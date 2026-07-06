@@ -21,5 +21,8 @@ wheels/
 .coverage
 htmlcov/
 
+# Local exploration output
+tmp/
+
 # OS files
 .DS_Store

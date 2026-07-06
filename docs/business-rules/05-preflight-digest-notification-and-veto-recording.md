@@ -66,73 +66,73 @@ Those belong to separate domain rules, application use cases, infrastructure ada
 
 ### Rule 1: Digest candidates must be explicitly eligible for pre-flight review
 
-| Condition                                                                                                                                    | Result                                                      |
-| -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Candidate came from `dormant_selector`, is enrollment-eligible, has an assigned/accountable agent, and the first-batch digest policy applies | Include candidate in digest preparation                     |
-| Candidate came from `crm_tag`                                                                                                                | Do not include; CRM tag is the human approval signal        |
-| Candidate is unassigned and qualifies for agentless dormant handling                                                                         | Do not include; no recipient exists                         |
-| Candidate is not enrollment-eligible or required facts are missing                                                                           | Do not include; hold back through campaign-start evaluation |
+| Condition | Result |
+| --- | --- |
+| Candidate came from `dormant_selector`, is enrollment-eligible, has an assigned/accountable agent, and the first-batch digest policy applies | Include candidate in digest preparation |
+| Candidate came from `crm_tag` | Do not include; CRM tag is the human approval signal |
+| Candidate is unassigned and qualifies for agentless dormant handling | Do not include; no recipient exists |
+| Candidate is not enrollment-eligible or required facts are missing | Do not include; hold back through campaign-start evaluation |
 
 The digest process should reuse the same candidate facts used by campaign-start evaluation. It must not create a second, inconsistent eligibility rule.
 
 ### Rule 2: Digest entries must be grouped by accountable recipient
 
-| Condition                                                                                  | Result                                                                               |
-| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| Candidate has a known assigned/accountable agent with a reachable notification destination | Group under that recipient                                                           |
-| Candidate has no known recipient or recipient destination is missing                       | Do not issue a digest for that candidate; fail safe and keep the candidate held back |
+| Condition | Result |
+| --- | --- |
+| Candidate has a known assigned/accountable agent with a reachable notification destination | Group under that recipient |
+| Candidate has no known recipient or recipient destination is missing | Do not issue a digest for that candidate; fail safe and keep the candidate held back |
 
 The default recipient is the assigned/accountable agent. If managers or other recipients are later added, they must come from validated workspace or campaign configuration.
 
 ### Rule 3: Digest notification must be idempotent
 
-| Condition                                                                              | Result                                              |
-| -------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| No digest has been issued for this workspace, campaign, batch, and recipient group     | Send notification and record `digest_sent_at`       |
+| Condition | Result |
+| --- | --- |
+| No digest has been issued for this workspace, campaign, batch, and recipient group | Send notification and record `digest_sent_at` |
 | Digest was already issued for the same workspace, campaign, batch, and recipient group | Do not send again; return the existing digest state |
-| Previous digest issue status is uncertain                                              | Do not blindly resend; require reconciliation       |
+| Previous digest issue status is uncertain | Do not blindly resend; require reconciliation |
 
 The idempotency key should be deterministic from workspace ID, campaign ID, batch ID, recipient ID, and digest version.
 
 ### Rule 4: Digest issuance must be durable before the veto window starts
 
-| Condition                                                                | Result                                                                               |
-| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| Notification is accepted by the notification port and state is persisted | Mark digest issued and set `digest_sent_at`                                          |
-| Notification fails before acceptance                                     | Do not mark digest issued; candidates remain blocked with `preflight_digest_pending` |
-| Persistence fails after notification acceptance                          | Treat state as uncertain; do not start outreach until reconciled                     |
+| Condition | Result |
+| --- | --- |
+| Notification is accepted by the notification port and state is persisted | Mark digest issued and set `digest_sent_at` |
+| Notification fails before acceptance | Do not mark digest issued; candidates remain blocked with `preflight_digest_pending` |
+| Persistence fails after notification acceptance | Treat state as uncertain; do not start outreach until reconciled |
 
 The veto window starts at the persisted `digest_sent_at`. The application must not infer the start time from local memory or provider timestamps alone.
 
 ### Rule 5: Veto requests must be validated before recording
 
-| Condition                                                                                                                                       | Result                                                       |
-| ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| Request references an existing digest entry, comes from an authorized recipient or authorized manager/admin, and arrives within the veto window | Record veto                                                  |
-| Request references a lead not in the digest                                                                                                     | Reject veto request                                          |
-| Request arrives after the veto window expires                                                                                                   | Reject or ignore as too late; do not modify batch veto state |
-| Request comes from an unauthorized user                                                                                                         | Reject veto request                                          |
-| Digest state is missing or uncertain                                                                                                            | Reject request until state is reconciled                     |
+| Condition | Result |
+| --- | --- |
+| Request references an existing digest entry, comes from an authorized recipient or authorized manager/admin, and arrives within the veto window | Record veto |
+| Request references a lead not in the digest | Reject veto request |
+| Request arrives after the veto window expires | Reject or ignore as too late; do not modify batch veto state |
+| Request comes from an unauthorized user | Reject veto request |
+| Digest state is missing or uncertain | Reject request until state is reconciled |
 
 Authorization rules must be enforced by the application/interface layer. The domain rule should receive already-validated actor facts.
 
 ### Rule 6: Veto recording must be idempotent and auditable
 
-| Condition                                        | Result                                                         |
-| ------------------------------------------------ | -------------------------------------------------------------- |
+| Condition | Result |
+| --- | --- |
 | Lead has not already been vetoed for this digest | Add lead ID to the digest's veto set and record audit metadata |
-| Lead was already vetoed for this digest          | Return success without duplicating side effects                |
+| Lead was already vetoed for this digest | Return success without duplicating side effects |
 
 At minimum, the recorded veto metadata should include workspace ID, campaign ID, digest ID, lead ID, actor ID, recorded timestamp, and reason text when supplied.
 
 ### Rule 7: Campaign-start evaluation consumes persisted digest state
 
-| Condition                                                            | Result                                                                    |
-| -------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| Digest has not been issued                                           | Campaign-start rule holds candidates back with `preflight_digest_pending` |
-| Digest has been issued and the veto window is still open             | Campaign-start rule holds candidates back with `veto_window_not_expired`  |
-| Digest has been issued, veto window expired, and lead was vetoed     | Campaign-start rule holds lead back with `agent_vetoed`                   |
-| Digest has been issued, veto window expired, and lead was not vetoed | Candidate may continue to daily cap and FIFO selection                    |
+| Condition | Result |
+| --- | --- |
+| Digest has not been issued | Campaign-start rule holds candidates back with `preflight_digest_pending` |
+| Digest has been issued and the veto window is still open | Campaign-start rule holds candidates back with `veto_window_not_expired` |
+| Digest has been issued, veto window expired, and lead was vetoed | Campaign-start rule holds lead back with `agent_vetoed` |
+| Digest has been issued, veto window expired, and lead was not vetoed | Candidate may continue to daily cap and FIFO selection |
 
 This process must not bypass `evaluate_campaign_start_batch(...)`. It only prepares the context that evaluator consumes.
 
@@ -141,15 +141,14 @@ This process must not bypass `evaluate_campaign_start_batch(...)`. It only prepa
 When multiple blocking conditions apply, evaluate and report in this order:
 
 1. Missing required workspace, campaign, batch, digest, candidate, or actor data
-2. Campaign is not active
-3. Candidate does not require pre-flight digest
-4. Missing assigned/accountable recipient
-5. Digest already issued or digest state uncertain
-6. Notification failure
-7. Veto request references a non-digest lead
-8. Veto request actor is unauthorized
-9. Veto request is outside the veto window
-10. Duplicate veto request
+2. Candidate does not require pre-flight digest
+3. Missing assigned/accountable recipient
+4. Digest already issued or digest state uncertain
+5. Notification failure
+6. Veto request references a non-digest lead
+7. Veto request actor is unauthorized
+8. Veto request is outside the veto window
+9. Duplicate veto request
 
 The first blocking rule wins for user-facing status, but the system should keep enough context for audit records.
 
@@ -186,7 +185,6 @@ For veto recording, return:
 ## Initial reason codes
 
 - `missing_required_data`
-- `campaign_not_active`
 - `digest_not_required`
 - `missing_digest_recipient`
 - `digest_already_issued`
