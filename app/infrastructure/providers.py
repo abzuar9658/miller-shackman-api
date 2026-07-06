@@ -1,0 +1,95 @@
+from pydantic import SecretStr
+
+from app.application.ports.cache import CacheProvider
+from app.application.ports.crm import CRMClient
+from app.application.ports.llm import LLMClient
+from app.application.ports.messaging import EmailProvider, SMSProvider
+from app.application.ports.storage import FileStorageProvider
+from app.core.config import Settings, get_settings
+
+
+def _secret(value: SecretStr | None) -> str | None:
+    return value.get_secret_value() if value else None
+
+
+def build_crm_client(settings: Settings | None = None) -> CRMClient:
+    settings = settings or get_settings()
+    if settings.crm_provider == "follow_up_boss":
+        from app.infrastructure.crm.follow_up_boss import FollowUpBossCRMClient
+
+        api_key = _secret(settings.fub_api_key)
+        if not api_key:
+            raise ValueError("FUB_API_KEY is required")
+        return FollowUpBossCRMClient(api_key=api_key, base_url=settings.fub_base_url)
+    raise ValueError(f"Unsupported CRM provider: {settings.crm_provider}")
+
+
+def build_llm_client(settings: Settings | None = None) -> LLMClient:
+    settings = settings or get_settings()
+    if settings.llm_provider == "openrouter":
+        from app.infrastructure.llm.openrouter import OpenRouterLLMClient
+
+        api_key = _secret(settings.openrouter_api_key)
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY is required")
+        return OpenRouterLLMClient(
+            api_key=api_key,
+            base_url=settings.openrouter_base_url,
+            model=settings.openrouter_model,
+        )
+    raise ValueError(f"Unsupported LLM provider: {settings.llm_provider}")
+
+
+def build_sms_provider(settings: Settings | None = None) -> SMSProvider:
+    settings = settings or get_settings()
+    if settings.sms_provider == "twilio":
+        from app.infrastructure.messaging.twilio import TwilioSMSProvider
+
+        account_sid = _secret(settings.twilio_account_sid)
+        auth_token = _secret(settings.twilio_auth_token)
+        if not account_sid or not auth_token:
+            raise ValueError("TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN are required")
+        return TwilioSMSProvider(
+            account_sid=account_sid,
+            auth_token=auth_token,
+            from_phone=settings.twilio_from_phone,
+        )
+    raise ValueError(f"Unsupported SMS provider: {settings.sms_provider}")
+
+
+def build_email_provider(settings: Settings | None = None) -> EmailProvider:
+    settings = settings or get_settings()
+    if settings.email_provider == "sendgrid":
+        from app.infrastructure.messaging.sendgrid import SendGridEmailProvider
+
+        api_key = _secret(settings.sendgrid_api_key)
+        if not api_key:
+            raise ValueError("SENDGRID_API_KEY is required")
+        return SendGridEmailProvider(
+            api_key=api_key,
+            from_email=settings.sendgrid_from_email,
+        )
+    raise ValueError(f"Unsupported email provider: {settings.email_provider}")
+
+
+def build_storage_provider(settings: Settings | None = None) -> FileStorageProvider:
+    settings = settings or get_settings()
+    if settings.storage_provider == "s3":
+        from app.infrastructure.storage.s3 import S3StorageProvider
+
+        return S3StorageProvider(
+            bucket=settings.s3_bucket,
+            region=settings.s3_region,
+            aws_access_key_id=_secret(settings.aws_access_key_id),
+            aws_secret_access_key=_secret(settings.aws_secret_access_key),
+        )
+    raise ValueError(f"Unsupported storage provider: {settings.storage_provider}")
+
+
+def build_cache_provider(settings: Settings | None = None) -> CacheProvider:
+    settings = settings or get_settings()
+    if settings.cache_provider == "redis":
+        from app.infrastructure.cache.redis import RedisCacheProvider
+
+        return RedisCacheProvider(redis_url=settings.redis_url)
+    raise ValueError(f"Unsupported cache provider: {settings.cache_provider}")
