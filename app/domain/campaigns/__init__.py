@@ -1,3 +1,4 @@
+from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
 from app.domain.campaigns.pre_send import (
     PreSendDecision,
     PreSendFacts,
@@ -26,6 +27,8 @@ __all__ = [
     "CampaignStartContext",
     "CampaignStartPolicy",
     "CampaignStatus",
+    "OutboundMessage",
+    "OutboundMessageStatus",
     "PreSendDecision",
     "PreSendFacts",
     "PreSendPolicy",
