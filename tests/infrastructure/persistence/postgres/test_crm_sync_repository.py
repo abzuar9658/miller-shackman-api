@@ -1,0 +1,237 @@
+from collections.abc import Coroutine
+from datetime import UTC, datetime
+from typing import Any, cast
+from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.domain.common.ids import WorkspaceId
+from app.domain.crm_sync import (
+    CRMSyncJob,
+    CRMSyncJobStatus,
+    CRMSyncType,
+    ExternalEvent,
+    ExternalEventStatus,
+)
+from app.infrastructure.persistence.postgres.crm_sync_repository import (
+    PostgresCRMSyncJobRepository,
+    PostgresExternalEventRepository,
+)
+from app.infrastructure.persistence.postgres.models import (
+    CRMSyncJobModel,
+    ExternalEventModel,
+)
+
+NOW = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
+WORKSPACE_ID = WorkspaceId("00000000-0000-0000-0000-000000000001")
+SYNC_JOB_ID = UUID("00000000-0000-0000-0000-000000000002")
+EXTERNAL_EVENT_ID = UUID("00000000-0000-0000-0000-000000000003")
+LEAD_ID = UUID("00000000-0000-0000-0000-000000000004")
+CREATOR_USER_ID = UUID("00000000-0000-0000-0000-000000000005")
+
+
+class _FakeScalarSequence:
+    def __init__(self, values: list[object]) -> None:
+        self._values = values
+
+    def all(self) -> list[object]:
+        return list(self._values)
+
+
+class _FakeResult:
+    def __init__(
+        self,
+        *,
+        scalar_value: object | None = None,
+        scalar_values: list[object] | None = None,
+    ) -> None:
+        self._scalar_value = scalar_value
+        self._scalar_values = scalar_values or []
+
+    def scalar_one_or_none(self) -> object | None:
+        return self._scalar_value
+
+    def scalar_one(self) -> object:
+        assert self._scalar_value is not None
+        return self._scalar_value
+
+    def scalars(self) -> _FakeScalarSequence:
+        return _FakeScalarSequence(self._scalar_values)
+
+
+class _FakeSession:
+    def __init__(self, result: _FakeResult) -> None:
+        self._result = result
+        self.statements: list[object] = []
+
+    async def execute(self, statement: object) -> _FakeResult:
+        self.statements.append(statement)
+        return self._result
+
+
+def _sync_job_model() -> CRMSyncJobModel:
+    return CRMSyncJobModel(
+        sync_job_id=SYNC_JOB_ID,
+        workspace_id=WORKSPACE_ID,
+        crm_provider="follow_up_boss",
+        sync_type="full",
+        status="running",
+        started_at=NOW,
+        finished_at=None,
+        cursor_started_at=None,
+        cursor_finished_at=None,
+        total_seen=0,
+        total_upserted=0,
+        total_failed=0,
+        failure_reason=None,
+        created_by_user_id=CREATOR_USER_ID,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _sync_job() -> CRMSyncJob:
+    return CRMSyncJob(
+        sync_job_id=SYNC_JOB_ID,
+        workspace_id=WORKSPACE_ID,
+        crm_provider="follow_up_boss",
+        sync_type=CRMSyncType.FULL,
+        status=CRMSyncJobStatus.RUNNING,
+        started_at=NOW,
+        finished_at=None,
+        cursor_started_at=None,
+        cursor_finished_at=None,
+        total_seen=0,
+        total_upserted=0,
+        total_failed=0,
+        failure_reason=None,
+        created_by_user_id=CREATOR_USER_ID,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _external_event_model() -> ExternalEventModel:
+    return ExternalEventModel(
+        external_event_id=EXTERNAL_EVENT_ID,
+        workspace_id=WORKSPACE_ID,
+        provider="follow_up_boss",
+        event_type="lead.updated",
+        provider_event_id="evt-123",
+        crm_lead_id="456",
+        lead_id=LEAD_ID,
+        received_at=NOW,
+        processed_at=None,
+        status="pending",
+        payload_redacted={"id": "evt-123"},
+        failure_reason=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _external_event() -> ExternalEvent:
+    return ExternalEvent(
+        external_event_id=EXTERNAL_EVENT_ID,
+        workspace_id=WORKSPACE_ID,
+        provider="follow_up_boss",
+        event_type="lead.updated",
+        provider_event_id="evt-123",
+        crm_lead_id="456",
+        lead_id=LEAD_ID,
+        received_at=NOW,
+        processed_at=None,
+        status=ExternalEventStatus.PENDING,
+        payload_redacted={"id": "evt-123"},
+        failure_reason=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def test_sync_job_repository_get_by_id_maps_domain() -> None:
+    model = _sync_job_model()
+    session = _FakeSession(_FakeResult(scalar_value=model))
+
+    result = _run(
+        PostgresCRMSyncJobRepository(cast(AsyncSession, session)).get_by_id(
+            WORKSPACE_ID,
+            SYNC_JOB_ID,
+        ),
+    )
+
+    assert result == _sync_job()
+    assert "crm_sync_jobs.workspace_id" in str(session.statements[0])
+    assert "crm_sync_jobs.sync_job_id" in str(session.statements[0])
+
+
+def test_sync_job_repository_list_recent_orders_by_created_at() -> None:
+    older = _sync_job_model()
+    newer = _sync_job_model()
+    newer.sync_job_id = UUID("00000000-0000-0000-0000-00000000000a")
+    newer.created_at = NOW.replace(minute=1)
+    session = _FakeSession(_FakeResult(scalar_values=[newer, older]))
+
+    jobs = _run(
+        PostgresCRMSyncJobRepository(cast(AsyncSession, session)).list_recent(
+            WORKSPACE_ID,
+            limit=10,
+        ),
+    )
+
+    assert len(jobs) == 2
+    assert jobs[0].sync_job_id == newer.sync_job_id
+    assert jobs[1].sync_job_id == older.sync_job_id
+    statement_str = str(session.statements[0])
+    assert "crm_sync_jobs.workspace_id" in statement_str
+    assert "ORDER BY" in statement_str
+    assert "LIMIT" in statement_str
+
+
+def test_sync_job_repository_save_returns_domain() -> None:
+    job = _sync_job()
+    model = _sync_job_model()
+    session = _FakeSession(_FakeResult(scalar_value=model))
+
+    saved = _run(PostgresCRMSyncJobRepository(cast(AsyncSession, session)).save(job))
+
+    assert saved == job
+    statement_str = str(session.statements[0])
+    assert "ON CONFLICT (sync_job_id) DO UPDATE" in statement_str
+
+
+def test_external_event_repository_get_by_provider_event_id_maps_domain() -> None:
+    model = _external_event_model()
+    session = _FakeSession(_FakeResult(scalar_value=model))
+
+    result = _run(
+        PostgresExternalEventRepository(cast(AsyncSession, session)).get_by_provider_event_id(
+            WORKSPACE_ID,
+            "follow_up_boss",
+            "evt-123",
+        ),
+    )
+
+    assert result == _external_event()
+    statement_str = str(session.statements[0])
+    assert "external_events.workspace_id" in statement_str
+    assert "external_events.provider" in statement_str
+    assert "external_events.provider_event_id" in statement_str
+
+
+def test_external_event_repository_save_uses_idempotent_upsert() -> None:
+    event = _external_event()
+    model = _external_event_model()
+    session = _FakeSession(_FakeResult(scalar_value=model))
+
+    saved = _run(PostgresExternalEventRepository(cast(AsyncSession, session)).save(event))
+
+    assert saved == event
+    statement_str = str(session.statements[0])
+    assert "ON CONFLICT (workspace_id, provider, provider_event_id) DO UPDATE" in statement_str
+
+
+def _run[T](coroutine: Coroutine[Any, Any, T]) -> T:
+    import asyncio
+
+    return asyncio.run(coroutine)

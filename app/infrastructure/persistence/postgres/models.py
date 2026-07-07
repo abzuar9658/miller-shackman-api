@@ -165,9 +165,7 @@ class WorkspaceModel(Base):
     __tablename__ = "workspaces"
 
     workspace_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -189,9 +187,7 @@ class WorkspaceMembershipModel(Base):
     )
 
     membership_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
     )
     workspace_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -263,9 +259,7 @@ class PasswordResetTokenModel(Base):
     )
 
     reset_token_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
     )
     user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -287,9 +281,7 @@ class UserInvitationModel(Base):
     )
 
     invitation_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
     )
     workspace_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -325,9 +317,7 @@ class AuthAuditLogModel(Base):
     )
 
     audit_log_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
     )
     workspace_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -344,3 +334,98 @@ class AuthAuditLogModel(Base):
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     event_details: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CRMSyncJobModel(Base):
+    __tablename__ = "crm_sync_jobs"
+    __table_args__ = (
+        Index(
+            "ix_crm_sync_jobs_workspace_provider_created",
+            "workspace_id",
+            "crm_provider",
+            "created_at",
+        ),
+        Index(
+            "ix_crm_sync_jobs_workspace_status_created",
+            "workspace_id",
+            "status",
+            "created_at",
+        ),
+    )
+
+    sync_job_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    crm_provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    sync_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cursor_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cursor_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    total_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_upserted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failure_reason: Mapped[str | None] = mapped_column(String(1000))
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ExternalEventModel(Base):
+    __tablename__ = "external_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "provider",
+            "provider_event_id",
+            name="uq_external_events_workspace_provider_event",
+        ),
+        Index(
+            "ix_external_events_workspace_provider_received",
+            "workspace_id",
+            "provider",
+            "received_at",
+        ),
+        Index(
+            "ix_external_events_workspace_status_received",
+            "workspace_id",
+            "status",
+            "received_at",
+        ),
+        Index(
+            "ix_external_events_workspace_lead_received",
+            "workspace_id",
+            "lead_id",
+            "received_at",
+        ),
+    )
+
+    external_event_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    provider_event_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    crm_lead_id: Mapped[str | None] = mapped_column(String(255))
+    lead_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("leads.lead_id"))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    payload_redacted: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    failure_reason: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -6,9 +6,11 @@ from app.domain.common.ids import (
     LeadId,
     RefreshSessionId,
     UserId,
+    UserInvitationId,
     WorkspaceId,
     WorkspaceMembershipId,
 )
+from app.domain.crm_sync import CRMSyncJob, ExternalEvent
 from app.domain.identity import (
     AuthAuditLog,
     PasswordCredential,
@@ -111,6 +113,12 @@ class WorkspaceMembershipRepository(Protocol):
     async def list_by_user_id(self, user_id: UserId) -> tuple[WorkspaceMembership, ...]:
         raise NotImplementedError
 
+    async def list_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> tuple[WorkspaceMembership, ...]:
+        raise NotImplementedError
+
     async def save(self, membership: WorkspaceMembership) -> WorkspaceMembership:
         raise NotImplementedError
 
@@ -155,6 +163,9 @@ class PasswordResetTokenRepository(Protocol):
 
 
 class InvitationRepository(Protocol):
+    async def get_by_id(self, invitation_id: UserInvitationId) -> UserInvitation | None:
+        raise NotImplementedError
+
     async def get_by_token_hash(self, token_hash: str) -> UserInvitation | None:
         raise NotImplementedError
 
@@ -174,4 +185,36 @@ class InvitationRepository(Protocol):
 
 class AuthAuditLogRepository(Protocol):
     async def append(self, audit_log: AuthAuditLog) -> AuthAuditLog:
+        raise NotImplementedError
+
+
+class CRMSyncJobRepository(Protocol):
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        sync_job_id: UUID,
+    ) -> CRMSyncJob | None:
+        raise NotImplementedError
+
+    async def list_recent(
+        self,
+        workspace_id: WorkspaceId,
+        limit: int = 100,
+    ) -> tuple[CRMSyncJob, ...]:
+        raise NotImplementedError
+
+    async def save(self, job: CRMSyncJob) -> CRMSyncJob:
+        raise NotImplementedError
+
+
+class ExternalEventRepository(Protocol):
+    async def get_by_provider_event_id(
+        self,
+        workspace_id: WorkspaceId,
+        provider: str,
+        provider_event_id: str,
+    ) -> ExternalEvent | None:
+        raise NotImplementedError
+
+    async def save(self, event: ExternalEvent) -> ExternalEvent:
         raise NotImplementedError
