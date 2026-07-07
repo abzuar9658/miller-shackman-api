@@ -1,2 +1,5 @@
+from app.infrastructure.workflows.temporal.worker import run_temporal_worker
+
+
 async def main() -> None:
-    raise NotImplementedError("Temporal worker registration will be added with workflows.")
+    await run_temporal_worker()

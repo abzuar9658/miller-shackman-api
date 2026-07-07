@@ -21,6 +21,7 @@ class Settings(BaseSettings):
 
     rabbitmq_url: str = "amqp://guest:guest@localhost:55672/"
     temporal_address: str = "localhost:57233"
+    temporal_task_queue: str = "miller-schackman-task-queue"
 
     crm_provider: str = "follow_up_boss"
     fub_api_key: SecretStr | None = None

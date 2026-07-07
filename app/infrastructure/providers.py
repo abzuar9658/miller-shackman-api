@@ -98,7 +98,6 @@ def build_cache_provider(settings: Settings | None = None) -> CacheProvider:
     raise ValueError(f"Unsupported cache provider: {settings.cache_provider}")
 
 
-
 def build_password_hasher(settings: Settings | None = None) -> PasswordHasher:
     settings = settings or get_settings()
     return PasslibPasswordHasher()

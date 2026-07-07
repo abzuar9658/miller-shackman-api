@@ -1,7 +1,22 @@
-.PHONY: run test lint format typecheck check migrate revision
+.PHONY: infra-up infra-down infra-logs infra-ps run worker test lint format typecheck check migrate revision
+
+infra-up:
+	docker compose up -d postgres rabbitmq redis temporal temporal-ui
+
+infra-down:
+	docker compose down
+
+infra-logs:
+	docker compose logs -f postgres rabbitmq redis temporal temporal-ui
+
+infra-ps:
+	docker compose ps
 
 run:
 	uv run uvicorn app.main:app --reload
+
+worker:
+	uv run python -c "import asyncio; from app.interfaces.workers.temporal_worker import main; asyncio.run(main())"
 
 test:
 	uv run pytest
