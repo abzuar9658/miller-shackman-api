@@ -1,11 +1,14 @@
 from pydantic import SecretStr
 
+from app.application.ports.auth import AccessTokenService, OpaqueTokenService, PasswordHasher
 from app.application.ports.cache import CacheProvider
 from app.application.ports.crm import CRMClient
 from app.application.ports.llm import LLMClient
 from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.storage import FileStorageProvider
 from app.core.config import Settings, get_settings
+from app.infrastructure.auth.passwords import PasslibPasswordHasher
+from app.infrastructure.auth.tokens import JoseAccessTokenService, SecureOpaqueTokenService
 
 
 def _secret(value: SecretStr | None) -> str | None:
@@ -93,3 +96,25 @@ def build_cache_provider(settings: Settings | None = None) -> CacheProvider:
 
         return RedisCacheProvider(redis_url=settings.redis_url)
     raise ValueError(f"Unsupported cache provider: {settings.cache_provider}")
+
+
+
+def build_password_hasher(settings: Settings | None = None) -> PasswordHasher:
+    settings = settings or get_settings()
+    return PasslibPasswordHasher()
+
+
+def build_access_token_service(settings: Settings | None = None) -> AccessTokenService:
+    settings = settings or get_settings()
+    secret = _secret(settings.auth_jwt_secret)
+    if not secret:
+        raise ValueError("AUTH_JWT_SECRET is required")
+    return JoseAccessTokenService(
+        secret=secret,
+        algorithm=settings.auth_jwt_algorithm,
+    )
+
+
+def build_opaque_token_service(settings: Settings | None = None) -> OpaqueTokenService:
+    settings = settings or get_settings()
+    return SecureOpaqueTokenService()
