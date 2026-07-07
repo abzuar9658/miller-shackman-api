@@ -1,7 +1,16 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -133,3 +142,205 @@ class OutboundMessageModel(Base):
     draft_safety_flags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class UserModel(Base):
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("email_normalized", name="uq_users_email_normalized"),
+        Index("ix_users_email_normalized", "email_normalized"),
+    )
+
+    user_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    email_normalized: Mapped[str] = mapped_column(String(320), nullable=False)
+    full_name: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceModel(Base):
+    __tablename__ = "workspaces"
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    default_timezone: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceMembershipModel(Base):
+    __tablename__ = "workspace_memberships"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "user_id",
+            name="uq_workspace_memberships_workspace_user",
+        ),
+        Index("ix_workspace_memberships_user", "user_id"),
+        Index("ix_workspace_memberships_workspace_status", "workspace_id", "status"),
+    )
+
+    membership_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PasswordCredentialModel(Base):
+    __tablename__ = "password_credentials"
+
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+        primary_key=True,
+    )
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RefreshSessionModel(Base):
+    __tablename__ = "refresh_sessions"
+    __table_args__ = (
+        UniqueConstraint("refresh_token_hash", name="uq_refresh_sessions_token_hash"),
+        Index("ix_refresh_sessions_user", "user_id"),
+        Index("ix_refresh_sessions_family", "family_id"),
+        Index("ix_refresh_sessions_workspace_user", "workspace_id", "user_id"),
+    )
+
+    session_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    refresh_token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    family_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    rotated_from_session_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_reason: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PasswordResetTokenModel(Base):
+    __tablename__ = "password_reset_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_password_reset_tokens_token_hash"),
+        Index("ix_password_reset_tokens_user", "user_id"),
+    )
+
+    reset_token_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+        nullable=False,
+    )
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class UserInvitationModel(Base):
+    __tablename__ = "user_invitations"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_user_invitations_token_hash"),
+        Index("ix_user_invitations_workspace_email", "workspace_id", "email_normalized"),
+        Index("ix_user_invitations_user", "user_id"),
+    )
+
+    invitation_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+        nullable=False,
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    email_normalized: Mapped[str] = mapped_column(String(320), nullable=False)
+    role: Mapped[str] = mapped_column(String(50), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by_user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AuthAuditLogModel(Base):
+    __tablename__ = "auth_audit_logs"
+    __table_args__ = (
+        Index("ix_auth_audit_logs_workspace_created", "workspace_id", "created_at"),
+        Index("ix_auth_audit_logs_actor_created", "actor_user_id", "created_at"),
+        Index("ix_auth_audit_logs_subject_created", "subject_user_id", "created_at"),
+    )
+
+    audit_log_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    workspace_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+    )
+    actor_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+    )
+    subject_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+    )
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    event_details: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
