@@ -86,12 +86,8 @@ def test_collect_values() -> None:
         {"id": 2, "source": "B", "tags": ["x", "y"], "customFields": {"a": "b"}},
         {"id": 3, "source": None, "tags": [], "customFields": {"a": "b", "c": "d"}},
     ]
-    assert collect_values(payloads, "source") == Counter(
-        {"A": 1, "B": 1, "(null)": 1}
-    )
-    assert collect_values(payloads, "tags") == Counter(
-        {"list[1]": 1, "list[2]": 1, "list[0]": 1}
-    )
+    assert collect_values(payloads, "source") == Counter({"A": 1, "B": 1, "(null)": 1})
+    assert collect_values(payloads, "tags") == Counter({"list[1]": 1, "list[2]": 1, "list[0]": 1})
     assert collect_values(payloads, "customFields") == Counter(
         {"(null)": 1, "dict[1]": 1, "dict[2]": 1}
     )

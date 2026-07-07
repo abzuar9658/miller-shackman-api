@@ -44,6 +44,7 @@ class WorkspaceMembershipStatus(StrEnum):
 class AuthAuditEventType(StrEnum):
     WORKSPACE_CREATED = "workspace_created"
     USER_INVITED = "user_invited"
+    INVITATION_RESENT = "invitation_resent"
     INVITATION_ACCEPTED = "invitation_accepted"
     SIGNIN_SUCCEEDED = "signin_succeeded"
     SIGNIN_FAILED = "signin_failed"
@@ -53,6 +54,9 @@ class AuthAuditEventType(StrEnum):
     PASSWORD_RESET_COMPLETED = "password_reset_completed"
     ROLE_CHANGED = "role_changed"
     USER_DISABLED = "user_disabled"
+    USER_ENABLED = "user_enabled"
+    MEMBERSHIP_DISABLED = "membership_disabled"
+    MEMBERSHIP_ENABLED = "membership_enabled"
 
 
 class RefreshSessionRevocationReason(StrEnum):

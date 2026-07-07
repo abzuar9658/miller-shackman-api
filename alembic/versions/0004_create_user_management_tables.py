@@ -1,7 +1,7 @@
 """create user management tables
 
-Revision ID: 0004_create_user_management_tables
-Revises: 0003_add_primary_contact_destinations_to_leads
+Revision ID: 0004_user_management_tables
+Revises: 0003_primary_contact_fields
 Create Date: 2026-07-07
 """
 
@@ -12,8 +12,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0004_create_user_management_tables"
-down_revision: str | None = "0003_add_primary_contact_destinations_to_leads"
+revision: str = "0004_user_management_tables"
+down_revision: str | None = "0003_primary_contact_fields"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

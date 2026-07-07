@@ -1,6 +1,6 @@
 """add primary contact destinations to leads
 
-Revision ID: 0003_add_primary_contact_destinations_to_leads
+Revision ID: 0003_primary_contact_fields
 Revises: 0002_create_outbound_messages
 Create Date: 2026-07-06
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0003_add_primary_contact_destinations_to_leads"
+revision: str = "0003_primary_contact_fields"
 down_revision: str | None = "0002_create_outbound_messages"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

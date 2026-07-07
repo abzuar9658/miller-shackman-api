@@ -24,6 +24,8 @@ only after the previous slice is implemented, tested, and reviewed.
 
 ### Slice 1 — Domain and application rules
 
+Status: **completed**.
+
 Goal: define pure identity and permission rules before touching persistence,
 JWT libraries, FastAPI routes, or provider adapters.
 
@@ -52,6 +54,8 @@ Validation:
 
 ### Slice 2 — Persistence schema and repositories
 
+Status: **completed**.
+
 Goal: persist the identity model without changing the Slice 1 rule boundaries.
 
 Deliverables:
@@ -71,6 +75,8 @@ Validation:
 
 ### Slice 3 — Password and token services
 
+Status: **completed**.
+
 Goal: add infrastructure adapters for secrets and token mechanics while keeping
 application logic library-agnostic.
 
@@ -87,6 +93,8 @@ Dependency note:
 - if new packages are required, use the package manager and ask before adding
 
 ### Slice 4 — Auth use cases
+
+Status: **completed**.
 
 Goal: implement business workflows over the ports and domain rules.
 
@@ -112,6 +120,8 @@ Validation:
 
 ### Slice 5 — API routes and request dependencies
 
+Status: **completed**.
+
 Goal: expose the use cases through thin FastAPI handlers.
 
 Deliverables:
@@ -122,10 +132,34 @@ Deliverables:
 - workspace-membership dependency
 - thin permission wrappers only at the interface layer
 
+Implemented routes:
+
+Auth routes:
+
+- `POST /api/v1/auth/signup`
+- `POST /api/v1/auth/signin`
+- `POST /api/v1/auth/refresh`
+- `POST /api/v1/auth/logout`
+- `POST /api/v1/auth/logout-all`
+- `POST /api/v1/auth/forgot-password`
+- `POST /api/v1/auth/reset-password`
+- `GET /api/v1/auth/me`
+- `POST /api/v1/auth/switch-workspace`
+
+Workspace user-management routes:
+
+- `POST /api/v1/workspaces`
+- `GET /api/v1/workspaces/{workspace_id}/users`
+- `POST /api/v1/workspaces/{workspace_id}/users/invitations`
+- `POST /api/v1/workspaces/{workspace_id}/users/invitations/{invitation_id}/resend`
+- `PATCH /api/v1/workspaces/{workspace_id}/users/{user_id}/membership`
+- `PATCH /api/v1/workspaces/{workspace_id}/users/{user_id}/status`
+
 Validation:
 
 - route tests
 - auth dependency tests
+- workspace user-management tests
 
 ### Slice 6 — Product authorization integration
 
@@ -154,11 +188,7 @@ Validation:
 
 ## Immediate Next Step
 
-Start **Slice 1**:
-
-1. inspect existing domain patterns and ID/value-object usage
-2. add auth domain models and enums
-3. add password policy rule
-4. add permission decision service
-5. add targeted unit tests
-6. run validation
+Start **Slice 6**: integrate the authenticated actor and permission checks into
+product use cases such as lead enrollment, campaign launch/pause, pre-flight veto,
+and resume/reassign/handoff actions. Business-logic permission integration remains
+intentionally deferred until the relevant product flows are addressed.

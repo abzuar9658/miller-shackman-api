@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -22,7 +22,6 @@ from tests.application.use_cases.test_authentication import (
     ADMIN_ID,
     FAMILY_ID,
     MEMBERSHIP_ID,
-    NOW,
     SECOND_MEMBERSHIP_ID,
     SECOND_WORKSPACE_ID,
     SESSION_ID,
@@ -40,25 +39,29 @@ from tests.application.use_cases.test_authentication import (
 )
 
 
-def _admin_refresh_session(*, token_hash: str = "hash::refresh-token") -> RefreshSession:
+class AuthTestClient:
+    def __init__(self, client: TestClient, deps: _Dependencies) -> None:
+        self.client = client
+        self.deps = deps
+
+
+def _admin_refresh_session(
+    session_id: UUID = SESSION_ID,
+    token_hash: str = "hash::refresh-token",
+) -> RefreshSession:
     return RefreshSession(
-        session_id=SESSION_ID,
+        session_id=session_id,
         user_id=ADMIN_ID,
         workspace_id=WORKSPACE_ID,
         refresh_token_hash=token_hash,
         family_id=FAMILY_ID,
         rotated_from_session_id=None,
-        expires_at=NOW + timedelta(days=30),
+        expires_at=datetime.now(UTC) + timedelta(days=30),
         revoked_at=None,
         revoked_reason=None,
-        created_at=NOW - timedelta(days=1),
+        created_at=datetime.now(UTC) - timedelta(days=1),
         last_used_at=None,
     )
-
-class AuthTestClient:
-    def __init__(self, client: TestClient, deps: _Dependencies) -> None:
-        self.client = client
-        self.deps = deps
 
 
 @pytest.fixture
@@ -101,19 +104,6 @@ def auth_client() -> AuthTestClient:
     app.dependency_overrides[get_current_actor] = override_get_current_actor
 
     return AuthTestClient(TestClient(app), deps)
-
-
-def test_invite_user_returns_201(auth_client: AuthTestClient) -> None:
-    response = auth_client.client.post(
-        "/api/v1/auth/invite",
-        json={"email": "agent@example.com", "role": "assigned_agent", "full_name": "Agent Smith"},
-    )
-
-    assert response.status_code == 201
-    body = response.json()
-    assert body["status"] == "invited"
-    assert body["user"]["email"] == "agent@example.com"
-    assert body["membership"]["role"] == "assigned_agent"
 
 
 def test_complete_signup_returns_201(auth_client: AuthTestClient) -> None:

@@ -146,7 +146,6 @@ def test_no_contactable_enabled_channels_blocks_enrollment() -> None:
     assert decision.reasons == (EnrollmentReasonCode.NO_CAMPAIGN_CHANNELS_CONTACTABLE,)
 
 
-
 def test_unsupported_enrollment_source_excluded() -> None:
     policy = CampaignEnrollmentPolicy(allowed_sources=frozenset({EnrollmentSource.CRM_TAG}))
     facts = CampaignEnrollmentFacts(

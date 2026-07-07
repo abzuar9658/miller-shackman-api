@@ -9,14 +9,12 @@ from app.application.use_cases.authentication import (
     AuthReasonCode,
     CompleteInvitedSignupStatus,
     CurrentUserStatus,
-    InviteWorkspaceUserStatus,
     RefreshAuthenticationStatus,
     ResetPasswordStatus,
     SignInStatus,
     SwitchWorkspaceStatus,
     complete_invited_signup,
     get_current_user,
-    invite_workspace_user,
     logout_all_sessions,
     logout_current_session,
     refresh_authentication,
@@ -37,8 +35,6 @@ from app.interfaces.api.schemas.auth import (
     CurrentUserResponse,
     ForgotPasswordRequest,
     ForgotPasswordResponse,
-    InviteWorkspaceUserRequest,
-    InviteWorkspaceUserResponse,
     LogoutAllResponse,
     LogoutRequest,
     LogoutResponse,
@@ -131,42 +127,6 @@ def _require_active_workspace_id(actor: AuthenticatedActor) -> UUID:
             detail="No active workspace",
         )
     return actor.active_workspace_id
-
-
-
-@router.post(
-    "/invite",
-    response_model=InviteWorkspaceUserResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def invite_user(
-    request: InviteWorkspaceUserRequest,
-    actor: Annotated[AuthenticatedActor, Depends(get_current_actor)],
-    bundle: Annotated[AuthServiceBundle, Depends(get_auth_service_bundle)],
-) -> InviteWorkspaceUserResponse:
-    workspace_id = _require_active_workspace_id(actor)
-    result = await invite_workspace_user(
-        actor=actor,
-        workspace_id=workspace_id,
-        email=request.email,
-        role=request.role,
-        full_name=request.full_name,
-        user_repository=bundle.user_repository,
-        workspace_repository=bundle.workspace_repository,
-        membership_repository=bundle.membership_repository,
-        invitation_repository=bundle.invitation_repository,
-        audit_log_repository=bundle.audit_log_repository,
-        opaque_token_service=bundle.opaque_token_service,
-        email_provider=bundle.email_provider,
-        now=datetime.now(UTC),
-    )
-    if result.status == InviteWorkspaceUserStatus.REJECTED:
-        _raise_for_reasons(result.reasons)
-    return InviteWorkspaceUserResponse(
-        status=result.status.value,
-        user=_user_response(result.user) if result.user else None,
-        membership=_membership_response(result.membership) if result.membership else None,
-    )
 
 
 @router.post(

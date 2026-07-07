@@ -13,6 +13,7 @@ from app.domain.identity.models import (
 class PermissionCapability(StrEnum):
     CREATE_WORKSPACE = "create_workspace"
     INVITE_WORKSPACE_USER = "invite_workspace_user"
+    MANAGE_WORKSPACE_USERS = "manage_workspace_users"
     VIEW_OWN_ASSIGNED_LEAD = "view_own_assigned_lead"
     ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS = "enroll_own_lead_when_campaign_allows"
     ENROLL_ANY_ELIGIBLE_LEAD = "enroll_any_eligible_lead"
@@ -31,9 +32,7 @@ class PermissionReasonCode(StrEnum):
     ROLE_NOT_ALLOWED = "role_not_allowed"
     PLATFORM_SUPER_ADMIN_RESTRICTED = "platform_super_admin_restricted"
     OWNERSHIP_REQUIRED = "ownership_required"
-    CAMPAIGN_DISALLOWS_ASSIGNED_AGENT_ENROLLMENT = (
-        "campaign_disallows_assigned_agent_enrollment"
-    )
+    CAMPAIGN_DISALLOWS_ASSIGNED_AGENT_ENROLLMENT = "campaign_disallows_assigned_agent_enrollment"
     RESUME_REASON_REQUIRED = "resume_reason_required"
 
 
@@ -153,6 +152,7 @@ def _role_allows(
         return capability in {
             PermissionCapability.CREATE_WORKSPACE,
             PermissionCapability.INVITE_WORKSPACE_USER,
+            PermissionCapability.MANAGE_WORKSPACE_USERS,
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
             PermissionCapability.ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS,
             PermissionCapability.ENROLL_ANY_ELIGIBLE_LEAD,
@@ -177,12 +177,16 @@ def _context_reasons(
 
     reasons: list[PermissionReasonCode] = []
 
-    if capability in {
-        PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
-        PermissionCapability.ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS,
-        PermissionCapability.VETO_OWN_PREFLIGHT_LEAD,
-        PermissionCapability.RESUME_AI_AFTER_HANDOFF_OWN_LEAD,
-    } and not context.acts_on_assigned_lead:
+    if (
+        capability
+        in {
+            PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
+            PermissionCapability.ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS,
+            PermissionCapability.VETO_OWN_PREFLIGHT_LEAD,
+            PermissionCapability.RESUME_AI_AFTER_HANDOFF_OWN_LEAD,
+        }
+        and not context.acts_on_assigned_lead
+    ):
         reasons.append(PermissionReasonCode.OWNERSHIP_REQUIRED)
 
     if (

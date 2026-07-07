@@ -199,9 +199,10 @@ def _digest_required(
     policy: CampaignStartPolicy,
     context: CampaignStartContext,
 ) -> bool:
-    return any(
-        _preflight_applies(candidate, policy, context) for candidate in candidates
-    ) and context.digest_sent_at is None
+    return (
+        any(_preflight_applies(candidate, policy, context) for candidate in candidates)
+        and context.digest_sent_at is None
+    )
 
 
 def _batch_veto_window_expires_at(

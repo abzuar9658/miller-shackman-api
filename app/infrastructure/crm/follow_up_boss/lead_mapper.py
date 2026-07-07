@@ -106,9 +106,7 @@ def _records(
     records: list[Mapping[str, Any]] = []
     if isinstance(value, list):
         records.extend(
-            item
-            for item in value
-            if isinstance(item, Mapping) and _record_has_value(item)
+            item for item in value if isinstance(item, Mapping) and _record_has_value(item)
         )
     fallback = _text(payload.get(fallback_key))
     if fallback and not records:
@@ -220,9 +218,7 @@ def _latest_property_event(events: Iterable[Mapping[str, Any]]) -> _PropertyEven
             ),
         )
     return (
-        max(candidates, key=lambda event: event.occurred_at or datetime.min)
-        if candidates
-        else None
+        max(candidates, key=lambda event: event.occurred_at or datetime.min) if candidates else None
     )
 
 

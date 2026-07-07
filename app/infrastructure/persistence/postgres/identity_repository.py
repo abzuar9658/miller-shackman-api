@@ -4,7 +4,13 @@ from sqlalchemy import Select, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.common.ids import RefreshSessionId, UserId, WorkspaceId, WorkspaceMembershipId
+from app.domain.common.ids import (
+    RefreshSessionId,
+    UserId,
+    UserInvitationId,
+    WorkspaceId,
+    WorkspaceMembershipId,
+)
 from app.domain.identity import (
     AuthAuditEventType,
     AuthAuditLog,
@@ -124,6 +130,18 @@ class PostgresWorkspaceMembershipRepository:
         result = await self._session.execute(
             select(WorkspaceMembershipModel)
             .where(WorkspaceMembershipModel.user_id == user_id)
+            .order_by(WorkspaceMembershipModel.created_at.asc()),
+        )
+        models = result.scalars().all()
+        return _models_to_memberships(models)
+
+    async def list_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> tuple[WorkspaceMembership, ...]:
+        result = await self._session.execute(
+            select(WorkspaceMembershipModel)
+            .where(WorkspaceMembershipModel.workspace_id == workspace_id)
             .order_by(WorkspaceMembershipModel.created_at.asc()),
         )
         models = result.scalars().all()
@@ -259,6 +277,13 @@ class PostgresInvitationRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def get_by_id(self, invitation_id: UserInvitationId) -> UserInvitation | None:
+        result = await self._session.execute(
+            select(UserInvitationModel).where(UserInvitationModel.invitation_id == invitation_id),
+        )
+        model = result.scalar_one_or_none()
+        return _invitation_from_model(model) if model else None
+
     async def get_by_token_hash(self, token_hash: str) -> UserInvitation | None:
         result = await self._session.execute(
             _invitation_by_token_hash_statement(token_hash=token_hash, for_update=False),
@@ -306,8 +331,12 @@ class PostgresAuthAuditLogRepository:
         self._session = session
 
     async def append(self, audit_log: AuthAuditLog) -> AuthAuditLog:
-        statement = insert(AuthAuditLogModel).values(**_audit_log_to_values(audit_log)).returning(
-            AuthAuditLogModel,
+        statement = (
+            insert(AuthAuditLogModel)
+            .values(**_audit_log_to_values(audit_log))
+            .returning(
+                AuthAuditLogModel,
+            )
         )
         result = await self._session.execute(statement)
         return _audit_log_from_model(result.scalar_one())
@@ -443,7 +472,7 @@ def _refresh_session_to_values(session: RefreshSession) -> dict[str, object]:
         "rotated_from_session_id": session.rotated_from_session_id,
         "expires_at": session.expires_at,
         "revoked_at": session.revoked_at,
-        "revoked_reason": session.revoked_reason.value if session.revoked_reason else None,
+        "revoked_reason": session.revoked_reason,
         "created_at": session.created_at,
         "last_used_at": session.last_used_at,
     }
@@ -466,9 +495,7 @@ def _refresh_session_from_model(model: RefreshSessionModel) -> RefreshSession:
         expires_at=model.expires_at,
         revoked_at=model.revoked_at,
         revoked_reason=(
-            RefreshSessionRevocationReason(model.revoked_reason)
-            if model.revoked_reason is not None
-            else None
+            RefreshSessionRevocationReason(model.revoked_reason) if model.revoked_reason else None
         ),
         created_at=model.created_at,
         last_used_at=model.last_used_at,

@@ -677,7 +677,8 @@ At minimum test:
 - Keep permission checks in application services and use cases.
 - Do not trust client-provided `workspace_id` without checking membership.
 - Add audit records for signin, failed signin, logout, password reset, invitation
-  accepted, role changed, and user disabled.
+  accepted, invitation resent, role changed, user disabled, user enabled, membership
+  disabled, and membership enabled.
 
 ## Resolved V1 Decisions
 

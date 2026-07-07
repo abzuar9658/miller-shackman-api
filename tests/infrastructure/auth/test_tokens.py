@@ -7,7 +7,7 @@ from app.application.ports.auth import AccessTokenSubject, InvalidAccessTokenErr
 from app.domain.identity import WorkspaceMembershipRole
 from app.infrastructure.auth.tokens import JoseAccessTokenService, SecureOpaqueTokenService
 
-NOW = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
+NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
 USER_ID = UUID("00000000-0000-0000-0000-000000000001")
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000002")
 MEMBERSHIP_ID = UUID("00000000-0000-0000-0000-000000000003")

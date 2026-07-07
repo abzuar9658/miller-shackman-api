@@ -90,9 +90,7 @@ def revoke_refresh_session_family(
     reason: RefreshSessionRevocationReason,
     now: datetime,
 ) -> tuple[RefreshSession, ...]:
-    return tuple(
-        _revoke_refresh_session(session, reason=reason, now=now) for session in sessions
-    )
+    return tuple(_revoke_refresh_session(session, reason=reason, now=now) for session in sessions)
 
 
 def _revoke_refresh_session(

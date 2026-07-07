@@ -118,9 +118,7 @@ def test_assigned_agent_enrollment_requires_campaign_to_allow_it() -> None:
     )
 
     assert decision.allowed is False
-    assert decision.reasons == (
-        PermissionReasonCode.CAMPAIGN_DISALLOWS_ASSIGNED_AGENT_ENROLLMENT,
-    )
+    assert decision.reasons == (PermissionReasonCode.CAMPAIGN_DISALLOWS_ASSIGNED_AGENT_ENROLLMENT,)
 
 
 def test_assigned_agent_resume_requires_reason() -> None:

@@ -257,9 +257,7 @@ async def test_missing_recipient_fails_safe_without_sending_digest() -> None:
 
     assert result.status == PreflightDigestPreparationStatus.FAILED
     assert result.reasons == (PreflightDigestReasonCode.MISSING_DIGEST_RECIPIENT,)
-    assert result.held_back[0].reasons == (
-        PreflightDigestReasonCode.MISSING_DIGEST_RECIPIENT,
-    )
+    assert result.held_back[0].reasons == (PreflightDigestReasonCode.MISSING_DIGEST_RECIPIENT,)
     assert notifications.notifications == []
     assert repository.save_count == 0
 
@@ -318,7 +316,9 @@ async def test_failed_digest_can_be_retried_without_guessing_prior_success() -> 
         workspace_id=WORKSPACE_ID,
         campaign_id=CAMPAIGN_ID,
         batch_id=BATCH_ID,
-        candidates=[_digest_candidate(start_candidate=_start_candidate(lead_id=failed.entries[0].lead_id))],
+        candidates=[
+            _digest_candidate(start_candidate=_start_candidate(lead_id=failed.entries[0].lead_id))
+        ],
         start_policy=_start_policy(),
         start_context=_start_context(),
         repository=repository,

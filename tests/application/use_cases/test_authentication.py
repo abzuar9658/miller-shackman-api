@@ -51,7 +51,7 @@ from app.domain.identity import (
 
 T = TypeVar("T")
 
-NOW = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
+NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 SECOND_WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000002")
 USER_ID = UUID("00000000-0000-0000-0000-000000000003")
@@ -262,13 +262,10 @@ def test_refresh_authentication_rotates_refresh_session() -> None:
     assert result.tokens is not None
     assert result.tokens.refresh_token == "refresh-token-next"
     assert (
-        deps.refresh_sessions[SESSION_ID].revoked_reason
-        == RefreshSessionRevocationReason.ROTATED
+        deps.refresh_sessions[SESSION_ID].revoked_reason == RefreshSessionRevocationReason.ROTATED
     )
     rotated_session = next(
-        session
-        for session_id, session in deps.refresh_sessions.items()
-        if session_id != SESSION_ID
+        session for session_id, session in deps.refresh_sessions.items() if session_id != SESSION_ID
     )
     assert rotated_session.rotated_from_session_id == SESSION_ID
 
@@ -533,9 +530,17 @@ class _FakeWorkspaceMembershipRepository:
 
     async def list_by_user_id(self, user_id: UUID) -> tuple[WorkspaceMembership, ...]:
         return tuple(
+            membership for membership in self._memberships.values() if membership.user_id == user_id
+        )
+
+    async def list_by_workspace_id(
+        self,
+        workspace_id: UUID,
+    ) -> tuple[WorkspaceMembership, ...]:
+        return tuple(
             membership
             for membership in self._memberships.values()
-            if membership.user_id == user_id
+            if membership.workspace_id == workspace_id
         )
 
     async def save(self, membership: WorkspaceMembership) -> WorkspaceMembership:
@@ -607,6 +612,9 @@ class _FakePasswordResetTokenRepository:
 class _FakeInvitationRepository:
     def __init__(self, invitations: dict[UUID, UserInvitation]) -> None:
         self._invitations = invitations
+
+    async def get_by_id(self, invitation_id: UUID) -> UserInvitation | None:
+        return self._invitations.get(invitation_id)
 
     async def get_by_token_hash(self, token_hash: str) -> UserInvitation | None:
         return next(
@@ -841,12 +849,13 @@ def _actor(
     *,
     user_id: UUID = ADMIN_ID,
     role: WorkspaceMembershipRole = WorkspaceMembershipRole.BROKERAGE_ADMIN,
+    active_workspace_id: UUID = WORKSPACE_ID,
 ) -> AuthenticatedActor:
     return AuthenticatedActor(
         user_id=user_id,
         user_status=UserStatus.ACTIVE,
         active_role=role,
-        active_workspace_id=WORKSPACE_ID,
+        active_workspace_id=active_workspace_id,
         active_workspace_status=WorkspaceStatus.ACTIVE,
         active_membership_id=MEMBERSHIP_ID,
         active_membership_status=WorkspaceMembershipStatus.ACTIVE,

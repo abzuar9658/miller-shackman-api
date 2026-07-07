@@ -314,9 +314,7 @@ async def invite_workspace_user(
     invitation_token = opaque_token_service.generate_token()
     invitation = UserInvitation(
         invitation_id=(
-            existing_invitation.invitation_id
-            if existing_invitation is not None
-            else uuid4()
+            existing_invitation.invitation_id if existing_invitation is not None else uuid4()
         ),
         workspace_id=workspace_id,
         user_id=saved_user.user_id,
@@ -645,9 +643,7 @@ async def sign_in(
                 credential,
                 password_hash=new_hash,
                 password_changed_at=(
-                    now
-                    if new_hash != credential.password_hash
-                    else credential.password_changed_at
+                    now if new_hash != credential.password_hash else credential.password_changed_at
                 ),
                 failed_attempt_count=0,
                 locked_until=None,
