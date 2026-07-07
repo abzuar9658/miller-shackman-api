@@ -55,6 +55,14 @@ class AuthAuditEventType(StrEnum):
     USER_DISABLED = "user_disabled"
 
 
+class RefreshSessionRevocationReason(StrEnum):
+    ROTATED = "rotated"
+    LOGOUT = "logout"
+    LOGOUT_ALL = "logout_all"
+    PASSWORD_RESET = "password_reset"
+    REUSE_DETECTED = "reuse_detected"
+
+
 def _empty_string_mapping() -> Mapping[str, str]:
     return {}
 
@@ -113,7 +121,7 @@ class RefreshSession:
     rotated_from_session_id: RefreshSessionId | None
     expires_at: datetime
     revoked_at: datetime | None
-    revoked_reason: str | None
+    revoked_reason: RefreshSessionRevocationReason | None
     created_at: datetime
     last_used_at: datetime | None
 

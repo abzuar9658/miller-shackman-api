@@ -4,6 +4,7 @@ from uuid import UUID
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.common.ids import (
     LeadId,
+    RefreshSessionId,
     UserId,
     WorkspaceId,
     WorkspaceMembershipId,
@@ -126,7 +127,7 @@ class PasswordCredentialRepository(Protocol):
 
 
 class RefreshSessionRepository(Protocol):
-    async def get_by_id(self, session_id: UUID) -> RefreshSession | None:
+    async def get_by_id(self, session_id: RefreshSessionId) -> RefreshSession | None:
         raise NotImplementedError
 
     async def get_by_token_hash(self, token_hash: str) -> RefreshSession | None:

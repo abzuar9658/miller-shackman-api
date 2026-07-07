@@ -11,6 +11,7 @@ from app.domain.identity import (
     PasswordCredential,
     PasswordResetToken,
     RefreshSession,
+    RefreshSessionRevocationReason,
     User,
     UserInvitation,
     UserStatus,
@@ -442,7 +443,7 @@ def _refresh_session_to_values(session: RefreshSession) -> dict[str, object]:
         "rotated_from_session_id": session.rotated_from_session_id,
         "expires_at": session.expires_at,
         "revoked_at": session.revoked_at,
-        "revoked_reason": session.revoked_reason,
+        "revoked_reason": session.revoked_reason.value if session.revoked_reason else None,
         "created_at": session.created_at,
         "last_used_at": session.last_used_at,
     }
@@ -464,7 +465,11 @@ def _refresh_session_from_model(model: RefreshSessionModel) -> RefreshSession:
         rotated_from_session_id=model.rotated_from_session_id,
         expires_at=model.expires_at,
         revoked_at=model.revoked_at,
-        revoked_reason=model.revoked_reason,
+        revoked_reason=(
+            RefreshSessionRevocationReason(model.revoked_reason)
+            if model.revoked_reason is not None
+            else None
+        ),
         created_at=model.created_at,
         last_used_at=model.last_used_at,
     )
