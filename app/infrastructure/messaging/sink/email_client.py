@@ -1,0 +1,19 @@
+import uuid
+
+from app.application.ports.messaging import EmailMessage, EmailProvider
+
+
+class SinkEmailProvider(EmailProvider):
+    """Dev-only email provider that never contacts an external service.
+
+    Captures every message in an in-memory list and returns a synthetic
+    provider message identifier so the normal send flow can be exercised
+    safely in tests and local development.
+    """
+
+    def __init__(self) -> None:
+        self.messages: list[EmailMessage] = []
+
+    async def send(self, message: EmailMessage) -> str:
+        self.messages.append(message)
+        return f"sink-email-{uuid.uuid4()}"

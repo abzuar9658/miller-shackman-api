@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -6,6 +6,10 @@ import httpx
 import structlog
 
 from app.application.ports.crm import CanonicalLead, CRMActivity, CRMAgent
+from app.application.ports.crm_sync import CanonicalLeadSnapshotPage
+from app.infrastructure.crm.follow_up_boss.lead_mapper import (
+    map_follow_up_boss_person_to_canonical_lead,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -45,6 +49,46 @@ class FollowUpBossCRMClient:
         response.raise_for_status()
         data = response.json()
         return [self._map_person(workspace_id, p) for p in data.get("people", [])]
+
+    async def list_lead_snapshots(
+        self,
+        *,
+        workspace_id: UUID,
+        page_size: int = 100,
+        cursor: str | None = None,
+        updated_after: datetime | None = None,
+        updated_before: datetime | None = None,
+        mapped_custom_field_keys: tuple[str, ...] = (),
+    ) -> CanonicalLeadSnapshotPage:
+        params: dict[str, Any] = {"limit": max(1, min(page_size, 100))}
+        if cursor:
+            params["next"] = cursor
+        if updated_after is not None:
+            params["updatedAfter"] = self._format_datetime(updated_after)
+        if updated_before is not None:
+            params["updatedBefore"] = self._format_datetime(updated_before)
+
+        response = await self._client.get("/people", params=params)
+        response.raise_for_status()
+        data = response.json()
+        page_now = datetime.now(UTC)
+        people = data.get("people", [])
+        leads = tuple(
+            map_follow_up_boss_person_to_canonical_lead(
+                workspace_id=workspace_id,
+                payload=person,
+                now=page_now,
+                mapped_custom_field_keys=mapped_custom_field_keys,
+            )
+            for person in people
+            if isinstance(person, dict)
+        )
+        metadata = data.get("_metadata") if isinstance(data.get("_metadata"), dict) else {}
+        next_cursor = metadata.get("next") or data.get("next")
+        return CanonicalLeadSnapshotPage(
+            leads=leads,
+            next_cursor=str(next_cursor) if next_cursor else None,
+        )
 
     async def get_recent_activity(
         self,
@@ -141,3 +185,6 @@ class FollowUpBossCRMClient:
         except ValueError:
             logger.warning("Unable to parse CRM datetime", value=value)
             return None
+
+    def _format_datetime(self, value: datetime) -> str:
+        return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

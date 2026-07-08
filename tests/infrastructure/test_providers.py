@@ -2,6 +2,7 @@ import pytest
 from pydantic import SecretStr
 
 from app.core.config import Settings
+from app.infrastructure.messaging.sink import SinkEmailProvider, SinkSMSProvider
 from app.infrastructure.providers import (
     build_cache_provider,
     build_crm_client,
@@ -36,10 +37,22 @@ def test_build_sms_provider_requires_credentials() -> None:
         build_sms_provider(settings)
 
 
+def test_build_sms_provider_returns_sink_adapter() -> None:
+    settings = Settings(sms_provider="sink")
+    provider = build_sms_provider(settings)
+    assert isinstance(provider, SinkSMSProvider)
+
+
 def test_build_email_provider_requires_api_key() -> None:
     settings = Settings(sendgrid_api_key=SecretStr(""))
     with pytest.raises(ValueError, match="SENDGRID_API_KEY"):
         build_email_provider(settings)
+
+
+def test_build_email_provider_returns_sink_adapter() -> None:
+    settings = Settings(email_provider="sink")
+    provider = build_email_provider(settings)
+    assert isinstance(provider, SinkEmailProvider)
 
 
 def test_build_storage_provider_returns_s3_adapter() -> None:

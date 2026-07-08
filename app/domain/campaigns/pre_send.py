@@ -4,19 +4,7 @@ from enum import StrEnum
 
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.compliance.contactability import ContactabilityDecision, ContactChannel
-
-
-class WorkflowState(StrEnum):
-    QUEUED = "queued"
-    ACTIVE_NURTURE = "active_nurture"
-    WAITING_FOR_RESPONSE = "waiting_for_response"
-    RESPONSE_PROCESSING = "response_processing"
-    PAUSED = "paused"
-    HUMAN_HANDOFF = "human_handoff"
-    HUMAN_OWNED = "human_owned"
-    COMPLETED = "completed"
-    SUPPRESSED = "suppressed"
-    CLOSED = "closed"
+from app.domain.workflows import WorkflowState as WorkflowState
 
 
 class ScheduledMessageStatus(StrEnum):

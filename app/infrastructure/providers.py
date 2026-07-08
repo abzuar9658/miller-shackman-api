@@ -57,6 +57,10 @@ def build_sms_provider(settings: Settings | None = None) -> SMSProvider:
             auth_token=auth_token,
             from_phone=settings.twilio_from_phone,
         )
+    if settings.sms_provider == "sink":
+        from app.infrastructure.messaging.sink import SinkSMSProvider
+
+        return SinkSMSProvider()
     raise ValueError(f"Unsupported SMS provider: {settings.sms_provider}")
 
 
@@ -72,6 +76,10 @@ def build_email_provider(settings: Settings | None = None) -> EmailProvider:
             api_key=api_key,
             from_email=settings.sendgrid_from_email,
         )
+    if settings.email_provider == "sink":
+        from app.infrastructure.messaging.sink import SinkEmailProvider
+
+        return SinkEmailProvider()
     raise ValueError(f"Unsupported email provider: {settings.email_provider}")
 
 

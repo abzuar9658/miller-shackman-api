@@ -5,15 +5,26 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from app.core.config import Settings, get_settings
+from app.infrastructure.workflows.temporal.activities import (
+    apply_inbound_workflow_transition_activity,
+    record_pause_workflow_signal_activity,
+    record_resume_workflow_signal_activity,
+)
+from app.infrastructure.workflows.temporal.lead_nurture import LeadNurtureWorkflow
 from app.infrastructure.workflows.temporal.smoke import SmokePingWorkflow, smoke_ping_activity
 
 
 def _registered_workflows() -> Sequence[type[Any]]:
-    return [SmokePingWorkflow]
+    return [SmokePingWorkflow, LeadNurtureWorkflow]
 
 
 def _registered_activities() -> Sequence[Any]:
-    return [smoke_ping_activity]
+    return [
+        smoke_ping_activity,
+        apply_inbound_workflow_transition_activity,
+        record_pause_workflow_signal_activity,
+        record_resume_workflow_signal_activity,
+    ]
 
 
 async def connect_temporal_client(settings: Settings | None = None) -> Client:

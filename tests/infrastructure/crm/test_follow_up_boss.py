@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -60,3 +61,73 @@ async def test_get_lead_maps_payload(workspace_id: uuid.UUID) -> None:
     assert lead.assigned_agent_id == "42"
     assert lead.tags == ["nurture"]
     assert lead.custom_fields == {"budget": "650000"}
+
+
+async def test_list_lead_snapshots_maps_payload_and_pagination_metadata(
+    workspace_id: uuid.UUID,
+) -> None:
+    payload = {
+        "_metadata": {"next": "cursor-2"},
+        "people": [
+            {
+                "id": 123,
+                "assignedUserId": 42,
+                "assignedTo": "Agent Name",
+                "type": "Buyer",
+                "source": "Zillow",
+                "stage": "Lead",
+                "createdVia": "Email Parsing",
+                "emails": [{"value": "ada@example.com"}],
+                "phones": [{"value": "+15551234567", "isLandline": False}],
+                "customFields": {"budget": "650000", "other": "ignore"},
+            }
+        ],
+    }
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=_transport(payload),
+    )
+
+    page = await client.list_lead_snapshots(
+        workspace_id=workspace_id,
+        page_size=25,
+        mapped_custom_field_keys=("budget",),
+    )
+
+    assert page.next_cursor == "cursor-2"
+    assert len(page.leads) == 1
+    assert page.leads[0].crm_lead_id == "123"
+    assert page.leads[0].lead_source == "Zillow"
+    assert page.leads[0].mapped_custom_fields == {"budget": "650000"}
+
+
+async def test_list_lead_snapshots_sends_incremental_filters_and_cursor(
+    workspace_id: uuid.UUID,
+) -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(dict(request.url.params))
+        return httpx.Response(200, json={"_metadata": {}, "people": []})
+
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    await client.list_lead_snapshots(
+        workspace_id=workspace_id,
+        page_size=50,
+        cursor="cursor-2",
+        updated_after=datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
+        updated_before=datetime(2026, 7, 8, 0, 0, tzinfo=UTC),
+    )
+
+    assert captured["limit"] == "50"
+    assert captured["next"] == "cursor-2"
+    assert captured["updatedAfter"] == "2026-07-01T00:00:00Z"
+    assert captured["updatedBefore"] == "2026-07-08T00:00:00Z"
