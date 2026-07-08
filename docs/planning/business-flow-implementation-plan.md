@@ -193,6 +193,31 @@ Business result:
 - Temporal now has a concrete, minimal seam for durable workflow signals while core
   business state transitions remain in application/domain code
 
+### Slice 6 — Campaign enrollment + workflow start
+
+Goal: convert selected leads into persisted campaign enrollments and running Temporal
+`LeadNurtureWorkflow` executions.
+
+Implemented in this slice:
+
+- canonical `CampaignEnrollment` domain model with source and status enums
+- `CampaignEnrollmentRepository` port and Postgres adapter with upsert on the unique
+  `(workspace_id, campaign_id, lead_id)` constraint
+- `TemporalWorkflowStarter` port in the application layer
+- `TemporalClientWorkflowStarter` implementation using the existing Temporal client
+- `start_selected_campaign_batch(...)` use case that creates:
+  - a `queued` campaign enrollment record
+  - a `queued` lead workflow record with a deterministic Temporal workflow id
+  - an initial workflow transition for `campaign_enrollment_started`
+  - a Temporal `LeadNurtureWorkflow` execution
+- duplicate-enrollment skip behavior and per-lead failure reporting when Temporal fails
+- fake-based tests for the use case and Postgres-adapter tests for the repository
+
+Business result:
+
+- authorized callers can now start a batch of selected leads into a campaign, and the
+  persisted workflow mirror plus Temporal execution are created together
+
 ## Execution Rules
 
 - Do not start a later slice before the current slice is implemented, tested, and
@@ -210,9 +235,9 @@ Business result:
 
 Start the next slice only after explicit approval:
 
-1. decide whether the next slice should be campaign enrollment or durable cadence execution
-2. if cadence execution is next, add only one simple wait/send/wait loop through Temporal
-3. keep pre-send safety checks inside application/domain use cases
-4. keep provider delivery idempotent through existing outbound message records
+1. add durable cadence execution inside `LeadNurtureWorkflow`
+2. start with one simple wait/send/wait loop using the existing pre-send safety use case
+3. keep provider delivery idempotent through existing outbound message records
+4. pause the workflow immediately when inbound signals are received
 5. avoid provider callback workflows until cadence execution is proven
 6. run `ruff`, `mypy`, targeted tests, and full `pytest`
