@@ -19,6 +19,7 @@ from app.domain.compliance.contactability import (
     WorkspaceContactPolicy,
 )
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.infrastructure.messaging.sink import SinkEmailProvider, SinkSMSProvider
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("11111111-1111-1111-1111-111111111111")
@@ -385,3 +386,65 @@ async def test_rejects_email_when_subject_is_missing() -> None:
 
     assert result.status == SendOutboundMessageStatus.REJECTED
     assert result.reasons == (SendOutboundMessageReasonCode.EMAIL_SUBJECT_MISSING,)
+
+
+async def test_sends_pending_sms_message_via_sink_provider() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    lead_repository = FakeLeadRepository(_lead())
+    sms_provider = SinkSMSProvider()
+    email_provider = SinkEmailProvider()
+
+    assert message_repository.message is not None
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=lead_repository,
+        message_repository=message_repository,
+        sms_provider=sms_provider,
+        email_provider=email_provider,
+        now=NOW,
+    )
+
+    assert result.status == SendOutboundMessageStatus.SENT
+    assert result.message is not None
+    assert result.message.status == OutboundMessageStatus.SENT
+    assert result.message.provider_send_status == ProviderSendStatus.ACCEPTED
+    assert result.message.provider_message_id is not None
+    assert result.message.provider_message_id.startswith("sink-sms-")
+    assert result.message.sent_at == NOW
+    assert len(sms_provider.messages) == 1
+    assert sms_provider.messages[0].to_phone == "+15551234567"
+    assert sms_provider.messages[0].body == message_repository.message.body
+    assert len(email_provider.messages) == 0
+
+
+async def test_sends_pending_email_message_via_sink_provider() -> None:
+    message_repository = FakeOutboundMessageRepository(
+        _message(channel=ContactChannel.EMAIL, subject="Quick check-in"),
+    )
+    lead_repository = FakeLeadRepository(_lead())
+    sms_provider = SinkSMSProvider()
+    email_provider = SinkEmailProvider()
+
+    assert message_repository.message is not None
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=lead_repository,
+        message_repository=message_repository,
+        sms_provider=sms_provider,
+        email_provider=email_provider,
+        now=NOW,
+    )
+
+    assert result.status == SendOutboundMessageStatus.SENT
+    assert result.message is not None
+    assert result.message.channel == ContactChannel.EMAIL
+    assert result.message.provider_message_id is not None
+    assert result.message.provider_message_id.startswith("sink-email-")
+    assert len(email_provider.messages) == 1
+    assert email_provider.messages[0].to_email == "lead@example.com"
+    assert email_provider.messages[0].subject == "Quick check-in"
+    assert len(sms_provider.messages) == 0

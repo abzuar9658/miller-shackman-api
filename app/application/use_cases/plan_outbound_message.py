@@ -31,6 +31,7 @@ from app.domain.compliance.contactability import (
     WorkspaceContactPolicy,
     evaluate_contactability,
 )
+from app.domain.leads import CanonicalLeadRecord
 
 
 class PlanOutboundMessageStatus(StrEnum):
@@ -104,6 +105,30 @@ async def plan_outbound_message(
             status=PlanOutboundMessageStatus.REJECTED,
             reasons=(PlanOutboundMessageReasonCode.LEAD_NOT_FOUND,),
         )
+
+    return await plan_outbound_message_for_lead_record(
+        lead=lead,
+        campaign_id=campaign_id,
+        context=context,
+        message_repository=message_repository,
+        llm_client=llm_client,
+        now=now,
+        message_id_factory=message_id_factory,
+    )
+
+
+async def plan_outbound_message_for_lead_record(
+    *,
+    lead: CanonicalLeadRecord,
+    campaign_id: CampaignId,
+    context: OutboundPlanningContext,
+    message_repository: OutboundMessageRepository,
+    llm_client: LLMClient,
+    now: datetime,
+    message_id_factory: Callable[[], UUID] | None = None,
+) -> PlanOutboundMessageResult:
+    workspace_id = lead.workspace_id
+    lead_id = lead.lead_id
 
     if not context.enabled_channels:
         return PlanOutboundMessageResult(
@@ -206,17 +231,12 @@ class _ChannelSelection:
 async def _select_channel(
     *,
     workspace_id: WorkspaceId,
-    lead: object,
+    lead: CanonicalLeadRecord,
     campaign_id: CampaignId,
     context: OutboundPlanningContext,
     message_repository: OutboundMessageRepository,
     now: datetime,
 ) -> _ChannelSelection:
-    from app.domain.leads import CanonicalLeadRecord
-
-    if not isinstance(lead, CanonicalLeadRecord):
-        raise TypeError("lead must be CanonicalLeadRecord")
-
     rejection_reasons: list[PlanOutboundMessageReasonCode] = []
     contactability_facts = contactability_facts_from_canonical_lead(lead)
     for channel in context.enabled_channels:
@@ -284,11 +304,10 @@ async def _select_channel(
     )
 
 
-def _has_destination_for_channel(lead: object, channel: ContactChannel) -> bool:
-    from app.domain.leads import CanonicalLeadRecord
-
-    if not isinstance(lead, CanonicalLeadRecord):
-        raise TypeError("lead must be CanonicalLeadRecord")
+def _has_destination_for_channel(
+    lead: CanonicalLeadRecord,
+    channel: ContactChannel,
+) -> bool:
     if channel == ContactChannel.SMS:
         return lead.has_sms_capable_phone and lead.primary_phone is not None
     return lead.has_email and lead.primary_email is not None
