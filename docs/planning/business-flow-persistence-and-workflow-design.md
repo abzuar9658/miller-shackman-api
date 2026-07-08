@@ -4,6 +4,9 @@ This document defines the V1 backend backbone needed to pull Follow Up Boss lead
 decide whether outreach is allowed, run durable nurture workflows, handle inbound
 replies, hand off to humans, and make system state queryable.
 
+Implementation order and slice boundaries now live in
+`docs/planning/business-flow-implementation-plan.md`.
+
 ## Current implementation baseline
 
 Already implemented and kept:
@@ -371,20 +374,21 @@ Indexes:
 - Keep enum-like values as strings in the DB and convert to domain enums in
   repository adapters.
 
-## Implementation slices
+## Implementation status and sequencing note
+
+Completed so far:
 
 1. Database migration for sync, campaign, workflow, decision audit, conversation,
    handoff, provider-event, and outbox tables.
-2. Repository ports and Postgres adapters for the new tables.
-3. FUB bulk sync use case with sync job tracking and canonical lead upsert.
-4. Persisted decision evaluation use case for contactability and campaign enrollment.
-5. Campaign configuration and enrollment use cases.
-6. Lead workflow state use cases and Temporal nurture workflow shell.
-7. Wire planning and sending into Temporal activities.
-8. Inbound SMS/email webhook ingestion with idempotency.
-9. Reply classification, conversation summary, and action decision use cases.
-10. Handoff creation with CRM note/tag update and agent notification.
-11. Read/query API endpoints for operational visibility.
+2. Repository ports and Postgres adapters for CRM sync tracking and external events.
+
+The agreed next delivery sequence is captured in
+`docs/planning/business-flow-implementation-plan.md`, starting with:
+
+3. Follow Up Boss lead snapshot sync into canonical leads.
+4. Outbound planning engine with rules-first message creation.
+5. Safe sink delivery for dev/testing.
+6. Inbound reply flow.
 
 ## Deferred from this design
 

@@ -32,11 +32,13 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "openai/gpt-4o-mini"
 
+    # Valid values: "twilio" or "sink" (dev-only, no external calls).
     sms_provider: str = "twilio"
     twilio_account_sid: SecretStr | None = None
     twilio_auth_token: SecretStr | None = None
     twilio_from_phone: str = ""
 
+    # Valid values: "sendgrid" or "sink" (dev-only, no external calls).
     email_provider: str = "sendgrid"
     sendgrid_api_key: SecretStr | None = None
     sendgrid_from_email: str = ""
