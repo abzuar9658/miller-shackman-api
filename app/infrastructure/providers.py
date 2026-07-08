@@ -6,6 +6,7 @@ from app.application.ports.crm import CRMClient
 from app.application.ports.llm import LLMClient
 from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.storage import FileStorageProvider
+from app.application.ports.temporal import TemporalWorkflowStarter
 from app.core.config import Settings, get_settings
 from app.infrastructure.auth.passwords import PasslibPasswordHasher
 from app.infrastructure.auth.tokens import JoseAccessTokenService, SecureOpaqueTokenService
@@ -125,3 +126,11 @@ def build_access_token_service(settings: Settings | None = None) -> AccessTokenS
 def build_opaque_token_service(settings: Settings | None = None) -> OpaqueTokenService:
     settings = settings or get_settings()
     return SecureOpaqueTokenService()
+
+
+async def build_temporal_workflow_starter(
+    settings: Settings | None = None,
+) -> TemporalWorkflowStarter:
+    from app.infrastructure.workflows.temporal.starter import build_temporal_workflow_starter
+
+    return await build_temporal_workflow_starter(settings)
