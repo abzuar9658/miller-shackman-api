@@ -10,6 +10,7 @@ from app.domain.common.ids import (
     WorkspaceId,
     WorkspaceMembershipId,
 )
+from app.domain.conversations import Conversation, ConversationSummary, Handoff, InboundMessage
 from app.domain.crm_sync import CRMSyncJob, ExternalEvent
 from app.domain.identity import (
     AuthAuditLog,
@@ -22,6 +23,7 @@ from app.domain.identity import (
     WorkspaceMembership,
 )
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.workflows import LeadWorkflow, WorkflowTransition
 
 
 class LeadRepository(Protocol):
@@ -74,6 +76,97 @@ class OutboundMessageRepository(Protocol):
         raise NotImplementedError
 
     async def save(self, message: OutboundMessage) -> OutboundMessage:
+        raise NotImplementedError
+
+
+class CRMSyncJobRepository(Protocol):
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        sync_job_id: UUID,
+    ) -> CRMSyncJob | None:
+        raise NotImplementedError
+
+    async def list_recent(
+        self,
+        workspace_id: WorkspaceId,
+        limit: int = 100,
+    ) -> tuple[CRMSyncJob, ...]:
+        raise NotImplementedError
+
+    async def save(self, job: CRMSyncJob) -> CRMSyncJob:
+        raise NotImplementedError
+
+
+class ExternalEventRepository(Protocol):
+    async def get_by_provider_event_id(
+        self,
+        workspace_id: WorkspaceId,
+        provider: str,
+        provider_event_id: str,
+    ) -> ExternalEvent | None:
+        raise NotImplementedError
+
+    async def save(self, event: ExternalEvent) -> ExternalEvent:
+        raise NotImplementedError
+
+
+class ConversationRepository(Protocol):
+    async def get_latest_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> Conversation | None:
+        raise NotImplementedError
+
+    async def save(self, conversation: Conversation) -> Conversation:
+        raise NotImplementedError
+
+
+class InboundMessageRepository(Protocol):
+    async def save(self, message: InboundMessage) -> InboundMessage:
+        raise NotImplementedError
+
+
+class ConversationSummaryRepository(Protocol):
+    async def save(self, summary: ConversationSummary) -> ConversationSummary:
+        raise NotImplementedError
+
+
+class HandoffRepository(Protocol):
+    async def save(self, handoff: Handoff) -> Handoff:
+        raise NotImplementedError
+
+
+class LeadWorkflowRepository(Protocol):
+    async def get_latest_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> LeadWorkflow | None:
+        raise NotImplementedError
+
+    async def get_latest_for_lead_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> LeadWorkflow | None:
+        raise NotImplementedError
+
+    async def save(self, workflow: LeadWorkflow) -> LeadWorkflow:
+        raise NotImplementedError
+
+
+class WorkflowTransitionRepository(Protocol):
+    async def append(self, transition: WorkflowTransition) -> WorkflowTransition:
+        raise NotImplementedError
+
+    async def list_for_workflow(
+        self,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        limit: int = 100,
+    ) -> tuple[WorkflowTransition, ...]:
         raise NotImplementedError
 
 
@@ -185,36 +278,4 @@ class InvitationRepository(Protocol):
 
 class AuthAuditLogRepository(Protocol):
     async def append(self, audit_log: AuthAuditLog) -> AuthAuditLog:
-        raise NotImplementedError
-
-
-class CRMSyncJobRepository(Protocol):
-    async def get_by_id(
-        self,
-        workspace_id: WorkspaceId,
-        sync_job_id: UUID,
-    ) -> CRMSyncJob | None:
-        raise NotImplementedError
-
-    async def list_recent(
-        self,
-        workspace_id: WorkspaceId,
-        limit: int = 100,
-    ) -> tuple[CRMSyncJob, ...]:
-        raise NotImplementedError
-
-    async def save(self, job: CRMSyncJob) -> CRMSyncJob:
-        raise NotImplementedError
-
-
-class ExternalEventRepository(Protocol):
-    async def get_by_provider_event_id(
-        self,
-        workspace_id: WorkspaceId,
-        provider: str,
-        provider_event_id: str,
-    ) -> ExternalEvent | None:
-        raise NotImplementedError
-
-    async def save(self, event: ExternalEvent) -> ExternalEvent:
         raise NotImplementedError

@@ -1,0 +1,147 @@
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from datetime import datetime
+from enum import StrEnum
+from uuid import UUID
+
+from app.domain.common.ids import CampaignId, LeadId, UserId, WorkspaceId
+
+
+class WorkflowState(StrEnum):
+    ELIGIBLE = "eligible"
+    QUEUED = "queued"
+    ACTIVE_NURTURE = "active_nurture"
+    WAITING_FOR_RESPONSE = "waiting_for_response"
+    RESPONSE_PROCESSING = "response_processing"
+    PAUSED = "paused"
+    HUMAN_HANDOFF = "human_handoff"
+    HUMAN_OWNED = "human_owned"
+    COMPLETED = "completed"
+    SUPPRESSED = "suppressed"
+    CLOSED = "closed"
+
+
+class WorkflowTransitionReasonCode(StrEnum):
+    INBOUND_REPLY_RECEIVED = "inbound_reply_received"
+    REPLY_CLASSIFICATION_REJECTED = "reply_classification_rejected"
+    HUMAN_HANDOFF_REQUIRED = "human_handoff_required"
+    OPT_OUT_DETECTED = "opt_out_detected"
+    MANUAL_PAUSE = "manual_pause"
+    MANUAL_RESUME = "manual_resume"
+
+
+class WorkflowTransitionError(ValueError):
+    pass
+
+
+def _empty_metadata() -> Mapping[str, object]:
+    return {}
+
+
+@dataclass(frozen=True)
+class LeadWorkflow:
+    workflow_id: UUID
+    temporal_workflow_id: str
+    workspace_id: WorkspaceId
+    campaign_enrollment_id: UUID
+    campaign_id: CampaignId
+    lead_id: LeadId
+    state: WorkflowState
+    last_transition_at: datetime
+    state_version: int
+    created_at: datetime
+    updated_at: datetime
+    current_step_id: UUID | None = None
+    next_action_at: datetime | None = None
+    pause_reason: str | None = None
+    resume_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class WorkflowTransition:
+    transition_id: UUID
+    workspace_id: WorkspaceId
+    workflow_id: UUID
+    lead_id: LeadId
+    campaign_id: CampaignId
+    to_state: WorkflowState
+    reason_code: WorkflowTransitionReasonCode
+    created_at: datetime
+    from_state: WorkflowState | None = None
+    actor_user_id: UserId | None = None
+    external_event_id: UUID | None = None
+    metadata: Mapping[str, object] = field(default_factory=_empty_metadata)
+
+
+@dataclass(frozen=True)
+class WorkflowTransitionResult:
+    workflow: LeadWorkflow
+    transition: WorkflowTransition
+
+
+def transition_workflow(
+    *,
+    workflow: LeadWorkflow,
+    to_state: WorkflowState,
+    reason_code: WorkflowTransitionReasonCode,
+    transition_id: UUID,
+    now: datetime,
+    actor_user_id: UserId | None = None,
+    external_event_id: UUID | None = None,
+    metadata: Mapping[str, object] | None = None,
+    pause_reason: str | None = None,
+    resume_reason: str | None = None,
+) -> WorkflowTransitionResult:
+    _validate_transition(workflow.state, to_state)
+    updated = replace(
+        workflow,
+        state=to_state,
+        current_step_id=None if to_state in _non_sendable_states() else workflow.current_step_id,
+        next_action_at=None if to_state in _non_sendable_states() else workflow.next_action_at,
+        last_transition_at=now,
+        pause_reason=pause_reason
+        if to_state in {WorkflowState.PAUSED, WorkflowState.HUMAN_HANDOFF}
+        else None,
+        resume_reason=resume_reason,
+        state_version=workflow.state_version + 1,
+        updated_at=now,
+    )
+    transition = WorkflowTransition(
+        transition_id=transition_id,
+        workspace_id=workflow.workspace_id,
+        workflow_id=workflow.workflow_id,
+        lead_id=workflow.lead_id,
+        campaign_id=workflow.campaign_id,
+        from_state=workflow.state,
+        to_state=to_state,
+        reason_code=reason_code,
+        actor_user_id=actor_user_id,
+        external_event_id=external_event_id,
+        metadata=metadata or {},
+        created_at=now,
+    )
+    return WorkflowTransitionResult(workflow=updated, transition=transition)
+
+
+def _validate_transition(from_state: WorkflowState, to_state: WorkflowState) -> None:
+    if from_state in _terminal_states():
+        raise WorkflowTransitionError(
+            f"Cannot transition workflow from terminal state {from_state.value}."
+        )
+    if from_state == WorkflowState.HUMAN_OWNED:
+        raise WorkflowTransitionError("Human-owned workflows require explicit authorized resume.")
+    if to_state in {WorkflowState.PAUSED, WorkflowState.HUMAN_HANDOFF}:
+        return
+    if from_state == WorkflowState.PAUSED and to_state == WorkflowState.ACTIVE_NURTURE:
+        return
+    raise WorkflowTransitionError(
+        f"Transition from {from_state.value} to {to_state.value} is not allowed in V1.",
+    )
+
+
+def _terminal_states() -> frozenset[WorkflowState]:
+    return frozenset({WorkflowState.COMPLETED, WorkflowState.SUPPRESSED, WorkflowState.CLOSED})
+
+
+def _non_sendable_states() -> frozenset[WorkflowState]:
+    return frozenset({WorkflowState.PAUSED, WorkflowState.HUMAN_HANDOFF, WorkflowState.HUMAN_OWNED})
