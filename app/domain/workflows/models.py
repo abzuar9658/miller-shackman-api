@@ -22,6 +22,7 @@ class WorkflowState(StrEnum):
 
 
 class WorkflowTransitionReasonCode(StrEnum):
+    CAMPAIGN_ENROLLMENT_STARTED = "campaign_enrollment_started"
     INBOUND_REPLY_RECEIVED = "inbound_reply_received"
     REPLY_CLASSIFICATION_REJECTED = "reply_classification_rejected"
     HUMAN_HANDOFF_REQUIRED = "human_handoff_required"

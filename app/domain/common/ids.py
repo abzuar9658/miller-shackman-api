@@ -9,5 +9,7 @@ UserInvitationId = UUID
 AuthAuditLogId = UUID
 LeadId = UUID
 CampaignId = UUID
+CampaignEnrollmentId = UUID
+CampaignVersionId = UUID
 WorkflowId = str
 CorrelationId = UUID

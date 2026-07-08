@@ -596,3 +596,45 @@ class HandoffModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CampaignEnrollmentModel(Base):
+    __tablename__ = "campaign_enrollments"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "campaign_id",
+            "lead_id",
+            name="uq_campaign_enrollments_active_lead_campaign",
+        ),
+        Index(
+            "ix_campaign_enrollments_workspace_status_created",
+            "workspace_id",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "ix_campaign_enrollments_workspace_lead_created",
+            "workspace_id",
+            "lead_id",
+            "created_at",
+        ),
+    )
+
+    campaign_enrollment_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    campaign_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    campaign_version_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    lead_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    source: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    eligible_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by_user_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    reason_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

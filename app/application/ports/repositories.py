@@ -1,8 +1,10 @@
 from typing import Protocol
 from uuid import UUID
 
+from app.domain.campaigns.enrollment import CampaignEnrollment
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.common.ids import (
+    CampaignId,
     LeadId,
     RefreshSessionId,
     UserId,
@@ -278,4 +280,17 @@ class InvitationRepository(Protocol):
 
 class AuthAuditLogRepository(Protocol):
     async def append(self, audit_log: AuthAuditLog) -> AuthAuditLog:
+        raise NotImplementedError
+
+
+class CampaignEnrollmentRepository(Protocol):
+    async def get_by_lead_and_campaign(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        campaign_id: CampaignId,
+    ) -> CampaignEnrollment | None:
+        raise NotImplementedError
+
+    async def save(self, enrollment: CampaignEnrollment) -> CampaignEnrollment:
         raise NotImplementedError
