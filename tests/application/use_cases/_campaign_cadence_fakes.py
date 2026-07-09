@@ -68,15 +68,23 @@ class FakeWorkspaceContactPolicyRepository:
 class FakeLeadRepository:
     def __init__(self, lead: CanonicalLeadRecord | None) -> None:
         self.lead = lead
+        self.saved: list[CanonicalLeadRecord] = []
+        self.by_id: dict[tuple[WorkspaceId, LeadId], CanonicalLeadRecord] = {}
+        self.by_crm_id: dict[tuple[WorkspaceId, CRMProvider, str], CanonicalLeadRecord] = {}
+        if lead is not None:
+            self._store(lead)
+
+    def _store(self, lead: CanonicalLeadRecord) -> None:
+        self.lead = lead
+        self.by_id[(lead.workspace_id, lead.lead_id)] = lead
+        self.by_crm_id[(lead.workspace_id, lead.crm_provider, lead.crm_lead_id)] = lead
 
     async def get_by_id(
         self,
         workspace_id: WorkspaceId,
         lead_id: LeadId,
     ) -> CanonicalLeadRecord | None:
-        if self.lead and self.lead.workspace_id == workspace_id and self.lead.lead_id == lead_id:
-            return self.lead
-        return None
+        return self.by_id.get((workspace_id, lead_id))
 
     async def get_by_id_for_update(
         self,
@@ -91,10 +99,11 @@ class FakeLeadRepository:
         crm_provider: CRMProvider,
         crm_lead_id: str,
     ) -> CanonicalLeadRecord | None:
-        return None
+        return self.by_crm_id.get((workspace_id, crm_provider, crm_lead_id))
 
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
-        self.lead = record
+        self.saved.append(record)
+        self._store(record)
         return record
 
 
