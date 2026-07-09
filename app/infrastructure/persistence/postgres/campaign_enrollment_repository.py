@@ -41,12 +41,24 @@ class PostgresCampaignEnrollmentRepository:
             .values(**values)
             .on_conflict_do_update(
                 index_elements=["workspace_id", "campaign_id", "lead_id"],
+                index_where=CampaignEnrollmentModel.status.in_(
+                    [status.value for status in _ACTIVE_ENROLLMENT_STATUSES]
+                ),
                 set_=update_values,
             )
             .returning(CampaignEnrollmentModel)
         )
         result = await self._session.execute(statement)
         return _model_to_enrollment(result.scalar_one())
+
+
+_ACTIVE_ENROLLMENT_STATUSES = (
+    CampaignEnrollmentStatus.CANDIDATE,
+    CampaignEnrollmentStatus.QUEUED,
+    CampaignEnrollmentStatus.ACTIVE,
+    CampaignEnrollmentStatus.PAUSED,
+    CampaignEnrollmentStatus.HANDOFF,
+)
 
 
 def _by_lead_and_campaign_statement(

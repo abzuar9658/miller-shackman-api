@@ -24,7 +24,7 @@ The target V1 business scenario is:
 
 ## Current Baseline
 
-Current baseline: **Slice 9 complete**.
+Current baseline: **Slice 10 complete**.
 
 This means the backend can now:
 
@@ -68,14 +68,14 @@ The backend cannot yet run the full intended V1 business loop end-to-end.
 - Temporal worker, starter, workflow, and activities exist for enrollment and the
   multi-step cadence execution path
 - sink providers exist for safe local end-to-end outbound testing
+- both application-level and real Postgres-backed business-flow harnesses now cover:
+  `sync -> enrollment -> first cadence send -> inbound reply -> human_handoff`
 - validation baseline is green at the current slice boundary
 
 ## Still Missing Before Real Business-Use-Case Testing
 
 ### Highest-priority business gaps
 
-- there is no thin end-to-end business-flow harness for:
-  `sync -> enrollment -> first cadence send -> inbound reply -> pause/handoff`
 - handoff is not yet complete from the business side because agent notification
   and CRM writeback are still missing
 - human agent activity from the CRM does not yet pause AI outreach automatically
@@ -94,13 +94,10 @@ The backend cannot yet run the full intended V1 business loop end-to-end.
 
 ## Recommended Next Order
 
-1. persist workspace contact policy and SMS compliance state
-2. add the narrow business-flow harness for the first end-to-end loop
-3. extend `LeadNurtureWorkflow` into a full multi-step cadence loop
-4. complete handoff with agent notification and CRM writeback
-5. add CRM human-activity pause detection
-6. wire dormant-lead selection and full pre-flight digest flow
-7. add provider callback handling, reporting, and operational readiness pieces
+1. complete handoff with agent notification and CRM writeback
+2. add CRM human-activity pause detection
+3. wire dormant-lead selection and full pre-flight digest flow
+4. add provider callback handling, reporting, and operational readiness pieces
 
 ## Ready-to-Test Definitions
 

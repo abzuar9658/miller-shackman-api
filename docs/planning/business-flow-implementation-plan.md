@@ -309,6 +309,32 @@ Business result:
 - a started lead nurture workflow can now progress through all published cadence steps
   instead of stopping after the first send
 
+### Slice 10 — Business-flow harnesses on fake and real Postgres persistence
+
+Status: complete.
+
+Goal: prove the first critical end-to-end business path both at the application layer
+and against a freshly migrated Postgres database.
+
+Implemented in this slice:
+
+- a thin application-level harness for:
+  `sync -> enrollment -> first cadence send -> inbound reply -> human_handoff`
+- a real Postgres-backed harness that boots a temporary migrated database and runs the
+  same business path through the production repository adapters
+- real-schema fixes uncovered by the harness:
+  - Alembic fresh-database bootstrap now supports this repo's longer revision ids
+  - workflow-transition inserts now persist the JSON metadata column correctly
+  - campaign-enrollment upserts now target the real partial unique index used by the
+    migrated schema
+- repository-focused regression coverage for the workflow-transition and
+  campaign-enrollment persistence seams involved in the harness path
+
+Business result:
+
+- the first real business loop is now executable both with fast in-memory fakes and
+  against a fresh Postgres schema, which closes the highest-priority integration gap
+
 ## Execution Rules
 
 - Do not start a later slice before the current slice is implemented, tested, and
@@ -326,8 +352,9 @@ Business result:
 
 Start the next slice only after explicit approval:
 
-1. add a narrow business-flow test harness that exercises: sync -> enrollment -> first
-   cadence send -> inbound reply -> pause/handoff
-2. keep provider delivery idempotent through existing outbound message records
-3. avoid provider callback workflows until the multi-step cadence path is proven
-4. run `ruff`, `mypy`, targeted tests, and full `pytest`
+1. complete handoff with agent notification and CRM writeback
+2. add CRM human-activity pause detection from real CRM activity signals
+3. keep provider delivery idempotent through existing outbound message records
+4. avoid provider callback workflows until the handoff and human-activity pause paths
+   are proven
+5. run `ruff`, `mypy`, targeted tests, and full `pytest`

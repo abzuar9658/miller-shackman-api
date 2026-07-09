@@ -1,6 +1,16 @@
 from logging.config import fileConfig
+from typing import Any
 
-from sqlalchemy import engine_from_config, pool
+from alembic.ddl.impl import DefaultImpl
+from sqlalchemy import (
+    Column,
+    MetaData,
+    PrimaryKeyConstraint,
+    String,
+    Table,
+    engine_from_config,
+    pool,
+)
 
 from alembic import context
 from app.core.config import get_settings
@@ -15,6 +25,32 @@ settings = get_settings()
 config.set_main_option("sqlalchemy.url", settings.database_migration_url)
 
 target_metadata = Base.metadata
+
+
+def _long_revision_version_table_impl(
+    self: DefaultImpl,
+    *,
+    version_table: str,
+    version_table_schema: str | None,
+    version_table_pk: bool,
+    **kw: Any,
+) -> Table:
+    table = Table(
+        version_table,
+        MetaData(),
+        Column("version_num", String(255), nullable=False),
+        schema=version_table_schema,
+    )
+    if version_table_pk:
+        table.append_constraint(
+            PrimaryKeyConstraint("version_num", name=f"{version_table}_pkc"),
+        )
+    return table
+
+
+# Alembic defaults the version table column to VARCHAR(32), but this repository
+# uses descriptive revision identifiers longer than 32 characters.
+DefaultImpl.version_table_impl = _long_revision_version_table_impl
 
 
 def run_migrations_offline() -> None:

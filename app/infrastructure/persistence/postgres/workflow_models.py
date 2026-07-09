@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -24,11 +24,15 @@ class CampaignEnrollmentModel(Base):
             "lead_id",
             "created_at",
         ),
-        UniqueConstraint(
+        Index(
+            "uq_campaign_enrollments_active_lead_campaign",
             "workspace_id",
             "campaign_id",
             "lead_id",
-            name="uq_campaign_enrollments_active_lead_campaign",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('candidate', 'queued', 'active', 'paused', 'handoff')"
+            ),
         ),
     )
 

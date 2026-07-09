@@ -63,7 +63,7 @@ class PostgresWorkflowTransitionRepository:
     async def append(self, transition: WorkflowTransition) -> WorkflowTransition:
         statement = (
             insert(WorkflowTransitionModel)
-            .values(**_transition_to_values(transition))
+            .values(_transition_to_values(transition))
             .returning(WorkflowTransitionModel)
         )
         result = await self._session.execute(statement)
@@ -142,20 +142,22 @@ def _model_to_workflow(model: LeadWorkflowModel) -> LeadWorkflow:
     )
 
 
-def _transition_to_values(transition: WorkflowTransition) -> dict[str, object]:
+def _transition_to_values(transition: WorkflowTransition) -> dict[object, object]:
     return {
-        "transition_id": transition.transition_id,
-        "workspace_id": transition.workspace_id,
-        "workflow_id": transition.workflow_id,
-        "lead_id": transition.lead_id,
-        "campaign_id": transition.campaign_id,
-        "from_state": transition.from_state.value if transition.from_state is not None else None,
-        "to_state": transition.to_state.value,
-        "reason_code": transition.reason_code.value,
-        "actor_user_id": transition.actor_user_id,
-        "external_event_id": transition.external_event_id,
-        "created_at": transition.created_at,
-        "metadata_": dict(transition.metadata),
+        WorkflowTransitionModel.transition_id: transition.transition_id,
+        WorkflowTransitionModel.workspace_id: transition.workspace_id,
+        WorkflowTransitionModel.workflow_id: transition.workflow_id,
+        WorkflowTransitionModel.lead_id: transition.lead_id,
+        WorkflowTransitionModel.campaign_id: transition.campaign_id,
+        WorkflowTransitionModel.from_state: (
+            transition.from_state.value if transition.from_state is not None else None
+        ),
+        WorkflowTransitionModel.to_state: transition.to_state.value,
+        WorkflowTransitionModel.reason_code: transition.reason_code.value,
+        WorkflowTransitionModel.actor_user_id: transition.actor_user_id,
+        WorkflowTransitionModel.external_event_id: transition.external_event_id,
+        WorkflowTransitionModel.created_at: transition.created_at,
+        WorkflowTransitionModel.metadata_: dict(transition.metadata),
     }
 
 
