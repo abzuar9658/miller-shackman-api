@@ -8,10 +8,10 @@ from temporalio.client import Client
 from app.core.config import Settings
 from app.infrastructure.workflows.temporal.activities import (
     apply_inbound_workflow_transition_activity,
-    execute_first_campaign_cadence_step_activity,
+    execute_campaign_cadence_step_activity,
     record_pause_workflow_signal_activity,
     record_resume_workflow_signal_activity,
-    schedule_first_campaign_cadence_step_activity,
+    schedule_next_campaign_cadence_step_activity,
 )
 from app.infrastructure.workflows.temporal.lead_nurture import (
     LeadNurtureWorkflow,
@@ -81,8 +81,8 @@ def test_build_temporal_worker_registers_smoke_components(monkeypatch: pytest.Mo
         "activities": [
             smoke_ping_activity,
             apply_inbound_workflow_transition_activity,
-            schedule_first_campaign_cadence_step_activity,
-            execute_first_campaign_cadence_step_activity,
+            schedule_next_campaign_cadence_step_activity,
+            execute_campaign_cadence_step_activity,
             record_pause_workflow_signal_activity,
             record_resume_workflow_signal_activity,
         ],

@@ -24,7 +24,7 @@ The target V1 business scenario is:
 
 ## Current Baseline
 
-Current baseline: **Slice 8 complete**.
+Current baseline: **Slice 9 complete**.
 
 This means the backend can now:
 
@@ -39,8 +39,8 @@ This means the backend can now:
 - persist workflow state and workflow transition history
 - start a Temporal `LeadNurtureWorkflow` for an enrolled lead
 - load persisted campaign execution config by `campaign_version_id`
-- execute the first persisted cadence step and move the workflow to
-  `waiting_for_response`
+- execute all persisted cadence steps in a multi-step wait/send/wait loop,
+  keeping the workflow alive after the final send for inbound replies and handoff
 
 The backend cannot yet run the full intended V1 business loop end-to-end.
 
@@ -66,7 +66,7 @@ The backend cannot yet run the full intended V1 business loop end-to-end.
   CRM sync jobs, external events, and workspace contact policies
 - repository ports and Postgres adapters exist for the major business-flow seams
 - Temporal worker, starter, workflow, and activities exist for enrollment and the
-  first cadence-step path
+  multi-step cadence execution path
 - sink providers exist for safe local end-to-end outbound testing
 - validation baseline is green at the current slice boundary
 
@@ -74,8 +74,6 @@ The backend cannot yet run the full intended V1 business loop end-to-end.
 
 ### Highest-priority business gaps
 
-- only the first cadence step runs; the workflow does not yet execute a full
-  multi-step wait/send/wait campaign loop
 - there is no thin end-to-end business-flow harness for:
   `sync -> enrollment -> first cadence send -> inbound reply -> pause/handoff`
 - handoff is not yet complete from the business side because agent notification

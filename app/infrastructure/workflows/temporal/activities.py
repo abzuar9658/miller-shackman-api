@@ -12,10 +12,10 @@ from app.application.use_cases.apply_workflow_state_transition import (
     apply_workflow_state_transition,
 )
 from app.application.use_cases.campaign_cadence_execution import (
-    FirstCadenceStepExecutionResult,
-    FirstCadenceStepScheduleResult,
-    execute_first_campaign_cadence_step,
-    schedule_first_campaign_cadence_step,
+    CadenceStepExecutionResult,
+    CadenceStepScheduleResult,
+    execute_campaign_cadence_step,
+    schedule_next_campaign_cadence_step,
 )
 from app.core.database import async_session_factory
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
@@ -36,13 +36,13 @@ from app.infrastructure.persistence.postgres.workspace_contact_policy_repository
 )
 from app.infrastructure.providers import build_email_provider, build_llm_client, build_sms_provider
 from app.infrastructure.workflows.temporal.lead_nurture import (
-    ExecuteFirstCadenceStepInput,
-    ExecuteFirstCadenceStepResult,
+    ExecuteCadenceStepInput,
+    ExecuteCadenceStepResult,
     InboundReplySignal,
     PauseWorkflowSignal,
     ResumeWorkflowSignal,
-    ScheduleFirstCadenceStepInput,
-    ScheduleFirstCadenceStepResult,
+    ScheduleNextCadenceStepInput,
+    ScheduleNextCadenceStepResult,
     WorkflowSignalActivityResult,
 )
 
@@ -129,12 +129,12 @@ async def record_resume_workflow_signal_activity(
     return _state_outcome_to_result(outcome)
 
 
-@activity.defn(name="schedule-first-campaign-cadence-step")
-async def schedule_first_campaign_cadence_step_activity(
-    input_: ScheduleFirstCadenceStepInput,
-) -> ScheduleFirstCadenceStepResult:
+@activity.defn(name="schedule-next-campaign-cadence-step")
+async def schedule_next_campaign_cadence_step_activity(
+    input_: ScheduleNextCadenceStepInput,
+) -> ScheduleNextCadenceStepResult:
     async with async_session_factory() as session:
-        outcome = await schedule_first_campaign_cadence_step(
+        outcome = await schedule_next_campaign_cadence_step(
             workspace_id=input_.workspace_id,
             lead_id=input_.lead_id,
             campaign_version_id=input_.campaign_version_id,
@@ -146,15 +146,16 @@ async def schedule_first_campaign_cadence_step_activity(
     return _schedule_outcome_to_result(outcome)
 
 
-@activity.defn(name="execute-first-campaign-cadence-step")
-async def execute_first_campaign_cadence_step_activity(
-    input_: ExecuteFirstCadenceStepInput,
-) -> ExecuteFirstCadenceStepResult:
+@activity.defn(name="execute-campaign-cadence-step")
+async def execute_campaign_cadence_step_activity(
+    input_: ExecuteCadenceStepInput,
+) -> ExecuteCadenceStepResult:
     async with async_session_factory() as session:
-        outcome = await execute_first_campaign_cadence_step(
+        outcome = await execute_campaign_cadence_step(
             workspace_id=input_.workspace_id,
             lead_id=input_.lead_id,
             campaign_version_id=input_.campaign_version_id,
+            cadence_step_id=input_.cadence_step_id,
             scheduled_for=input_.scheduled_for,
             campaign_execution_repository=PostgresCampaignExecutionRepository(session),
             workspace_repository=PostgresWorkspaceRepository(session),
@@ -208,9 +209,9 @@ def _state_outcome_to_result(
 
 
 def _schedule_outcome_to_result(
-    outcome: FirstCadenceStepScheduleResult,
-) -> ScheduleFirstCadenceStepResult:
-    return ScheduleFirstCadenceStepResult(
+    outcome: CadenceStepScheduleResult,
+) -> ScheduleNextCadenceStepResult:
+    return ScheduleNextCadenceStepResult(
         status=outcome.status.value,
         workflow_id=outcome.workflow.workflow_id if outcome.workflow is not None else None,
         cadence_step_id=outcome.cadence_step_id,
@@ -220,9 +221,9 @@ def _schedule_outcome_to_result(
 
 
 def _execution_outcome_to_result(
-    outcome: FirstCadenceStepExecutionResult,
-) -> ExecuteFirstCadenceStepResult:
-    return ExecuteFirstCadenceStepResult(
+    outcome: CadenceStepExecutionResult,
+) -> ExecuteCadenceStepResult:
+    return ExecuteCadenceStepResult(
         status=outcome.status.value,
         workflow_id=outcome.workflow.workflow_id if outcome.workflow is not None else None,
         transition_id=outcome.transition_id,
@@ -230,4 +231,5 @@ def _execution_outcome_to_result(
         outbound_message_id=outcome.outbound_message_id,
         provider_message_id=outcome.provider_message_id,
         skip_reason=outcome.skip_reason,
+        has_more_steps=outcome.has_more_steps,
     )

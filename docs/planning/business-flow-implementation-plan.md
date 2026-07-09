@@ -254,6 +254,61 @@ Business result:
   step through the existing planning and send-time safety rules instead of stopping at
   workflow creation
 
+### Slice 8 — Workspace contact policy persistence
+
+Status: complete.
+
+Goal: replace the hardcoded workspace send-policy assumptions with persisted workspace
+contact policy so SMS compliance and quiet-hour checks use the real source of truth.
+
+Implemented in this slice:
+
+- a dedicated `workspace_contact_policies` persistence seam and migration
+- canonical `WorkspaceContactPolicy` domain model plus repository port and Postgres
+  adapter
+- timezone-aware quiet-hour evaluation using the workspace default timezone
+- first-step cadence execution now loads persisted workspace contact policy instead of
+  constructing a test-only default in-process
+- repository, domain, and application tests for SMS compliance blocking and persisted
+  quiet-hour enforcement
+
+Business result:
+
+- cadence execution now honors persisted workspace contact policy rules before any SMS
+  or email send is attempted
+
+### Slice 9 — Multi-step cadence loop
+
+Status: complete.
+
+Goal: extend `LeadNurtureWorkflow` from a single persisted first step into a real
+multi-step wait/send/wait cadence loop.
+
+Implemented in this slice:
+
+- generalized application orchestration from first-step-only helpers into:
+  - `schedule_next_campaign_cadence_step(...)`
+  - `execute_campaign_cadence_step(...)`
+- workflow transition guard expansion for `waiting_for_response -> active_nurture`
+- pause semantics now preserve the current cadence cursor while still clearing pending
+  send time, which allows an explicit resume to retry the blocked step cleanly
+- successful cadence execution now advances the persisted workflow cursor to the next
+  cadence step when one exists
+- final-step behavior intentionally keeps the workflow alive in
+  `waiting_for_response` after the last send so inbound replies and handoff signals can
+  still arrive; the workflow does not auto-complete without a defined post-final wait
+  policy
+- Temporal activities and worker registration now use generic next-step scheduling and
+  execution activity names
+- direct workflow tests cover both:
+  - looping through multiple cadence steps
+  - retrying after a blocked step once the workflow is unblocked
+
+Business result:
+
+- a started lead nurture workflow can now progress through all published cadence steps
+  instead of stopping after the first send
+
 ## Execution Rules
 
 - Do not start a later slice before the current slice is implemented, tested, and
@@ -271,12 +326,8 @@ Business result:
 
 Start the next slice only after explicit approval:
 
-1. add persistence for workspace-level contact policy and SMS compliance state so SMS
-   cadence steps can run without test-only assumptions
-2. extend `LeadNurtureWorkflow` from one persisted first step to a full multi-step
-   wait/send/wait cadence loop
-3. add a narrow business-flow test harness that exercises: sync -> enrollment -> first
+1. add a narrow business-flow test harness that exercises: sync -> enrollment -> first
    cadence send -> inbound reply -> pause/handoff
-4. keep provider delivery idempotent through existing outbound message records
-5. avoid provider callback workflows until the multi-step cadence path is proven
-6. run `ruff`, `mypy`, targeted tests, and full `pytest`
+2. keep provider delivery idempotent through existing outbound message records
+3. avoid provider callback workflows until the multi-step cadence path is proven
+4. run `ruff`, `mypy`, targeted tests, and full `pytest`

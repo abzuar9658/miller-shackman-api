@@ -73,6 +73,36 @@ def test_active_nurture_can_enter_waiting_for_response_after_send() -> None:
     assert result.transition.to_state == WorkflowState.WAITING_FOR_RESPONSE
 
 
+def test_waiting_for_response_can_reenter_active_nurture_for_next_due_step() -> None:
+    result = transition_workflow(
+        workflow=_workflow(WorkflowState.WAITING_FOR_RESPONSE),
+        to_state=WorkflowState.ACTIVE_NURTURE,
+        reason_code=WorkflowTransitionReasonCode.CADENCE_STEP_STARTED,
+        transition_id=TRANSITION_ID,
+        now=NOW,
+    )
+
+    assert result.workflow.state == WorkflowState.ACTIVE_NURTURE
+    assert result.workflow.current_step_id == STEP_ID
+    assert result.workflow.next_action_at == NOW
+
+
+def test_pause_transition_clears_pending_time_but_preserves_current_step() -> None:
+    result = transition_workflow(
+        workflow=_workflow(WorkflowState.WAITING_FOR_RESPONSE),
+        to_state=WorkflowState.PAUSED,
+        reason_code=WorkflowTransitionReasonCode.MANUAL_PAUSE,
+        transition_id=TRANSITION_ID,
+        now=NOW,
+        pause_reason="manual_pause",
+    )
+
+    assert result.workflow.state == WorkflowState.PAUSED
+    assert result.workflow.current_step_id == STEP_ID
+    assert result.workflow.next_action_at is None
+    assert result.workflow.pause_reason == "manual_pause"
+
+
 def test_terminal_workflow_cannot_transition_from_inbound_reply() -> None:
     with pytest.raises(WorkflowTransitionError):
         transition_workflow(

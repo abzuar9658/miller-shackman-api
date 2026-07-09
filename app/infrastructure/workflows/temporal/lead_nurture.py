@@ -14,7 +14,7 @@ class LeadNurtureWorkflowInput:
 
 
 @dataclass(frozen=True)
-class ScheduleFirstCadenceStepInput:
+class ScheduleNextCadenceStepInput:
     workspace_id: UUID
     lead_id: UUID
     campaign_version_id: UUID
@@ -22,7 +22,7 @@ class ScheduleFirstCadenceStepInput:
 
 
 @dataclass(frozen=True)
-class ScheduleFirstCadenceStepResult:
+class ScheduleNextCadenceStepResult:
     status: str
     workflow_id: UUID | None = None
     cadence_step_id: UUID | None = None
@@ -31,7 +31,7 @@ class ScheduleFirstCadenceStepResult:
 
 
 @dataclass(frozen=True)
-class ExecuteFirstCadenceStepInput:
+class ExecuteCadenceStepInput:
     workspace_id: UUID
     lead_id: UUID
     campaign_version_id: UUID
@@ -41,7 +41,7 @@ class ExecuteFirstCadenceStepInput:
 
 
 @dataclass(frozen=True)
-class ExecuteFirstCadenceStepResult:
+class ExecuteCadenceStepResult:
     status: str
     workflow_id: UUID | None = None
     transition_id: UUID | None = None
@@ -49,6 +49,7 @@ class ExecuteFirstCadenceStepResult:
     outbound_message_id: UUID | None = None
     provider_message_id: str | None = None
     skip_reason: str | None = None
+    has_more_steps: bool = False
 
 
 @dataclass(frozen=True)
@@ -126,42 +127,58 @@ class LeadNurtureWorkflow:
             lead_id=input_.lead_id,
             campaign_version_id=input_.campaign_version_id,
         )
-        schedule_result = await workflow.execute_activity(
-            "schedule-first-campaign-cadence-step",
-            ScheduleFirstCadenceStepInput(
-                workspace_id=input_.workspace_id,
-                lead_id=input_.lead_id,
-                campaign_version_id=input_.campaign_version_id,
-                occurred_at=workflow.now(),
-            ),
-            start_to_close_timeout=timedelta(seconds=30),
-        )
-        self._record_schedule_result(schedule_result)
-        if schedule_result.status != "scheduled" or schedule_result.scheduled_for is None:
-            return self._snapshot
 
-        delay = schedule_result.scheduled_for - workflow.now()
-        if delay > timedelta():
-            await workflow.sleep(delay)
-        if self._send_blocked:
-            await workflow.wait_condition(lambda: self._closed or not self._send_blocked)
-        if self._closed or schedule_result.cadence_step_id is None:
-            return self._snapshot
+        while not self._closed:
+            schedule_result = await workflow.execute_activity(
+                "schedule-next-campaign-cadence-step",
+                ScheduleNextCadenceStepInput(
+                    workspace_id=input_.workspace_id,
+                    lead_id=input_.lead_id,
+                    campaign_version_id=input_.campaign_version_id,
+                    occurred_at=workflow.now(),
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            self._record_schedule_result(schedule_result)
+            if schedule_result.status != "scheduled" or schedule_result.scheduled_for is None:
+                return self._snapshot
 
-        execute_result = await workflow.execute_activity(
-            "execute-first-campaign-cadence-step",
-            ExecuteFirstCadenceStepInput(
-                workspace_id=input_.workspace_id,
-                lead_id=input_.lead_id,
-                campaign_version_id=input_.campaign_version_id,
-                cadence_step_id=schedule_result.cadence_step_id,
-                scheduled_for=schedule_result.scheduled_for,
-                occurred_at=workflow.now(),
-            ),
-            start_to_close_timeout=timedelta(minutes=2),
-        )
-        self._record_execution_result(execute_result)
-        await workflow.wait_condition(lambda: self._closed)
+            delay = schedule_result.scheduled_for - workflow.now()
+            if delay > timedelta():
+                await workflow.sleep(delay)
+            if self._send_blocked:
+                await workflow.wait_condition(lambda: self._closed or not self._send_blocked)
+            if self._closed or schedule_result.cadence_step_id is None:
+                return self._snapshot
+
+            execute_result = await workflow.execute_activity(
+                "execute-campaign-cadence-step",
+                ExecuteCadenceStepInput(
+                    workspace_id=input_.workspace_id,
+                    lead_id=input_.lead_id,
+                    campaign_version_id=input_.campaign_version_id,
+                    cadence_step_id=schedule_result.cadence_step_id,
+                    scheduled_for=schedule_result.scheduled_for,
+                    occurred_at=workflow.now(),
+                ),
+                start_to_close_timeout=timedelta(minutes=2),
+            )
+            self._record_execution_result(execute_result)
+
+            if execute_result.status in {"rejected", "failed", "uncertain"}:
+                self._send_blocked = True
+                await workflow.wait_condition(lambda: self._closed or not self._send_blocked)
+                if self._closed:
+                    return self._snapshot
+                continue
+
+            if execute_result.status not in {"sent", "already_sent"}:
+                return self._snapshot
+
+            if not execute_result.has_more_steps:
+                await workflow.wait_condition(lambda: self._closed)
+                return self._snapshot
+
         return self._snapshot
 
     @workflow.signal(name="inbound-reply-received")
@@ -223,24 +240,25 @@ class LeadNurtureWorkflow:
         )
         return cast(WorkflowSignalActivityResult, result)
 
-    def _record_schedule_result(self, result: ScheduleFirstCadenceStepResult) -> None:
+    def _record_schedule_result(self, result: ScheduleNextCadenceStepResult) -> None:
         assert self._snapshot is not None
         self._snapshot = replace(
             self._snapshot,
             current_step_id=result.cadence_step_id,
             scheduled_for=result.scheduled_for,
-            last_activity="schedule_first_cadence_step",
+            last_activity="schedule_next_cadence_step",
             last_activity_status=result.status,
             workflow_id=result.workflow_id,
             skip_reason=result.skip_reason,
         )
 
-    def _record_execution_result(self, result: ExecuteFirstCadenceStepResult) -> None:
+    def _record_execution_result(self, result: ExecuteCadenceStepResult) -> None:
         assert self._snapshot is not None
         self._snapshot = replace(
             self._snapshot,
             current_step_id=result.cadence_step_id,
-            last_activity="execute_first_cadence_step",
+            scheduled_for=None,
+            last_activity="execute_cadence_step",
             last_activity_status=result.status,
             workflow_id=result.workflow_id,
             transition_id=result.transition_id,

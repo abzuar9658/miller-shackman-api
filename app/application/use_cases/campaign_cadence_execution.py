@@ -38,14 +38,14 @@ from app.domain.compliance.contactability import (
 from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransitionReasonCode
 
 
-class FirstCadenceStepScheduleStatus(StrEnum):
+class CadenceStepScheduleStatus(StrEnum):
     SCHEDULED = "scheduled"
     NO_WORKFLOW = "no_workflow"
     MISSING_CAMPAIGN_CONFIG = "missing_campaign_config"
     NO_CADENCE_STEP = "no_cadence_step"
 
 
-class FirstCadenceStepExecutionStatus(StrEnum):
+class CadenceStepExecutionStatus(StrEnum):
     SENT = "sent"
     ALREADY_SENT = "already_sent"
     ALREADY_WAITING_FOR_RESPONSE = "already_waiting_for_response"
@@ -60,8 +60,8 @@ class FirstCadenceStepExecutionStatus(StrEnum):
 
 
 @dataclass(frozen=True)
-class FirstCadenceStepScheduleResult:
-    status: FirstCadenceStepScheduleStatus
+class CadenceStepScheduleResult:
+    status: CadenceStepScheduleStatus
     workflow: LeadWorkflow | None = None
     cadence_step_id: UUID | None = None
     scheduled_for: datetime | None = None
@@ -69,17 +69,18 @@ class FirstCadenceStepScheduleResult:
 
 
 @dataclass(frozen=True)
-class FirstCadenceStepExecutionResult:
-    status: FirstCadenceStepExecutionStatus
+class CadenceStepExecutionResult:
+    status: CadenceStepExecutionStatus
     workflow: LeadWorkflow | None = None
     transition_id: UUID | None = None
     cadence_step_id: UUID | None = None
     outbound_message_id: UUID | None = None
     provider_message_id: str | None = None
     skip_reason: str | None = None
+    has_more_steps: bool = False
 
 
-async def schedule_first_campaign_cadence_step(
+async def schedule_next_campaign_cadence_step(
     *,
     workspace_id: WorkspaceId,
     lead_id: LeadId,
@@ -87,22 +88,22 @@ async def schedule_first_campaign_cadence_step(
     campaign_execution_repository: CampaignExecutionRepository,
     lead_workflow_repository: LeadWorkflowRepository,
     now: datetime,
-) -> FirstCadenceStepScheduleResult:
+) -> CadenceStepScheduleResult:
     config = await campaign_execution_repository.get_by_version_id(
         workspace_id, campaign_version_id
     )
     if config is None:
-        return FirstCadenceStepScheduleResult(
-            status=FirstCadenceStepScheduleStatus.MISSING_CAMPAIGN_CONFIG,
+        return CadenceStepScheduleResult(
+            status=CadenceStepScheduleStatus.MISSING_CAMPAIGN_CONFIG,
         )
-
-    step = _first_step(config.cadence_steps)
-    if step is None:
-        return FirstCadenceStepScheduleResult(status=FirstCadenceStepScheduleStatus.NO_CADENCE_STEP)
 
     workflow = await lead_workflow_repository.get_latest_for_lead_for_update(workspace_id, lead_id)
     if workflow is None:
-        return FirstCadenceStepScheduleResult(status=FirstCadenceStepScheduleStatus.NO_WORKFLOW)
+        return CadenceStepScheduleResult(status=CadenceStepScheduleStatus.NO_WORKFLOW)
+
+    step = _scheduled_or_initial_step(config.cadence_steps, workflow.current_step_id)
+    if step is None:
+        return CadenceStepScheduleResult(status=CadenceStepScheduleStatus.NO_CADENCE_STEP)
 
     scheduled_for = workflow.next_action_at
     if workflow.current_step_id != step.cadence_step_id or scheduled_for is None:
@@ -116,19 +117,20 @@ async def schedule_first_campaign_cadence_step(
             )
         )
 
-    return FirstCadenceStepScheduleResult(
-        status=FirstCadenceStepScheduleStatus.SCHEDULED,
+    return CadenceStepScheduleResult(
+        status=CadenceStepScheduleStatus.SCHEDULED,
         workflow=workflow,
         cadence_step_id=step.cadence_step_id,
         scheduled_for=scheduled_for,
     )
 
 
-async def execute_first_campaign_cadence_step(
+async def execute_campaign_cadence_step(
     *,
     workspace_id: WorkspaceId,
     lead_id: LeadId,
     campaign_version_id: CampaignVersionId,
+    cadence_step_id: UUID,
     scheduled_for: datetime,
     campaign_execution_repository: CampaignExecutionRepository,
     workspace_repository: WorkspaceRepository,
@@ -141,31 +143,38 @@ async def execute_first_campaign_cadence_step(
     sms_provider: SMSProvider,
     email_provider: EmailProvider,
     now: datetime,
-) -> FirstCadenceStepExecutionResult:
+) -> CadenceStepExecutionResult:
     config = await campaign_execution_repository.get_by_version_id(
         workspace_id, campaign_version_id
     )
     if config is None:
-        return FirstCadenceStepExecutionResult(
-            status=FirstCadenceStepExecutionStatus.MISSING_CAMPAIGN_CONFIG,
+        return CadenceStepExecutionResult(
+            status=CadenceStepExecutionStatus.MISSING_CAMPAIGN_CONFIG,
         )
 
-    step = _first_step(config.cadence_steps)
+    step = _step_by_id(config.cadence_steps, cadence_step_id)
     if step is None:
-        return FirstCadenceStepExecutionResult(
-            status=FirstCadenceStepExecutionStatus.NO_CADENCE_STEP
-        )
+        return CadenceStepExecutionResult(status=CadenceStepExecutionStatus.NO_CADENCE_STEP)
 
     workflow = await lead_workflow_repository.get_latest_for_lead_for_update(workspace_id, lead_id)
     if workflow is None:
-        return FirstCadenceStepExecutionResult(status=FirstCadenceStepExecutionStatus.NO_WORKFLOW)
+        return CadenceStepExecutionResult(status=CadenceStepExecutionStatus.NO_WORKFLOW)
+
+    if workflow.current_step_id not in {None, step.cadence_step_id}:
+        return CadenceStepExecutionResult(
+            status=CadenceStepExecutionStatus.SKIPPED,
+            workflow=workflow,
+            cadence_step_id=step.cadence_step_id,
+            skip_reason="Workflow cursor does not match the scheduled cadence step.",
+        )
 
     if (
         workflow.state == WorkflowState.WAITING_FOR_RESPONSE
         and workflow.current_step_id == step.cadence_step_id
+        and workflow.next_action_at is None
     ):
-        return FirstCadenceStepExecutionResult(
-            status=FirstCadenceStepExecutionStatus.ALREADY_WAITING_FOR_RESPONSE,
+        return CadenceStepExecutionResult(
+            status=CadenceStepExecutionStatus.ALREADY_WAITING_FOR_RESPONSE,
             workflow=workflow,
             cadence_step_id=step.cadence_step_id,
         )
@@ -178,8 +187,8 @@ async def execute_first_campaign_cadence_step(
         WorkflowState.SUPPRESSED,
         WorkflowState.CLOSED,
     }:
-        return FirstCadenceStepExecutionResult(
-            status=FirstCadenceStepExecutionStatus.SKIPPED,
+        return CadenceStepExecutionResult(
+            status=CadenceStepExecutionStatus.SKIPPED,
             workflow=workflow,
             cadence_step_id=step.cadence_step_id,
             skip_reason=f"Workflow is not sendable from state {workflow.state.value}.",
@@ -187,8 +196,8 @@ async def execute_first_campaign_cadence_step(
 
     workspace = await workspace_repository.get_by_id(workspace_id)
     if workspace is None:
-        return FirstCadenceStepExecutionResult(
-            status=FirstCadenceStepExecutionStatus.MISSING_WORKSPACE,
+        return CadenceStepExecutionResult(
+            status=CadenceStepExecutionStatus.MISSING_WORKSPACE,
             workflow=workflow,
             cadence_step_id=step.cadence_step_id,
         )
@@ -203,6 +212,16 @@ async def execute_first_campaign_cadence_step(
         workspace_contact_policy,
         workspace.default_timezone,
     )
+
+    if workflow.current_step_id != step.cadence_step_id or workflow.next_action_at != scheduled_for:
+        workflow = await lead_workflow_repository.save(
+            replace(
+                workflow,
+                current_step_id=step.cadence_step_id,
+                next_action_at=scheduled_for,
+                updated_at=now,
+            )
+        )
 
     if workflow.state != WorkflowState.ACTIVE_NURTURE:
         active_outcome = await apply_workflow_state_transition(
@@ -219,8 +238,8 @@ async def execute_first_campaign_cadence_step(
             active_outcome.status != WorkflowStateTransitionStatus.UPDATED
             or active_outcome.workflow is None
         ):
-            return FirstCadenceStepExecutionResult(
-                status=FirstCadenceStepExecutionStatus.SKIPPED,
+            return CadenceStepExecutionResult(
+                status=CadenceStepExecutionStatus.SKIPPED,
                 workflow=active_outcome.workflow or workflow,
                 cadence_step_id=step.cadence_step_id,
                 skip_reason=active_outcome.skip_reason,
@@ -257,7 +276,7 @@ async def execute_first_campaign_cadence_step(
             now=now,
             reason_code=WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED,
             skip_reason=_reason_values(plan_result.reasons),
-            status=FirstCadenceStepExecutionStatus.REJECTED,
+            status=CadenceStepExecutionStatus.REJECTED,
         )
 
     send_context = OutboundSendContext(
@@ -297,19 +316,38 @@ async def execute_first_campaign_cadence_step(
                 else None,
             },
         )
-        workflow_outcome = waiting_outcome.workflow
         if (
-            waiting_outcome.status == WorkflowStateTransitionStatus.UPDATED
-            and workflow_outcome is not None
+            waiting_outcome.status != WorkflowStateTransitionStatus.UPDATED
+            or waiting_outcome.workflow is None
         ):
-            workflow_outcome = await lead_workflow_repository.save(
-                replace(workflow_outcome, next_action_at=None, updated_at=now)
+            return CadenceStepExecutionResult(
+                status=CadenceStepExecutionStatus.SKIPPED,
+                workflow=waiting_outcome.workflow or workflow,
+                transition_id=waiting_outcome.transition_id,
+                cadence_step_id=step.cadence_step_id,
+                outbound_message_id=send_result.message.message_id if send_result.message else None,
+                provider_message_id=send_result.message.provider_message_id
+                if send_result.message
+                else None,
+                skip_reason=waiting_outcome.skip_reason,
             )
-        return FirstCadenceStepExecutionResult(
+
+        next_step = _next_step(config.cadence_steps, step.cadence_step_id)
+        workflow_outcome = await lead_workflow_repository.save(
+            replace(
+                waiting_outcome.workflow,
+                current_step_id=(
+                    next_step.cadence_step_id if next_step is not None else step.cadence_step_id
+                ),
+                next_action_at=None,
+                updated_at=now,
+            )
+        )
+        return CadenceStepExecutionResult(
             status=(
-                FirstCadenceStepExecutionStatus.SENT
+                CadenceStepExecutionStatus.SENT
                 if send_result.status == SendOutboundMessageStatus.SENT
-                else FirstCadenceStepExecutionStatus.ALREADY_SENT
+                else CadenceStepExecutionStatus.ALREADY_SENT
             ),
             workflow=workflow_outcome,
             transition_id=waiting_outcome.transition_id,
@@ -318,6 +356,7 @@ async def execute_first_campaign_cadence_step(
             provider_message_id=send_result.message.provider_message_id
             if send_result.message
             else None,
+            has_more_steps=next_step is not None,
         )
 
     return await _pause_after_block(
@@ -334,10 +373,10 @@ async def execute_first_campaign_cadence_step(
         ),
         skip_reason=_reason_values(send_result.reasons),
         status={
-            SendOutboundMessageStatus.REJECTED: FirstCadenceStepExecutionStatus.REJECTED,
-            SendOutboundMessageStatus.FAILED: FirstCadenceStepExecutionStatus.FAILED,
-            SendOutboundMessageStatus.UNCERTAIN: FirstCadenceStepExecutionStatus.UNCERTAIN,
-        }.get(send_result.status, FirstCadenceStepExecutionStatus.FAILED),
+            SendOutboundMessageStatus.REJECTED: CadenceStepExecutionStatus.REJECTED,
+            SendOutboundMessageStatus.FAILED: CadenceStepExecutionStatus.FAILED,
+            SendOutboundMessageStatus.UNCERTAIN: CadenceStepExecutionStatus.UNCERTAIN,
+        }.get(send_result.status, CadenceStepExecutionStatus.FAILED),
     )
 
 
@@ -351,8 +390,8 @@ async def _pause_after_block(
     now: datetime,
     reason_code: WorkflowTransitionReasonCode,
     skip_reason: str,
-    status: FirstCadenceStepExecutionStatus,
-) -> FirstCadenceStepExecutionResult:
+    status: CadenceStepExecutionStatus,
+) -> CadenceStepExecutionResult:
     outcome = await apply_workflow_state_transition(
         workspace_id=workspace_id,
         lead_id=lead_id,
@@ -364,7 +403,7 @@ async def _pause_after_block(
         metadata={"cadence_step_id": str(cadence_step_id), "reason": skip_reason},
         pause_reason="cadence_step_blocked",
     )
-    return FirstCadenceStepExecutionResult(
+    return CadenceStepExecutionResult(
         status=status,
         workflow=outcome.workflow,
         transition_id=outcome.transition_id,
@@ -373,8 +412,36 @@ async def _pause_after_block(
     )
 
 
-def _first_step(steps: tuple[CampaignCadenceStep, ...]) -> CampaignCadenceStep | None:
-    return steps[0] if steps else None
+def _scheduled_or_initial_step(
+    steps: tuple[CampaignCadenceStep, ...],
+    current_step_id: UUID | None,
+) -> CampaignCadenceStep | None:
+    if not steps:
+        return None
+    if current_step_id is None:
+        return steps[0]
+    return _step_by_id(steps, current_step_id)
+
+
+def _step_by_id(
+    steps: tuple[CampaignCadenceStep, ...],
+    cadence_step_id: UUID,
+) -> CampaignCadenceStep | None:
+    for step in steps:
+        if step.cadence_step_id == cadence_step_id:
+            return step
+    return None
+
+
+def _next_step(
+    steps: tuple[CampaignCadenceStep, ...],
+    current_step_id: UUID,
+) -> CampaignCadenceStep | None:
+    for index, step in enumerate(steps):
+        if step.cadence_step_id == current_step_id:
+            next_index = index + 1
+            return steps[next_index] if next_index < len(steps) else None
+    return None
 
 
 def _pre_send_policy(

@@ -9,6 +9,7 @@ from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import WorkspaceContactPolicy
 from app.domain.identity import Workspace
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.workflows import LeadWorkflow, WorkflowTransition
 
 
 class FakeCampaignExecutionRepository:
@@ -95,6 +96,52 @@ class FakeLeadRepository:
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         self.lead = record
         return record
+
+
+class FakeLeadWorkflowRepository:
+    def __init__(self) -> None:
+        self.workflows: dict[UUID, LeadWorkflow] = {}
+        self.latest_by_lead: dict[tuple[WorkspaceId, LeadId], LeadWorkflow] = {}
+
+    async def get_latest_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> LeadWorkflow | None:
+        return self.latest_by_lead.get((workspace_id, lead_id))
+
+    async def get_latest_for_lead_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> LeadWorkflow | None:
+        return self.latest_by_lead.get((workspace_id, lead_id))
+
+    async def save(self, workflow: LeadWorkflow) -> LeadWorkflow:
+        self.workflows[workflow.workflow_id] = workflow
+        self.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow
+        return workflow
+
+
+class FakeWorkflowTransitionRepository:
+    def __init__(self) -> None:
+        self.transitions: dict[UUID, WorkflowTransition] = {}
+
+    async def append(self, transition: WorkflowTransition) -> WorkflowTransition:
+        self.transitions[transition.transition_id] = transition
+        return transition
+
+    async def list_for_workflow(
+        self,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        limit: int = 100,
+    ) -> tuple[WorkflowTransition, ...]:
+        return tuple(
+            transition
+            for transition in self.transitions.values()
+            if transition.workspace_id == workspace_id and transition.workflow_id == workflow_id
+        )
 
 
 class FakeOutboundMessageRepository:

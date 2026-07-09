@@ -101,8 +101,8 @@ def transition_workflow(
     updated = replace(
         workflow,
         state=to_state,
-        current_step_id=None if to_state in _non_sendable_states() else workflow.current_step_id,
-        next_action_at=None if to_state in _non_sendable_states() else workflow.next_action_at,
+        current_step_id=_next_current_step_id(workflow, to_state),
+        next_action_at=_next_action_at(workflow, to_state),
         last_transition_at=now,
         pause_reason=pause_reason
         if to_state in {WorkflowState.PAUSED, WorkflowState.HUMAN_HANDOFF}
@@ -142,6 +142,11 @@ def _validate_transition(from_state: WorkflowState, to_state: WorkflowState) -> 
     if from_state == WorkflowState.PAUSED and to_state == WorkflowState.ACTIVE_NURTURE:
         return
     if (
+        from_state == WorkflowState.WAITING_FOR_RESPONSE
+        and to_state == WorkflowState.ACTIVE_NURTURE
+    ):
+        return
+    if (
         from_state == WorkflowState.ACTIVE_NURTURE
         and to_state == WorkflowState.WAITING_FOR_RESPONSE
     ):
@@ -156,4 +161,25 @@ def _terminal_states() -> frozenset[WorkflowState]:
 
 
 def _non_sendable_states() -> frozenset[WorkflowState]:
-    return frozenset({WorkflowState.PAUSED, WorkflowState.HUMAN_HANDOFF, WorkflowState.HUMAN_OWNED})
+    return frozenset(
+        {
+            WorkflowState.PAUSED,
+            WorkflowState.HUMAN_HANDOFF,
+            WorkflowState.HUMAN_OWNED,
+            WorkflowState.COMPLETED,
+            WorkflowState.SUPPRESSED,
+            WorkflowState.CLOSED,
+        }
+    )
+
+
+def _next_current_step_id(workflow: LeadWorkflow, to_state: WorkflowState) -> UUID | None:
+    if to_state in _terminal_states() | {WorkflowState.HUMAN_HANDOFF, WorkflowState.HUMAN_OWNED}:
+        return None
+    return workflow.current_step_id
+
+
+def _next_action_at(workflow: LeadWorkflow, to_state: WorkflowState) -> datetime | None:
+    if to_state in _non_sendable_states():
+        return None
+    return workflow.next_action_at
