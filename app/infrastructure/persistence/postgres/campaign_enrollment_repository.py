@@ -10,7 +10,7 @@ from app.domain.campaigns.enrollment import (
     CampaignEnrollmentStatus,
 )
 from app.domain.common.ids import CampaignId, LeadId, WorkspaceId
-from app.infrastructure.persistence.postgres.models import CampaignEnrollmentModel
+from app.infrastructure.persistence.postgres.workflow_models import CampaignEnrollmentModel
 
 
 class PostgresCampaignEnrollmentRepository:

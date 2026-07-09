@@ -11,7 +11,7 @@ from app.domain.workflows import (
     WorkflowTransition,
     WorkflowTransitionReasonCode,
 )
-from app.infrastructure.persistence.postgres.models import (
+from app.infrastructure.persistence.postgres.workflow_models import (
     LeadWorkflowModel,
     WorkflowTransitionModel,
 )

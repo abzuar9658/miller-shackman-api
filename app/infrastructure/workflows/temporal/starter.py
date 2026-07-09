@@ -2,7 +2,7 @@ from temporalio.client import Client
 
 from app.application.ports.temporal import TemporalWorkflowStarter
 from app.core.config import Settings, get_settings
-from app.domain.common.ids import LeadId, WorkspaceId
+from app.domain.common.ids import CampaignVersionId, LeadId, WorkspaceId
 from app.infrastructure.workflows.temporal.lead_nurture import (
     LeadNurtureWorkflow,
     LeadNurtureWorkflowInput,
@@ -20,11 +20,16 @@ class TemporalClientWorkflowStarter:
         *,
         workspace_id: WorkspaceId,
         lead_id: LeadId,
+        campaign_version_id: CampaignVersionId,
         temporal_workflow_id: str,
     ) -> None:
         await self._client.start_workflow(
             LeadNurtureWorkflow.run,
-            LeadNurtureWorkflowInput(workspace_id=workspace_id, lead_id=lead_id),
+            LeadNurtureWorkflowInput(
+                workspace_id=workspace_id,
+                lead_id=lead_id,
+                campaign_version_id=campaign_version_id,
+            ),
             id=temporal_workflow_id,
             task_queue=self._task_queue,
         )

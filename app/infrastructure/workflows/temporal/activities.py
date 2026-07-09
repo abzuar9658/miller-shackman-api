@@ -11,16 +11,35 @@ from app.application.use_cases.apply_workflow_state_transition import (
     WorkflowStateTransitionOutcome,
     apply_workflow_state_transition,
 )
+from app.application.use_cases.campaign_cadence_execution import (
+    FirstCadenceStepExecutionResult,
+    FirstCadenceStepScheduleResult,
+    execute_first_campaign_cadence_step,
+    schedule_first_campaign_cadence_step,
+)
 from app.core.database import async_session_factory
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
+from app.infrastructure.persistence.postgres.campaign_execution_repository import (
+    PostgresCampaignExecutionRepository,
+)
+from app.infrastructure.persistence.postgres.identity_repository import PostgresWorkspaceRepository
+from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
+from app.infrastructure.persistence.postgres.outbound_message_repository import (
+    PostgresOutboundMessageRepository,
+)
 from app.infrastructure.persistence.postgres.workflow_repository import (
     PostgresLeadWorkflowRepository,
     PostgresWorkflowTransitionRepository,
 )
+from app.infrastructure.providers import build_email_provider, build_llm_client, build_sms_provider
 from app.infrastructure.workflows.temporal.lead_nurture import (
+    ExecuteFirstCadenceStepInput,
+    ExecuteFirstCadenceStepResult,
     InboundReplySignal,
     PauseWorkflowSignal,
     ResumeWorkflowSignal,
+    ScheduleFirstCadenceStepInput,
+    ScheduleFirstCadenceStepResult,
     WorkflowSignalActivityResult,
 )
 
@@ -107,6 +126,48 @@ async def record_resume_workflow_signal_activity(
     return _state_outcome_to_result(outcome)
 
 
+@activity.defn(name="schedule-first-campaign-cadence-step")
+async def schedule_first_campaign_cadence_step_activity(
+    input_: ScheduleFirstCadenceStepInput,
+) -> ScheduleFirstCadenceStepResult:
+    async with async_session_factory() as session:
+        outcome = await schedule_first_campaign_cadence_step(
+            workspace_id=input_.workspace_id,
+            lead_id=input_.lead_id,
+            campaign_version_id=input_.campaign_version_id,
+            campaign_execution_repository=PostgresCampaignExecutionRepository(session),
+            lead_workflow_repository=PostgresLeadWorkflowRepository(session),
+            now=input_.occurred_at,
+        )
+        await session.commit()
+    return _schedule_outcome_to_result(outcome)
+
+
+@activity.defn(name="execute-first-campaign-cadence-step")
+async def execute_first_campaign_cadence_step_activity(
+    input_: ExecuteFirstCadenceStepInput,
+) -> ExecuteFirstCadenceStepResult:
+    async with async_session_factory() as session:
+        outcome = await execute_first_campaign_cadence_step(
+            workspace_id=input_.workspace_id,
+            lead_id=input_.lead_id,
+            campaign_version_id=input_.campaign_version_id,
+            scheduled_for=input_.scheduled_for,
+            campaign_execution_repository=PostgresCampaignExecutionRepository(session),
+            workspace_repository=PostgresWorkspaceRepository(session),
+            lead_repository=PostgresLeadRepository(session),
+            lead_workflow_repository=PostgresLeadWorkflowRepository(session),
+            workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
+            message_repository=PostgresOutboundMessageRepository(session),
+            llm_client=build_llm_client(),
+            sms_provider=build_sms_provider(),
+            email_provider=build_email_provider(),
+            now=input_.occurred_at,
+        )
+        await session.commit()
+    return _execution_outcome_to_result(outcome)
+
+
 def _intent_or_none(raw_intent: str | None) -> InboundReplyIntent | None:
     if raw_intent is None:
         return None
@@ -138,5 +199,31 @@ def _state_outcome_to_result(
         status=outcome.status.value,
         workflow_id=outcome.workflow.workflow_id if outcome.workflow is not None else None,
         transition_id=outcome.transition_id,
+        skip_reason=outcome.skip_reason,
+    )
+
+
+def _schedule_outcome_to_result(
+    outcome: FirstCadenceStepScheduleResult,
+) -> ScheduleFirstCadenceStepResult:
+    return ScheduleFirstCadenceStepResult(
+        status=outcome.status.value,
+        workflow_id=outcome.workflow.workflow_id if outcome.workflow is not None else None,
+        cadence_step_id=outcome.cadence_step_id,
+        scheduled_for=outcome.scheduled_for,
+        skip_reason=outcome.skip_reason,
+    )
+
+
+def _execution_outcome_to_result(
+    outcome: FirstCadenceStepExecutionResult,
+) -> ExecuteFirstCadenceStepResult:
+    return ExecuteFirstCadenceStepResult(
+        status=outcome.status.value,
+        workflow_id=outcome.workflow.workflow_id if outcome.workflow is not None else None,
+        transition_id=outcome.transition_id,
+        cadence_step_id=outcome.cadence_step_id,
+        outbound_message_id=outcome.outbound_message_id,
+        provider_message_id=outcome.provider_message_id,
         skip_reason=outcome.skip_reason,
     )

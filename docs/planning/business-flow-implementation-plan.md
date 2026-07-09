@@ -7,6 +7,9 @@ It defines the delivery order, slice boundaries, and validation expectations so
 we can build the backend in business-priority order without mixing outbound and
 inbound work prematurely.
 
+See also `docs/planning/business-use-case-readiness.md` for the living checklist
+of what is done versus what remains before real business-use-case testing.
+
 ## Approved Business Sequence
 
 The agreed business sequence is:
@@ -218,6 +221,39 @@ Business result:
 - authorized callers can now start a batch of selected leads into a campaign, and the
   persisted workflow mirror plus Temporal execution are created together
 
+### Slice 7 — Persisted campaign execution config + first cadence step
+
+Status: complete.
+
+Goal: move the first nurture step from hardcoded workflow input into persisted
+campaign/version/cadence-step config so Temporal can execute a real campaign step.
+
+Implemented in this slice:
+
+- ORM models and repository mapping for the already-existing `campaigns`,
+  `campaign_versions`, and `campaign_cadence_steps` tables
+- canonical `CampaignExecutionConfig` and `CampaignCadenceStep` domain models for
+  loading execution-ready campaign config by `campaign_version_id`
+- workflow transition guard expansion for `queued -> active_nurture` and
+  `active_nurture -> waiting_for_response`
+- application orchestration to:
+  - schedule the first cadence step onto the persisted workflow mirror
+  - transition the workflow into `active_nurture` when the step becomes due
+  - plan and send the first outbound message using the persisted cadence-step channel
+  - transition the workflow into `waiting_for_response` after send
+  - pause the workflow if planning or send-time safety blocks the step
+- Temporal activities for first-step scheduling and execution
+- `LeadNurtureWorkflow` now loads the persisted first step, waits until due, blocks
+  send on pause/handoff/inbound signals, and records execution snapshot metadata
+- fake-based application tests, repository mapping tests, and worker registration
+  coverage for the new cadence-step path
+
+Business result:
+
+- a started lead nurture workflow can now execute the first persisted campaign cadence
+  step through the existing planning and send-time safety rules instead of stopping at
+  workflow creation
+
 ## Execution Rules
 
 - Do not start a later slice before the current slice is implemented, tested, and
@@ -235,9 +271,12 @@ Business result:
 
 Start the next slice only after explicit approval:
 
-1. add durable cadence execution inside `LeadNurtureWorkflow`
-2. start with one simple wait/send/wait loop using the existing pre-send safety use case
-3. keep provider delivery idempotent through existing outbound message records
-4. pause the workflow immediately when inbound signals are received
-5. avoid provider callback workflows until cadence execution is proven
+1. add persistence for workspace-level contact policy and SMS compliance state so SMS
+   cadence steps can run without test-only assumptions
+2. extend `LeadNurtureWorkflow` from one persisted first step to a full multi-step
+   wait/send/wait cadence loop
+3. add a narrow business-flow test harness that exercises: sync -> enrollment -> first
+   cadence send -> inbound reply -> pause/handoff
+4. keep provider delivery idempotent through existing outbound message records
+5. avoid provider callback workflows until the multi-step cadence path is proven
 6. run `ruff`, `mypy`, targeted tests, and full `pytest`

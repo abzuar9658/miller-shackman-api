@@ -12,7 +12,7 @@ from app.domain.campaigns.enrollment import (
 from app.infrastructure.persistence.postgres.campaign_enrollment_repository import (
     PostgresCampaignEnrollmentRepository,
 )
-from app.infrastructure.persistence.postgres.models import CampaignEnrollmentModel
+from app.infrastructure.persistence.postgres.workflow_models import CampaignEnrollmentModel
 
 NOW = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")

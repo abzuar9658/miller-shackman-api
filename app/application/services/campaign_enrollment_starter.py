@@ -110,6 +110,7 @@ async def start_single_campaign_enrollment(
         await temporal_workflow_starter.start_lead_nurture_workflow(
             workspace_id=workspace_id,
             lead_id=lead_id,
+            campaign_version_id=campaign_version_id,
             temporal_workflow_id=temporal_workflow_id,
         )
     except Exception as error:

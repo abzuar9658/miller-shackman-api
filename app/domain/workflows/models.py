@@ -23,10 +23,14 @@ class WorkflowState(StrEnum):
 
 class WorkflowTransitionReasonCode(StrEnum):
     CAMPAIGN_ENROLLMENT_STARTED = "campaign_enrollment_started"
+    CADENCE_STEP_STARTED = "cadence_step_started"
     INBOUND_REPLY_RECEIVED = "inbound_reply_received"
     REPLY_CLASSIFICATION_REJECTED = "reply_classification_rejected"
     HUMAN_HANDOFF_REQUIRED = "human_handoff_required"
     OPT_OUT_DETECTED = "opt_out_detected"
+    OUTBOUND_MESSAGE_SENT = "outbound_message_sent"
+    OUTBOUND_MESSAGE_BLOCKED = "outbound_message_blocked"
+    OUTBOUND_MESSAGE_FAILED = "outbound_message_failed"
     MANUAL_PAUSE = "manual_pause"
     MANUAL_RESUME = "manual_resume"
 
@@ -133,7 +137,14 @@ def _validate_transition(from_state: WorkflowState, to_state: WorkflowState) -> 
         raise WorkflowTransitionError("Human-owned workflows require explicit authorized resume.")
     if to_state in {WorkflowState.PAUSED, WorkflowState.HUMAN_HANDOFF}:
         return
+    if from_state == WorkflowState.QUEUED and to_state == WorkflowState.ACTIVE_NURTURE:
+        return
     if from_state == WorkflowState.PAUSED and to_state == WorkflowState.ACTIVE_NURTURE:
+        return
+    if (
+        from_state == WorkflowState.ACTIVE_NURTURE
+        and to_state == WorkflowState.WAITING_FOR_RESPONSE
+    ):
         return
     raise WorkflowTransitionError(
         f"Transition from {from_state.value} to {to_state.value} is not allowed in V1.",

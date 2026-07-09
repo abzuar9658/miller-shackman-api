@@ -1,6 +1,6 @@
 from typing import Protocol
 
-from app.domain.common.ids import LeadId, WorkspaceId
+from app.domain.common.ids import CampaignVersionId, LeadId, WorkspaceId
 
 
 class TemporalWorkflowStarter(Protocol):
@@ -9,6 +9,7 @@ class TemporalWorkflowStarter(Protocol):
         *,
         workspace_id: WorkspaceId,
         lead_id: LeadId,
+        campaign_version_id: CampaignVersionId,
         temporal_workflow_id: str,
     ) -> None:
         raise NotImplementedError

@@ -4,6 +4,11 @@ from app.domain.campaigns.enrollment import (
     CampaignEnrollmentStatus,
     build_enrollment_reason_codes,
 )
+from app.domain.campaigns.execution import (
+    CampaignCadenceStep,
+    CampaignExecutionConfig,
+    CampaignVersionStatus,
+)
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
 from app.domain.campaigns.pre_send import (
     PreSendDecision,
@@ -30,12 +35,15 @@ __all__ = [
     "CampaignEnrollment",
     "CampaignEnrollmentSource",
     "CampaignEnrollmentStatus",
+    "CampaignCadenceStep",
+    "CampaignExecutionConfig",
     "CampaignStartBatchDecision",
     "CampaignStartCandidate",
     "CampaignStartCandidateDecision",
     "CampaignStartContext",
     "CampaignStartPolicy",
     "CampaignStatus",
+    "CampaignVersionStatus",
     "OutboundMessage",
     "OutboundMessageStatus",
     "PreSendDecision",

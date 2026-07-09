@@ -83,6 +83,10 @@ async def test_starts_workflow_for_selected_lead(base_dependencies: _Dependencie
 
     assert len(base_dependencies.temporal_workflow_starter.calls) == 1
     assert base_dependencies.temporal_workflow_starter.calls[0]["lead_id"] == LEAD_ID_1
+    assert (
+        base_dependencies.temporal_workflow_starter.calls[0]["campaign_version_id"]
+        == CAMPAIGN_VERSION_ID
+    )
 
 
 async def test_skips_already_enrolled_lead(base_dependencies: _Dependencies) -> None:

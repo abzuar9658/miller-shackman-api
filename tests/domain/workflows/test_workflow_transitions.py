@@ -45,6 +45,34 @@ def test_inbound_handoff_transition_pauses_pending_action_and_records_audit() ->
     assert result.transition.metadata == {"intent": "human_requested"}
 
 
+def test_queued_workflow_can_enter_active_nurture_for_due_step() -> None:
+    result = transition_workflow(
+        workflow=_workflow(WorkflowState.QUEUED),
+        to_state=WorkflowState.ACTIVE_NURTURE,
+        reason_code=WorkflowTransitionReasonCode.CADENCE_STEP_STARTED,
+        transition_id=TRANSITION_ID,
+        now=NOW,
+    )
+
+    assert result.workflow.state == WorkflowState.ACTIVE_NURTURE
+    assert result.workflow.current_step_id == STEP_ID
+    assert result.workflow.next_action_at == NOW
+
+
+def test_active_nurture_can_enter_waiting_for_response_after_send() -> None:
+    result = transition_workflow(
+        workflow=_workflow(WorkflowState.ACTIVE_NURTURE),
+        to_state=WorkflowState.WAITING_FOR_RESPONSE,
+        reason_code=WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_SENT,
+        transition_id=TRANSITION_ID,
+        now=NOW,
+    )
+
+    assert result.workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+    assert result.transition.from_state == WorkflowState.ACTIVE_NURTURE
+    assert result.transition.to_state == WorkflowState.WAITING_FOR_RESPONSE
+
+
 def test_terminal_workflow_cannot_transition_from_inbound_reply() -> None:
     with pytest.raises(WorkflowTransitionError):
         transition_workflow(

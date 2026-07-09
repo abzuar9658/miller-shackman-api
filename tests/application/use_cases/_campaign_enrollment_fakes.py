@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from app.domain.campaigns.enrollment import CampaignEnrollment
-from app.domain.common.ids import LeadId, WorkspaceId
+from app.domain.common.ids import CampaignVersionId, LeadId, WorkspaceId
 from app.domain.workflows import LeadWorkflow, WorkflowTransition
 
 
@@ -80,12 +80,14 @@ class FakeTemporalWorkflowStarter:
         *,
         workspace_id: WorkspaceId,
         lead_id: LeadId,
+        campaign_version_id: CampaignVersionId,
         temporal_workflow_id: str,
     ) -> None:
         self.calls.append(
             {
                 "workspace_id": workspace_id,
                 "lead_id": lead_id,
+                "campaign_version_id": campaign_version_id,
                 "temporal_workflow_id": temporal_workflow_id,
             }
         )
