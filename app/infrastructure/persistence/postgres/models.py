@@ -493,6 +493,19 @@ class WorkspaceModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class WorkspaceContactPolicyModel(Base):
+    __tablename__ = "workspace_contact_policies"
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), primary_key=True
+    )
+    sms_compliance_state: Mapped[str] = mapped_column(String(50), nullable=False)
+    quiet_hours_start: Mapped[time] = mapped_column(Time, nullable=False)
+    quiet_hours_end: Mapped[time] = mapped_column(Time, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class WorkspaceMembershipModel(Base):
     __tablename__ = "workspace_memberships"
     __table_args__ = (

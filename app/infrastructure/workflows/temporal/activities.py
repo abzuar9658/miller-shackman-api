@@ -31,6 +31,9 @@ from app.infrastructure.persistence.postgres.workflow_repository import (
     PostgresLeadWorkflowRepository,
     PostgresWorkflowTransitionRepository,
 )
+from app.infrastructure.persistence.postgres.workspace_contact_policy_repository import (
+    PostgresWorkspaceContactPolicyRepository,
+)
 from app.infrastructure.providers import build_email_provider, build_llm_client, build_sms_provider
 from app.infrastructure.workflows.temporal.lead_nurture import (
     ExecuteFirstCadenceStepInput,
@@ -155,6 +158,7 @@ async def execute_first_campaign_cadence_step_activity(
             scheduled_for=input_.scheduled_for,
             campaign_execution_repository=PostgresCampaignExecutionRepository(session),
             workspace_repository=PostgresWorkspaceRepository(session),
+            workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
             lead_repository=PostgresLeadRepository(session),
             lead_workflow_repository=PostgresLeadWorkflowRepository(session),
             workflow_transition_repository=PostgresWorkflowTransitionRepository(session),

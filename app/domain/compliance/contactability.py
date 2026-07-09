@@ -1,5 +1,8 @@
 from dataclasses import dataclass, field
+from datetime import time
 from enum import StrEnum
+
+from app.domain.common.ids import WorkspaceId
 
 
 class ContactChannel(StrEnum):
@@ -48,9 +51,24 @@ class LeadContactabilityFacts:
     suppressions: frozenset[SuppressionType] = field(default_factory=_empty_suppressions)
 
 
+def _default_quiet_hours_start() -> time:
+    return time(10, 0)
+
+
+def _default_quiet_hours_end() -> time:
+    return time(17, 0)
+
+
 @dataclass(frozen=True)
 class WorkspaceContactPolicy:
-    sms_compliance_state: SmsComplianceState | None = None
+    workspace_id: WorkspaceId
+    sms_compliance_state: SmsComplianceState = SmsComplianceState.NOT_APPROVED
+    quiet_hours_start: time | None = field(default_factory=_default_quiet_hours_start)
+    quiet_hours_end: time | None = field(default_factory=_default_quiet_hours_end)
+
+
+def default_workspace_contact_policy(workspace_id: WorkspaceId) -> WorkspaceContactPolicy:
+    return WorkspaceContactPolicy(workspace_id=workspace_id)
 
 
 @dataclass(frozen=True)

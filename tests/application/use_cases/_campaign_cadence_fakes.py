@@ -6,6 +6,7 @@ from app.application.ports.messaging import EmailMessage, SMSMessage
 from app.domain.campaigns.execution import CampaignExecutionConfig
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.common.ids import LeadId, WorkspaceId
+from app.domain.compliance.contactability import WorkspaceContactPolicy
 from app.domain.identity import Workspace
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 
@@ -40,6 +41,27 @@ class FakeWorkspaceRepository:
     async def save(self, workspace: Workspace) -> Workspace:
         self.workspace = workspace
         return workspace
+
+
+class FakeWorkspaceContactPolicyRepository:
+    def __init__(self, policy: WorkspaceContactPolicy | None) -> None:
+        self.policy = policy
+        self.saved: list[WorkspaceContactPolicy] = []
+
+    async def get_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceContactPolicy | None:
+        if self.policy is None:
+            return None
+        if self.policy.workspace_id != workspace_id:
+            return None
+        return self.policy
+
+    async def save(self, policy: WorkspaceContactPolicy) -> WorkspaceContactPolicy:
+        self.saved.append(policy)
+        self.policy = policy
+        return policy
 
 
 class FakeLeadRepository:

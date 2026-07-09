@@ -12,6 +12,7 @@ from app.domain.common.ids import (
     WorkspaceId,
     WorkspaceMembershipId,
 )
+from app.domain.compliance.contactability import WorkspaceContactPolicy
 from app.domain.conversations import Conversation, ConversationSummary, Handoff, InboundMessage
 from app.domain.crm_sync import CRMSyncJob, ExternalEvent
 from app.domain.identity import (
@@ -206,6 +207,17 @@ class WorkspaceRepository(Protocol):
         raise NotImplementedError
 
     async def save(self, workspace: Workspace) -> Workspace:
+        raise NotImplementedError
+
+
+class WorkspaceContactPolicyRepository(Protocol):
+    async def get_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceContactPolicy | None:
+        raise NotImplementedError
+
+    async def save(self, policy: WorkspaceContactPolicy) -> WorkspaceContactPolicy:
         raise NotImplementedError
 
 

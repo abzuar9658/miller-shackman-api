@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.compliance.contactability import ContactabilityDecision, ContactChannel
@@ -62,6 +63,7 @@ class PreSendPolicy:
     channel_frequency_limit_hours: int | None = None
     allow_simultaneous_channels: bool = False
     simultaneous_channel_window_minutes: int = 0
+    timezone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,7 @@ def evaluate_pre_send_safety(
     now: datetime,
 ) -> PreSendDecision:
     reasons: list[PreSendReasonCode] = []
+    local_now = _to_policy_timezone(now, policy.timezone)
 
     if _missing_required_data(facts):
         reasons.append(PreSendReasonCode.MISSING_REQUIRED_DATA)
@@ -120,7 +123,7 @@ def evaluate_pre_send_safety(
     if facts.preflight_vetoed:
         reasons.append(PreSendReasonCode.PREFLIGHT_VETOED)
 
-    if _is_outside_allowed_hours(now, policy):
+    if _is_outside_allowed_hours(local_now, policy):
         reasons.append(PreSendReasonCode.OUTSIDE_ALLOWED_HOURS)
 
     frequency_block_until = _frequency_block_until(facts, policy)
@@ -140,6 +143,7 @@ def evaluate_pre_send_safety(
             reasons=reasons,
             policy=policy,
             now=now,
+            local_now=local_now,
             frequency_block_until=frequency_block_until,
             simultaneous_block_until=simultaneous_block_until,
         ),
@@ -247,6 +251,7 @@ def _next_allowed_at(
     reasons: list[PreSendReasonCode],
     policy: PreSendPolicy,
     now: datetime,
+    local_now: datetime,
     frequency_block_until: datetime | None,
     simultaneous_block_until: datetime | None,
 ) -> datetime | None:
@@ -263,8 +268,9 @@ def _next_allowed_at(
         candidate = frequency_block_until
     if simultaneous_block_until is not None and candidate < simultaneous_block_until:
         candidate = simultaneous_block_until
-    candidate = _roll_forward_to_allowed_window(candidate, policy)
-    return candidate if candidate > now else None
+    local_candidate = _to_policy_timezone(candidate, policy.timezone)
+    local_candidate = _roll_forward_to_allowed_window(local_candidate, policy)
+    return _from_policy_timezone(local_candidate, policy.timezone)
 
 
 def _roll_forward_to_allowed_window(now: datetime, policy: PreSendPolicy) -> datetime:
@@ -279,3 +285,18 @@ def _roll_forward_to_allowed_window(now: datetime, policy: PreSendPolicy) -> dat
     if now.hour >= policy.allowed_send_end_hour:
         return start_of_window + timedelta(days=1)
     return now
+
+
+def _to_policy_timezone(now: datetime, timezone: str | None) -> datetime:
+    if timezone is None:
+        return now
+    tz = ZoneInfo(timezone)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=UTC).astimezone(tz)
+    return now.astimezone(tz)
+
+
+def _from_policy_timezone(local_now: datetime, timezone: str | None) -> datetime:
+    if timezone is None or local_now.tzinfo is None:
+        return local_now
+    return local_now.astimezone(UTC)

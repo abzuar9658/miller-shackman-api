@@ -9,7 +9,12 @@ from app.application.use_cases.campaign_cadence_execution import (
 )
 from app.domain.campaigns import CampaignStatus, CampaignVersionStatus
 from app.domain.campaigns.execution import CampaignCadenceStep, CampaignExecutionConfig
-from app.domain.compliance.contactability import ContactChannel, ContactPermissionStatus
+from app.domain.compliance.contactability import (
+    ContactChannel,
+    ContactPermissionStatus,
+    SmsComplianceState,
+    WorkspaceContactPolicy,
+)
 from app.domain.identity import Workspace, WorkspaceStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransitionReasonCode
@@ -20,6 +25,7 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeLLMClient,
     FakeOutboundMessageRepository,
     FakeSMSProvider,
+    FakeWorkspaceContactPolicyRepository,
     FakeWorkspaceRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
@@ -80,6 +86,9 @@ async def test_execute_first_campaign_cadence_step_sends_email_and_waits_for_res
         scheduled_for=schedule_result.scheduled_for or NOW,
         campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
         workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
         lead_repository=FakeLeadRepository(_lead()),
         lead_workflow_repository=workflow_repository,
         workflow_transition_repository=transition_repository,
@@ -87,7 +96,7 @@ async def test_execute_first_campaign_cadence_step_sends_email_and_waits_for_res
         llm_client=FakeLLMClient(),
         sms_provider=FakeSMSProvider(),
         email_provider=email_provider,
-        now=NOW + timedelta(hours=24),
+        now=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
     )
 
     assert result.status == FirstCadenceStepExecutionStatus.SENT
@@ -126,6 +135,9 @@ async def test_execute_first_campaign_cadence_step_pauses_when_planning_is_block
         scheduled_for=schedule_result.scheduled_for or NOW,
         campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
         workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
         lead_repository=FakeLeadRepository(_lead(has_email=False)),
         lead_workflow_repository=workflow_repository,
         workflow_transition_repository=transition_repository,
@@ -143,6 +155,89 @@ async def test_execute_first_campaign_cadence_step_pauses_when_planning_is_block
     assert list(transition_repository.transitions.values())[-1].reason_code == (
         WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED
     )
+
+
+async def test_execute_first_campaign_cadence_step_blocks_sms_when_compliance_not_approved() -> (
+    None
+):
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    await workflow_repository.save(_workflow())
+    schedule_result = await schedule_first_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config_sms()),
+        lead_workflow_repository=workflow_repository,
+        now=NOW,
+    )
+
+    sms_provider = FakeSMSProvider("SM123")
+    result = await execute_first_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        scheduled_for=schedule_result.scheduled_for or NOW,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config_sms()),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy(sms_compliance_state=SmsComplianceState.NOT_APPROVED)
+        ),
+        lead_repository=FakeLeadRepository(_lead_with_sms()),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        message_repository=FakeOutboundMessageRepository(),
+        llm_client=FakeLLMClient(),
+        sms_provider=sms_provider,
+        email_provider=FakeEmailProvider(),
+        now=NOW + timedelta(hours=24),
+    )
+
+    assert result.status == FirstCadenceStepExecutionStatus.REJECTED
+    assert result.workflow is not None
+    assert result.workflow.state == WorkflowState.PAUSED
+    assert sms_provider.messages == []
+
+
+async def test_execute_first_campaign_cadence_step_respects_persisted_quiet_hours() -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    await workflow_repository.save(_workflow())
+    schedule_result = await schedule_first_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        lead_workflow_repository=workflow_repository,
+        now=NOW,
+    )
+
+    execution_now = datetime(2026, 7, 9, 13, 0, tzinfo=UTC)
+    email_provider = FakeEmailProvider("email-123")
+    result = await execute_first_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        scheduled_for=schedule_result.scheduled_for or NOW,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        message_repository=FakeOutboundMessageRepository(),
+        llm_client=FakeLLMClient(),
+        sms_provider=FakeSMSProvider(),
+        email_provider=email_provider,
+        now=execution_now,
+    )
+
+    assert result.status == FirstCadenceStepExecutionStatus.REJECTED
+    assert result.workflow is not None
+    assert result.workflow.state == WorkflowState.PAUSED
+    assert email_provider.messages == []
 
 
 def _workflow() -> LeadWorkflow:
@@ -176,6 +271,18 @@ def _workspace() -> Workspace:
     )
 
 
+def _workspace_contact_policy(
+    *,
+    sms_compliance_state: SmsComplianceState = SmsComplianceState.APPROVED,
+) -> WorkspaceContactPolicy:
+    return WorkspaceContactPolicy(
+        workspace_id=WORKSPACE_ID,
+        sms_compliance_state=sms_compliance_state,
+        quiet_hours_start=time(10, 0),
+        quiet_hours_end=time(17, 0),
+    )
+
+
 def _lead(*, has_email: bool = True) -> CanonicalLeadRecord:
     return CanonicalLeadRecord(
         workspace_id=WORKSPACE_ID,
@@ -190,6 +297,24 @@ def _lead(*, has_email: bool = True) -> CanonicalLeadRecord:
         has_email=has_email,
         email_count=1 if has_email else 0,
         email_permission_status=ContactPermissionStatus.CONFIRMED,
+        do_not_contact=False,
+    )
+
+
+def _lead_with_sms() -> CanonicalLeadRecord:
+    return CanonicalLeadRecord(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+        crm_lead_id="123",
+        facts_derived_at=NOW,
+        source_payload_version="test:v1",
+        lead_source="website",
+        lead_stage="long_term_nurture",
+        primary_phone="+15551234567",
+        has_sms_capable_phone=True,
+        phone_count=1,
+        sms_permission_status=ContactPermissionStatus.CONFIRMED,
         do_not_contact=False,
     )
 
@@ -228,6 +353,45 @@ def _step() -> CampaignCadenceStep:
         delay_hours=24,
         message_goal="Check whether the lead is still considering a move.",
         template_key="dormant-email-1",
+        max_attempts=1,
+        created_at=NOW,
+    )
+
+
+def _config_sms() -> CampaignExecutionConfig:
+    return CampaignExecutionConfig(
+        campaign_id=CAMPAIGN_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        workspace_id=WORKSPACE_ID,
+        campaign_name="Dormant Buyers",
+        campaign_status=CampaignStatus.ACTIVE,
+        version_status=CampaignVersionStatus.PUBLISHED,
+        enabled_channels=(ContactChannel.SMS,),
+        daily_start_cap=50,
+        dormant_threshold_days=60,
+        quiet_hours_start=time(10, 0),
+        quiet_hours_end=time(17, 0),
+        timezone="America/Chicago",
+        sms_compliance_required=True,
+        preflight_digest_enabled=False,
+        prompt_version="v1",
+        approved_model="openai/gpt-4o-mini",
+        cadence_steps=(_step_sms(),),
+        created_at=NOW,
+        published_at=NOW,
+    )
+
+
+def _step_sms() -> CampaignCadenceStep:
+    return CampaignCadenceStep(
+        cadence_step_id=STEP_ID,
+        workspace_id=WORKSPACE_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        step_order=1,
+        channel=ContactChannel.SMS,
+        delay_hours=24,
+        message_goal="Check whether the lead is still considering a move.",
+        template_key="dormant-sms-1",
         max_attempts=1,
         created_at=NOW,
     )

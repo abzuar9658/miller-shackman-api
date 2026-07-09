@@ -24,7 +24,7 @@ The target V1 business scenario is:
 
 ## Current Baseline
 
-Current baseline: **Slice 7 complete**.
+Current baseline: **Slice 8 complete**.
 
 This means the backend can now:
 
@@ -33,7 +33,8 @@ This means the backend can now:
 - evaluate contactability, enrollment eligibility, queueing, pre-flight veto, and
   pre-send safety as explicit business rules
 - plan outbound messages and persist them safely
-- send outbound messages through sink or provider adapters
+- send outbound messages through sink or provider adapters, using persisted
+  workspace contact policy for SMS compliance and timezone-aware quiet hours
 - ingest inbound replies with idempotency and conversation persistence
 - persist workflow state and workflow transition history
 - start a Temporal `LeadNurtureWorkflow` for an enrolled lead
@@ -52,14 +53,17 @@ The backend cannot yet run the full intended V1 business loop end-to-end.
 - campaign enrollment eligibility rules exist
 - campaign start queue and pre-flight veto rules exist
 - pre-send safety checks exist and run immediately before send
+- pre-send quiet-hour checks now respect the workspace timezone
 - inbound replies can pause automation and trigger handoff behavior
 - workflow state transitions are explicit and auditable
+- workspace-level contact policy is persisted and used by cadence execution
+  (SMS compliance state, quiet hours, timezone)
 
 ### Technical foundations
 
 - Postgres persistence exists for leads, campaigns, enrollments, workflows,
   transitions, conversations, inbound messages, outbound messages, handoffs,
-  CRM sync jobs, and external events
+  CRM sync jobs, external events, and workspace contact policies
 - repository ports and Postgres adapters exist for the major business-flow seams
 - Temporal worker, starter, workflow, and activities exist for enrollment and the
   first cadence-step path
@@ -70,8 +74,6 @@ The backend cannot yet run the full intended V1 business loop end-to-end.
 
 ### Highest-priority business gaps
 
-- workspace-level contact policy is not yet persisted as the source of truth for
-  SMS compliance state, quiet hours, timezone, and channel policy
 - only the first cadence step runs; the workflow does not yet execute a full
   multi-step wait/send/wait campaign loop
 - there is no thin end-to-end business-flow harness for:
@@ -85,7 +87,6 @@ The backend cannot yet run the full intended V1 business loop end-to-end.
 
 ### Important technical gaps
 
-- workspace contact-policy persistence seam and repository are not implemented
 - provider delivery callbacks are not yet wired into outbound status updates
 - CRM activity webhooks are not yet consumed into pause/resume business logic
 - transactional outbox and RabbitMQ fan-out are not yet production-real

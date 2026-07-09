@@ -11,6 +11,7 @@ from app.application.ports.repositories import (
     LeadWorkflowRepository,
     OutboundMessageRepository,
     WorkflowTransitionRepository,
+    WorkspaceContactPolicyRepository,
     WorkspaceRepository,
 )
 from app.application.use_cases.apply_workflow_state_transition import (
@@ -28,11 +29,11 @@ from app.application.use_cases.send_outbound_message import (
     send_outbound_message,
 )
 from app.domain.campaigns.execution import CampaignCadenceStep
+from app.domain.campaigns.pre_send import PreSendPolicy
 from app.domain.common.ids import CampaignVersionId, LeadId, WorkspaceId
 from app.domain.compliance.contactability import (
-    ContactChannel,
-    SmsComplianceState,
     WorkspaceContactPolicy,
+    default_workspace_contact_policy,
 )
 from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransitionReasonCode
 
@@ -131,6 +132,7 @@ async def execute_first_campaign_cadence_step(
     scheduled_for: datetime,
     campaign_execution_repository: CampaignExecutionRepository,
     workspace_repository: WorkspaceRepository,
+    workspace_contact_policy_repository: WorkspaceContactPolicyRepository,
     lead_repository: LeadRepository,
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
@@ -191,6 +193,17 @@ async def execute_first_campaign_cadence_step(
             cadence_step_id=step.cadence_step_id,
         )
 
+    workspace_contact_policy = await workspace_contact_policy_repository.get_by_workspace_id(
+        workspace_id,
+    )
+    if workspace_contact_policy is None:
+        workspace_contact_policy = default_workspace_contact_policy(workspace_id)
+
+    pre_send_policy = _pre_send_policy(
+        workspace_contact_policy,
+        workspace.default_timezone,
+    )
+
     if workflow.state != WorkflowState.ACTIVE_NURTURE:
         active_outcome = await apply_workflow_state_transition(
             workspace_id=workspace_id,
@@ -217,11 +230,12 @@ async def execute_first_campaign_cadence_step(
         campaign_status=config.campaign_status,
         workflow_state=WorkflowState.ACTIVE_NURTURE,
         enabled_channels=(step.channel,),
-        workspace_contact_policy=_workspace_contact_policy(step.channel),
+        workspace_contact_policy=workspace_contact_policy,
         campaign_goal=step.message_goal,
         brokerage_name=workspace.name,
         cadence_step_id=str(step.cadence_step_id),
         scheduled_for=scheduled_for,
+        pre_send_policy=pre_send_policy,
     )
     plan_result = await plan_next_outbound_message_for_lead(
         workspace_id=workspace_id,
@@ -250,8 +264,9 @@ async def execute_first_campaign_cadence_step(
         campaign_status=config.campaign_status,
         workflow_state=WorkflowState.ACTIVE_NURTURE,
         enabled_channels=(step.channel,),
-        workspace_contact_policy=_workspace_contact_policy(step.channel),
+        workspace_contact_policy=workspace_contact_policy,
         current_message_version=plan_result.message.message_version,
+        pre_send_policy=pre_send_policy,
     )
     send_result = await send_outbound_message(
         workspace_id=workspace_id,
@@ -362,11 +377,16 @@ def _first_step(steps: tuple[CampaignCadenceStep, ...]) -> CampaignCadenceStep |
     return steps[0] if steps else None
 
 
-def _workspace_contact_policy(channel: ContactChannel) -> WorkspaceContactPolicy:
-    return WorkspaceContactPolicy(
-        sms_compliance_state=(
-            SmsComplianceState.NOT_APPROVED if channel == ContactChannel.SMS else None
-        )
+def _pre_send_policy(
+    workspace_contact_policy: WorkspaceContactPolicy,
+    timezone: str,
+) -> PreSendPolicy:
+    quiet_hours_start = workspace_contact_policy.quiet_hours_start
+    quiet_hours_end = workspace_contact_policy.quiet_hours_end
+    return PreSendPolicy(
+        allowed_send_start_hour=quiet_hours_start.hour if quiet_hours_start else 10,
+        allowed_send_end_hour=quiet_hours_end.hour if quiet_hours_end else 17,
+        timezone=timezone,
     )
 
 

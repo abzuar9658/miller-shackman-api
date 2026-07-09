@@ -1,4 +1,5 @@
 from dataclasses import replace
+from uuid import UUID
 
 import pytest
 
@@ -13,6 +14,8 @@ from app.domain.compliance.contactability import (
     evaluate_contactability,
 )
 
+WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
+
 
 def _base_facts() -> LeadContactabilityFacts:
     return LeadContactabilityFacts(
@@ -23,7 +26,10 @@ def _base_facts() -> LeadContactabilityFacts:
 
 
 def _approved_policy() -> WorkspaceContactPolicy:
-    return WorkspaceContactPolicy(sms_compliance_state=SmsComplianceState.APPROVED)
+    return WorkspaceContactPolicy(
+        workspace_id=WORKSPACE_ID,
+        sms_compliance_state=SmsComplianceState.APPROVED,
+    )
 
 
 @pytest.mark.parametrize("channel", [ContactChannel.SMS, ContactChannel.EMAIL])
@@ -96,7 +102,10 @@ def test_denied_email_permission_blocks_email() -> None:
 def test_unapproved_sms_compliance_blocks_sms() -> None:
     decision = evaluate_contactability(
         _base_facts(),
-        WorkspaceContactPolicy(sms_compliance_state=SmsComplianceState.NOT_APPROVED),
+        WorkspaceContactPolicy(
+            workspace_id=WORKSPACE_ID,
+            sms_compliance_state=SmsComplianceState.NOT_APPROVED,
+        ),
         ContactChannel.SMS,
     )
 
@@ -124,7 +133,10 @@ def test_multiple_sms_blockers_return_deterministic_precedence() -> None:
         sms_consent_status=ContactPermissionStatus.DENIED,
         suppressions=frozenset({SuppressionType.SMS_OPT_OUT}),
     )
-    policy = WorkspaceContactPolicy(sms_compliance_state=SmsComplianceState.NOT_APPROVED)
+    policy = WorkspaceContactPolicy(
+        workspace_id=WORKSPACE_ID,
+        sms_compliance_state=SmsComplianceState.NOT_APPROVED,
+    )
 
     decision = evaluate_contactability(facts, policy, ContactChannel.SMS)
 

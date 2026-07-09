@@ -26,6 +26,7 @@ def _policy(
     channel_frequency_limit_hours: int | None = None,
     allow_simultaneous_channels: bool = False,
     simultaneous_channel_window_minutes: int = 0,
+    timezone: str | None = None,
 ) -> PreSendPolicy:
     return PreSendPolicy(
         allowed_send_start_hour=allowed_send_start_hour,
@@ -35,6 +36,7 @@ def _policy(
         channel_frequency_limit_hours=channel_frequency_limit_hours,
         allow_simultaneous_channels=allow_simultaneous_channels,
         simultaneous_channel_window_minutes=simultaneous_channel_window_minutes,
+        timezone=timezone,
     )
 
 
@@ -233,6 +235,20 @@ def test_outside_allowed_hours_returns_next_window_start() -> None:
     assert decision.allowed is False
     assert decision.reasons == (PreSendReasonCode.OUTSIDE_ALLOWED_HOURS,)
     assert decision.next_allowed_at == datetime(2026, 7, 6, 10, 0, 0)
+
+
+def test_outside_allowed_hours_uses_policy_timezone() -> None:
+    from datetime import UTC
+
+    utc_1300 = datetime(2026, 7, 6, 13, 0, 0, tzinfo=UTC)
+    policy = _policy(timezone="America/Chicago")
+
+    decision = evaluate_pre_send_safety(_facts(), policy, utc_1300)
+
+    assert decision.allowed is False
+    assert decision.reasons == (PreSendReasonCode.OUTSIDE_ALLOWED_HOURS,)
+    # 10:00 America/Chicago = 15:00 UTC on this date.
+    assert decision.next_allowed_at == datetime(2026, 7, 6, 15, 0, 0, tzinfo=UTC)
 
 
 def test_strictest_frequency_limit_blocks_and_returns_latest_retry_time() -> None:

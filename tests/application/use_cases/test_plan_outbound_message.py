@@ -148,6 +148,7 @@ def _planning_context(
         workflow_state=workflow_state,
         enabled_channels=enabled_channels,
         workspace_contact_policy=WorkspaceContactPolicy(
+            workspace_id=WORKSPACE_ID,
             sms_compliance_state=SmsComplianceState.APPROVED,
         ),
         campaign_goal="Re-engage dormant buyer leads without giving property or finance advice.",
