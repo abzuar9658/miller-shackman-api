@@ -463,6 +463,28 @@ class HandoffModel(Base):
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class HandoffCompletionModel(Base):
+    __tablename__ = "handoff_completions"
+
+    handoff_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("handoffs.handoff_id"), primary_key=True
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    notification_idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    notification_recipient_id: Mapped[str | None] = mapped_column(String(255))
+    notification_recipient_destination: Mapped[str | None] = mapped_column(String(320))
+    notification_provider_reference: Mapped[str | None] = mapped_column(String(255))
+    notification_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    crm_note_written_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    crm_tag_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    crm_custom_fields_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(500))
+
+
 class UserModel(Base):
     __tablename__ = "users"
     __table_args__ = (
@@ -502,6 +524,19 @@ class WorkspaceContactPolicyModel(Base):
     sms_compliance_state: Mapped[str] = mapped_column(String(50), nullable=False)
     quiet_hours_start: Mapped[time] = mapped_column(Time, nullable=False)
     quiet_hours_end: Mapped[time] = mapped_column(Time, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceHandoffConfigModel(Base):
+    __tablename__ = "workspace_handoff_configs"
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), primary_key=True
+    )
+    fallback_recipient_email: Mapped[str | None] = mapped_column(String(320))
+    crm_handoff_tag: Mapped[str | None] = mapped_column(String(255))
+    crm_custom_fields: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

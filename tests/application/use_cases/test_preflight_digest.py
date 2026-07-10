@@ -72,6 +72,9 @@ class FakeNotificationProvider:
             return self.results.pop(0)
         return NotificationSendResult(accepted=True, provider_reference="notification-1")
 
+    async def send_handoff_notification(self, notification: object) -> NotificationSendResult:
+        raise AssertionError("handoff notification should not be used in preflight digest tests")
+
 
 def _start_policy(veto_window_hours: int = 24) -> CampaignStartPolicy:
     return CampaignStartPolicy(veto_window_hours=veto_window_hours)

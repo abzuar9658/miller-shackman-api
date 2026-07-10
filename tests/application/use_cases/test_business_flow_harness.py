@@ -1,9 +1,16 @@
 import json
 from datetime import UTC, datetime, time
+from typing import cast
 from uuid import UUID
 
+from app.application.ports.crm import CRMAgent, CRMClient
 from app.application.ports.crm_sync import CanonicalLeadSnapshotPage
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
+from app.application.ports.notifications import (
+    HandoffNotification,
+    NotificationProvider,
+    NotificationSendResult,
+)
 from app.application.use_cases.campaign_cadence_execution import (
     CadenceStepExecutionStatus,
     CadenceStepScheduleStatus,
@@ -25,7 +32,14 @@ from app.domain.campaigns.enrollment import CampaignEnrollmentSource
 from app.domain.campaigns.execution import CampaignCadenceStep, CampaignExecutionConfig
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel, ContactPermissionStatus
-from app.domain.conversations import Conversation, ConversationSummary, Handoff, InboundMessage
+from app.domain.conversations import (
+    Conversation,
+    ConversationSummary,
+    Handoff,
+    HandoffCompletionRecord,
+    InboundMessage,
+    WorkspaceHandoffConfig,
+)
 from app.domain.crm_sync import CRMSyncJob, CRMSyncJobStatus, CRMSyncType, ExternalEvent
 from app.domain.identity import Workspace, WorkspaceStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
@@ -141,9 +155,9 @@ class FakeInboundMessageRepository:
         self.messages: dict[tuple[WorkspaceId, str, str], InboundMessage] = {}
 
     async def save(self, message: InboundMessage) -> InboundMessage:
-        self.messages[
-            (message.workspace_id, message.provider, message.provider_message_id)
-        ] = message
+        self.messages[(message.workspace_id, message.provider, message.provider_message_id)] = (
+            message
+        )
         return message
 
 
@@ -159,10 +173,97 @@ class FakeConversationSummaryRepository:
 class FakeHandoffRepository:
     def __init__(self) -> None:
         self.saved: list[Handoff] = []
+        self.by_id: dict[UUID, Handoff] = {}
+
+    async def get_by_id(self, workspace_id: WorkspaceId, handoff_id: UUID) -> Handoff | None:
+        handoff = self.by_id.get(handoff_id)
+        if handoff is None or handoff.workspace_id != workspace_id:
+            return None
+        return handoff
 
     async def save(self, handoff: Handoff) -> Handoff:
         self.saved.append(handoff)
+        self.by_id[handoff.handoff_id] = handoff
         return handoff
+
+
+class FakeHandoffCompletionRepository:
+    def __init__(self) -> None:
+        self.by_id: dict[UUID, HandoffCompletionRecord] = {}
+
+    async def get_by_handoff_id(
+        self,
+        workspace_id: WorkspaceId,
+        handoff_id: UUID,
+    ) -> HandoffCompletionRecord | None:
+        record = self.by_id.get(handoff_id)
+        if record is None or record.workspace_id != workspace_id:
+            return None
+        return record
+
+    async def save(self, record: HandoffCompletionRecord) -> HandoffCompletionRecord:
+        self.by_id[record.handoff_id] = record
+        return record
+
+
+class FakeWorkspaceHandoffConfigRepository:
+    def __init__(self, config: WorkspaceHandoffConfig | None = None) -> None:
+        self.config = config
+
+    async def get_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceHandoffConfig | None:
+        if self.config is None or self.config.workspace_id != workspace_id:
+            return None
+        return self.config
+
+    async def save(self, config: WorkspaceHandoffConfig) -> WorkspaceHandoffConfig:
+        self.config = config
+        return config
+
+
+class FakeCRMClient:
+    def __init__(self) -> None:
+        self.notes: list[tuple[WorkspaceId, str, str]] = []
+        self.tags: list[tuple[WorkspaceId, str, str]] = []
+        self.updated_fields: list[tuple[WorkspaceId, str, dict[str, str]]] = []
+
+    async def get_assigned_agent(
+        self, workspace_id: WorkspaceId, crm_lead_id: str
+    ) -> CRMAgent | None:
+        return CRMAgent(crm_agent_id="agent-99", name="Agent Smith", email="agent@example.com")
+
+    async def add_note(self, workspace_id: WorkspaceId, crm_lead_id: str, content: str) -> None:
+        self.notes.append((workspace_id, crm_lead_id, content))
+
+    async def add_tag(self, workspace_id: WorkspaceId, crm_lead_id: str, tag: str) -> None:
+        self.tags.append((workspace_id, crm_lead_id, tag))
+
+    async def update_custom_fields(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+        fields: dict[str, str],
+    ) -> None:
+        self.updated_fields.append((workspace_id, crm_lead_id, fields))
+
+
+class FakeNotificationProvider:
+    def __init__(self) -> None:
+        self.notifications: list[HandoffNotification] = []
+
+    async def send_handoff_notification(
+        self,
+        notification: HandoffNotification,
+    ) -> NotificationSendResult:
+        self.notifications.append(notification)
+        return NotificationSendResult(accepted=True, provider_reference="notif-123")
+
+    async def send_preflight_digest(
+        self, notification: object
+    ) -> NotificationSendResult:  # pragma: no cover
+        raise AssertionError("preflight digest should not be used in business flow harness")
 
 
 class FakeInboundReplyLLMClient:
@@ -194,6 +295,17 @@ async def test_business_flow_harness_runs_sync_to_handoff_path() -> None:
     inbound_messages = FakeInboundMessageRepository()
     summaries = FakeConversationSummaryRepository()
     handoffs = FakeHandoffRepository()
+    handoff_completions = FakeHandoffCompletionRepository()
+    workspace_handoff_config_repository = FakeWorkspaceHandoffConfigRepository(
+        WorkspaceHandoffConfig(
+            workspace_id=WORKSPACE_ID,
+            fallback_recipient_email="fallback@example.com",
+            crm_handoff_tag="human_handoff_required",
+            crm_custom_fields={"handoff_status": "required"},
+        )
+    )
+    crm_client = FakeCRMClient()
+    notification_provider = FakeNotificationProvider()
 
     sync_result = await run_follow_up_boss_lead_snapshot_sync(
         workspace_id=WORKSPACE_ID,
@@ -278,6 +390,10 @@ async def test_business_flow_harness_runs_sync_to_handoff_path() -> None:
         inbound_message_repository=inbound_messages,
         conversation_summary_repository=summaries,
         handoff_repository=handoffs,
+        crm_client=cast(CRMClient, crm_client),
+        notification_provider=cast(NotificationProvider, notification_provider),
+        workspace_handoff_config_repository=workspace_handoff_config_repository,
+        handoff_completion_repository=handoff_completions,
         llm_client=FakeInboundReplyLLMClient(_classification_json()),
         now=NOW,
         lead_workflow_repository=lead_workflow_repository,
@@ -292,6 +408,7 @@ async def test_business_flow_harness_runs_sync_to_handoff_path() -> None:
     assert inbound_result.status == ProcessInboundMessageEventStatus.PROCESSED
     assert inbound_result.handoff_required is True
     assert inbound_result.handoff_id == HANDOFF_ID
+    assert inbound_result.handoff_completion_failure_reason is None
 
     final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     assert final_workflow.state == WorkflowState.HUMAN_HANDOFF
@@ -310,8 +427,11 @@ async def test_business_flow_harness_runs_sync_to_handoff_path() -> None:
     ]
     assert handoffs.saved[0].workflow_id == final_workflow.workflow_id
     assert handoffs.saved[0].assigned_agent_crm_id == "agent-99"
+    assert handoffs.by_id[HANDOFF_ID].status.value == "notified"
     assert conversations.by_id[CONVERSATION_ID].status.value == "human_handoff"
     assert summaries.saved[0].summary_id == SUMMARY_ID
+    assert len(notification_provider.notifications) == 1
+    assert crm_client.tags == [(WORKSPACE_ID, "crm-123", "human_handoff_required")]
 
 
 def _lead() -> CanonicalLeadRecord:

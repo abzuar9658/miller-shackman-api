@@ -25,6 +25,7 @@ class WorkflowTransitionReasonCode(StrEnum):
     CAMPAIGN_ENROLLMENT_STARTED = "campaign_enrollment_started"
     CADENCE_STEP_STARTED = "cadence_step_started"
     INBOUND_REPLY_RECEIVED = "inbound_reply_received"
+    CRM_HUMAN_ACTIVITY_DETECTED = "crm_human_activity_detected"
     REPLY_CLASSIFICATION_REJECTED = "reply_classification_rejected"
     HUMAN_HANDOFF_REQUIRED = "human_handoff_required"
     OPT_OUT_DETECTED = "opt_out_detected"

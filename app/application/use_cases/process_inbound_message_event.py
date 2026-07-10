@@ -4,16 +4,20 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
+from app.application.ports.crm import CRMClient
 from app.application.ports.llm import LLMClient
+from app.application.ports.notifications import NotificationProvider
 from app.application.ports.repositories import (
     ConversationRepository,
     ConversationSummaryRepository,
     ExternalEventRepository,
+    HandoffCompletionRepository,
     HandoffRepository,
     InboundMessageRepository,
     LeadRepository,
     LeadWorkflowRepository,
     WorkflowTransitionRepository,
+    WorkspaceHandoffConfigRepository,
 )
 from app.application.services.llm.reply_classification import (
     InboundReplyIntent,
@@ -26,6 +30,7 @@ from app.application.use_cases.apply_inbound_workflow_transition import (
     InboundWorkflowTransitionStatus,
     apply_inbound_workflow_transition,
 )
+from app.application.use_cases.complete_handoff import HandoffCompletionStatus, complete_handoff
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.conversations import (
@@ -85,6 +90,8 @@ class ProcessInboundMessageEventResult:
     handoff_id: UUID | None = None
     intent: InboundReplyIntent | None = None
     handoff_required: bool = False
+    handoff_completion_status: HandoffCompletionStatus | None = None
+    handoff_completion_failure_reason: str | None = None
     opt_out_detected: bool = False
     reasons: tuple[ProcessInboundMessageEventReasonCode, ...] = ()
     classification_reasons: tuple[ReplyClassificationReasonCode, ...] = ()
@@ -100,6 +107,10 @@ async def process_inbound_message_event(
     conversation_summary_repository: ConversationSummaryRepository,
     handoff_repository: HandoffRepository,
     llm_client: LLMClient,
+    crm_client: CRMClient | None = None,
+    notification_provider: NotificationProvider | None = None,
+    workspace_handoff_config_repository: WorkspaceHandoffConfigRepository | None = None,
+    handoff_completion_repository: HandoffCompletionRepository | None = None,
     now: datetime,
     lead_workflow_repository: LeadWorkflowRepository | None = None,
     workflow_transition_repository: WorkflowTransitionRepository | None = None,
@@ -349,6 +360,26 @@ async def process_inbound_message_event(
                 created_at=now,
             ),
         )
+        handoff_completion_result = None
+        if (
+            crm_client is not None
+            and notification_provider is not None
+            and workspace_handoff_config_repository is not None
+            and handoff_completion_repository is not None
+        ):
+            handoff_completion_result = await complete_handoff(
+                workspace_id=event.workspace_id,
+                handoff_id=handoff.handoff_id,
+                handoff_repository=handoff_repository,
+                handoff_completion_repository=handoff_completion_repository,
+                workspace_handoff_config_repository=workspace_handoff_config_repository,
+                lead_repository=lead_repository,
+                crm_client=crm_client,
+                notification_provider=notification_provider,
+                now=now,
+            )
+    else:
+        handoff_completion_result = None
 
     await external_event_repository.save(
         replace(
@@ -371,6 +402,12 @@ async def process_inbound_message_event(
         handoff_id=handoff.handoff_id if handoff is not None else None,
         intent=classification.intent,
         handoff_required=classification.handoff_required,
+        handoff_completion_status=handoff_completion_result.status
+        if handoff_completion_result is not None
+        else None,
+        handoff_completion_failure_reason=handoff_completion_result.failure_reason
+        if handoff_completion_result is not None
+        else None,
         opt_out_detected=classification.opt_out_detected,
     )
 

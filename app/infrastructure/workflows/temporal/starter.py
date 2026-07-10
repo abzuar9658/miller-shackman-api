@@ -1,11 +1,16 @@
 from temporalio.client import Client
 
-from app.application.ports.temporal import TemporalWorkflowStarter
+from app.application.ports.temporal import (
+    LeadNurtureWorkflowSignaler,
+    PauseLeadNurtureWorkflowSignal,
+    TemporalWorkflowStarter,
+)
 from app.core.config import Settings, get_settings
 from app.domain.common.ids import CampaignVersionId, LeadId, WorkspaceId
 from app.infrastructure.workflows.temporal.lead_nurture import (
     LeadNurtureWorkflow,
     LeadNurtureWorkflowInput,
+    PauseWorkflowSignal,
 )
 from app.infrastructure.workflows.temporal.worker import connect_temporal_client
 
@@ -34,10 +39,40 @@ class TemporalClientWorkflowStarter:
             task_queue=self._task_queue,
         )
 
+    async def signal_pause_lead_nurture_workflow(
+        self,
+        *,
+        temporal_workflow_id: str,
+        signal: PauseLeadNurtureWorkflowSignal,
+    ) -> None:
+        handle = self._client.get_workflow_handle(temporal_workflow_id)
+        await handle.signal(
+            LeadNurtureWorkflow.pause_requested,
+            PauseWorkflowSignal(
+                workspace_id=signal.workspace_id,
+                lead_id=signal.lead_id,
+                occurred_at=signal.occurred_at,
+                reason=signal.reason,
+                actor_user_id=signal.actor_user_id,
+                external_event_id=signal.external_event_id,
+            ),
+        )
+
 
 async def build_temporal_workflow_starter(
     settings: Settings | None = None,
 ) -> TemporalWorkflowStarter:
+    resolved_settings = settings or get_settings()
+    client = await connect_temporal_client(resolved_settings)
+    return TemporalClientWorkflowStarter(
+        client,
+        task_queue=resolved_settings.temporal_task_queue,
+    )
+
+
+async def build_temporal_workflow_signaler(
+    settings: Settings | None = None,
+) -> LeadNurtureWorkflowSignaler:
     resolved_settings = settings or get_settings()
     client = await connect_temporal_client(resolved_settings)
     return TemporalClientWorkflowStarter(

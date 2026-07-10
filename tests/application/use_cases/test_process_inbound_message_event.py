@@ -15,7 +15,6 @@ from app.domain.compliance.contactability import ContactChannel
 from app.domain.conversations import Conversation, ConversationSummary, Handoff, InboundMessage
 from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
-from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransition
 
 NOW = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -25,10 +24,6 @@ CONVERSATION_ID = UUID("00000000-0000-0000-0000-000000000004")
 INBOUND_MESSAGE_ID = UUID("00000000-0000-0000-0000-000000000005")
 SUMMARY_ID = UUID("00000000-0000-0000-0000-000000000006")
 HANDOFF_ID = UUID("00000000-0000-0000-0000-000000000007")
-WORKFLOW_ID = UUID("00000000-0000-0000-0000-000000000008")
-WORKFLOW_TRANSITION_ID = UUID("00000000-0000-0000-0000-000000000009")
-CAMPAIGN_ID = UUID("00000000-0000-0000-0000-00000000000a")
-CAMPAIGN_ENROLLMENT_ID = UUID("00000000-0000-0000-0000-00000000000b")
 
 
 class FakeLeadRepository:
@@ -36,7 +31,9 @@ class FakeLeadRepository:
         self.lead = lead
 
     async def get_by_id(
-        self, workspace_id: WorkspaceId, lead_id: LeadId
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
     ) -> CanonicalLeadRecord | None:
         return self.lead
 
@@ -132,63 +129,15 @@ class FakeConversationSummaryRepository:
 class FakeHandoffRepository:
     def __init__(self) -> None:
         self.saved: list[Handoff] = []
+        self.by_id: dict[tuple[WorkspaceId, UUID], Handoff] = {}
+
+    async def get_by_id(self, workspace_id: WorkspaceId, handoff_id: UUID) -> Handoff | None:
+        return self.by_id.get((workspace_id, handoff_id))
 
     async def save(self, handoff: Handoff) -> Handoff:
         self.saved.append(handoff)
+        self.by_id[(handoff.workspace_id, handoff.handoff_id)] = handoff
         return handoff
-
-
-class FakeLeadWorkflowRepository:
-    def __init__(self, workflow: LeadWorkflow | None) -> None:
-        self.workflow = workflow
-        self.locked = False
-
-    async def get_latest_for_lead(
-        self,
-        workspace_id: WorkspaceId,
-        lead_id: LeadId,
-    ) -> LeadWorkflow | None:
-        return self.workflow if self._matches(workspace_id, lead_id) else None
-
-    async def get_latest_for_lead_for_update(
-        self,
-        workspace_id: WorkspaceId,
-        lead_id: LeadId,
-    ) -> LeadWorkflow | None:
-        self.locked = True
-        return self.workflow if self._matches(workspace_id, lead_id) else None
-
-    async def save(self, workflow: LeadWorkflow) -> LeadWorkflow:
-        self.workflow = workflow
-        return workflow
-
-    def _matches(self, workspace_id: WorkspaceId, lead_id: LeadId) -> bool:
-        return (
-            self.workflow is not None
-            and self.workflow.workspace_id == workspace_id
-            and self.workflow.lead_id == lead_id
-        )
-
-
-class FakeWorkflowTransitionRepository:
-    def __init__(self) -> None:
-        self.transitions: list[WorkflowTransition] = []
-
-    async def append(self, transition: WorkflowTransition) -> WorkflowTransition:
-        self.transitions.append(transition)
-        return transition
-
-    async def list_for_workflow(
-        self,
-        workspace_id: WorkspaceId,
-        workflow_id: UUID,
-        limit: int = 100,
-    ) -> tuple[WorkflowTransition, ...]:
-        return tuple(
-            transition
-            for transition in self.transitions
-            if transition.workspace_id == workspace_id and transition.workflow_id == workflow_id
-        )[:limit]
 
 
 class FakeLLMClient:
@@ -219,24 +168,6 @@ def _lead() -> CanonicalLeadRecord:
         lead_stage="long_term_nurture",
         assigned_agent_crm_id="agent-99",
         has_accountable_owner=True,
-    )
-
-
-def _workflow(state: WorkflowState = WorkflowState.WAITING_FOR_RESPONSE) -> LeadWorkflow:
-    return LeadWorkflow(
-        workflow_id=WORKFLOW_ID,
-        temporal_workflow_id="lead-nurture-test",
-        workspace_id=WORKSPACE_ID,
-        campaign_enrollment_id=CAMPAIGN_ENROLLMENT_ID,
-        campaign_id=CAMPAIGN_ID,
-        lead_id=LEAD_ID,
-        state=state,
-        current_step_id=UUID("00000000-0000-0000-0000-00000000000c"),
-        next_action_at=NOW,
-        last_transition_at=NOW,
-        state_version=2,
-        created_at=NOW,
-        updated_at=NOW,
     )
 
 
@@ -298,7 +229,9 @@ async def test_returns_duplicate_when_external_event_already_exists() -> None:
     await external_events.save(existing)
     llm = FakeLLMClient(
         _classification_json(
-            intent="human_requested", handoff_required=True, handoff_reason="human_requested"
+            intent="human_requested",
+            handoff_required=True,
+            handoff_reason="human_requested",
         )
     )
 
@@ -357,51 +290,6 @@ async def test_creates_handoff_for_human_request() -> None:
     assert handoffs.saved[0].reason_code.value == "human_requested"
     assert summaries.saved[0].summary_id == SUMMARY_ID
     assert conversations.by_id[CONVERSATION_ID].status.value == "human_handoff"
-
-
-async def test_human_request_moves_existing_workflow_to_handoff() -> None:
-    workflows = FakeLeadWorkflowRepository(_workflow())
-    transitions = FakeWorkflowTransitionRepository()
-    conversations = FakeConversationRepository()
-    handoffs = FakeHandoffRepository()
-
-    result = await process_inbound_message_event(
-        event=_event(),
-        lead_repository=FakeLeadRepository(_lead()),
-        external_event_repository=FakeExternalEventRepository(),
-        conversation_repository=conversations,
-        inbound_message_repository=FakeInboundMessageRepository(),
-        conversation_summary_repository=FakeConversationSummaryRepository(),
-        handoff_repository=handoffs,
-        lead_workflow_repository=workflows,
-        workflow_transition_repository=transitions,
-        llm_client=FakeLLMClient(
-            _classification_json(
-                intent="human_requested",
-                handoff_required=True,
-                handoff_reason="human_requested",
-            ),
-        ),
-        now=NOW,
-        conversation_id_factory=lambda: CONVERSATION_ID,
-        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
-        handoff_id_factory=lambda: HANDOFF_ID,
-        workflow_transition_id_factory=lambda: WORKFLOW_TRANSITION_ID,
-    )
-
-    assert result.workflow_id == WORKFLOW_ID
-    assert result.workflow_transition_id == WORKFLOW_TRANSITION_ID
-    assert workflows.locked is True
-    assert workflows.workflow is not None
-    assert workflows.workflow.state == WorkflowState.HUMAN_HANDOFF
-    assert workflows.workflow.current_step_id is None
-    assert workflows.workflow.next_action_at is None
-    assert workflows.workflow.state_version == 3
-    assert transitions.transitions[0].to_state == WorkflowState.HUMAN_HANDOFF
-    assert transitions.transitions[0].reason_code.value == "human_handoff_required"
-    assert handoffs.saved[0].workflow_id == WORKFLOW_ID
-    assert handoffs.saved[0].campaign_id == CAMPAIGN_ID
-    assert conversations.by_id[CONVERSATION_ID].workflow_id == WORKFLOW_ID
 
 
 async def test_processes_opt_out_without_handoff() -> None:

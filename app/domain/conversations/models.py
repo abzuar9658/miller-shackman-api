@@ -41,6 +41,39 @@ def _empty_preferences() -> Mapping[str, str]:
     return {}
 
 
+def _empty_string_mapping() -> Mapping[str, str]:
+    return {}
+
+
+@dataclass(frozen=True)
+class WorkspaceHandoffConfig:
+    workspace_id: WorkspaceId
+    fallback_recipient_email: str | None = None
+    crm_handoff_tag: str | None = None
+    crm_custom_fields: Mapping[str, str] = field(default_factory=_empty_string_mapping)
+
+
+def default_workspace_handoff_config(workspace_id: WorkspaceId) -> WorkspaceHandoffConfig:
+    return WorkspaceHandoffConfig(workspace_id=workspace_id)
+
+
+@dataclass(frozen=True)
+class HandoffCompletionRecord:
+    handoff_id: UUID
+    workspace_id: WorkspaceId
+    notification_idempotency_key: str
+    notification_recipient_id: str | None = None
+    notification_recipient_destination: str | None = None
+    notification_provider_reference: str | None = None
+    notification_sent_at: datetime | None = None
+    crm_note_written_at: datetime | None = None
+    crm_tag_applied_at: datetime | None = None
+    crm_custom_fields_updated_at: datetime | None = None
+    completed_at: datetime | None = None
+    last_attempted_at: datetime | None = None
+    failure_reason: str | None = None
+
+
 @dataclass(frozen=True)
 class Conversation:
     conversation_id: UUID

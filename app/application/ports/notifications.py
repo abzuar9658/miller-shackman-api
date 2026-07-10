@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
+from uuid import UUID
 
 from app.domain.common.ids import CampaignId, LeadId, WorkspaceId
+from app.domain.conversations import HandoffReasonCode
 
 
 @dataclass(frozen=True)
@@ -31,9 +33,34 @@ class NotificationSendResult:
     uncertain: bool = False
 
 
+@dataclass(frozen=True)
+class HandoffNotification:
+    workspace_id: WorkspaceId
+    handoff_id: UUID
+    lead_id: LeadId
+    recipient_id: str
+    recipient_destination: str
+    lead_display_name: str
+    lead_primary_email: str | None
+    lead_primary_phone: str | None
+    handoff_reason: HandoffReasonCode
+    latest_inbound_text: str
+    summary: str
+    preferences: dict[str, str]
+    assigned_agent_name: str | None
+    recommended_next_action: str
+    idempotency_key: str
+
+
 class NotificationProvider(Protocol):
     async def send_preflight_digest(
         self,
         notification: PreflightDigestNotification,
+    ) -> NotificationSendResult:
+        raise NotImplementedError
+
+    async def send_handoff_notification(
+        self,
+        notification: HandoffNotification,
     ) -> NotificationSendResult:
         raise NotImplementedError

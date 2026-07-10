@@ -335,6 +335,131 @@ Business result:
 - the first real business loop is now executable both with fast in-memory fakes and
   against a fresh Postgres schema, which closes the highest-priority integration gap
 
+### Slice 11 — Handoff completion
+
+Status: complete.
+
+Goal: finish the business-side handoff path so interested leads reliably reach the
+assigned human with the correct CRM context.
+
+Implemented in this slice:
+
+- notify the assigned agent when a handoff is created
+- write a handoff summary and reason back to Follow Up Boss
+- update the configured CRM handoff tag and/or custom field mapping
+- persist notification/writeback status for retries and auditability
+- add fake-based tests and extend the real Postgres harness to verify the handoff side
+  effects
+
+Business result:
+
+- a handoff now reaches the assigned human through the notification seam, writes the
+  configured CRM context back to Follow Up Boss, and records durable completion state
+  for retries and auditability
+
+### Slice 12 — CRM human-activity pause detection
+
+Status: complete.
+
+Goal: ensure human ownership always wins when an agent acts in the CRM.
+
+Implemented in this slice:
+
+- consume CRM activity/update signals that indicate meaningful human action
+- map those signals into explicit pause reasons in the workflow layer
+- stop pending AI sends and pause active nurture safely
+- require explicit resume after a human-activity pause
+- add tests for note/activity/reassignment/status-change pause scenarios
+
+Business result:
+
+- meaningful CRM human activity now pauses active nurture, records the explicit pause
+  reason in workflow history, and signals Temporal so stale AI sends do not proceed
+
+### Slice 13 — Opt-out and unsubscribe event completion
+
+Status: planned.
+
+Goal: complete the real suppression paths for SMS and email.
+
+Planned deliverables:
+
+- ingest SMS opt-out keywords from provider/CRM events
+- ingest email unsubscribe events from provider/CRM events
+- persist channel or global suppression state with evidence
+- stop affected workflows and prevent future sends immediately
+- add duplicate-event and idempotency coverage
+
+### Slice 14 — Daily dormant selector + pre-flight digest flow
+
+Status: planned.
+
+Goal: wire the intended V1 dormant-lead operating loop without introducing a rules
+engine.
+
+Planned deliverables:
+
+- simple dormant-lead selector using the configured inactivity threshold
+- FIFO campaign-cap enforcement for eligible candidates
+- pre-flight digest generation for assigned agents
+- veto recording and veto enforcement before workflow start and before send
+- tests covering uncertain CRM activity, caps, and veto behavior
+
+### Slice 15 — Provider delivery callbacks
+
+Status: planned.
+
+Goal: reconcile outbound message state with real provider delivery outcomes.
+
+Planned deliverables:
+
+- webhook ingestion for SMS/email provider delivery callbacks
+- outbound status updates with late and duplicate callback safety
+- retry rules that avoid uncertain duplicate sends
+- audit-friendly provider status history where needed
+
+### Slice 16 — Transactional outbox + RabbitMQ fan-out
+
+Status: planned.
+
+Goal: make important asynchronous events production-real without leaking queue logic
+into the domain.
+
+Planned deliverables:
+
+- Postgres transactional outbox writes alongside state changes
+- worker/publisher that fans out outbox events to RabbitMQ
+- idempotent publish and retry behavior
+- event-driven hooks for notifications, reporting, and non-critical async work
+
+### Slice 17 — Campaign admin and publishing APIs
+
+Status: planned.
+
+Goal: expose the minimum operational controls required to manage campaigns safely in
+V1.
+
+Planned deliverables:
+
+- create/edit draft campaigns and cadence configuration
+- publish campaign versions
+- pause campaigns and launch eligible batches
+- enforce role-based permissions for admin/manager/agent operations
+- audit campaign configuration changes and launches
+
+### Slice 18 — Reporting, RLS, and pilot-operational readiness
+
+Status: planned.
+
+Goal: close the final visibility and tenant-isolation gaps before calling V1 ready.
+
+Planned deliverables:
+
+- reporting and operational views for workflow/message/handoff status
+- audit visibility for major business decisions and failures
+- deployed PostgreSQL row-level security validation
+- final readiness validation across sync, workflow, messaging, and handoff operations
+
 ## Execution Rules
 
 - Do not start a later slice before the current slice is implemented, tested, and
@@ -352,9 +477,9 @@ Business result:
 
 Start the next slice only after explicit approval:
 
-1. complete handoff with agent notification and CRM writeback
-2. add CRM human-activity pause detection from real CRM activity signals
-3. keep provider delivery idempotent through existing outbound message records
-4. avoid provider callback workflows until the handoff and human-activity pause paths
-   are proven
+1. complete opt-out and unsubscribe handling across real provider/CRM events
+2. wire dormant-lead selection and pre-flight digest/veto flow
+3. add provider delivery callbacks and outbound status reconciliation
+4. add outbox/RabbitMQ, admin APIs, reporting, and operational readiness slices in
+   order
 5. run `ruff`, `mypy`, targeted tests, and full `pytest`

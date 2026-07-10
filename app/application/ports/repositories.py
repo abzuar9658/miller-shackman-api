@@ -5,6 +5,8 @@ from app.domain.campaigns.enrollment import CampaignEnrollment
 from app.domain.campaigns.execution import CampaignExecutionConfig
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.common.ids import (
+    CampaignId,
+    CampaignVersionId,
     LeadId,
     RefreshSessionId,
     UserId,
@@ -13,7 +15,14 @@ from app.domain.common.ids import (
     WorkspaceMembershipId,
 )
 from app.domain.compliance.contactability import WorkspaceContactPolicy
-from app.domain.conversations import Conversation, ConversationSummary, Handoff, InboundMessage
+from app.domain.conversations import (
+    Conversation,
+    ConversationSummary,
+    Handoff,
+    HandoffCompletionRecord,
+    InboundMessage,
+    WorkspaceHandoffConfig,
+)
 from app.domain.crm_sync import CRMSyncJob, ExternalEvent
 from app.domain.identity import (
     AuthAuditLog,
@@ -82,21 +91,12 @@ class OutboundMessageRepository(Protocol):
         raise NotImplementedError
 
 
-class CampaignExecutionRepository(Protocol):
-    async def get_by_version_id(
-        self,
-        workspace_id: WorkspaceId,
-        campaign_version_id: UUID,
-    ) -> CampaignExecutionConfig | None:
-        raise NotImplementedError
-
-
 class CampaignEnrollmentRepository(Protocol):
     async def get_by_lead_and_campaign(
         self,
         workspace_id: WorkspaceId,
         lead_id: LeadId,
-        campaign_id: UUID,
+        campaign_id: CampaignId,
     ) -> CampaignEnrollment | None:
         raise NotImplementedError
 
@@ -104,40 +104,21 @@ class CampaignEnrollmentRepository(Protocol):
         raise NotImplementedError
 
 
-class LeadWorkflowRepository(Protocol):
-    async def get_latest_for_lead(
+class CampaignExecutionRepository(Protocol):
+    async def get_by_version_id(
         self,
         workspace_id: WorkspaceId,
-        lead_id: LeadId,
-    ) -> LeadWorkflow | None:
-        raise NotImplementedError
-
-    async def get_latest_for_lead_for_update(
-        self,
-        workspace_id: WorkspaceId,
-        lead_id: LeadId,
-    ) -> LeadWorkflow | None:
-        raise NotImplementedError
-
-    async def save(self, workflow: LeadWorkflow) -> LeadWorkflow:
-        raise NotImplementedError
-
-
-class WorkflowTransitionRepository(Protocol):
-    async def append(self, transition: WorkflowTransition) -> WorkflowTransition:
-        raise NotImplementedError
-
-    async def list_for_workflow(
-        self,
-        workspace_id: WorkspaceId,
-        workflow_id: UUID,
-        limit: int = 100,
-    ) -> tuple[WorkflowTransition, ...]:
+        campaign_version_id: CampaignVersionId,
+    ) -> CampaignExecutionConfig | None:
         raise NotImplementedError
 
 
 class CRMSyncJobRepository(Protocol):
-    async def get_by_id(self, workspace_id: WorkspaceId, sync_job_id: UUID) -> CRMSyncJob | None:
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        sync_job_id: UUID,
+    ) -> CRMSyncJob | None:
         raise NotImplementedError
 
     async def list_recent(
@@ -187,7 +168,80 @@ class ConversationSummaryRepository(Protocol):
 
 
 class HandoffRepository(Protocol):
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        handoff_id: UUID,
+    ) -> Handoff | None:
+        raise NotImplementedError
+
     async def save(self, handoff: Handoff) -> Handoff:
+        raise NotImplementedError
+
+
+class HandoffCompletionRepository(Protocol):
+    async def get_by_handoff_id(
+        self,
+        workspace_id: WorkspaceId,
+        handoff_id: UUID,
+    ) -> HandoffCompletionRecord | None:
+        raise NotImplementedError
+
+    async def save(self, record: HandoffCompletionRecord) -> HandoffCompletionRecord:
+        raise NotImplementedError
+
+
+class WorkspaceHandoffConfigRepository(Protocol):
+    async def get_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceHandoffConfig | None:
+        raise NotImplementedError
+
+    async def save(self, config: WorkspaceHandoffConfig) -> WorkspaceHandoffConfig:
+        raise NotImplementedError
+
+
+class WorkspaceContactPolicyRepository(Protocol):
+    async def get_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceContactPolicy | None:
+        raise NotImplementedError
+
+    async def save(self, policy: WorkspaceContactPolicy) -> WorkspaceContactPolicy:
+        raise NotImplementedError
+
+
+class LeadWorkflowRepository(Protocol):
+    async def get_latest_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> LeadWorkflow | None:
+        raise NotImplementedError
+
+    async def get_latest_for_lead_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> LeadWorkflow | None:
+        raise NotImplementedError
+
+    async def save(self, workflow: LeadWorkflow) -> LeadWorkflow:
+        raise NotImplementedError
+
+
+class WorkflowTransitionRepository(Protocol):
+    async def append(self, transition: WorkflowTransition) -> WorkflowTransition:
+        raise NotImplementedError
+
+    async def list_for_workflow(
+        self,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        limit: int = 100,
+    ) -> tuple[WorkflowTransition, ...]:
         raise NotImplementedError
 
 
@@ -207,17 +261,6 @@ class WorkspaceRepository(Protocol):
         raise NotImplementedError
 
     async def save(self, workspace: Workspace) -> Workspace:
-        raise NotImplementedError
-
-
-class WorkspaceContactPolicyRepository(Protocol):
-    async def get_by_workspace_id(
-        self,
-        workspace_id: WorkspaceId,
-    ) -> WorkspaceContactPolicy | None:
-        raise NotImplementedError
-
-    async def save(self, policy: WorkspaceContactPolicy) -> WorkspaceContactPolicy:
         raise NotImplementedError
 
 

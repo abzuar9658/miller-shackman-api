@@ -3,10 +3,13 @@ from app.domain.conversations.models import (
     ConversationStatus,
     ConversationSummary,
     Handoff,
+    HandoffCompletionRecord,
     HandoffReasonCode,
     HandoffStatus,
     InboundMessage,
     InboundMessageClassificationStatus,
+    WorkspaceHandoffConfig,
+    default_workspace_handoff_config,
 )
 
 __all__ = [
@@ -14,8 +17,11 @@ __all__ = [
     "ConversationStatus",
     "ConversationSummary",
     "Handoff",
+    "HandoffCompletionRecord",
     "HandoffReasonCode",
     "HandoffStatus",
     "InboundMessage",
     "InboundMessageClassificationStatus",
+    "WorkspaceHandoffConfig",
+    "default_workspace_handoff_config",
 ]

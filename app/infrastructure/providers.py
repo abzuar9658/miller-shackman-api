@@ -5,8 +5,9 @@ from app.application.ports.cache import CacheProvider
 from app.application.ports.crm import CRMClient
 from app.application.ports.llm import LLMClient
 from app.application.ports.messaging import EmailProvider, SMSProvider
+from app.application.ports.notifications import NotificationProvider
 from app.application.ports.storage import FileStorageProvider
-from app.application.ports.temporal import TemporalWorkflowStarter
+from app.application.ports.temporal import LeadNurtureWorkflowSignaler, TemporalWorkflowStarter
 from app.core.config import Settings, get_settings
 from app.infrastructure.auth.passwords import PasslibPasswordHasher
 from app.infrastructure.auth.tokens import JoseAccessTokenService, SecureOpaqueTokenService
@@ -84,6 +85,12 @@ def build_email_provider(settings: Settings | None = None) -> EmailProvider:
     raise ValueError(f"Unsupported email provider: {settings.email_provider}")
 
 
+def build_notification_provider(settings: Settings | None = None) -> NotificationProvider:
+    from app.infrastructure.notifications import EmailNotificationProvider
+
+    return EmailNotificationProvider(build_email_provider(settings))
+
+
 def build_storage_provider(settings: Settings | None = None) -> FileStorageProvider:
     settings = settings or get_settings()
     if settings.storage_provider == "s3":
@@ -134,3 +141,11 @@ async def build_temporal_workflow_starter(
     from app.infrastructure.workflows.temporal.starter import build_temporal_workflow_starter
 
     return await build_temporal_workflow_starter(settings)
+
+
+async def build_temporal_workflow_signaler(
+    settings: Settings | None = None,
+) -> LeadNurtureWorkflowSignaler:
+    from app.infrastructure.workflows.temporal.starter import build_temporal_workflow_signaler
+
+    return await build_temporal_workflow_signaler(settings)

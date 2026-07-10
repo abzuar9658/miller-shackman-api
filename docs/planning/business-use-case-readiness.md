@@ -4,7 +4,7 @@
 
 This is the living readiness checklist for the business-flow backend. It tracks what
 is already true, what is still missing, and what must be completed before we can
-honestly say the system is ready for real business-use-case testing.
+honestly say the system is V1-complete for the intended pilot business flow.
 
 Update this document after every completed slice.
 
@@ -24,7 +24,7 @@ The target V1 business scenario is:
 
 ## Current Baseline
 
-Current baseline: **Slice 10 complete**.
+Current baseline: **Slice 12 complete**.
 
 This means the backend can now:
 
@@ -41,8 +41,40 @@ This means the backend can now:
 - load persisted campaign execution config by `campaign_version_id`
 - execute all persisted cadence steps in a multi-step wait/send/wait loop,
   keeping the workflow alive after the final send for inbound replies and handoff
+- complete handoff delivery by notifying the assigned agent, writing CRM note/tag/
+  custom-field updates, and persisting handoff completion status for retries
+- consume CRM human-activity events that pause active nurture and signal Temporal to
+  stop pending AI sends
 
-The backend cannot yet run the full intended V1 business loop end-to-end.
+The backend now has the core V1 business-flow spine, but it is not yet V1-complete
+because dormant-selector operations, opt-out event completion, delivery callbacks,
+and the remaining operational readiness slices are still missing.
+
+## V1 Status Summary
+
+### What is done
+
+- the core sync -> enroll -> cadence -> inbound -> pause/handoff path exists
+- the main business rules are explicit in code rather than hidden in prompts or CRM
+  adapters
+- Temporal orchestration, workflow persistence, campaign execution config, and
+  workspace contact policy are implemented
+- both fake-based and real Postgres-backed harnesses prove the first critical
+  business loop end-to-end
+
+### What is left before V1 can be called complete
+
+- wire the daily dormant-lead selector and full pre-flight digest/veto flow
+- complete opt-out and unsubscribe handling across real provider/CRM event paths
+- wire provider delivery callbacks into outbound status updates
+- complete the operational slices for outbox/RabbitMQ, campaign admin/publishing,
+  reporting, and deployed tenant-isolation hardening
+
+### Current honest status
+
+- the backend is past the foundation stage and into completion work
+- the project is **not yet V1-complete**
+- the next most important milestone is **opt-out and unsubscribe completion**
 
 ## Done Now
 
@@ -55,6 +87,10 @@ The backend cannot yet run the full intended V1 business loop end-to-end.
 - pre-send safety checks exist and run immediately before send
 - pre-send quiet-hour checks now respect the workspace timezone
 - inbound replies can pause automation and trigger handoff behavior
+- handoff completion now notifies the assigned agent and writes the configured CRM
+  handoff context back to Follow Up Boss
+- CRM human activity can now pause active nurture and signal Temporal with an
+  explicit pause reason
 - workflow state transitions are explicit and auditable
 - workspace-level contact policy is persisted and used by cadence execution
   (SMS compliance state, quiet hours, timezone)
@@ -67,18 +103,17 @@ The backend cannot yet run the full intended V1 business loop end-to-end.
 - repository ports and Postgres adapters exist for the major business-flow seams
 - Temporal worker, starter, workflow, and activities exist for enrollment and the
   multi-step cadence execution path
+- dedicated persistence exists for workspace handoff config and handoff completion
+  tracking
 - sink providers exist for safe local end-to-end outbound testing
 - both application-level and real Postgres-backed business-flow harnesses now cover:
   `sync -> enrollment -> first cadence send -> inbound reply -> human_handoff`
 - validation baseline is green at the current slice boundary
 
-## Still Missing Before Real Business-Use-Case Testing
+## Still Missing Before V1 Completion
 
 ### Highest-priority business gaps
 
-- handoff is not yet complete from the business side because agent notification
-  and CRM writeback are still missing
-- human agent activity from the CRM does not yet pause AI outreach automatically
 - daily dormant-lead selection and the full pre-flight digest workflow are not yet
   wired into a repeatable operational flow
 - opt-out and unsubscribe handling still needs the full provider/CRM event path
@@ -86,7 +121,6 @@ The backend cannot yet run the full intended V1 business loop end-to-end.
 ### Important technical gaps
 
 - provider delivery callbacks are not yet wired into outbound status updates
-- CRM activity webhooks are not yet consumed into pause/resume business logic
 - transactional outbox and RabbitMQ fan-out are not yet production-real
 - reporting, audit views, and operational dashboards are not yet implemented
 - PostgreSQL row-level security is not yet enforced as deployed policy
@@ -94,10 +128,10 @@ The backend cannot yet run the full intended V1 business loop end-to-end.
 
 ## Recommended Next Order
 
-1. complete handoff with agent notification and CRM writeback
-2. add CRM human-activity pause detection
-3. wire dormant-lead selection and full pre-flight digest flow
-4. add provider callback handling, reporting, and operational readiness pieces
+1. complete opt-out and unsubscribe handling across real provider/CRM events
+2. wire dormant-lead selection and full pre-flight digest flow
+3. add provider callback handling and outbound status reconciliation
+4. add outbox/RabbitMQ, reporting, admin APIs, and operational readiness pieces
 
 ## Ready-to-Test Definitions
 
@@ -122,6 +156,17 @@ We can claim this when the backend additionally has:
 - handoff notification and CRM writeback
 - human-activity pause behavior
 - opt-out and unsubscribe enforcement across real inbound events
+
+### Ready for V1 completion
+
+We can claim this when the backend additionally has:
+
+- handoff completion through notification plus CRM writeback
+- human-activity pause behavior from real CRM activity/update signals
+- dormant-lead selection and the full pre-flight digest/veto workflow
+- provider delivery callbacks and safe outbound status reconciliation
+- transactional outbox plus RabbitMQ fan-out for important asynchronous events
+- campaign admin/publishing controls, reporting visibility, and deployed RLS policy
 
 ## Maintenance Rule
 

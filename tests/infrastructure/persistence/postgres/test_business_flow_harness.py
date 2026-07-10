@@ -1,12 +1,19 @@
 import json
 from datetime import UTC, datetime, time, timedelta
+from typing import cast
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.ports.crm import CRMAgent, CRMClient
 from app.application.ports.crm_sync import CanonicalLeadSnapshotPage
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
+from app.application.ports.notifications import (
+    HandoffNotification,
+    NotificationProvider,
+    NotificationSendResult,
+)
 from app.application.use_cases.campaign_cadence_execution import (
     CadenceStepExecutionStatus,
     CadenceStepScheduleStatus,
@@ -31,6 +38,7 @@ from app.domain.compliance.contactability import (
     SmsComplianceState,
     WorkspaceContactPolicy,
 )
+from app.domain.conversations import WorkspaceHandoffConfig
 from app.domain.crm_sync import CRMSyncJobStatus, CRMSyncType, ExternalEventStatus
 from app.domain.identity import Workspace, WorkspaceStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
@@ -44,6 +52,7 @@ from app.infrastructure.persistence.postgres.campaign_execution_repository impor
 from app.infrastructure.persistence.postgres.conversation_repository import (
     PostgresConversationRepository,
     PostgresConversationSummaryRepository,
+    PostgresHandoffCompletionRepository,
     PostgresHandoffRepository,
     PostgresInboundMessageRepository,
 )
@@ -58,6 +67,7 @@ from app.infrastructure.persistence.postgres.models import (
     CampaignModel,
     CampaignVersionModel,
     ConversationSummaryModel,
+    HandoffCompletionModel,
     HandoffModel,
     InboundMessageModel,
     OutboundMessageModel,
@@ -72,6 +82,9 @@ from app.infrastructure.persistence.postgres.workflow_repository import (
 )
 from app.infrastructure.persistence.postgres.workspace_contact_policy_repository import (
     PostgresWorkspaceContactPolicyRepository,
+)
+from app.infrastructure.persistence.postgres.workspace_handoff_config_repository import (
+    PostgresWorkspaceHandoffConfigRepository,
 )
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeEmailProvider,
@@ -133,6 +146,52 @@ class FakeInboundReplyLLMClient:
         )
 
 
+class FakeCRMClient:
+    def __init__(self) -> None:
+        self.notes: list[tuple[WorkspaceId, str, str]] = []
+        self.tags: list[tuple[WorkspaceId, str, str]] = []
+        self.updated_fields: list[tuple[WorkspaceId, str, dict[str, str]]] = []
+
+    async def get_assigned_agent(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+    ) -> CRMAgent | None:
+        return CRMAgent(crm_agent_id="agent-99", name="Agent Smith", email="agent@example.com")
+
+    async def add_note(self, workspace_id: WorkspaceId, crm_lead_id: str, content: str) -> None:
+        self.notes.append((workspace_id, crm_lead_id, content))
+
+    async def add_tag(self, workspace_id: WorkspaceId, crm_lead_id: str, tag: str) -> None:
+        self.tags.append((workspace_id, crm_lead_id, tag))
+
+    async def update_custom_fields(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+        fields: dict[str, str],
+    ) -> None:
+        self.updated_fields.append((workspace_id, crm_lead_id, fields))
+
+
+class FakeNotificationProvider:
+    def __init__(self) -> None:
+        self.notifications: list[HandoffNotification] = []
+
+    async def send_handoff_notification(
+        self,
+        notification: HandoffNotification,
+    ) -> NotificationSendResult:
+        self.notifications.append(notification)
+        return NotificationSendResult(accepted=True, provider_reference="notif-123")
+
+    async def send_preflight_digest(
+        self,
+        notification: object,
+    ) -> NotificationSendResult:  # pragma: no cover
+        raise AssertionError("preflight digest should not be used in this harness")
+
+
 async def test_business_flow_harness_runs_against_real_postgres(
     postgres_session: AsyncSession,
 ) -> None:
@@ -152,6 +211,10 @@ async def test_business_flow_harness_runs_against_real_postgres(
     inbound_message_repository = PostgresInboundMessageRepository(postgres_session)
     conversation_summary_repository = PostgresConversationSummaryRepository(postgres_session)
     handoff_repository = PostgresHandoffRepository(postgres_session)
+    handoff_completion_repository = PostgresHandoffCompletionRepository(postgres_session)
+    workspace_handoff_config_repository = PostgresWorkspaceHandoffConfigRepository(postgres_session)
+    crm_client = FakeCRMClient()
+    notification_provider = FakeNotificationProvider()
 
     sync_result = await run_follow_up_boss_lead_snapshot_sync(
         workspace_id=WORKSPACE_ID,
@@ -236,6 +299,10 @@ async def test_business_flow_harness_runs_against_real_postgres(
         inbound_message_repository=inbound_message_repository,
         conversation_summary_repository=conversation_summary_repository,
         handoff_repository=handoff_repository,
+        crm_client=cast(CRMClient, crm_client),
+        notification_provider=cast(NotificationProvider, notification_provider),
+        workspace_handoff_config_repository=workspace_handoff_config_repository,
+        handoff_completion_repository=handoff_completion_repository,
         llm_client=FakeInboundReplyLLMClient(_classification_json()),
         now=INBOUND_TIME,
         lead_workflow_repository=lead_workflow_repository,
@@ -250,6 +317,7 @@ async def test_business_flow_harness_runs_against_real_postgres(
     assert inbound_result.status == ProcessInboundMessageEventStatus.PROCESSED
     assert inbound_result.handoff_required is True
     assert inbound_result.handoff_id == HANDOFF_ID
+    assert inbound_result.handoff_completion_failure_reason is None
 
     final_workflow = await lead_workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID)
     assert final_workflow is not None
@@ -302,6 +370,17 @@ async def test_business_flow_harness_runs_against_real_postgres(
     )
     assert handoff is not None
     assert handoff.assigned_agent_crm_id == "agent-99"
+    assert handoff.status == "notified"
+
+    handoff_completion = await postgres_session.scalar(
+        select(HandoffCompletionModel).where(HandoffCompletionModel.handoff_id == HANDOFF_ID)
+    )
+    assert handoff_completion is not None
+    assert handoff_completion.notification_recipient_destination == "agent@example.com"
+    assert handoff_completion.completed_at == INBOUND_TIME
+    assert crm_client.tags == [(WORKSPACE_ID, "crm-123", "human_handoff_required")]
+    assert crm_client.updated_fields == [(WORKSPACE_ID, "crm-123", {"handoff_status": "required"})]
+    assert len(notification_provider.notifications) == 1
 
     persisted_message = await postgres_session.scalar(
         select(OutboundMessageModel).where(
@@ -315,9 +394,11 @@ async def test_business_flow_harness_runs_against_real_postgres(
 async def _seed_business_flow_prerequisites(session: AsyncSession) -> None:
     workspace_repository = PostgresWorkspaceRepository(session)
     workspace_contact_policy_repository = PostgresWorkspaceContactPolicyRepository(session)
+    workspace_handoff_config_repository = PostgresWorkspaceHandoffConfigRepository(session)
 
     await workspace_repository.save(_workspace())
     await workspace_contact_policy_repository.save(_workspace_contact_policy())
+    await workspace_handoff_config_repository.save(_workspace_handoff_config())
 
     session.add(
         UserModel(
@@ -410,6 +491,15 @@ def _workspace_contact_policy() -> WorkspaceContactPolicy:
         sms_compliance_state=SmsComplianceState.APPROVED,
         quiet_hours_start=time(10, 0),
         quiet_hours_end=time(17, 0),
+    )
+
+
+def _workspace_handoff_config() -> WorkspaceHandoffConfig:
+    return WorkspaceHandoffConfig(
+        workspace_id=WORKSPACE_ID,
+        fallback_recipient_email="fallback@example.com",
+        crm_handoff_tag="human_handoff_required",
+        crm_custom_fields={"handoff_status": "required"},
     )
 
 

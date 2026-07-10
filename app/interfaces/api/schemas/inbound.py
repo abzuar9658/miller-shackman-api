@@ -20,6 +20,21 @@ class FollowUpBossInboundMessageRequest(BaseModel):
     payload_redacted: dict[str, Any] = Field(default_factory=dict)
 
 
+class FollowUpBossCRMHumanActivityRequest(BaseModel):
+    workspace_id: UUID
+    provider_event_id: str
+    crm_lead_id: str
+    occurred_at: datetime
+    event_type: str
+    activity_type: str | None = None
+    crm_activity_id: str | None = None
+    actor_agent_id: str | None = None
+    changed_field: str | None = None
+    previous_value_redacted: str | None = None
+    new_value_redacted: str | None = None
+    payload_redacted: dict[str, Any] = Field(default_factory=dict)
+
+
 class InboundWebhookResponse(BaseModel):
     status: str
     external_event_id: UUID | None = None
@@ -32,3 +47,18 @@ class InboundWebhookResponse(BaseModel):
     opt_out_detected: bool = False
     reasons: list[str] = Field(default_factory=list)
     classification_reasons: list[str] = Field(default_factory=list)
+
+
+class CRMHumanActivityWebhookResponse(BaseModel):
+    status: str
+    external_event_id: UUID | None = None
+    lead_id: UUID | None = None
+    workflow_id: UUID | None = None
+    workflow_transition_id: UUID | None = None
+    activity_kind: str | None = None
+    pause_reason: str | None = None
+    pause_requested: bool = False
+    signal_sent: bool = False
+    signal_failure_reason: str | None = None
+    transition_skip_reason: str | None = None
+    reasons: list[str] = Field(default_factory=list)
