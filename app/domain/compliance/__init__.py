@@ -3,10 +3,12 @@ from app.domain.compliance.contactability import (
     ContactabilityReasonCode,
     ContactChannel,
     ContactPermissionStatus,
+    ContactSuppressionKind,
     LeadContactabilityFacts,
     SmsComplianceState,
     SuppressionType,
     WorkspaceContactPolicy,
+    default_workspace_contact_policy,
     evaluate_contactability,
 )
 from app.domain.compliance.enrollment import (
@@ -24,6 +26,7 @@ __all__ = [
     "CampaignEnrollmentFacts",
     "CampaignEnrollmentPolicy",
     "ContactChannel",
+    "ContactSuppressionKind",
     "ContactPermissionStatus",
     "ContactabilityDecision",
     "ContactabilityReasonCode",
@@ -33,6 +36,7 @@ __all__ = [
     "SmsComplianceState",
     "SuppressionType",
     "WorkspaceContactPolicy",
+    "default_workspace_contact_policy",
     "evaluate_campaign_enrollment",
     "evaluate_contactability",
     "sort_enrollment_candidates_fifo",

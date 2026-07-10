@@ -31,8 +31,11 @@ from app.application.use_cases.apply_inbound_workflow_transition import (
     apply_inbound_workflow_transition,
 )
 from app.application.use_cases.complete_handoff import HandoffCompletionStatus, complete_handoff
+from app.application.use_cases.process_contact_suppression_event import (
+    apply_contact_suppression_to_lead,
+)
 from app.domain.common.ids import LeadId, WorkspaceId
-from app.domain.compliance.contactability import ContactChannel
+from app.domain.compliance.contactability import ContactChannel, ContactSuppressionKind
 from app.domain.conversations import (
     Conversation,
     ConversationStatus,
@@ -294,6 +297,15 @@ async def process_inbound_message_event(
             processed_at=now,
         ),
     )
+    if classification.opt_out_detected:
+        lead = await apply_contact_suppression_to_lead(
+            lead=lead,
+            suppression_kind=_contact_suppression_kind(event.channel),
+            source_provider=event.provider,
+            source_event_id=event.provider_event_id,
+            occurred_at=event.received_at,
+            lead_repository=lead_repository,
+        )
     await conversation_summary_repository.save(
         ConversationSummary(
             summary_id=(summary_id_factory or uuid4)(),
@@ -417,6 +429,12 @@ def _crm_provider(raw_provider: str) -> CRMProvider | None:
         return CRMProvider(raw_provider)
     except ValueError:
         return None
+
+
+def _contact_suppression_kind(channel: ContactChannel) -> ContactSuppressionKind:
+    if channel == ContactChannel.SMS:
+        return ContactSuppressionKind.SMS_OPT_OUT
+    return ContactSuppressionKind.EMAIL_UNSUBSCRIBED
 
 
 async def _apply_workflow_transition_if_configured(

@@ -378,17 +378,23 @@ Business result:
 
 ### Slice 13 — Opt-out and unsubscribe event completion
 
-Status: planned.
+Status: complete.
 
 Goal: complete the real suppression paths for SMS and email.
 
-Planned deliverables:
+Implemented in this slice:
 
 - ingest SMS opt-out keywords from provider/CRM events
 - ingest email unsubscribe events from provider/CRM events
 - persist channel or global suppression state with evidence
 - stop affected workflows and prevent future sends immediately
 - add duplicate-event and idempotency coverage
+
+Business result:
+
+- real suppression events now mutate persisted lead facts, stop unsafe nurture execution,
+  and expose an explicit webhook/use-case seam for SMS opt-out, email unsubscribe, and
+  do-not-contact handling
 
 ### Slice 14 — Daily dormant selector + pre-flight digest flow
 
@@ -477,9 +483,8 @@ Planned deliverables:
 
 Start the next slice only after explicit approval:
 
-1. complete opt-out and unsubscribe handling across real provider/CRM events
-2. wire dormant-lead selection and pre-flight digest/veto flow
-3. add provider delivery callbacks and outbound status reconciliation
-4. add outbox/RabbitMQ, admin APIs, reporting, and operational readiness slices in
+1. wire dormant-lead selection and pre-flight digest/veto flow
+2. add provider delivery callbacks and outbound status reconciliation
+3. add outbox/RabbitMQ, admin APIs, reporting, and operational readiness slices in
    order
-5. run `ruff`, `mypy`, targeted tests, and full `pytest`
+4. run `ruff`, `mypy`, targeted tests, and full `pytest`

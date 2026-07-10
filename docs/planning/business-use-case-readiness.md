@@ -24,7 +24,7 @@ The target V1 business scenario is:
 
 ## Current Baseline
 
-Current baseline: **Slice 12 complete**.
+Current baseline: **Slice 13 complete**.
 
 This means the backend can now:
 
@@ -45,10 +45,12 @@ This means the backend can now:
   custom-field updates, and persisting handoff completion status for retries
 - consume CRM human-activity events that pause active nurture and signal Temporal to
   stop pending AI sends
+- persist SMS opt-out, email unsubscribe, and do-not-contact suppression events with
+  evidence, idempotency, and workflow pause/suppress handling
 
 The backend now has the core V1 business-flow spine, but it is not yet V1-complete
-because dormant-selector operations, opt-out event completion, delivery callbacks,
-and the remaining operational readiness slices are still missing.
+because dormant-selector operations, provider delivery callbacks, and the remaining
+operational readiness slices are still missing.
 
 ## V1 Status Summary
 
@@ -65,7 +67,6 @@ and the remaining operational readiness slices are still missing.
 ### What is left before V1 can be called complete
 
 - wire the daily dormant-lead selector and full pre-flight digest/veto flow
-- complete opt-out and unsubscribe handling across real provider/CRM event paths
 - wire provider delivery callbacks into outbound status updates
 - complete the operational slices for outbox/RabbitMQ, campaign admin/publishing,
   reporting, and deployed tenant-isolation hardening
@@ -74,7 +75,7 @@ and the remaining operational readiness slices are still missing.
 
 - the backend is past the foundation stage and into completion work
 - the project is **not yet V1-complete**
-- the next most important milestone is **opt-out and unsubscribe completion**
+- the next most important milestone is **dormant selector + pre-flight digest**
 
 ## Done Now
 
@@ -91,6 +92,8 @@ and the remaining operational readiness slices are still missing.
   handoff context back to Follow Up Boss
 - CRM human activity can now pause active nurture and signal Temporal with an
   explicit pause reason
+- opt-out and unsubscribe events now persist suppression facts on the lead and stop
+  unsafe workflow execution through explicit pause/suppress transitions
 - workflow state transitions are explicit and auditable
 - workspace-level contact policy is persisted and used by cadence execution
   (SMS compliance state, quiet hours, timezone)
@@ -116,7 +119,6 @@ and the remaining operational readiness slices are still missing.
 
 - daily dormant-lead selection and the full pre-flight digest workflow are not yet
   wired into a repeatable operational flow
-- opt-out and unsubscribe handling still needs the full provider/CRM event path
 
 ### Important technical gaps
 
@@ -128,10 +130,9 @@ and the remaining operational readiness slices are still missing.
 
 ## Recommended Next Order
 
-1. complete opt-out and unsubscribe handling across real provider/CRM events
-2. wire dormant-lead selection and full pre-flight digest flow
-3. add provider callback handling and outbound status reconciliation
-4. add outbox/RabbitMQ, reporting, admin APIs, and operational readiness pieces
+1. wire dormant-lead selection and full pre-flight digest flow
+2. add provider callback handling and outbound status reconciliation
+3. add outbox/RabbitMQ, reporting, admin APIs, and operational readiness pieces
 
 ## Ready-to-Test Definitions
 
@@ -155,7 +156,7 @@ We can claim this when the backend additionally has:
 - full multi-step cadence execution
 - handoff notification and CRM writeback
 - human-activity pause behavior
-- opt-out and unsubscribe enforcement across real inbound events
+- opt-out and unsubscribe enforcement across real provider/CRM events
 
 ### Ready for V1 completion
 

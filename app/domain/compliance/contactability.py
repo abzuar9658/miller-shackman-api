@@ -27,6 +27,12 @@ class SuppressionType(StrEnum):
     EMAIL_UNSUBSCRIBED = "email_unsubscribed"
 
 
+class ContactSuppressionKind(StrEnum):
+    SMS_OPT_OUT = "sms_opt_out"
+    EMAIL_UNSUBSCRIBED = "email_unsubscribed"
+    DO_NOT_CONTACT = "do_not_contact"
+
+
 class ContactabilityReasonCode(StrEnum):
     DO_NOT_CONTACT = "do_not_contact"
     INSUFFICIENT_DATA = "insufficient_data"
