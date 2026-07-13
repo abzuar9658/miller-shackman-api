@@ -57,6 +57,21 @@ class PreflightDigestRecord:
 
 
 class PreflightDigestRepository(Protocol):
+    async def list_digests_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 50,
+    ) -> tuple[PreflightDigestRecord, ...]:
+        raise NotImplementedError
+
+    async def get_digest_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        digest_id: str,
+    ) -> PreflightDigestRecord | None:
+        raise NotImplementedError
+
     async def get_digest(
         self,
         workspace_id: WorkspaceId,

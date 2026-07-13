@@ -2,6 +2,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from uuid import UUID, uuid4
 
+from app.application.ports.event_bus import EventBus
 from app.application.ports.repositories import (
     CampaignEnrollmentRepository,
     LeadWorkflowRepository,
@@ -16,6 +17,7 @@ from app.domain.campaigns.enrollment import (
     build_enrollment_reason_codes,
 )
 from app.domain.common.ids import CampaignId, CampaignVersionId, LeadId, UserId, WorkspaceId
+from app.domain.events import AggregateType, DomainEvent, DomainEventType
 from app.domain.workflows import (
     LeadWorkflow,
     WorkflowState,
@@ -43,6 +45,7 @@ async def start_single_campaign_enrollment(
     transition_id: UUID | None = None,
     temporal_workflow_id: str | None = None,
     metadata: Mapping[str, object] | None = None,
+    event_bus: EventBus | None = None,
 ) -> LeadStartResult:
     campaign_enrollment_id = campaign_enrollment_id or uuid4()
     workflow_id = workflow_id or uuid4()
@@ -113,6 +116,14 @@ async def start_single_campaign_enrollment(
             campaign_version_id=campaign_version_id,
             temporal_workflow_id=temporal_workflow_id,
         )
+        await _publish_enrollment_events(
+            event_bus=event_bus,
+            enrollment=enrollment,
+            workflow=workflow,
+            transition=transition,
+            temporal_workflow_id=temporal_workflow_id,
+            now=now,
+        )
     except Exception as error:
         return LeadStartResult(
             lead_id=lead_id,
@@ -134,3 +145,52 @@ async def start_single_campaign_enrollment(
 
 def _default_temporal_workflow_id(lead_id: LeadId, campaign_enrollment_id: UUID) -> str:
     return f"lead-nurture:{lead_id}:{campaign_enrollment_id}"
+
+
+async def _publish_enrollment_events(
+    *,
+    event_bus: EventBus | None,
+    enrollment: CampaignEnrollment,
+    workflow: LeadWorkflow,
+    transition: WorkflowTransition,
+    temporal_workflow_id: str,
+    now: datetime,
+) -> None:
+    if event_bus is None:
+        return
+    await event_bus.publish(
+        DomainEvent(
+            workspace_id=enrollment.workspace_id,
+            aggregate_type=AggregateType.CAMPAIGN,
+            aggregate_id=enrollment.campaign_id,
+            event_type=DomainEventType.CAMPAIGN_ENROLLED,
+            payload={
+                "campaign_enrollment_id": str(enrollment.campaign_enrollment_id),
+                "campaign_id": str(enrollment.campaign_id),
+                "campaign_version_id": str(enrollment.campaign_version_id),
+                "lead_id": str(enrollment.lead_id),
+                "source": enrollment.source.value,
+                "status": enrollment.status.value,
+                "temporal_workflow_id": temporal_workflow_id,
+                "occurred_at": now.isoformat(),
+            },
+        ),
+    )
+    await event_bus.publish(
+        DomainEvent(
+            workspace_id=workflow.workspace_id,
+            aggregate_type=AggregateType.WORKFLOW,
+            aggregate_id=workflow.workflow_id,
+            event_type=DomainEventType.WORKFLOW_TRANSITIONED,
+            payload={
+                "workflow_id": str(workflow.workflow_id),
+                "transition_id": str(transition.transition_id),
+                "lead_id": str(workflow.lead_id),
+                "campaign_id": str(workflow.campaign_id),
+                "from_state": None,
+                "to_state": transition.to_state.value,
+                "reason_code": transition.reason_code.value,
+                "occurred_at": now.isoformat(),
+            },
+        ),
+    )

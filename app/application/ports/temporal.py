@@ -28,11 +28,29 @@ class PauseLeadNurtureWorkflowSignal:
     external_event_id: UUID | None = None
 
 
+@dataclass(frozen=True)
+class ResumeLeadNurtureWorkflowSignal:
+    workspace_id: WorkspaceId
+    lead_id: LeadId
+    occurred_at: datetime
+    reason: str
+    actor_user_id: UUID | None = None
+    external_event_id: UUID | None = None
+
+
 class LeadNurtureWorkflowSignaler(Protocol):
     async def signal_pause_lead_nurture_workflow(
         self,
         *,
         temporal_workflow_id: str,
         signal: PauseLeadNurtureWorkflowSignal,
+    ) -> None:
+        raise NotImplementedError
+
+    async def signal_resume_lead_nurture_workflow(
+        self,
+        *,
+        temporal_workflow_id: str,
+        signal: ResumeLeadNurtureWorkflowSignal,
     ) -> None:
         raise NotImplementedError

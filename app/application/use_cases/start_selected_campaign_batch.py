@@ -2,6 +2,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
+from app.application.ports.event_bus import EventBus
 from app.application.ports.repositories import (
     CampaignEnrollmentRepository,
     LeadWorkflowRepository,
@@ -39,6 +40,7 @@ async def start_selected_campaign_batch(
     temporal_workflow_starter: TemporalWorkflowStarter,
     now: datetime,
     metadata: Mapping[str, object] | None = None,
+    event_bus: EventBus | None = None,
 ) -> StartSelectedCampaignBatchResult:
     lead_results: list[LeadStartResult] = []
     started_count = 0
@@ -76,6 +78,7 @@ async def start_selected_campaign_batch(
             temporal_workflow_starter=temporal_workflow_starter,
             now=now,
             metadata=metadata,
+            event_bus=event_bus,
         )
         lead_results.append(result)
         if result.status == LeadStartStatus.STARTED:

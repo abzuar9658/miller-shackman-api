@@ -1,5 +1,5 @@
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from enum import StrEnum
 from uuid import UUID, uuid4
 
@@ -9,10 +9,19 @@ from app.application.ports.repositories import (
     AuthAuditLogRepository,
     InvitationRepository,
     UserRepository,
+    WorkspaceContactPolicyRepository,
+    WorkspaceHandoffConfigRepository,
     WorkspaceMembershipRepository,
     WorkspaceRepository,
 )
+from app.application.services.authentication import render_invitation_email_body
 from app.application.use_cases.authentication import AuthReasonCode
+from app.domain.compliance import (
+    SmsComplianceState,
+    WorkspaceContactPolicy,
+    default_workspace_contact_policy,
+)
+from app.domain.conversations import WorkspaceHandoffConfig, default_workspace_handoff_config
 from app.domain.identity import (
     AuthAuditEventType,
     AuthAuditLog,
@@ -55,6 +64,26 @@ class UpdateUserStatusStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class WorkspaceSettingsReadStatus(StrEnum):
+    FOUND = "found"
+    REJECTED = "rejected"
+
+
+class UpdateWorkspaceContactPolicyStatus(StrEnum):
+    UPDATED = "updated"
+    REJECTED = "rejected"
+
+
+class UpdateWorkspaceHandoffConfigStatus(StrEnum):
+    UPDATED = "updated"
+    REJECTED = "rejected"
+
+
+class UpdateWorkspaceTimezoneStatus(StrEnum):
+    UPDATED = "updated"
+    REJECTED = "rejected"
+
+
 @dataclass(frozen=True)
 class CreateWorkspaceResult:
     status: CreateWorkspaceStatus
@@ -67,6 +96,7 @@ class CreateWorkspaceResult:
 class WorkspaceUser:
     user: User
     membership: WorkspaceMembership
+    invitation_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +124,41 @@ class UpdateWorkspaceMembershipResult:
 class UpdateUserStatusResult:
     status: UpdateUserStatusStatus
     user: User | None = None
+    reasons: tuple[AuthReasonCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class WorkspaceSettingsView:
+    workspace: Workspace
+    contact_policy: WorkspaceContactPolicy
+    handoff_config: WorkspaceHandoffConfig
+
+
+@dataclass(frozen=True)
+class WorkspaceSettingsReadResult:
+    status: WorkspaceSettingsReadStatus
+    view: WorkspaceSettingsView | None = None
+    reasons: tuple[AuthReasonCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class UpdateWorkspaceContactPolicyResult:
+    status: UpdateWorkspaceContactPolicyStatus
+    contact_policy: WorkspaceContactPolicy | None = None
+    reasons: tuple[AuthReasonCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class UpdateWorkspaceHandoffConfigResult:
+    status: UpdateWorkspaceHandoffConfigStatus
+    handoff_config: WorkspaceHandoffConfig | None = None
+    reasons: tuple[AuthReasonCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class UpdateWorkspaceTimezoneResult:
+    status: UpdateWorkspaceTimezoneStatus
+    workspace: Workspace | None = None
     reasons: tuple[AuthReasonCode, ...] = ()
 
 
@@ -159,6 +224,7 @@ async def list_workspace_users(
     workspace_repository: WorkspaceRepository,
     membership_repository: WorkspaceMembershipRepository,
     user_repository: UserRepository,
+    invitation_repository: InvitationRepository,
 ) -> ListWorkspaceUsersResult:
     effective_actor = await _actor_for_workspace(
         actor=actor,
@@ -172,7 +238,7 @@ async def list_workspace_users(
             reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
         )
 
-    permission = evaluate_permission(effective_actor, PermissionCapability.MANAGE_WORKSPACE_USERS)
+    permission = evaluate_permission(effective_actor, PermissionCapability.INVITE_WORKSPACE_USER)
     if not permission.allowed:
         return ListWorkspaceUsersResult(
             status=ListWorkspaceUsersStatus.REJECTED,
@@ -192,7 +258,21 @@ async def list_workspace_users(
         user = await user_repository.get_by_id(membership.user_id)
         if user is None:
             continue
-        users.append(WorkspaceUser(user=user, membership=membership))
+        invitation_id: UUID | None = None
+        if membership.status == WorkspaceMembershipStatus.INVITED:
+            invitation = await invitation_repository.get_by_workspace_and_email_normalized(
+                workspace_id,
+                user.email_normalized,
+            )
+            if invitation is not None and invitation.accepted_at is None and invitation.revoked_at is None:
+                invitation_id = invitation.invitation_id
+        users.append(
+            WorkspaceUser(
+                user=user,
+                membership=membership,
+                invitation_id=invitation_id,
+            ),
+        )
 
     return ListWorkspaceUsersResult(
         status=ListWorkspaceUsersStatus.FOUND,
@@ -211,6 +291,7 @@ async def resend_invitation(
     audit_log_repository: AuthAuditLogRepository,
     opaque_token_service: OpaqueTokenService,
     email_provider: EmailProvider,
+    frontend_app_base_url: str,
     now: datetime,
     invitation_ttl: timedelta = timedelta(days=7),
 ) -> ResendInvitationResult:
@@ -269,10 +350,11 @@ async def resend_invitation(
         EmailMessage(
             to_email=saved_invitation.email,
             subject=f"You're invited to {workspace.name}",
-            body=_invitation_email_body(
+            body=render_invitation_email_body(
                 workspace_name=workspace.name,
                 role=saved_invitation.role,
                 invitation_token=new_token.plaintext,
+                frontend_app_base_url=frontend_app_base_url,
             ),
             idempotency_key=f"auth-invitation-resent:{saved_invitation.invitation_id}:{saved_invitation.expires_at.isoformat()}",
         ),
@@ -321,7 +403,7 @@ async def update_workspace_membership(
             reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
         )
 
-    permission = evaluate_permission(effective_actor, PermissionCapability.MANAGE_WORKSPACE_USERS)
+    permission = evaluate_permission(effective_actor, PermissionCapability.INVITE_WORKSPACE_USER)
     if not permission.allowed:
         return UpdateWorkspaceMembershipResult(
             status=UpdateWorkspaceMembershipStatus.REJECTED,
@@ -409,7 +491,7 @@ async def update_user_status(
             reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
         )
 
-    permission = evaluate_permission(effective_actor, PermissionCapability.MANAGE_WORKSPACE_USERS)
+    permission = evaluate_permission(effective_actor, PermissionCapability.INVITE_WORKSPACE_USER)
     if not permission.allowed:
         return UpdateUserStatusResult(
             status=UpdateUserStatusStatus.REJECTED,
@@ -455,6 +537,310 @@ async def update_user_status(
         status=UpdateUserStatusStatus.UPDATED,
         user=saved_user,
     )
+
+
+async def get_workspace_settings(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: UUID,
+    workspace_repository: WorkspaceRepository,
+    membership_repository: WorkspaceMembershipRepository,
+    contact_policy_repository: WorkspaceContactPolicyRepository,
+    handoff_config_repository: WorkspaceHandoffConfigRepository,
+) -> WorkspaceSettingsReadResult:
+    effective_actor = await _actor_for_workspace(
+        actor=actor,
+        workspace_id=workspace_id,
+        workspace_repository=workspace_repository,
+        membership_repository=membership_repository,
+    )
+    if effective_actor is None:
+        return WorkspaceSettingsReadResult(
+            status=WorkspaceSettingsReadStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
+        )
+
+    permission = evaluate_permission(
+        effective_actor,
+        PermissionCapability.VIEW_WORKSPACE_REPORTING,
+    )
+    if not permission.allowed:
+        return WorkspaceSettingsReadResult(
+            status=WorkspaceSettingsReadStatus.REJECTED,
+            reasons=(AuthReasonCode.PERMISSION_DENIED,),
+        )
+
+    workspace = await workspace_repository.get_by_id(workspace_id)
+    if workspace is None:
+        return WorkspaceSettingsReadResult(
+            status=WorkspaceSettingsReadStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_NOT_FOUND,),
+        )
+
+    contact_policy = await contact_policy_repository.get_by_workspace_id(workspace_id)
+    handoff_config = await handoff_config_repository.get_by_workspace_id(workspace_id)
+    return WorkspaceSettingsReadResult(
+        status=WorkspaceSettingsReadStatus.FOUND,
+        view=WorkspaceSettingsView(
+            workspace=workspace,
+            contact_policy=contact_policy or default_workspace_contact_policy(workspace_id),
+            handoff_config=handoff_config or default_workspace_handoff_config(workspace_id),
+        ),
+    )
+
+
+async def update_workspace_contact_policy(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: UUID,
+    sms_compliance_state: SmsComplianceState,
+    quiet_hours_start: time,
+    quiet_hours_end: time,
+    workspace_repository: WorkspaceRepository,
+    membership_repository: WorkspaceMembershipRepository,
+    contact_policy_repository: WorkspaceContactPolicyRepository,
+    audit_log_repository: AuthAuditLogRepository,
+    now: datetime,
+) -> UpdateWorkspaceContactPolicyResult:
+    effective_actor = await _actor_for_workspace(
+        actor=actor,
+        workspace_id=workspace_id,
+        workspace_repository=workspace_repository,
+        membership_repository=membership_repository,
+    )
+    if effective_actor is None:
+        return UpdateWorkspaceContactPolicyResult(
+            status=UpdateWorkspaceContactPolicyStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
+        )
+
+    permission = evaluate_permission(
+        effective_actor,
+        PermissionCapability.CHANGE_CONSENT_SUPPRESSION_POLICY,
+    )
+    if not permission.allowed:
+        return UpdateWorkspaceContactPolicyResult(
+            status=UpdateWorkspaceContactPolicyStatus.REJECTED,
+            reasons=(AuthReasonCode.PERMISSION_DENIED,),
+        )
+
+    workspace = await workspace_repository.get_by_id(workspace_id)
+    if workspace is None:
+        return UpdateWorkspaceContactPolicyResult(
+            status=UpdateWorkspaceContactPolicyStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_NOT_FOUND,),
+        )
+
+    current_policy = await contact_policy_repository.get_by_workspace_id(
+        workspace_id
+    ) or default_workspace_contact_policy(workspace_id)
+    if (
+        current_policy.sms_compliance_state == sms_compliance_state
+        and current_policy.quiet_hours_start == quiet_hours_start
+        and current_policy.quiet_hours_end == quiet_hours_end
+    ):
+        return UpdateWorkspaceContactPolicyResult(
+            status=UpdateWorkspaceContactPolicyStatus.UPDATED,
+            contact_policy=current_policy,
+        )
+
+    updated_policy = replace(
+        current_policy,
+        sms_compliance_state=sms_compliance_state,
+        quiet_hours_start=quiet_hours_start,
+        quiet_hours_end=quiet_hours_end,
+    )
+    saved_policy = await contact_policy_repository.save(updated_policy)
+    await audit_log_repository.append(
+        _auth_audit_log(
+            event_type=AuthAuditEventType.WORKSPACE_CONTACT_POLICY_UPDATED,
+            now=now,
+            workspace_id=workspace_id,
+            actor_user_id=actor.user_id,
+            event_details={
+                "sms_compliance_state": saved_policy.sms_compliance_state.value,
+                "quiet_hours_start": (
+                    saved_policy.quiet_hours_start.isoformat()
+                    if saved_policy.quiet_hours_start is not None
+                    else ""
+                ),
+                "quiet_hours_end": (
+                    saved_policy.quiet_hours_end.isoformat()
+                    if saved_policy.quiet_hours_end is not None
+                    else ""
+                ),
+            },
+        ),
+    )
+    return UpdateWorkspaceContactPolicyResult(
+        status=UpdateWorkspaceContactPolicyStatus.UPDATED,
+        contact_policy=saved_policy,
+    )
+
+
+async def update_workspace_handoff_config(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: UUID,
+    fallback_recipient_email: str | None,
+    crm_handoff_tag: str | None,
+    crm_custom_fields: dict[str, str],
+    workspace_repository: WorkspaceRepository,
+    membership_repository: WorkspaceMembershipRepository,
+    handoff_config_repository: WorkspaceHandoffConfigRepository,
+    audit_log_repository: AuthAuditLogRepository,
+    now: datetime,
+) -> UpdateWorkspaceHandoffConfigResult:
+    effective_actor = await _actor_for_workspace(
+        actor=actor,
+        workspace_id=workspace_id,
+        workspace_repository=workspace_repository,
+        membership_repository=membership_repository,
+    )
+    if effective_actor is None:
+        return UpdateWorkspaceHandoffConfigResult(
+            status=UpdateWorkspaceHandoffConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
+        )
+
+    permission = evaluate_permission(
+        effective_actor,
+        PermissionCapability.CHANGE_CONSENT_SUPPRESSION_POLICY,
+    )
+    if not permission.allowed:
+        return UpdateWorkspaceHandoffConfigResult(
+            status=UpdateWorkspaceHandoffConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.PERMISSION_DENIED,),
+        )
+
+    workspace = await workspace_repository.get_by_id(workspace_id)
+    if workspace is None:
+        return UpdateWorkspaceHandoffConfigResult(
+            status=UpdateWorkspaceHandoffConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_NOT_FOUND,),
+        )
+
+    normalized_email = _normalize_optional_text(fallback_recipient_email)
+    normalized_tag = _normalize_optional_text(crm_handoff_tag)
+    normalized_custom_fields = _normalize_custom_fields(crm_custom_fields)
+    current_config = await handoff_config_repository.get_by_workspace_id(
+        workspace_id
+    ) or default_workspace_handoff_config(workspace_id)
+    if (
+        current_config.fallback_recipient_email == normalized_email
+        and current_config.crm_handoff_tag == normalized_tag
+        and dict(current_config.crm_custom_fields) == normalized_custom_fields
+    ):
+        return UpdateWorkspaceHandoffConfigResult(
+            status=UpdateWorkspaceHandoffConfigStatus.UPDATED,
+            handoff_config=current_config,
+        )
+
+    updated_config = WorkspaceHandoffConfig(
+        workspace_id=workspace_id,
+        fallback_recipient_email=normalized_email,
+        crm_handoff_tag=normalized_tag,
+        crm_custom_fields=normalized_custom_fields,
+    )
+    saved_config = await handoff_config_repository.save(updated_config)
+    await audit_log_repository.append(
+        _auth_audit_log(
+            event_type=AuthAuditEventType.WORKSPACE_HANDOFF_CONFIG_UPDATED,
+            now=now,
+            workspace_id=workspace_id,
+            actor_user_id=actor.user_id,
+            event_details={
+                "fallback_recipient_email": saved_config.fallback_recipient_email or "",
+                "crm_handoff_tag": saved_config.crm_handoff_tag or "",
+                "crm_custom_fields": str(dict(saved_config.crm_custom_fields)),
+            },
+        ),
+    )
+    return UpdateWorkspaceHandoffConfigResult(
+        status=UpdateWorkspaceHandoffConfigStatus.UPDATED,
+        handoff_config=saved_config,
+    )
+
+
+async def update_workspace_default_timezone(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: UUID,
+    default_timezone: str,
+    workspace_repository: WorkspaceRepository,
+    membership_repository: WorkspaceMembershipRepository,
+    audit_log_repository: AuthAuditLogRepository,
+    now: datetime,
+) -> UpdateWorkspaceTimezoneResult:
+    effective_actor = await _actor_for_workspace(
+        actor=actor,
+        workspace_id=workspace_id,
+        workspace_repository=workspace_repository,
+        membership_repository=membership_repository,
+    )
+    if effective_actor is None:
+        return UpdateWorkspaceTimezoneResult(
+            status=UpdateWorkspaceTimezoneStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
+        )
+
+    permission = evaluate_permission(
+        effective_actor,
+        PermissionCapability.CHANGE_CONSENT_SUPPRESSION_POLICY,
+    )
+    if not permission.allowed:
+        return UpdateWorkspaceTimezoneResult(
+            status=UpdateWorkspaceTimezoneStatus.REJECTED,
+            reasons=(AuthReasonCode.PERMISSION_DENIED,),
+        )
+
+    workspace = await workspace_repository.get_by_id(workspace_id)
+    if workspace is None:
+        return UpdateWorkspaceTimezoneResult(
+            status=UpdateWorkspaceTimezoneStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_NOT_FOUND,),
+        )
+
+    normalized_timezone = default_timezone.strip()
+    if workspace.default_timezone == normalized_timezone:
+        return UpdateWorkspaceTimezoneResult(
+            status=UpdateWorkspaceTimezoneStatus.UPDATED,
+            workspace=workspace,
+        )
+
+    saved_workspace = await workspace_repository.save(
+        replace(workspace, default_timezone=normalized_timezone, updated_at=now),
+    )
+    await audit_log_repository.append(
+        _auth_audit_log(
+            event_type=AuthAuditEventType.WORKSPACE_TIMEZONE_UPDATED,
+            now=now,
+            workspace_id=workspace_id,
+            actor_user_id=actor.user_id,
+            event_details={"default_timezone": saved_workspace.default_timezone},
+        ),
+    )
+    return UpdateWorkspaceTimezoneResult(
+        status=UpdateWorkspaceTimezoneStatus.UPDATED,
+        workspace=saved_workspace,
+    )
+
+
+def _normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _normalize_custom_fields(values: dict[str, str]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for key, value in values.items():
+        normalized_key = key.strip()
+        normalized_value = value.strip()
+        if normalized_key and normalized_value:
+            normalized[normalized_key] = normalized_value
+    return normalized
 
 
 async def _actor_for_workspace(
@@ -506,16 +892,4 @@ def _auth_audit_log(
         event_type=event_type,
         event_details=event_details or {},
         created_at=now,
-    )
-
-
-def _invitation_email_body(
-    *,
-    workspace_name: str,
-    role: WorkspaceMembershipRole,
-    invitation_token: str,
-) -> str:
-    return (
-        f"You've been invited to join {workspace_name} as {role.value}. "
-        f"Use this invitation token to complete signup: {invitation_token}"
     )

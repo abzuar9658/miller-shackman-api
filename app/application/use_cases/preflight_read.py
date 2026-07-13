@@ -1,0 +1,97 @@
+from dataclasses import dataclass
+from enum import StrEnum
+
+from app.application.ports.preflight_digest import PreflightDigestRecord, PreflightDigestRepository
+from app.domain.common.ids import WorkspaceId
+from app.domain.identity import AuthenticatedActor, PermissionCapability, evaluate_permission
+
+
+class PreflightReadStatus(StrEnum):
+    OK = "ok"
+    NOT_FOUND = "not_found"
+    REJECTED = "rejected"
+
+
+class PreflightReadReasonCode(StrEnum):
+    PERMISSION_DENIED = "permission_denied"
+    DIGEST_NOT_FOUND = "digest_not_found"
+
+
+@dataclass(frozen=True)
+class PreflightDigestSummaryView:
+    digest: PreflightDigestRecord
+    lead_count: int
+    veto_count: int
+    recipient_count: int
+
+
+@dataclass(frozen=True)
+class PreflightListResult:
+    status: PreflightReadStatus
+    views: tuple[PreflightDigestSummaryView, ...] = ()
+    reasons: tuple[PreflightReadReasonCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class PreflightDetailResult:
+    status: PreflightReadStatus
+    view: PreflightDigestSummaryView | None = None
+    reasons: tuple[PreflightReadReasonCode, ...] = ()
+
+
+async def list_preflight_digest_views(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: WorkspaceId,
+    repository: PreflightDigestRepository,
+    limit: int = 50,
+) -> PreflightListResult:
+    if not _can_view_workspace_preflight(actor):
+        return PreflightListResult(
+            status=PreflightReadStatus.REJECTED,
+            reasons=(PreflightReadReasonCode.PERMISSION_DENIED,),
+        )
+
+    digests = await repository.list_digests_for_workspace(workspace_id, limit=limit)
+    return PreflightListResult(
+        status=PreflightReadStatus.OK,
+        views=tuple(_summary_view(digest) for digest in digests),
+    )
+
+
+async def get_preflight_digest_view(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: WorkspaceId,
+    digest_id: str,
+    repository: PreflightDigestRepository,
+) -> PreflightDetailResult:
+    if not _can_view_workspace_preflight(actor):
+        return PreflightDetailResult(
+            status=PreflightReadStatus.REJECTED,
+            reasons=(PreflightReadReasonCode.PERMISSION_DENIED,),
+        )
+
+    digest = await repository.get_digest_by_id(workspace_id, digest_id)
+    if digest is None:
+        return PreflightDetailResult(
+            status=PreflightReadStatus.NOT_FOUND,
+            reasons=(PreflightReadReasonCode.DIGEST_NOT_FOUND,),
+        )
+    return PreflightDetailResult(
+        status=PreflightReadStatus.OK,
+        view=_summary_view(digest),
+    )
+
+
+def _summary_view(digest: PreflightDigestRecord) -> PreflightDigestSummaryView:
+    return PreflightDigestSummaryView(
+        digest=digest,
+        lead_count=len(digest.entries),
+        veto_count=len(digest.vetoes),
+        recipient_count=len({entry.recipient_id for entry in digest.entries}),
+    )
+
+
+def _can_view_workspace_preflight(actor: AuthenticatedActor) -> bool:
+    return bool(evaluate_permission(actor, PermissionCapability.VIEW_WORKSPACE_REPORTING).allowed)
