@@ -398,49 +398,99 @@ Business result:
 
 ### Slice 14 — Daily dormant selector + pre-flight digest flow
 
-Status: planned.
+Status: complete.
 
 Goal: wire the intended V1 dormant-lead operating loop without introducing a rules
 engine.
 
-Planned deliverables:
+Implemented deliverables:
 
-- simple dormant-lead selector using the configured inactivity threshold
-- FIFO campaign-cap enforcement for eligible candidates
-- pre-flight digest generation for assigned agents
-- veto recording and veto enforcement before workflow start and before send
-- tests covering uncertain CRM activity, caps, and veto behavior
+- `DormantCandidateSelector` port and Postgres query that selects the oldest reliable
+  dormant leads not already enrolled in the campaign, ordered by
+  `last_meaningful_communication_at` and capped by a configurable buffer.
+- `CampaignExecutionRepository.get_active_for_campaign(...)` so the selector can load
+  the published campaign version directly from `campaign_id`.
+- `run_dormant_selector_batch(...)` orchestration use case that:
+  - loads active campaign execution config and workspace contact policy
+  - evaluates each candidate through contactability and enrollment rules
+  - issues a pre-flight digest when the campaign requires it and the lead has an
+    assigned agent
+  - enforces the campaign daily cap via the existing FIFO start-queue evaluator
+  - starts the selected batch through `start_selected_campaign_batch`
+- Postgres `PreflightDigestRepository` that persists the batch-level digest aggregate
+  (entries and notification records as JSONB) alongside per-lead vetoes in the
+  `preflight_vetoes` table, with idempotent veto inserts and full round-trip loading.
+- Minimal API routes:
+  - `POST /workspaces/{workspace_id}/campaigns/{campaign_id}/dormant-selector-runs`
+  - `POST /workspaces/{workspace_id}/campaigns/{campaign_id}/batches/{batch_id}/preflight-vetoes`
+  - both enforce manager/brokerage-admin role checks and commit the unit of work.
+- Added the missing `CampaignModel`, `CampaignVersionModel`, and
+  `CampaignCadenceStepModel` SQLAlchemy models so the campaign execution repository
+  resolves against the actual Postgres schema.
+- Migration `0013_align_preflight_digest_schema.py` that aligns the pre-flight digest
+  persistence with the batch-level aggregate (JSONB entries/notification records and
+  a `digest_id` reference on vetoes).
+- Unit tests for the orchestration using fakes, plus Postgres integration tests for the
+  new repository and selector.
 
 ### Slice 15 — Provider delivery callbacks
 
-Status: planned.
+Status: complete.
 
 Goal: reconcile outbound message state with real provider delivery outcomes.
 
-Planned deliverables:
+Implemented deliverables:
 
-- webhook ingestion for SMS/email provider delivery callbacks
-- outbound status updates with late and duplicate callback safety
-- retry rules that avoid uncertain duplicate sends
-- audit-friendly provider status history where needed
+- webhook ingestion for Twilio SMS message-status callbacks and SendGrid event webhook
+  delivery callbacks
+- provider-specific payload/signature validation at the interface boundary, with strict
+  verification when Twilio/SendGrid signing configuration is present
+- canonical provider delivery callback use case that maps provider statuses into internal
+  delivery statuses
+- outbound message delivery summary fields for provider name, delivery status, status
+  timestamp, and delivered timestamp
+- `provider_message_events` persistence for audit-friendly callback history and duplicate
+  provider-event handling
+- duplicate callbacks return safe success without repeating side effects
+- late callback safety prevents delivered messages from regressing to older accepted or
+  failure states
+- failed/bounced/undelivered/dropped callbacks update delivery failure information without
+  triggering unsafe duplicate sends
+- fake-based application/API tests plus Postgres repository tests for callback
+  reconciliation and delivery-event persistence
 
 ### Slice 16 — Transactional outbox + RabbitMQ fan-out
 
-Status: planned.
+Status: complete.
 
 Goal: make important asynchronous events production-real without leaking queue logic
 into the domain.
 
-Planned deliverables:
+Completed deliverables:
 
 - Postgres transactional outbox writes alongside state changes
 - worker/publisher that fans out outbox events to RabbitMQ
 - idempotent publish and retry behavior
 - event-driven hooks for notifications, reporting, and non-critical async work
 
+Implemented notes:
+
+- added explicit `EventBus`, `OutboxEventRepository`, and `OutboxEventPublisher`
+  ports
+- added canonical domain event and outbox event models/enums
+- mapped the existing `outbox_events` table into SQLAlchemy and implemented append,
+  claim-with-lease, mark-published, and retryable-failure persistence
+- added a RabbitMQ topic-exchange publisher that emits a canonical JSON event envelope
+  with the outbox event id as the broker message id
+- added an outbox publisher worker entrypoint for polling and publishing pending events
+- emit events from outbound send, provider delivery reconciliation, inbound reply
+  processing, handoff/opt-out paths, campaign enrollment, and workflow transitions
+- covered the behavior with fake-based application tests, Postgres repository tests, and
+  publisher envelope tests
+
 ### Slice 17 — Campaign admin and publishing APIs
 
-Status: planned.
+Status: complete.
 
 Goal: expose the minimum operational controls required to manage campaigns safely in
 V1.
@@ -453,9 +503,26 @@ Planned deliverables:
 - enforce role-based permissions for admin/manager/agent operations
 - audit campaign configuration changes and launches
 
+Implemented notes:
+
+- added explicit campaign admin domain DTOs and use cases for draft create/update,
+  version publish, campaign pause, and batch-launch audit recording
+- added a write-side campaign admin repository and dedicated campaign admin audit
+  repository
+- added `campaign_admin_audit_logs` migration/model for queryable business audit
+  history
+- added admin API endpoints for draft create/update, publish, and pause with
+  role/capability checks
+- updated dormant selector runs to use permission evaluation and record launch audit
+  entries/events
+- emit campaign draft, publish, pause, and batch-launch events through the
+  transactional outbox seam
+- covered behavior with fake-based use-case tests, API tests, and a real Postgres
+  repository/audit test
+
 ### Slice 18 — Reporting, RLS, and pilot-operational readiness
 
-Status: planned.
+Status: complete.
 
 Goal: close the final visibility and tenant-isolation gaps before calling V1 ready.
 
@@ -465,6 +532,24 @@ Planned deliverables:
 - audit visibility for major business decisions and failures
 - deployed PostgreSQL row-level security validation
 - final readiness validation across sync, workflow, messaging, and handoff operations
+
+Implemented notes:
+
+- added explicit reporting read models, permission-checked reporting use cases, and
+  workspace-scoped reporting API routes
+- added Postgres reporting queries for workspace operations, campaign operations, and
+  campaign admin audit visibility
+- added PostgreSQL row-level security policies for tenant-owned business-flow tables,
+  plus workspace/service session-context helpers for routes, webhooks, workers, and
+  Temporal activities
+- validated the reporting repository and RLS behavior against real Postgres
+- expanded the real-Postgres business-flow harness to cover delivery reconciliation,
+  admin audit visibility, and reporting visibility on top of the existing
+  sync -> enrollment -> send -> inbound -> handoff path
+
+## Slice-plan status
+
+Slices 14–18 of the backend business-flow plan are now complete and verified.
 
 ## Execution Rules
 
@@ -481,10 +566,6 @@ Planned deliverables:
 
 ## Immediate Next Step
 
-Start the next slice only after explicit approval:
+No remaining slices in this plan.
 
-1. wire dormant-lead selection and pre-flight digest/veto flow
-2. add provider delivery callbacks and outbound status reconciliation
-3. add outbox/RabbitMQ, admin APIs, reporting, and operational readiness slices in
-   order
-4. run `ruff`, `mypy`, targeted tests, and full `pytest`
+If follow-up work is needed, create a new approved slice or plan before continuing.

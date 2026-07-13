@@ -24,7 +24,7 @@ The target V1 business scenario is:
 
 ## Current Baseline
 
-Current baseline: **Slice 13 complete**.
+Current baseline: **Slice 14 complete**.
 
 This means the backend can now:
 
@@ -38,7 +38,8 @@ This means the backend can now:
 - ingest inbound replies with idempotency and conversation persistence
 - persist workflow state and workflow transition history
 - start a Temporal `LeadNurtureWorkflow` for an enrolled lead
-- load persisted campaign execution config by `campaign_version_id`
+- load persisted campaign execution config by `campaign_id` (active published version)
+  or `campaign_version_id`
 - execute all persisted cadence steps in a multi-step wait/send/wait loop,
   keeping the workflow alive after the final send for inbound replies and handoff
 - complete handoff delivery by notifying the assigned agent, writing CRM note/tag/
@@ -47,10 +48,13 @@ This means the backend can now:
   stop pending AI sends
 - persist SMS opt-out, email unsubscribe, and do-not-contact suppression events with
   evidence, idempotency, and workflow pause/suppress handling
+- run a daily dormant-lead selector, issue pre-flight digests to assigned agents,
+  record vetoes, and start the selected batch into a campaign
 
-The backend now has the core V1 business-flow spine, but it is not yet V1-complete
-because dormant-selector operations, provider delivery callbacks, and the remaining
-operational readiness slices are still missing.
+The backend now has the core V1 business-flow spine, including provider delivery
+callback reconciliation and transactional outbox/RabbitMQ fan-out, but it is not yet
+V1-complete because campaign administration, reporting, and final operational readiness
+slices are still missing.
 
 ## V1 Status Summary
 
@@ -66,16 +70,14 @@ operational readiness slices are still missing.
 
 ### What is left before V1 can be called complete
 
-- wire the daily dormant-lead selector and full pre-flight digest/veto flow
-- wire provider delivery callbacks into outbound status updates
-- complete the operational slices for outbox/RabbitMQ, campaign admin/publishing,
-  reporting, and deployed tenant-isolation hardening
+- no remaining gaps inside the current backend business-flow slice plan
 
 ### Current honest status
 
-- the backend is past the foundation stage and into completion work
-- the project is **not yet V1-complete**
-- the next most important milestone is **dormant selector + pre-flight digest**
+- the backend business-flow plan for slices 14–18 is complete
+- the project is **backend-V1 ready for the scoped business-flow work**
+- the next work, if any, should be planned as a new approved slice rather than added
+  implicitly here
 
 ## Done Now
 
@@ -94,9 +96,23 @@ operational readiness slices are still missing.
   explicit pause reason
 - opt-out and unsubscribe events now persist suppression facts on the lead and stop
   unsafe workflow execution through explicit pause/suppress transitions
+- provider delivery callbacks now reconcile outbound message delivery state through
+  Twilio and SendGrid webhook ingestion, idempotent provider-event history, and safe
+  late-callback handling
+- important asynchronous events now go through a transactional Postgres outbox and a
+  RabbitMQ topic-exchange publisher worker
+- campaign admin/publishing controls now support draft create/update, version publish,
+  campaign pause, role/capability enforcement, launch auditing, and outbox events
+- reporting now exposes workspace operations, campaign operations, and campaign admin
+  audit visibility through explicit reporting APIs and Postgres read models
+- PostgreSQL row-level security policies now exist for tenant-owned business-flow
+  tables, with explicit workspace/service session context wiring and real Postgres
+  validation
 - workflow state transitions are explicit and auditable
 - workspace-level contact policy is persisted and used by cadence execution
   (SMS compliance state, quiet hours, timezone)
+- dormant-lead selection, pre-flight digest issuance, veto recording, and veto
+  enforcement before starting the selected batch are implemented end-to-end
 
 ### Technical foundations
 
@@ -110,29 +126,22 @@ operational readiness slices are still missing.
   tracking
 - sink providers exist for safe local end-to-end outbound testing
 - both application-level and real Postgres-backed business-flow harnesses now cover:
-  `sync -> enrollment -> first cadence send -> inbound reply -> human_handoff`
+  `sync -> enrollment -> first cadence send -> delivery callback -> inbound reply -> human_handoff -> reporting visibility`
 - validation baseline is green at the current slice boundary
 
 ## Still Missing Before V1 Completion
 
 ### Highest-priority business gaps
 
-- daily dormant-lead selection and the full pre-flight digest workflow are not yet
-  wired into a repeatable operational flow
+- none inside this backend business-flow slice plan
 
 ### Important technical gaps
 
-- provider delivery callbacks are not yet wired into outbound status updates
-- transactional outbox and RabbitMQ fan-out are not yet production-real
-- reporting, audit views, and operational dashboards are not yet implemented
-- PostgreSQL row-level security is not yet enforced as deployed policy
-- campaign admin and publishing APIs are not yet implemented
+- none inside this backend business-flow slice plan
 
 ## Recommended Next Order
 
-1. wire dormant-lead selection and full pre-flight digest flow
-2. add provider callback handling and outbound status reconciliation
-3. add outbox/RabbitMQ, reporting, admin APIs, and operational readiness pieces
+1. only start new work through a new explicitly approved slice or plan
 
 ## Ready-to-Test Definitions
 
@@ -164,10 +173,11 @@ We can claim this when the backend additionally has:
 
 - handoff completion through notification plus CRM writeback
 - human-activity pause behavior from real CRM activity/update signals
-- dormant-lead selection and the full pre-flight digest/veto workflow
 - provider delivery callbacks and safe outbound status reconciliation
 - transactional outbox plus RabbitMQ fan-out for important asynchronous events
 - campaign admin/publishing controls, reporting visibility, and deployed RLS policy
+
+This readiness definition is now satisfied for the scoped backend business-flow work.
 
 ## Maintenance Rule
 

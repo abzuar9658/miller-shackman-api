@@ -20,9 +20,8 @@ Already implemented and kept:
 - Follow Up Boss adapter and lead mapper foundation.
 - Twilio, SendGrid, OpenRouter, Redis, S3, and Temporal provider foundations.
 
-Still missing: durable campaign/workflow persistence, sync tracking, decision audit,
-inbound replies, conversation records, handoff records, provider callbacks, and the
-transactional outbox.
+The previously missing reporting/audit views, deployed RLS hardening, and final
+operational readiness checks are now implemented in the current backend slice plan.
 
 ## Design principles
 
@@ -381,6 +380,7 @@ Completed so far:
 1. Database migration for sync, campaign, workflow, decision audit, conversation,
    handoff, provider-event, and outbox tables.
 2. Repository ports and Postgres adapters for CRM sync tracking and external events.
+3. Transactional outbox persistence and RabbitMQ fan-out publisher worker.
 
 The agreed next delivery sequence is captured in
 `docs/planning/business-flow-implementation-plan.md`, starting with:
