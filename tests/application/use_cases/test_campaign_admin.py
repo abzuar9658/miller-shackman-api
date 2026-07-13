@@ -131,7 +131,6 @@ def test_campaign_read_views_require_reporting_permission_and_include_latest_ver
     assert rejected_result.reasons[0].value == "permission_denied"
 
 
-
 def test_update_published_campaign_creates_next_draft_version() -> None:
     repo = FakeCampaignAdminRepository()
     repo.campaigns[CAMPAIGN_ID] = _campaign(status=CampaignStatus.ACTIVE)

@@ -86,7 +86,5 @@ def temporary_postgres_database(prefix: str = "ms_harness_") -> Iterator[Postgre
                     (database_name,),
                 )
                 cursor.execute(
-                    sql.SQL("DROP DATABASE IF EXISTS {}").format(
-                        sql.Identifier(database_name)
-                    )
+                    sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(database_name))
                 )

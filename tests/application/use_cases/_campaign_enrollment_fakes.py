@@ -27,6 +27,20 @@ class FakeCampaignEnrollmentRepository:
         )
         return enrollment
 
+    async def count_started_today(
+        self,
+        workspace_id: WorkspaceId,
+        campaign_id: UUID,
+        now: object,
+    ) -> int:
+        return sum(
+            1
+            for enrollment in self.enrollments.values()
+            if enrollment.workspace_id == workspace_id
+            and enrollment.campaign_id == campaign_id
+            and enrollment.started_at is not None
+        )
+
 
 class FakeLeadWorkflowRepository:
     def __init__(self) -> None:

@@ -21,7 +21,7 @@ from app.domain.identity import (
     WorkspaceMembershipStatus,
     WorkspaceStatus,
 )
-from app.domain.leads import CRMProvider, CanonicalLeadRecord
+from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workflows import LeadWorkflow, WorkflowState
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeLeadRepository,

@@ -73,9 +73,7 @@ def test_campaign_read_routes_return_list_and_detail(
     )
     campaign_id = create_response.json()["campaign"]["campaign_id"]
 
-    list_response = campaign_admin_client.client.get(
-        f"/api/v1/workspaces/{WORKSPACE_ID}/campaigns"
-    )
+    list_response = campaign_admin_client.client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/campaigns")
     detail_response = campaign_admin_client.client.get(
         f"/api/v1/workspaces/{WORKSPACE_ID}/campaigns/{campaign_id}"
     )
@@ -88,7 +86,6 @@ def test_campaign_read_routes_return_list_and_detail(
     assert detail_response.json()["cadence_steps"][0]["template_key"] == "dormant-email-1"
 
 
-
 def test_assigned_agent_cannot_view_campaign_list() -> None:
     client = _client_for_role(WorkspaceMembershipRole.ASSIGNED_AGENT)
 
@@ -96,7 +93,6 @@ def test_assigned_agent_cannot_view_campaign_list() -> None:
 
     assert response.status_code == 403
     assert response.json()["detail"] == ["permission_denied"]
-
 
 
 def test_assigned_agent_cannot_create_campaign() -> None:
