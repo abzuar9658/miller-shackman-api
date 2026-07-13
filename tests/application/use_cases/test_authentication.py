@@ -143,6 +143,43 @@ def test_complete_invited_signup_activates_user_and_issues_tokens() -> None:
     assert deps.invitations[INVITATION_ID].accepted_at == NOW
 
 
+def test_complete_invited_signup_preserves_current_membership_role() -> None:
+    deps = _Dependencies(tokens=["refresh-token"])
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.users[USER_ID] = _user(status=UserStatus.PENDING_VERIFICATION)
+    deps.memberships[MEMBERSHIP_ID] = _membership(
+        role=WorkspaceMembershipRole.BROKERAGE_ADMIN,
+        status=WorkspaceMembershipStatus.INVITED,
+    )
+    deps.invitations[INVITATION_ID] = _invitation(
+        token_hash="hash::invite-token",
+        role=WorkspaceMembershipRole.ASSIGNED_AGENT,
+    )
+
+    result = _run(
+        complete_invited_signup(
+            invitation_token="invite-token",
+            full_name="Agent Smith",
+            password="strong-password",
+            user_repository=deps.user_repository,
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            credential_repository=deps.credential_repository,
+            invitation_repository=deps.invitation_repository,
+            refresh_session_repository=deps.refresh_session_repository,
+            audit_log_repository=deps.audit_log_repository,
+            password_hasher=deps.password_hasher,
+            access_token_service=deps.access_token_service,
+            opaque_token_service=deps.opaque_token_service,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == CompleteInvitedSignupStatus.COMPLETED
+    assert result.membership is not None
+    assert result.membership.role == WorkspaceMembershipRole.BROKERAGE_ADMIN
+
+
 def test_sign_in_requires_workspace_selection_for_multi_workspace_user() -> None:
     deps = _Dependencies(tokens=["refresh-token"])
     deps.users[USER_ID] = _user()
@@ -855,14 +892,18 @@ def _refresh_session(
     )
 
 
-def _invitation(*, token_hash: str) -> UserInvitation:
+def _invitation(
+    *,
+    token_hash: str = "hash::invite-token",
+    role: WorkspaceMembershipRole = WorkspaceMembershipRole.ASSIGNED_AGENT,
+) -> UserInvitation:
     return UserInvitation(
         invitation_id=INVITATION_ID,
         workspace_id=WORKSPACE_ID,
         user_id=USER_ID,
         email="user@example.com",
         email_normalized="user@example.com",
-        role=WorkspaceMembershipRole.ASSIGNED_AGENT,
+        role=role,
         token_hash=token_hash,
         expires_at=NOW + timedelta(days=7),
         accepted_at=None,

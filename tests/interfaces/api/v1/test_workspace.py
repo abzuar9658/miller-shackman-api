@@ -131,6 +131,12 @@ def test_invite_user_returns_201(workspace_client: WorkspaceTestClient) -> None:
 
 
 def test_resend_invitation_returns_200(workspace_client: WorkspaceTestClient) -> None:
+    workspace_client.deps.users[USER_ID] = _user(status=UserStatus.PENDING_VERIFICATION)
+    workspace_client.deps.memberships[UUID("00000000-0000-0000-0000-000000000010")] = _membership(
+        user_id=USER_ID,
+        role=WorkspaceMembershipRole.ASSIGNED_AGENT,
+        status=WorkspaceMembershipStatus.INVITED,
+    )
     workspace_client.deps.invitations[INVITATION_ID] = _invitation(token_hash="hash::old-token")
 
     response = workspace_client.client.post(

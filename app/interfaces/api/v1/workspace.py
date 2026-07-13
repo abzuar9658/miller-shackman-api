@@ -433,6 +433,8 @@ async def update_workspace_membership_route(
         membership_status=request.membership_status,
         workspace_repository=bundle.workspace_repository,
         membership_repository=bundle.membership_repository,
+        user_repository=bundle.user_repository,
+        invitation_repository=bundle.invitation_repository,
         audit_log_repository=bundle.audit_log_repository,
         now=datetime.now(UTC),
     )

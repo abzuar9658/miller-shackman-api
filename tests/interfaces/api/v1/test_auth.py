@@ -40,9 +40,23 @@ from tests.application.use_cases.test_authentication import (
 
 
 class AuthTestClient:
-    def __init__(self, client: TestClient, deps: _Dependencies) -> None:
+    def __init__(
+        self,
+        client: TestClient,
+        deps: _Dependencies,
+        session: "_FakeCommitSession",
+    ) -> None:
         self.client = client
         self.deps = deps
+        self.session = session
+
+
+class _FakeCommitSession:
+    def __init__(self) -> None:
+        self.commit_count = 0
+
+    async def commit(self) -> None:
+        self.commit_count += 1
 
 
 def _admin_refresh_session(
@@ -68,6 +82,7 @@ def _admin_refresh_session(
 def auth_client() -> AuthTestClient:
     app = create_app()
     deps = _Dependencies()
+    session = _FakeCommitSession()
     deps.workspaces[WORKSPACE_ID] = _workspace()
     deps.users[ADMIN_ID] = _user(user_id=ADMIN_ID, status=UserStatus.ACTIVE)
     deps.memberships[MEMBERSHIP_ID] = _membership(
@@ -89,6 +104,7 @@ def auth_client() -> AuthTestClient:
         opaque_token_service=deps.opaque_token_service,
         email_provider=deps.email_provider,
         settings=get_settings(),
+        session=session,
     )
 
     def override_get_auth_service_bundle() -> AuthServiceBundle:
@@ -103,7 +119,7 @@ def auth_client() -> AuthTestClient:
     app.dependency_overrides[get_auth_service_bundle] = override_get_auth_service_bundle
     app.dependency_overrides[get_current_actor] = override_get_current_actor
 
-    return AuthTestClient(TestClient(app), deps)
+    return AuthTestClient(TestClient(app), deps, session)
 
 
 def test_complete_signup_returns_201(auth_client: AuthTestClient) -> None:
@@ -128,6 +144,32 @@ def test_complete_signup_returns_201(auth_client: AuthTestClient) -> None:
     body = response.json()
     assert body["status"] == "completed"
     assert body["tokens"]["access_token"] is not None
+    assert auth_client.session.commit_count == 1
+
+
+def test_complete_signup_accepts_invitation_alias_route(auth_client: AuthTestClient) -> None:
+    auth_client.deps.users[USER_ID] = _user(status=UserStatus.PENDING_VERIFICATION)
+    auth_client.deps.memberships[MEMBERSHIP_ID] = _membership(
+        status=WorkspaceMembershipStatus.INVITED,
+    )
+    auth_client.deps.invitations[UUID("00000000-0000-0000-0000-00000000000a")] = _invitation(
+        token_hash="hash::invite-token",
+    )
+
+    response = auth_client.client.post(
+        "/api/v1/auth/invitations/accept",
+        json={
+            "invitation_token": "invite-token",
+            "full_name": "Agent Smith",
+            "password": "strong-password",
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["tokens"]["access_token"] is not None
+    assert auth_client.session.commit_count == 1
 
 
 def test_signin_returns_200(auth_client: AuthTestClient) -> None:
@@ -146,6 +188,7 @@ def test_signin_returns_200(auth_client: AuthTestClient) -> None:
     body = response.json()
     assert body["status"] == "authenticated"
     assert body["tokens"]["access_token"] is not None
+    assert auth_client.session.commit_count == 1
 
 
 def test_signin_wrong_password_returns_401(auth_client: AuthTestClient) -> None:
@@ -161,6 +204,7 @@ def test_signin_wrong_password_returns_401(auth_client: AuthTestClient) -> None:
     )
 
     assert response.status_code == 401
+    assert auth_client.session.commit_count == 1
 
 
 def test_refresh_returns_200(auth_client: AuthTestClient) -> None:
@@ -177,6 +221,7 @@ def test_refresh_returns_200(auth_client: AuthTestClient) -> None:
     body = response.json()
     assert body["status"] == "refreshed"
     assert body["tokens"]["access_token"] is not None
+    assert auth_client.session.commit_count == 1
 
 
 def test_me_returns_200(auth_client: AuthTestClient) -> None:
@@ -232,6 +277,7 @@ def test_logout_returns_200(auth_client: AuthTestClient) -> None:
     body = response.json()
     assert body["status"] == "logged_out"
     assert body["revoked"] is True
+    assert auth_client.session.commit_count == 1
 
 
 def test_logout_all_returns_200(auth_client: AuthTestClient) -> None:
@@ -243,6 +289,7 @@ def test_logout_all_returns_200(auth_client: AuthTestClient) -> None:
     body = response.json()
     assert body["status"] == "logged_out"
     assert body["revoked"] is True
+    assert auth_client.session.commit_count == 1
 
 
 def test_forgot_password_returns_202(auth_client: AuthTestClient) -> None:
@@ -254,6 +301,7 @@ def test_forgot_password_returns_202(auth_client: AuthTestClient) -> None:
     assert response.status_code == 202
     body = response.json()
     assert body["status"] == "accepted"
+    assert auth_client.session.commit_count == 1
 
 
 def test_reset_password_returns_200(auth_client: AuthTestClient) -> None:
@@ -273,3 +321,4 @@ def test_reset_password_returns_200(auth_client: AuthTestClient) -> None:
     body = response.json()
     assert body["status"] == "reset"
     assert body["user"]["status"] == "active"
+    assert auth_client.session.commit_count == 1

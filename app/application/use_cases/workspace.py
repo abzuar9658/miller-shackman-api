@@ -264,7 +264,11 @@ async def list_workspace_users(
                 workspace_id,
                 user.email_normalized,
             )
-            if invitation is not None and invitation.accepted_at is None and invitation.revoked_at is None:
+            if (
+                invitation is not None
+                and invitation.accepted_at is None
+                and invitation.revoked_at is None
+            ):
                 invitation_id = invitation.invitation_id
         users.append(
             WorkspaceUser(
@@ -338,9 +342,30 @@ async def resend_invitation(
             reasons=(AuthReasonCode.INVITATION_REVOKED,),
         )
 
+    membership = await membership_repository.get_by_user_and_workspace(
+        invitation.user_id,
+        workspace_id,
+    )
+    if membership is None:
+        return ResendInvitationResult(
+            status=ResendInvitationStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
+        )
+    if membership.status == WorkspaceMembershipStatus.ACTIVE:
+        return ResendInvitationResult(
+            status=ResendInvitationStatus.REJECTED,
+            reasons=(AuthReasonCode.MEMBERSHIP_ALREADY_ACTIVE,),
+        )
+    if membership.status != WorkspaceMembershipStatus.INVITED:
+        return ResendInvitationResult(
+            status=ResendInvitationStatus.REJECTED,
+            reasons=(AuthReasonCode.MEMBERSHIP_NOT_ACTIVE,),
+        )
+
     new_token = opaque_token_service.generate_token()
     updated_invitation = replace(
         invitation,
+        role=membership.role,
         token_hash=new_token.token_hash,
         expires_at=now + invitation_ttl,
     )
@@ -388,6 +413,8 @@ async def update_workspace_membership(
     membership_status: WorkspaceMembershipStatus | None,
     workspace_repository: WorkspaceRepository,
     membership_repository: WorkspaceMembershipRepository,
+    user_repository: UserRepository,
+    invitation_repository: InvitationRepository,
     audit_log_repository: AuthAuditLogRepository,
     now: datetime,
 ) -> UpdateWorkspaceMembershipResult:
@@ -416,6 +443,12 @@ async def update_workspace_membership(
             status=UpdateWorkspaceMembershipStatus.REJECTED,
             reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
         )
+    user = await user_repository.get_by_id(user_id)
+    if user is None:
+        return UpdateWorkspaceMembershipResult(
+            status=UpdateWorkspaceMembershipStatus.REJECTED,
+            reasons=(AuthReasonCode.USER_NOT_FOUND,),
+        )
 
     if role is not None and role == WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN:
         return UpdateWorkspaceMembershipResult(
@@ -438,6 +471,23 @@ async def update_workspace_membership(
         updated_at=now,
     )
     saved_membership = await membership_repository.save(updated_membership)
+
+    pending_invitation = await invitation_repository.get_by_workspace_and_email_normalized(
+        workspace_id,
+        user.email_normalized,
+    )
+    if pending_invitation is not None:
+        invitation_is_pending = (
+            pending_invitation.accepted_at is None and pending_invitation.revoked_at is None
+        )
+        if invitation_is_pending and membership.status == WorkspaceMembershipStatus.INVITED:
+            updated_invitation = pending_invitation
+            if pending_invitation.role != saved_membership.role:
+                updated_invitation = replace(updated_invitation, role=saved_membership.role)
+            if saved_membership.status != WorkspaceMembershipStatus.INVITED:
+                updated_invitation = replace(updated_invitation, revoked_at=now)
+            if updated_invitation != pending_invitation:
+                await invitation_repository.save(updated_invitation)
 
     event_type = AuthAuditEventType.ROLE_CHANGED
     if membership_status is not None:

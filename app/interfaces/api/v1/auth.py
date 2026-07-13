@@ -55,6 +55,11 @@ from app.interfaces.api.schemas.auth import (
 router = APIRouter(tags=["auth"])
 
 
+async def _commit_bundle_session(bundle: AuthServiceBundle) -> None:
+    if bundle.session is not None:
+        await bundle.session.commit()
+
+
 def _user_response(user: User) -> UserResponse:
     return UserResponse(
         user_id=user.user_id,
@@ -130,6 +135,11 @@ def _require_active_workspace_id(actor: AuthenticatedActor) -> UUID:
 
 
 @router.post(
+    "/invitations/accept",
+    response_model=CompleteInvitedSignupResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+@router.post(
     "/signup",
     response_model=CompleteInvitedSignupResponse,
     status_code=status.HTTP_201_CREATED,
@@ -154,6 +164,7 @@ async def complete_signup(
         opaque_token_service=bundle.opaque_token_service,
         now=datetime.now(UTC),
     )
+    await _commit_bundle_session(bundle)
     if result.status == CompleteInvitedSignupStatus.REJECTED:
         _raise_for_reasons(result.reasons)
     return CompleteInvitedSignupResponse(
@@ -184,6 +195,7 @@ async def signin(
         opaque_token_service=bundle.opaque_token_service,
         now=datetime.now(UTC),
     )
+    await _commit_bundle_session(bundle)
     if result.status == SignInStatus.REJECTED:
         _raise_for_reasons(result.reasons)
     return SignInResponse(
@@ -209,6 +221,7 @@ async def refresh(
         opaque_token_service=bundle.opaque_token_service,
         now=datetime.now(UTC),
     )
+    await _commit_bundle_session(bundle)
     if result.status == RefreshAuthenticationStatus.REJECTED:
         _raise_for_reasons(result.reasons)
     return RefreshAuthenticationResponse(
@@ -233,6 +246,7 @@ async def logout(
         opaque_token_service=bundle.opaque_token_service,
         now=datetime.now(UTC),
     )
+    await _commit_bundle_session(bundle)
     return LogoutResponse(status=result.status.value, revoked=result.revoked)
 
 
@@ -247,6 +261,7 @@ async def logout_all(
         audit_log_repository=bundle.audit_log_repository,
         now=datetime.now(UTC),
     )
+    await _commit_bundle_session(bundle)
     return LogoutAllResponse(status=result.status.value, revoked=result.revoked)
 
 
@@ -269,6 +284,7 @@ async def forgot_password(
         email_provider=bundle.email_provider,
         now=datetime.now(UTC),
     )
+    await _commit_bundle_session(bundle)
     return ForgotPasswordResponse(status=result.status.value)
 
 
@@ -289,6 +305,7 @@ async def reset_password_route(
         opaque_token_service=bundle.opaque_token_service,
         now=datetime.now(UTC),
     )
+    await _commit_bundle_session(bundle)
     if result.status == ResetPasswordStatus.REJECTED:
         _raise_for_reasons(result.reasons)
     return ResetPasswordResponse(

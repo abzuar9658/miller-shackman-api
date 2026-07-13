@@ -427,6 +427,16 @@ async def complete_invited_signup(
             status=CompleteInvitedSignupStatus.REJECTED,
             reasons=(AuthReasonCode.WORKSPACE_NOT_ACTIVE,),
         )
+    if membership.status == WorkspaceMembershipStatus.ACTIVE:
+        return CompleteInvitedSignupResult(
+            status=CompleteInvitedSignupStatus.REJECTED,
+            reasons=(AuthReasonCode.MEMBERSHIP_ALREADY_ACTIVE,),
+        )
+    if membership.status != WorkspaceMembershipStatus.INVITED:
+        return CompleteInvitedSignupResult(
+            status=CompleteInvitedSignupStatus.REJECTED,
+            reasons=(AuthReasonCode.MEMBERSHIP_NOT_ACTIVE,),
+        )
 
     saved_user = await user_repository.save(
         replace(
@@ -440,7 +450,6 @@ async def complete_invited_signup(
     saved_membership = await membership_repository.save(
         replace(
             membership,
-            role=invitation.role,
             status=WorkspaceMembershipStatus.ACTIVE,
             updated_at=now,
         ),

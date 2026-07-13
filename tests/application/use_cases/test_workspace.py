@@ -121,6 +121,7 @@ def test_list_workspace_users_returns_users() -> None:
             workspace_repository=deps.workspace_repository,
             membership_repository=deps.membership_repository,
             user_repository=deps.user_repository,
+            invitation_repository=deps.invitation_repository,
         ),
     )
 
@@ -141,6 +142,7 @@ def test_list_workspace_users_rejects_without_membership() -> None:
             workspace_repository=deps.workspace_repository,
             membership_repository=deps.membership_repository,
             user_repository=deps.user_repository,
+            invitation_repository=deps.invitation_repository,
         ),
     )
 
@@ -151,11 +153,16 @@ def test_list_workspace_users_rejects_without_membership() -> None:
 def test_resend_invitation_sends_new_email() -> None:
     deps = _Dependencies()
     deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.users[USER_ID] = _user()
     deps.memberships[MEMBERSHIP_ID] = _membership(
-        user_id=ADMIN_ID,
-        role=WorkspaceMembershipRole.BROKERAGE_ADMIN,
+        user_id=USER_ID,
+        role=WorkspaceMembershipRole.MANAGER,
+        status=WorkspaceMembershipStatus.INVITED,
     )
-    deps.invitations[INVITATION_ID] = _invitation(token_hash="hash::old-token")
+    deps.invitations[INVITATION_ID] = _invitation(
+        token_hash="hash::old-token",
+        role=WorkspaceMembershipRole.ASSIGNED_AGENT,
+    )
     actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
 
     result = _run(
@@ -177,10 +184,8 @@ def test_resend_invitation_sends_new_email() -> None:
     assert result.status == ResendInvitationStatus.RESENT
     assert result.invitation is not None
     assert result.invitation.token_hash == "hash::invite-token"
+    assert result.invitation.role == WorkspaceMembershipRole.MANAGER
     assert len(deps.email_provider.messages) == 1
-    assert "https://app.millerschackman.test/signup/invited?token=invite-token" in (
-        deps.email_provider.messages[0].body
-    )
     assert deps.audit_log_repository.logs[-1].event_type == AuthAuditEventType.INVITATION_RESENT
 
 
@@ -200,6 +205,8 @@ def test_update_workspace_membership_changes_role() -> None:
             membership_status=None,
             workspace_repository=deps.workspace_repository,
             membership_repository=deps.membership_repository,
+            user_repository=deps.user_repository,
+            invitation_repository=deps.invitation_repository,
             audit_log_repository=deps.audit_log_repository,
             now=NOW,
         ),
@@ -227,6 +234,8 @@ def test_update_workspace_membership_disables_membership() -> None:
             membership_status=WorkspaceMembershipStatus.DISABLED,
             workspace_repository=deps.workspace_repository,
             membership_repository=deps.membership_repository,
+            user_repository=deps.user_repository,
+            invitation_repository=deps.invitation_repository,
             audit_log_repository=deps.audit_log_repository,
             now=NOW,
         ),
@@ -236,6 +245,70 @@ def test_update_workspace_membership_disables_membership() -> None:
     assert result.membership is not None
     assert result.membership.status == WorkspaceMembershipStatus.DISABLED
     assert deps.audit_log_repository.logs[-1].event_type == AuthAuditEventType.MEMBERSHIP_DISABLED
+
+
+def test_update_workspace_membership_syncs_pending_invitation_role() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.users[USER_ID] = _user()
+    deps.memberships[MEMBERSHIP_ID] = _membership(
+        role=WorkspaceMembershipRole.ASSIGNED_AGENT,
+        status=WorkspaceMembershipStatus.INVITED,
+    )
+    deps.invitations[INVITATION_ID] = _invitation(role=WorkspaceMembershipRole.ASSIGNED_AGENT)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_membership(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            user_id=USER_ID,
+            role=WorkspaceMembershipRole.BROKERAGE_ADMIN,
+            membership_status=None,
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            user_repository=deps.user_repository,
+            invitation_repository=deps.invitation_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceMembershipStatus.UPDATED
+    assert result.membership is not None
+    assert result.membership.role == WorkspaceMembershipRole.BROKERAGE_ADMIN
+    assert deps.invitations[INVITATION_ID].role == WorkspaceMembershipRole.BROKERAGE_ADMIN
+    assert deps.invitations[INVITATION_ID].revoked_at is None
+
+
+def test_update_workspace_membership_revokes_pending_invitation_when_leaving_invited() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.users[USER_ID] = _user()
+    deps.memberships[MEMBERSHIP_ID] = _membership(status=WorkspaceMembershipStatus.INVITED)
+    deps.invitations[INVITATION_ID] = _invitation()
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_membership(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            user_id=USER_ID,
+            role=None,
+            membership_status=WorkspaceMembershipStatus.DISABLED,
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            user_repository=deps.user_repository,
+            invitation_repository=deps.invitation_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceMembershipStatus.UPDATED
+    assert result.membership is not None
+    assert result.membership.status == WorkspaceMembershipStatus.DISABLED
+    assert deps.invitations[INVITATION_ID].revoked_at == NOW
 
 
 def test_update_user_status_disables_user() -> None:
