@@ -129,7 +129,13 @@ def _message(
 def _client(bundle: ProviderDeliveryServiceBundle, settings: Settings | None = None) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_provider_delivery_service_bundle] = lambda: bundle
-    app.dependency_overrides[get_settings] = lambda: settings or Settings()
+    app.dependency_overrides[get_settings] = lambda: (
+        settings
+        or Settings(
+            twilio_auth_token=None,
+            sendgrid_event_webhook_public_key=None,
+        )
+    )
     return TestClient(app)
 
 

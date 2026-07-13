@@ -11,6 +11,7 @@ from sqlalchemy import (
     String,
     Time,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -296,7 +297,23 @@ class CampaignAdminAuditLogModel(Base):
 
 class CRMSyncJobModel(Base):
     __tablename__ = "crm_sync_jobs"
-    __table_args__ = (Index("ix_crm_sync_jobs_workspace_created", "workspace_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_crm_sync_jobs_workspace_created", "workspace_id", "created_at"),
+        Index(
+            "ix_crm_sync_jobs_workspace_provider_created",
+            "workspace_id",
+            "crm_provider",
+            "created_at",
+        ),
+        Index("ix_crm_sync_jobs_workspace_status_created", "workspace_id", "status", "created_at"),
+        Index(
+            "uq_crm_sync_jobs_one_active_workspace_provider",
+            "workspace_id",
+            "crm_provider",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running')"),
+        ),
+    )
 
     sync_job_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4

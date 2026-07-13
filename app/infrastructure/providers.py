@@ -1,8 +1,11 @@
+from typing import cast
+
 from pydantic import SecretStr
 
 from app.application.ports.auth import AccessTokenService, OpaqueTokenService, PasswordHasher
 from app.application.ports.cache import CacheProvider
 from app.application.ports.crm import CRMClient
+from app.application.ports.crm_sync import CanonicalLeadSnapshotSource
 from app.application.ports.llm import LLMClient
 from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.notifications import NotificationProvider
@@ -27,6 +30,10 @@ def build_crm_client(settings: Settings | None = None) -> CRMClient:
             raise ValueError("FUB_API_KEY is required")
         return FollowUpBossCRMClient(api_key=api_key, base_url=settings.fub_base_url)
     raise ValueError(f"Unsupported CRM provider: {settings.crm_provider}")
+
+
+def build_crm_lead_snapshot_source(settings: Settings | None = None) -> CanonicalLeadSnapshotSource:
+    return cast(CanonicalLeadSnapshotSource, build_crm_client(settings))
 
 
 def build_llm_client(settings: Settings | None = None) -> LLMClient:

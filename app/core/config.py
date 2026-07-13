@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     )
 
     rabbitmq_url: str = "amqp://guest:guest@localhost:55672/"
+    crm_sync_exchange_name: str = "miller_schackman.events"
+    crm_sync_queue_name: str = "miller_schackman.crm_sync"
+    crm_sync_worker_prefetch_count: int = 1
+    crm_sync_incremental_interval_seconds: int = 300
+    crm_sync_scheduler_poll_seconds: int = 60
+    crm_sync_scheduler_workspace_limit: int = 100
     temporal_address: str = "localhost:57233"
     temporal_task_queue: str = "miller-schackman-task-queue"
 

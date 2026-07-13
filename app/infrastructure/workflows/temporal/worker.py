@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 from typing import Any
 
+import structlog
 from temporalio.client import Client
 from temporalio.worker import Worker
 
@@ -14,6 +15,8 @@ from app.infrastructure.workflows.temporal.activities import (
 )
 from app.infrastructure.workflows.temporal.lead_nurture import LeadNurtureWorkflow
 from app.infrastructure.workflows.temporal.smoke import SmokePingWorkflow, smoke_ping_activity
+
+logger = structlog.get_logger(__name__)
 
 
 def _registered_workflows() -> Sequence[type[Any]]:
@@ -50,4 +53,9 @@ async def run_temporal_worker(settings: Settings | None = None) -> None:
     resolved_settings = settings or get_settings()
     client = await connect_temporal_client(resolved_settings)
     worker = build_temporal_worker(client, resolved_settings)
+    logger.info(
+        "Temporal worker started",
+        temporal_address=resolved_settings.temporal_address,
+        task_queue=resolved_settings.temporal_task_queue,
+    )
     await worker.run()

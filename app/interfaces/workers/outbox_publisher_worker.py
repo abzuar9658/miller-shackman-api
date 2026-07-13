@@ -16,7 +16,10 @@ async def run_once() -> None:
         await enable_postgres_service_access(session)
         await publish_outbox_events(
             outbox_repository=PostgresOutboxEventRepository(session),
-            publisher=RabbitMQOutboxEventPublisher(rabbitmq_url=settings.rabbitmq_url),
+            publisher=RabbitMQOutboxEventPublisher(
+                rabbitmq_url=settings.rabbitmq_url,
+                exchange_name=settings.crm_sync_exchange_name,
+            ),
             now=datetime.now(UTC),
         )
         await session.commit()

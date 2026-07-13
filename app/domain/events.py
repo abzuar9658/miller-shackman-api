@@ -9,6 +9,7 @@ from app.domain.common.ids import WorkspaceId
 
 class AggregateType(StrEnum):
     CAMPAIGN = "campaign"
+    CRM_SYNC = "crm_sync"
     HANDOFF = "handoff"
     LEAD = "lead"
     MESSAGE = "message"
@@ -22,6 +23,7 @@ class DomainEventType(StrEnum):
     CAMPAIGN_ENROLLED = "campaign.enrolled"
     CAMPAIGN_PAUSED = "campaign.paused"
     CAMPAIGN_PUBLISHED = "campaign.published"
+    CRM_SYNC_REQUESTED = "crm_sync.requested"
     HANDOFF_CREATED = "handoff.created"
     LEAD_OPTED_OUT = "lead.opted_out"
     MESSAGE_DELIVERED = "message.delivered"

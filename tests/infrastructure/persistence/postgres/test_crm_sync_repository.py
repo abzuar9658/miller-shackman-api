@@ -1,4 +1,5 @@
 from collections.abc import Coroutine
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
@@ -186,6 +187,64 @@ def test_sync_job_repository_list_recent_orders_by_created_at() -> None:
     assert "crm_sync_jobs.workspace_id" in statement_str
     assert "ORDER BY" in statement_str
     assert "LIMIT" in statement_str
+
+
+def test_sync_job_repository_get_latest_active_filters_provider_and_active_status() -> None:
+    model = _sync_job_model()
+    session = _FakeSession(_FakeResult(scalar_value=model))
+
+    result = _run(
+        PostgresCRMSyncJobRepository(cast(AsyncSession, session)).get_active_for_workspace_provider(
+            WORKSPACE_ID,
+            "follow_up_boss",
+        ),
+    )
+
+    assert result == _sync_job()
+    statement_str = str(session.statements[0])
+    assert "crm_sync_jobs.workspace_id" in statement_str
+    assert "crm_sync_jobs.crm_provider" in statement_str
+    assert "crm_sync_jobs.status IN" in statement_str
+
+
+def test_sync_job_repository_insert_pending_uses_active_partial_conflict_guard() -> None:
+    job = _sync_job()
+    pending = replace(job, status=CRMSyncJobStatus.PENDING, started_at=None)
+    model = _sync_job_model()
+    model.status = "pending"
+    model.started_at = None
+    session = _FakeSession(_FakeResult(scalar_value=model))
+
+    saved = _run(
+        PostgresCRMSyncJobRepository(cast(AsyncSession, session)).insert_pending_if_no_active(
+            pending,
+        ),
+    )
+
+    assert saved is not None
+    assert saved.status == CRMSyncJobStatus.PENDING
+    statement_str = str(session.statements[0])
+    assert "ON CONFLICT (workspace_id, crm_provider)" in statement_str
+    assert "DO NOTHING" in statement_str
+
+
+def test_sync_job_repository_claim_pending_by_id_updates_only_pending_job() -> None:
+    model = _sync_job_model()
+    session = _FakeSession(_FakeResult(scalar_value=model))
+
+    claimed = _run(
+        PostgresCRMSyncJobRepository(cast(AsyncSession, session)).claim_pending_by_id(
+            WORKSPACE_ID,
+            SYNC_JOB_ID,
+            now=NOW,
+        ),
+    )
+
+    assert claimed == _sync_job()
+    statement_str = str(session.statements[0])
+    assert "UPDATE crm_sync_jobs" in statement_str
+    assert "crm_sync_jobs.status" in statement_str
+    assert "RETURNING" in statement_str
 
 
 def test_sync_job_repository_save_returns_domain() -> None:

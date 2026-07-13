@@ -1,12 +1,19 @@
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from app.application.ports.crm_sync import CanonicalLeadSnapshotPage
 from app.application.use_cases.crm_sync import (
+    ExecuteQueuedCRMSyncStatus,
+    RequestCRMSyncStatus,
     RunFollowUpBossLeadSyncStatus,
+    enqueue_due_follow_up_boss_crm_syncs,
+    execute_queued_follow_up_boss_crm_sync,
+    request_crm_sync,
     run_follow_up_boss_lead_snapshot_sync,
 )
 from app.domain.crm_sync import CRMSyncJob, CRMSyncJobStatus, CRMSyncType
+from app.domain.events import DomainEvent, DomainEventType
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 
 NOW = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
@@ -46,8 +53,17 @@ class FakeLeadRepository:
 
 
 class FakeCRMSyncJobRepository:
-    def __init__(self, recent_jobs: tuple[CRMSyncJob, ...] = ()) -> None:
+    def __init__(
+        self,
+        recent_jobs: tuple[CRMSyncJob, ...] = (),
+        active_job: CRMSyncJob | None = None,
+        latest_job: CRMSyncJob | None = None,
+        latest_completed_job: CRMSyncJob | None = None,
+    ) -> None:
         self.recent_jobs = recent_jobs
+        self.active_job = active_job
+        self.latest_job = latest_job
+        self.latest_completed_job = latest_completed_job
         self.saved: list[CRMSyncJob] = []
 
     async def get_by_id(self, workspace_id: UUID, sync_job_id: UUID) -> CRMSyncJob | None:
@@ -56,9 +72,95 @@ class FakeCRMSyncJobRepository:
     async def list_recent(self, workspace_id: UUID, limit: int = 100) -> tuple[CRMSyncJob, ...]:
         return self.recent_jobs[:limit]
 
-    async def save(self, job: CRMSyncJob) -> CRMSyncJob:
+    async def get_latest_for_workspace_provider(
+        self,
+        workspace_id: UUID,
+        crm_provider: str,
+    ) -> CRMSyncJob | None:
+        return self.latest_job
+
+    async def get_latest_completed_for_workspace_provider(
+        self,
+        workspace_id: UUID,
+        crm_provider: str,
+    ) -> CRMSyncJob | None:
+        return self.latest_completed_job
+
+    async def get_active_for_workspace_provider(
+        self,
+        workspace_id: UUID,
+        crm_provider: str,
+    ) -> CRMSyncJob | None:
+        return self.active_job
+
+    async def insert_pending_if_no_active(self, job: CRMSyncJob) -> CRMSyncJob | None:
+        if self.active_job is not None:
+            return None
+        self.active_job = job
+        self.latest_job = job
         self.saved.append(job)
         return job
+
+    async def claim_pending_by_id(
+        self,
+        workspace_id: UUID,
+        sync_job_id: UUID,
+        *,
+        now: datetime,
+    ) -> CRMSyncJob | None:
+        pending = next(
+            (
+                job
+                for job in self.saved
+                if job.workspace_id == workspace_id
+                and job.sync_job_id == sync_job_id
+                and job.status == CRMSyncJobStatus.PENDING
+            ),
+            None,
+        )
+        if pending is None:
+            return None
+        claimed = replace(
+            pending,
+            status=CRMSyncJobStatus.RUNNING,
+            started_at=now,
+            updated_at=now,
+        )
+        self.active_job = claimed
+        self.saved.append(claimed)
+        return claimed
+
+    async def save(self, job: CRMSyncJob) -> CRMSyncJob:
+        self.saved.append(job)
+        self.latest_job = job
+        self.active_job = (
+            job if job.status in {CRMSyncJobStatus.PENDING, CRMSyncJobStatus.RUNNING} else None
+        )
+        if job.status == CRMSyncJobStatus.COMPLETED:
+            self.latest_completed_job = job
+        return job
+
+
+class FakeEventBus:
+    def __init__(self) -> None:
+        self.events: list[DomainEvent] = []
+
+    async def publish(self, event: DomainEvent) -> None:
+        self.events.append(event)
+
+
+class FakeWorkspaceRepository:
+    def __init__(self, workspace_ids: tuple[UUID, ...]) -> None:
+        self.workspace_ids = workspace_ids
+
+    async def get_by_id(self, workspace_id: UUID) -> None:
+        return None
+
+    async def list_active_ids(self, *, limit: int = 100) -> tuple[UUID, ...]:
+        return self.workspace_ids[:limit]
+
+    async def save(self, workspace: object) -> object:
+        return workspace
 
 
 class FakeLeadSnapshotSource:
@@ -125,6 +227,27 @@ def _completed_job(*, cursor_finished_at: datetime) -> CRMSyncJob:
         created_by_user_id=None,
         created_at=PREVIOUS_SYNC_AT,
         updated_at=PREVIOUS_SYNC_AT,
+    )
+
+
+def _pending_job() -> CRMSyncJob:
+    return CRMSyncJob(
+        sync_job_id=SYNC_JOB_ID,
+        workspace_id=WORKSPACE_ID,
+        crm_provider=CRMProvider.FOLLOW_UP_BOSS.value,
+        sync_type=CRMSyncType.FULL,
+        status=CRMSyncJobStatus.PENDING,
+        started_at=None,
+        finished_at=None,
+        cursor_started_at=None,
+        cursor_finished_at=None,
+        total_seen=0,
+        total_upserted=0,
+        total_failed=0,
+        failure_reason=None,
+        created_by_user_id=None,
+        created_at=NOW,
+        updated_at=NOW,
     )
 
 
@@ -229,3 +352,127 @@ async def test_marks_job_failed_when_page_fetch_raises() -> None:
     assert result.job.total_upserted == 0
     assert result.job.total_failed == 0
     assert result.job.failure_reason == "sync page fetch failed: network"
+
+
+async def test_request_crm_sync_creates_pending_job_and_outbox_event() -> None:
+    job_repository = FakeCRMSyncJobRepository()
+    event_bus = FakeEventBus()
+
+    result = await request_crm_sync(
+        workspace_id=WORKSPACE_ID,
+        sync_type=CRMSyncType.FULL,
+        crm_sync_job_repository=job_repository,
+        event_bus=event_bus,
+        now=NOW,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+
+    assert result.status == RequestCRMSyncStatus.REQUESTED
+    assert result.job.status == CRMSyncJobStatus.PENDING
+    assert result.job.sync_type == CRMSyncType.FULL
+    assert event_bus.events[0].event_type == DomainEventType.CRM_SYNC_REQUESTED
+    assert event_bus.events[0].payload["sync_job_id"] == str(SYNC_JOB_ID)
+
+
+async def test_request_crm_sync_returns_active_job_without_publishing_duplicate() -> None:
+    active = replace(_pending_job(), status=CRMSyncJobStatus.RUNNING, started_at=NOW)
+    event_bus = FakeEventBus()
+
+    result = await request_crm_sync(
+        workspace_id=WORKSPACE_ID,
+        sync_type=CRMSyncType.INCREMENTAL,
+        crm_sync_job_repository=FakeCRMSyncJobRepository(active_job=active),
+        event_bus=event_bus,
+        now=NOW,
+    )
+
+    assert result.status == RequestCRMSyncStatus.ALREADY_ACTIVE
+    assert result.job == active
+    assert event_bus.events == []
+
+
+async def test_execute_queued_sync_claims_pending_job_and_runs_snapshot_sync() -> None:
+    source = FakeLeadSnapshotSource(pages=(CanonicalLeadSnapshotPage(leads=(_lead("1"),)),))
+    job_repository = FakeCRMSyncJobRepository()
+    await job_repository.insert_pending_if_no_active(_pending_job())
+
+    result = await execute_queued_follow_up_boss_crm_sync(
+        workspace_id=WORKSPACE_ID,
+        sync_job_id=SYNC_JOB_ID,
+        lead_snapshot_source=source,
+        lead_repository=FakeLeadRepository(),
+        crm_sync_job_repository=job_repository,
+        now=NOW,
+    )
+
+    assert result.status == ExecuteQueuedCRMSyncStatus.COMPLETED
+    assert result.job is not None
+    assert result.job.status == CRMSyncJobStatus.COMPLETED
+    assert result.job.created_at == NOW
+    assert result.page_count == 1
+
+
+async def test_execute_queued_sync_is_noop_when_job_was_already_claimed() -> None:
+    result = await execute_queued_follow_up_boss_crm_sync(
+        workspace_id=WORKSPACE_ID,
+        sync_job_id=SYNC_JOB_ID,
+        lead_snapshot_source=FakeLeadSnapshotSource(),
+        lead_repository=FakeLeadRepository(),
+        crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        now=NOW,
+    )
+
+    assert result.status == ExecuteQueuedCRMSyncStatus.NOT_CLAIMED
+    assert result.job is None
+
+
+async def test_scheduler_enqueues_full_until_first_success_then_incremental_when_due() -> None:
+    event_bus = FakeEventBus()
+    never_synced_repository = FakeCRMSyncJobRepository()
+
+    first_result = await enqueue_due_follow_up_boss_crm_syncs(
+        workspace_repository=FakeWorkspaceRepository((WORKSPACE_ID,)),
+        crm_sync_job_repository=never_synced_repository,
+        event_bus=event_bus,
+        now=NOW,
+        minimum_interval=timedelta(minutes=5),
+    )
+
+    assert first_result.requested_count == 1
+    assert never_synced_repository.saved[0].sync_type == CRMSyncType.FULL
+
+    completed = _completed_job(cursor_finished_at=NOW - timedelta(minutes=10))
+    due_repository = FakeCRMSyncJobRepository(
+        latest_job=completed,
+        latest_completed_job=completed,
+    )
+
+    second_result = await enqueue_due_follow_up_boss_crm_syncs(
+        workspace_repository=FakeWorkspaceRepository((WORKSPACE_ID,)),
+        crm_sync_job_repository=due_repository,
+        event_bus=event_bus,
+        now=NOW,
+        minimum_interval=timedelta(minutes=5),
+    )
+
+    assert second_result.requested_count == 1
+    assert due_repository.saved[0].sync_type == CRMSyncType.INCREMENTAL
+
+
+async def test_scheduler_skips_active_or_not_due_workspaces() -> None:
+    active = _pending_job()
+    repository = FakeCRMSyncJobRepository(
+        active_job=active,
+        latest_job=replace(active, updated_at=NOW - timedelta(minutes=1)),
+    )
+
+    result = await enqueue_due_follow_up_boss_crm_syncs(
+        workspace_repository=FakeWorkspaceRepository((WORKSPACE_ID,)),
+        crm_sync_job_repository=repository,
+        event_bus=FakeEventBus(),
+        now=NOW,
+        minimum_interval=timedelta(minutes=5),
+    )
+
+    assert result.requested_count == 0
+    assert result.skipped_active_count == 1

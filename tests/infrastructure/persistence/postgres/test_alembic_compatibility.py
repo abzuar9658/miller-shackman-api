@@ -7,7 +7,7 @@ from tests.infrastructure.persistence.postgres._harness import (
     temporary_postgres_database,
 )
 
-LATEST_REVISION = "0016_enable_workspace_row_level_security"
+LATEST_REVISION = "0017_crm_sync_active_guard"
 
 
 def test_migrations_upgrade_legacy_alembic_version_table() -> None:

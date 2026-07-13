@@ -1,8 +1,10 @@
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 
 from app.domain.common.ids import WorkspaceId
 from app.domain.crm_sync import (
@@ -50,6 +52,82 @@ class PostgresCRMSyncJobRepository:
         result = await self._session.execute(statement)
         models = result.scalars().all()
         return tuple(_model_to_sync_job(model) for model in models)
+
+    async def get_latest_for_workspace_provider(
+        self,
+        workspace_id: WorkspaceId,
+        crm_provider: str,
+    ) -> CRMSyncJob | None:
+        statement = _workspace_provider_jobs_statement(workspace_id, crm_provider).limit(1)
+        result = await self._session.execute(statement)
+        model = result.scalar_one_or_none()
+        return _model_to_sync_job(model) if model is not None else None
+
+    async def get_latest_completed_for_workspace_provider(
+        self,
+        workspace_id: WorkspaceId,
+        crm_provider: str,
+    ) -> CRMSyncJob | None:
+        statement = (
+            _workspace_provider_jobs_statement(workspace_id, crm_provider)
+            .where(CRMSyncJobModel.status == CRMSyncJobStatus.COMPLETED.value)
+            .limit(1)
+        )
+        result = await self._session.execute(statement)
+        model = result.scalar_one_or_none()
+        return _model_to_sync_job(model) if model is not None else None
+
+    async def get_active_for_workspace_provider(
+        self,
+        workspace_id: WorkspaceId,
+        crm_provider: str,
+    ) -> CRMSyncJob | None:
+        statement = (
+            _workspace_provider_jobs_statement(workspace_id, crm_provider)
+            .where(CRMSyncJobModel.status.in_(_ACTIVE_SYNC_JOB_STATUSES))
+            .limit(1)
+        )
+        result = await self._session.execute(statement)
+        model = result.scalar_one_or_none()
+        return _model_to_sync_job(model) if model is not None else None
+
+    async def insert_pending_if_no_active(self, job: CRMSyncJob) -> CRMSyncJob | None:
+        statement = (
+            insert(CRMSyncJobModel)
+            .values(**_sync_job_to_values(job))
+            .on_conflict_do_nothing(
+                index_elements=["workspace_id", "crm_provider"],
+                index_where=CRMSyncJobModel.status.in_(_ACTIVE_SYNC_JOB_STATUSES),
+            )
+            .returning(CRMSyncJobModel)
+        )
+        result = await self._session.execute(statement)
+        model = result.scalar_one_or_none()
+        return _model_to_sync_job(model) if model is not None else None
+
+    async def claim_pending_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        sync_job_id: UUID,
+        *,
+        now: datetime,
+    ) -> CRMSyncJob | None:
+        statement = (
+            update(CRMSyncJobModel)
+            .where(CRMSyncJobModel.workspace_id == workspace_id)
+            .where(CRMSyncJobModel.sync_job_id == sync_job_id)
+            .where(CRMSyncJobModel.status == CRMSyncJobStatus.PENDING.value)
+            .values(
+                status=CRMSyncJobStatus.RUNNING.value,
+                started_at=now,
+                updated_at=now,
+                failure_reason=None,
+            )
+            .returning(CRMSyncJobModel)
+        )
+        result = await self._session.execute(statement)
+        model = result.scalar_one_or_none()
+        return _model_to_sync_job(model) if model is not None else None
 
     async def save(self, job: CRMSyncJob) -> CRMSyncJob:
         values = _sync_job_to_values(job)
@@ -126,6 +204,24 @@ def _sync_job_to_values(job: CRMSyncJob) -> dict[str, object]:
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
+
+
+_ACTIVE_SYNC_JOB_STATUSES = (
+    CRMSyncJobStatus.PENDING.value,
+    CRMSyncJobStatus.RUNNING.value,
+)
+
+
+def _workspace_provider_jobs_statement(
+    workspace_id: WorkspaceId,
+    crm_provider: str,
+) -> Select[tuple[CRMSyncJobModel]]:
+    return (
+        select(CRMSyncJobModel)
+        .where(CRMSyncJobModel.workspace_id == workspace_id)
+        .where(CRMSyncJobModel.crm_provider == crm_provider)
+        .order_by(CRMSyncJobModel.created_at.desc())
+    )
 
 
 def _model_to_sync_job(model: CRMSyncJobModel) -> CRMSyncJob:

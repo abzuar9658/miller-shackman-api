@@ -1,4 +1,4 @@
-.PHONY: infra-up infra-down infra-logs infra-ps run worker test lint format typecheck check migrate revision
+.PHONY: infra-up infra-down infra-logs infra-ps run worker crm-sync-worker crm-sync-scheduler test lint format typecheck check migrate revision
 
 infra-up:
 	docker compose up -d postgres rabbitmq redis temporal temporal-ui mailpit
@@ -17,6 +17,12 @@ run:
 
 worker:
 	uv run python -c "import asyncio; from app.interfaces.workers.temporal_worker import main; asyncio.run(main())"
+
+crm-sync-worker:
+	uv run python -c "import asyncio; from app.interfaces.workers.crm_sync_worker import main; asyncio.run(main())"
+
+crm-sync-scheduler:
+	uv run python -c "import asyncio; from app.interfaces.workers.crm_sync_scheduler_worker import main; asyncio.run(main())"
 
 test:
 	uv run pytest

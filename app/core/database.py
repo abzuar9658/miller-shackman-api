@@ -52,7 +52,7 @@ async def enable_postgres_service_access(session: object) -> None:
         text(
             "select set_config('app.service_access', 'on', true), "
             "set_config('app.current_workspace_id', '', true)"
-        )
+        ),
     )
 
 
@@ -62,5 +62,5 @@ async def clear_postgres_rls_context(session: object) -> None:
         text(
             "select set_config('app.service_access', 'off', true), "
             "set_config('app.current_workspace_id', '', true)"
-        )
+        ),
     )

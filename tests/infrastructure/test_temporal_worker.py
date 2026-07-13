@@ -111,6 +111,11 @@ async def test_run_temporal_worker_connects_and_runs(monkeypatch: pytest.MonkeyP
     )
     captured: dict[str, object] = {}
 
+    class FakeLogger:
+        def info(self, event: str, **kwargs: object) -> None:
+            captured["log_event"] = event
+            captured["log_kwargs"] = kwargs
+
     class FakeWorker:
         async def run(self) -> None:
             captured["ran"] = True
@@ -132,10 +137,19 @@ async def test_run_temporal_worker_connects_and_runs(monkeypatch: pytest.MonkeyP
         "app.infrastructure.workflows.temporal.worker.build_temporal_worker",
         fake_build_temporal_worker,
     )
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.worker.logger",
+        FakeLogger(),
+    )
 
     await run_temporal_worker(settings)
 
     assert captured["connect_settings"] is settings
     assert captured["client"] == "fake-client"
     assert captured["build_settings"] is settings
+    assert captured["log_event"] == "Temporal worker started"
+    assert captured["log_kwargs"] == {
+        "temporal_address": "temporal.example:7233",
+        "task_queue": "custom-task-queue",
+    }
     assert captured["ran"] is True

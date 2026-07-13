@@ -82,6 +82,15 @@ class PostgresWorkspaceRepository:
         model = result.scalar_one_or_none()
         return _workspace_from_model(model) if model else None
 
+    async def list_active_ids(self, *, limit: int = 100) -> tuple[WorkspaceId, ...]:
+        result = await self._session.execute(
+            select(WorkspaceModel.workspace_id)
+            .where(WorkspaceModel.status == WorkspaceStatus.ACTIVE.value)
+            .order_by(WorkspaceModel.created_at.asc())
+            .limit(limit),
+        )
+        return tuple(result.scalars().all())
+
     async def save(self, workspace: Workspace) -> Workspace:
         statement = (
             insert(WorkspaceModel)
