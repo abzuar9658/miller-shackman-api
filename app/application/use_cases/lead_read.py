@@ -14,7 +14,13 @@ from app.application.ports.lead_read import (
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.common.ids import LeadId, UserId, WorkspaceId
 from app.domain.conversations import Handoff, InboundMessage
-from app.domain.identity import AuthenticatedActor, PermissionCapability, evaluate_permission
+from app.domain.identity import (
+    AuthenticatedActor,
+    PermissionCapability,
+    PermissionContext,
+    WorkspaceMembershipRole,
+    evaluate_permission,
+)
 from app.domain.leads import CanonicalLeadRecord
 from app.domain.workflows import LeadWorkflow, WorkflowTransition
 
@@ -71,7 +77,12 @@ async def list_lead_views(
     user_repository: LeadReadUserRepository,
     limit: int = 100,
 ) -> LeadListResult:
-    if not _can_view_workspace_leads(actor):
+    scoped_actor: AuthenticatedActor | None
+    if _can_view_workspace_leads(actor):
+        scoped_actor = None
+    elif actor.active_role == WorkspaceMembershipRole.ASSIGNED_AGENT:
+        scoped_actor = actor
+    else:
         return LeadListResult(
             status=LeadReadStatus.REJECTED,
             reasons=(LeadReadReasonCode.PERMISSION_DENIED,),
@@ -96,6 +107,7 @@ async def list_lead_views(
             latest_handoff=latest_handoffs.get(lead.lead_id),
         )
         for lead in leads
+        if scoped_actor is None or _can_view_assigned_lead(scoped_actor, lead)
     ]
     return LeadListResult(status=LeadReadStatus.OK, views=tuple(views))
 
@@ -113,17 +125,17 @@ async def get_lead_detail_view(
     handoff_repository: LeadReadHandoffRepository,
     user_repository: LeadReadUserRepository,
 ) -> LeadDetailResult:
-    if not _can_view_workspace_leads(actor):
-        return LeadDetailResult(
-            status=LeadReadStatus.REJECTED,
-            reasons=(LeadReadReasonCode.PERMISSION_DENIED,),
-        )
-
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
     if lead is None:
         return LeadDetailResult(
             status=LeadReadStatus.NOT_FOUND,
             reasons=(LeadReadReasonCode.LEAD_NOT_FOUND,),
+        )
+
+    if not _can_view_workspace_leads(actor) and not _can_view_assigned_lead(actor, lead):
+        return LeadDetailResult(
+            status=LeadReadStatus.REJECTED,
+            reasons=(LeadReadReasonCode.PERMISSION_DENIED,),
         )
 
     latest_workflow = await workflow_repository.get_latest_for_lead(workspace_id, lead_id)
@@ -182,3 +194,18 @@ def _assigned_agent_user_id(lead: CanonicalLeadRecord) -> UserId | None:
 
 def _can_view_workspace_leads(actor: AuthenticatedActor) -> bool:
     return bool(evaluate_permission(actor, PermissionCapability.VIEW_WORKSPACE_REPORTING).allowed)
+
+
+def _can_view_assigned_lead(actor: AuthenticatedActor, lead: CanonicalLeadRecord) -> bool:
+    return bool(
+        evaluate_permission(
+            actor,
+            PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
+            PermissionContext(acts_on_assigned_lead=_acts_on_assigned_lead(actor, lead)),
+        ).allowed
+    )
+
+
+def _acts_on_assigned_lead(actor: AuthenticatedActor, lead: CanonicalLeadRecord) -> bool:
+    assigned_agent_user_id = _assigned_agent_user_id(lead)
+    return assigned_agent_user_id is not None and assigned_agent_user_id == actor.user_id

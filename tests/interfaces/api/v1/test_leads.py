@@ -33,13 +33,13 @@ from app.domain.workflows import (
     WorkflowTransition,
     WorkflowTransitionReasonCode,
 )
+from app.interfaces.api.dependencies.lead_read import LeadReadBundle, get_lead_read_bundle
 from app.interfaces.api.dependencies.lead_resume import (
     LeadResumeActionBundle,
     LeadResumeReadBundle,
     get_lead_resume_action_bundle,
     get_lead_resume_read_bundle,
 )
-from app.interfaces.api.dependencies.lead_read import LeadReadBundle, get_lead_read_bundle
 from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.main import create_app
 from tests.application.use_cases._campaign_cadence_fakes import FakeWorkspaceContactPolicyRepository
@@ -110,16 +110,35 @@ def test_assigned_agent_can_resume_own_lead() -> None:
     assert response.json()["status"] == "requested"
 
 
-def test_lead_routes_reject_assigned_agent() -> None:
+def test_assigned_agent_can_read_own_lead_routes() -> None:
     client = _client_for_role(WorkspaceMembershipRole.ASSIGNED_AGENT)
 
-    response = client.client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/leads")
+    list_response = client.client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/leads")
+    detail_response = client.client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}")
+
+    assert list_response.status_code == 200
+    assert list_response.json()["leads"][0]["lead"]["display_name"] == "Jordan Seller"
+    assert detail_response.status_code == 200
+    assert detail_response.json()["lead"]["display_name"] == "Jordan Seller"
+
+
+def test_assigned_agent_lead_detail_rejects_unowned_lead() -> None:
+    client = _client_for_role(
+        WorkspaceMembershipRole.ASSIGNED_AGENT,
+        assigned_agent_user_id=UUID("00000000-0000-0000-0000-000000000099"),
+    )
+
+    response = client.client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}")
 
     assert response.status_code == 403
     assert response.json()["detail"] == ["permission_denied"]
 
 
-def _client_for_role(role: WorkspaceMembershipRole) -> LeadsTestClient:
+def _client_for_role(
+    role: WorkspaceMembershipRole,
+    *,
+    assigned_agent_user_id: UUID = USER_ID,
+) -> LeadsTestClient:
     app = create_app()
     lead = CanonicalLeadRecord(
         workspace_id=WORKSPACE_ID,
@@ -138,7 +157,7 @@ def _client_for_role(role: WorkspaceMembershipRole) -> LeadsTestClient:
         email_permission_status=ContactPermissionStatus.CONFIRMED,
         do_not_contact=False,
         mapped_custom_fields={
-            "assigned_agent_user_id": str(USER_ID),
+            "assigned_agent_user_id": str(assigned_agent_user_id),
             "display_name": "Jordan Seller",
         },
     )

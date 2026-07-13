@@ -4,12 +4,6 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.application.use_cases.lead_resume import (
-    LeadResumeActionStatus,
-    LeadResumeEligibilityStatus,
-    get_lead_resume_eligibility,
-    resume_lead_workflow,
-)
 from app.application.use_cases.lead_read import (
     LeadDetailView,
     LeadReadStatus,
@@ -17,26 +11,32 @@ from app.application.use_cases.lead_read import (
     get_lead_detail_view,
     list_lead_views,
 )
+from app.application.use_cases.lead_resume import (
+    LeadResumeActionStatus,
+    LeadResumeEligibilityStatus,
+    get_lead_resume_eligibility,
+    resume_lead_workflow,
+)
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.conversations import InboundMessage
 from app.domain.identity import AuthenticatedActor
 from app.domain.leads import CanonicalLeadRecord
 from app.domain.workflows import LeadWorkflow, WorkflowTransition
+from app.interfaces.api.dependencies.lead_read import LeadReadBundle, get_lead_read_bundle
 from app.interfaces.api.dependencies.lead_resume import (
     LeadResumeActionBundle,
     LeadResumeReadBundle,
     get_lead_resume_action_bundle,
     get_lead_resume_read_bundle,
 )
-from app.interfaces.api.dependencies.lead_read import LeadReadBundle, get_lead_read_bundle
 from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.interfaces.api.schemas.leads import (
     InboundMessageResponse,
     LeadDetailResponse,
     LeadListItemResponse,
     LeadListResponse,
-    LeadResumeEligibilityResponse,
     LeadResponse,
+    LeadResumeEligibilityResponse,
     LeadWorkflowResponse,
     OutboundMessageResponse,
     ResumeLeadWorkflowRequest,

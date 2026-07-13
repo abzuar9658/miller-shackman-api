@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from app.application.use_cases.lead_read import (
+    LeadReadReasonCode,
     LeadReadStatus,
     get_lead_detail_view,
     list_lead_views,
@@ -93,6 +94,43 @@ def test_get_lead_detail_view_returns_messages_and_transitions() -> None:
     assert len(result.view.handoffs) == 1
 
 
+def test_assigned_agent_list_lead_views_returns_only_owned_leads() -> None:
+    result = asyncio.run(
+        list_lead_views(
+            actor=_actor(WorkspaceMembershipRole.ASSIGNED_AGENT),
+            workspace_id=WORKSPACE_ID,
+            lead_repository=FakeLeadRepository((_lead(), _other_lead())),
+            workflow_repository=FakeLeadWorkflowRepository((_workflow(),)),
+            handoff_repository=FakeHandoffRepository((_handoff(),)),
+            user_repository=FakeUserRepository({USER_ID: _user()}),
+        )
+    )
+
+    assert result.status == LeadReadStatus.OK
+    assert len(result.views) == 1
+    assert result.views[0].lead.lead_id == LEAD_ID
+
+
+def test_assigned_agent_get_lead_detail_view_rejects_unowned_lead() -> None:
+    result = asyncio.run(
+        get_lead_detail_view(
+            actor=_actor(WorkspaceMembershipRole.ASSIGNED_AGENT),
+            workspace_id=WORKSPACE_ID,
+            lead_id=UUID("00000000-0000-0000-0000-000000000099"),
+            lead_repository=FakeLeadRepository((_other_lead(),)),
+            workflow_repository=FakeLeadWorkflowRepository(()),
+            workflow_transition_repository=FakeWorkflowTransitionRepository(()),
+            inbound_message_repository=FakeInboundMessageRepository(()),
+            outbound_message_repository=FakeOutboundMessageRepository(()),
+            handoff_repository=FakeHandoffRepository(()),
+            user_repository=FakeUserRepository({USER_ID: _user()}),
+        )
+    )
+
+    assert result.status == LeadReadStatus.REJECTED
+    assert result.reasons == (LeadReadReasonCode.PERMISSION_DENIED,)
+
+
 def _lead() -> CanonicalLeadRecord:
     return CanonicalLeadRecord(
         workspace_id=WORKSPACE_ID,
@@ -106,6 +144,23 @@ def _lead() -> CanonicalLeadRecord:
         mapped_custom_fields={
             "assigned_agent_user_id": str(USER_ID),
             "display_name": "Jordan Seller",
+        },
+    )
+
+
+def _other_lead() -> CanonicalLeadRecord:
+    return CanonicalLeadRecord(
+        workspace_id=WORKSPACE_ID,
+        lead_id=UUID("00000000-0000-0000-0000-000000000099"),
+        crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+        crm_lead_id="crm-2",
+        facts_derived_at=NOW,
+        source_payload_version="test:v1",
+        primary_email="other@example.com",
+        primary_phone="+15555550124",
+        mapped_custom_fields={
+            "assigned_agent_user_id": str(UUID("00000000-0000-0000-0000-000000000098")),
+            "display_name": "Casey Unowned",
         },
     )
 
