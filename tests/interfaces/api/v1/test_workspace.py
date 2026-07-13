@@ -8,6 +8,7 @@ from app.domain.identity import (
     AuthenticatedActor,
     UserStatus,
     WorkspaceMembershipRole,
+    WorkspaceMembershipStatus,
 )
 from app.interfaces.api.dependencies.auth import (
     AuthServiceBundle,
@@ -92,10 +93,15 @@ def test_create_workspace_returns_201(workspace_client: WorkspaceTestClient) -> 
 
 
 def test_list_workspace_users_returns_200(workspace_client: WorkspaceTestClient) -> None:
-    workspace_client.deps.users[USER_ID] = _user()
-    workspace_client.deps.memberships[UUID("00000000-0000-0000-0000-00000000000f")] = _membership(
-        membership_id=UUID("00000000-0000-0000-0000-00000000000f"),
+    invited_membership_id = UUID("00000000-0000-0000-0000-00000000000f")
+    workspace_client.deps.users[USER_ID] = _user(status=UserStatus.PENDING_VERIFICATION)
+    workspace_client.deps.memberships[invited_membership_id] = _membership(
+        membership_id=invited_membership_id,
+        user_id=USER_ID,
+        role=WorkspaceMembershipRole.MANAGER,
+        status=WorkspaceMembershipStatus.INVITED,
     )
+    workspace_client.deps.invitations[INVITATION_ID] = _invitation(token_hash="hash::invite-token")
 
     response = workspace_client.client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/users")
 
@@ -103,6 +109,12 @@ def test_list_workspace_users_returns_200(workspace_client: WorkspaceTestClient)
     body = response.json()
     assert body["status"] == "found"
     assert len(body["users"]) == 2
+    invited_user = next(
+        user
+        for user in body["users"]
+        if user["membership"]["membership_id"] == str(invited_membership_id)
+    )
+    assert invited_user["invitation_id"] == str(INVITATION_ID)
 
 
 def test_invite_user_returns_201(workspace_client: WorkspaceTestClient) -> None:

@@ -109,6 +109,7 @@ class OutboundMessageModel(Base):
             name="uq_outbound_messages_workspace_idempotency_key",
         ),
         Index("ix_outbound_messages_workspace_lead", "workspace_id", "lead_id"),
+        Index("ix_outbound_messages_provider_message", "provider_name", "provider_message_id"),
         Index("ix_outbound_messages_workspace_status", "workspace_id", "status"),
     )
 
@@ -128,7 +129,11 @@ class OutboundMessageModel(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     message_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     provider_send_status: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_name: Mapped[str | None] = mapped_column(String(50))
     provider_message_id: Mapped[str | None] = mapped_column(String(255))
+    provider_delivery_status: Mapped[str | None] = mapped_column(String(50))
+    provider_status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_reason: Mapped[str | None] = mapped_column(String(500))
     draft_prompt_version: Mapped[str | None] = mapped_column(String(100))
     draft_model: Mapped[str | None] = mapped_column(String(100))
@@ -256,6 +261,39 @@ class CampaignCadenceStepModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class CampaignAdminAuditLogModel(Base):
+    __tablename__ = "campaign_admin_audit_logs"
+    __table_args__ = (
+        Index(
+            "ix_campaign_admin_audit_workspace_campaign",
+            "workspace_id",
+            "campaign_id",
+            "created_at",
+        ),
+        Index("ix_campaign_admin_audit_actor_created", "actor_user_id", "created_at"),
+        Index("ix_campaign_admin_audit_workspace_action", "workspace_id", "action", "created_at"),
+    )
+
+    audit_log_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    campaign_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("campaigns.campaign_id"), nullable=False
+    )
+    campaign_version_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("campaign_versions.campaign_version_id")
+    )
+    actor_user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    details: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class CRMSyncJobModel(Base):
     __tablename__ = "crm_sync_jobs"
     __table_args__ = (Index("ix_crm_sync_jobs_workspace_created", "workspace_id", "created_at"),)
@@ -318,6 +356,154 @@ class ExternalEventModel(Base):
     failure_reason: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ProviderMessageEventModel(Base):
+    __tablename__ = "provider_message_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "provider",
+            "external_provider_event_id",
+            name="uq_provider_message_events_workspace_provider_event",
+        ),
+        Index(
+            "ix_provider_message_events_provider_external", "provider", "external_provider_event_id"
+        ),
+        Index(
+            "ix_provider_message_events_workspace_message", "workspace_id", "provider_message_id"
+        ),
+        Index(
+            "ix_provider_message_events_workspace_status_received",
+            "workspace_id",
+            "status",
+            "received_at",
+        ),
+    )
+
+    provider_event_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_message_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    outbound_message_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("outbound_messages.message_id"),
+    )
+    external_provider_event_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload_redacted: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class OutboxEventModel(Base):
+    __tablename__ = "outbox_events"
+    __table_args__ = (
+        Index("ix_outbox_events_status_available", "status", "available_at"),
+        Index(
+            "ix_outbox_events_workspace_type_created",
+            "workspace_id",
+            "event_type",
+            "created_at",
+        ),
+    )
+
+    outbox_event_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    aggregate_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    aggregate_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(1000))
+
+
+class PreflightDigestModel(Base):
+    __tablename__ = "preflight_digests"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "campaign_id",
+            "batch_id",
+            name="uq_preflight_digests_workspace_campaign_batch",
+        ),
+        Index("ix_preflight_digests_workspace_status", "workspace_id", "status"),
+    )
+
+    digest_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    campaign_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("campaigns.campaign_id"), nullable=False
+    )
+    batch_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    veto_window_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    entries: Mapped[list[dict[str, object]]] = mapped_column(JSONB, nullable=False, default=list)
+    notification_records: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PreflightVetoModel(Base):
+    __tablename__ = "preflight_vetoes"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "campaign_id",
+            "batch_id",
+            "lead_id",
+            "actor_user_id",
+            name="uq_preflight_vetoes_workspace_campaign_batch_lead_actor",
+        ),
+        UniqueConstraint(
+            "workspace_id", "idempotency_key", name="uq_preflight_vetoes_workspace_idempotency"
+        ),
+        Index("ix_preflight_vetoes_workspace_lead", "workspace_id", "lead_id"),
+        Index("ix_preflight_vetoes_digest_id", "digest_id"),
+    )
+
+    veto_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    campaign_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("campaigns.campaign_id"), nullable=False
+    )
+    batch_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    digest_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("preflight_digests.digest_id")
+    )
+    lead_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.lead_id"), nullable=False
+    )
+    actor_user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
+    )
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class ConversationModel(Base):

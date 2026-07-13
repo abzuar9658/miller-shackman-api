@@ -29,6 +29,19 @@ class FakeCampaignExecutionRepository:
             return None
         return self.config
 
+    async def get_active_for_campaign(
+        self,
+        workspace_id: WorkspaceId,
+        campaign_id: UUID,
+    ) -> CampaignExecutionConfig | None:
+        if self.config is None:
+            return None
+        if self.config.workspace_id != workspace_id:
+            return None
+        if self.config.campaign_id != campaign_id:
+            return None
+        return self.config
+
 
 class FakeWorkspaceRepository:
     def __init__(self, workspace: Workspace | None) -> None:
@@ -213,6 +226,8 @@ class FakeLLMClient:
 
 
 class FakeSMSProvider:
+    provider_name = "twilio"
+
     def __init__(self, result: str | Exception = "SM123") -> None:
         self.result = result
         self.messages: list[SMSMessage] = []
@@ -225,6 +240,8 @@ class FakeSMSProvider:
 
 
 class FakeEmailProvider:
+    provider_name = "sendgrid"
+
     def __init__(self, result: str | Exception = "msg-123") -> None:
         self.result = result
         self.messages: list[EmailMessage] = []

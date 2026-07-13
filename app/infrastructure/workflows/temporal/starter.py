@@ -3,6 +3,7 @@ from temporalio.client import Client
 from app.application.ports.temporal import (
     LeadNurtureWorkflowSignaler,
     PauseLeadNurtureWorkflowSignal,
+    ResumeLeadNurtureWorkflowSignal,
     TemporalWorkflowStarter,
 )
 from app.core.config import Settings, get_settings
@@ -11,6 +12,7 @@ from app.infrastructure.workflows.temporal.lead_nurture import (
     LeadNurtureWorkflow,
     LeadNurtureWorkflowInput,
     PauseWorkflowSignal,
+    ResumeWorkflowSignal,
 )
 from app.infrastructure.workflows.temporal.worker import connect_temporal_client
 
@@ -49,6 +51,25 @@ class TemporalClientWorkflowStarter:
         await handle.signal(
             LeadNurtureWorkflow.pause_requested,
             PauseWorkflowSignal(
+                workspace_id=signal.workspace_id,
+                lead_id=signal.lead_id,
+                occurred_at=signal.occurred_at,
+                reason=signal.reason,
+                actor_user_id=signal.actor_user_id,
+                external_event_id=signal.external_event_id,
+            ),
+        )
+
+    async def signal_resume_lead_nurture_workflow(
+        self,
+        *,
+        temporal_workflow_id: str,
+        signal: ResumeLeadNurtureWorkflowSignal,
+    ) -> None:
+        handle = self._client.get_workflow_handle(temporal_workflow_id)
+        await handle.signal(
+            LeadNurtureWorkflow.resume_requested,
+            ResumeWorkflowSignal(
                 workspace_id=signal.workspace_id,
                 lead_id=signal.lead_id,
                 occurred_at=signal.occurred_at,

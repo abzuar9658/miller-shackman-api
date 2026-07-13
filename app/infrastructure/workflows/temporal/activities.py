@@ -17,7 +17,7 @@ from app.application.use_cases.campaign_cadence_execution import (
     execute_campaign_cadence_step,
     schedule_next_campaign_cadence_step,
 )
-from app.core.database import async_session_factory
+from app.core.database import async_session_factory, enable_postgres_service_access
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
 from app.infrastructure.persistence.postgres.campaign_execution_repository import (
     PostgresCampaignExecutionRepository,
@@ -59,6 +59,7 @@ async def apply_inbound_workflow_transition_activity(
         )
 
     async with async_session_factory() as session:
+        await enable_postgres_service_access(session)
         outcome = await apply_inbound_workflow_transition(
             workspace_id=signal.workspace_id,
             lead_id=signal.lead_id,
@@ -84,6 +85,7 @@ async def record_pause_workflow_signal_activity(
     signal: PauseWorkflowSignal,
 ) -> WorkflowSignalActivityResult:
     async with async_session_factory() as session:
+        await enable_postgres_service_access(session)
         outcome = await apply_workflow_state_transition(
             workspace_id=signal.workspace_id,
             lead_id=signal.lead_id,
@@ -112,6 +114,7 @@ async def record_resume_workflow_signal_activity(
         )
 
     async with async_session_factory() as session:
+        await enable_postgres_service_access(session)
         outcome = await apply_workflow_state_transition(
             workspace_id=signal.workspace_id,
             lead_id=signal.lead_id,
@@ -134,6 +137,7 @@ async def schedule_next_campaign_cadence_step_activity(
     input_: ScheduleNextCadenceStepInput,
 ) -> ScheduleNextCadenceStepResult:
     async with async_session_factory() as session:
+        await enable_postgres_service_access(session)
         outcome = await schedule_next_campaign_cadence_step(
             workspace_id=input_.workspace_id,
             lead_id=input_.lead_id,
@@ -151,6 +155,7 @@ async def execute_campaign_cadence_step_activity(
     input_: ExecuteCadenceStepInput,
 ) -> ExecuteCadenceStepResult:
     async with async_session_factory() as session:
+        await enable_postgres_service_access(session)
         outcome = await execute_campaign_cadence_step(
             workspace_id=input_.workspace_id,
             lead_id=input_.lead_id,

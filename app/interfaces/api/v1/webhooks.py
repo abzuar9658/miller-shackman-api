@@ -1,8 +1,17 @@
+import json
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
+from pydantic import TypeAdapter, ValidationError
+from sendgrid.helpers.eventwebhook import EventWebhook
+from twilio.request_validator import RequestValidator
 
+from app.application.use_cases.process_contact_suppression_event import (
+    ContactSuppressionEvent,
+    process_contact_suppression_event,
+)
 from app.application.use_cases.process_crm_human_activity_event import (
     CRMHumanActivityEvent,
     process_crm_human_activity_event,
@@ -11,13 +20,34 @@ from app.application.use_cases.process_inbound_message_event import (
     InboundMessageEvent,
     process_inbound_message_event,
 )
+from app.application.use_cases.process_provider_delivery_callback import (
+    ProcessProviderDeliveryCallbackResult,
+    ProcessProviderDeliveryCallbackStatus,
+    ProviderDeliveryCallback,
+    process_provider_delivery_callback,
+)
+from app.core.config import Settings, get_settings
+from app.core.database import enable_postgres_service_access, set_postgres_workspace_context
+from app.domain.campaigns.outbound_message import ProviderDeliveryStatus
 from app.domain.leads import CRMProvider
 from app.interfaces.api.dependencies.inbound import InboundServiceBundle, get_inbound_service_bundle
+from app.interfaces.api.dependencies.provider_delivery import (
+    ProviderDeliveryServiceBundle,
+    get_provider_delivery_service_bundle,
+)
 from app.interfaces.api.schemas.inbound import (
+    ContactSuppressionWebhookResponse,
     CRMHumanActivityWebhookResponse,
+    FollowUpBossContactSuppressionRequest,
     FollowUpBossCRMHumanActivityRequest,
     FollowUpBossInboundMessageRequest,
     InboundWebhookResponse,
+)
+from app.interfaces.api.schemas.provider_delivery import (
+    ProviderDeliveryWebhookResponse,
+    ProviderDeliveryWebhookResult,
+    SendGridEventWebhookPayload,
+    TwilioMessageStatusCallbackPayload,
 )
 
 router = APIRouter(tags=["webhooks"])
@@ -31,6 +61,7 @@ async def receive_follow_up_boss_inbound_message(
     request: FollowUpBossInboundMessageRequest,
     bundle: Annotated[InboundServiceBundle, Depends(get_inbound_service_bundle)],
 ) -> InboundWebhookResponse:
+    await set_postgres_workspace_context(bundle.session, str(request.workspace_id))
     result = await process_inbound_message_event(
         event=InboundMessageEvent(
             workspace_id=request.workspace_id,
@@ -58,6 +89,7 @@ async def receive_follow_up_boss_inbound_message(
         lead_workflow_repository=bundle.lead_workflow_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
         llm_client=bundle.llm_client,
+        event_bus=bundle.event_bus,
         now=datetime.now(UTC),
     )
     await bundle.session.commit()
@@ -84,6 +116,7 @@ async def receive_follow_up_boss_human_activity_event(
     request: FollowUpBossCRMHumanActivityRequest,
     bundle: Annotated[InboundServiceBundle, Depends(get_inbound_service_bundle)],
 ) -> CRMHumanActivityWebhookResponse:
+    await set_postgres_workspace_context(bundle.session, str(request.workspace_id))
     result = await process_crm_human_activity_event(
         event=CRMHumanActivityEvent(
             workspace_id=request.workspace_id,
@@ -121,4 +154,339 @@ async def receive_follow_up_boss_human_activity_event(
         signal_failure_reason=result.signal_failure_reason,
         transition_skip_reason=result.transition_skip_reason,
         reasons=[reason.value for reason in result.reasons],
+    )
+
+
+@router.post(
+    "/follow-up-boss/suppression-events",
+    response_model=ContactSuppressionWebhookResponse,
+)
+async def receive_follow_up_boss_contact_suppression_event(
+    request: FollowUpBossContactSuppressionRequest,
+    bundle: Annotated[InboundServiceBundle, Depends(get_inbound_service_bundle)],
+) -> ContactSuppressionWebhookResponse:
+    await set_postgres_workspace_context(bundle.session, str(request.workspace_id))
+    result = await process_contact_suppression_event(
+        event=ContactSuppressionEvent(
+            workspace_id=request.workspace_id,
+            source_provider=request.source_provider,
+            provider_event_id=request.provider_event_id,
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+            crm_lead_id=request.crm_lead_id,
+            suppression_kind=request.suppression_kind,
+            occurred_at=request.occurred_at,
+            provider_message_id=request.provider_message_id,
+            payload_redacted=request.payload_redacted,
+        ),
+        lead_repository=bundle.lead_repository,
+        external_event_repository=bundle.external_event_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
+        lead_nurture_workflow_signaler=bundle.lead_nurture_workflow_signaler,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    return ContactSuppressionWebhookResponse(
+        status=result.status.value,
+        external_event_id=result.external_event_id,
+        lead_id=result.lead_id,
+        workflow_id=result.workflow_id,
+        workflow_transition_id=result.workflow_transition_id,
+        suppression_kind=(
+            result.suppression_kind.value if result.suppression_kind is not None else None
+        ),
+        workflow_state=result.workflow_state.value if result.workflow_state is not None else None,
+        suppression_applied=result.suppression_applied,
+        signal_sent=result.signal_sent,
+        signal_failure_reason=result.signal_failure_reason,
+        transition_skip_reason=result.transition_skip_reason,
+        reasons=[reason.value for reason in result.reasons],
+    )
+
+
+@router.post(
+    "/twilio/message-status",
+    response_model=ProviderDeliveryWebhookResponse,
+)
+async def receive_twilio_message_status_callback(
+    request: Request,
+    bundle: Annotated[
+        ProviderDeliveryServiceBundle,
+        Depends(get_provider_delivery_service_bundle),
+    ],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ProviderDeliveryWebhookResponse:
+    await enable_postgres_service_access(bundle.session)
+    form = await request.form()
+    form_values = {key: str(value) for key, value in form.multi_items()}
+    _verify_twilio_signature_if_configured(
+        request=request,
+        settings=settings,
+        form_values=form_values,
+    )
+    payload = _validate_twilio_payload(form_values)
+    callback = ProviderDeliveryCallback(
+        provider="twilio",
+        provider_event_id=_twilio_provider_event_id(payload),
+        provider_message_id=payload.provider_message_id,
+        event_type=payload.message_status,
+        status=_map_twilio_delivery_status(payload.message_status),
+        occurred_at=datetime.now(UTC),
+        failure_reason=payload.error_message or payload.error_code,
+        payload_redacted=_twilio_payload_redacted(payload),
+    )
+    result = await process_provider_delivery_callback(
+        callback=callback,
+        message_repository=bundle.message_repository,
+        provider_message_event_repository=bundle.provider_message_event_repository,
+        event_bus=bundle.event_bus,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    return _provider_delivery_response((result,))
+
+
+@router.post(
+    "/sendgrid/message-events",
+    response_model=ProviderDeliveryWebhookResponse,
+)
+async def receive_sendgrid_message_events(
+    request: Request,
+    bundle: Annotated[
+        ProviderDeliveryServiceBundle,
+        Depends(get_provider_delivery_service_bundle),
+    ],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ProviderDeliveryWebhookResponse:
+    await enable_postgres_service_access(bundle.session)
+    body = await request.body()
+    _verify_sendgrid_signature_if_configured(
+        request=request,
+        settings=settings,
+        body=body,
+    )
+    payloads = _validate_sendgrid_payload(body)
+    now = datetime.now(UTC)
+    results: list[ProviderDeliveryWebhookResult | ProcessProviderDeliveryCallbackResult] = []
+    for payload in payloads:
+        if payload.event not in {"processed", "deferred", "delivered", "bounce", "dropped"}:
+            results.append(
+                ProviderDeliveryWebhookResult(
+                    status=ProcessProviderDeliveryCallbackStatus.IGNORED.value,
+                    reasons=[f"unsupported_event_type:{payload.event}"],
+                )
+            )
+            continue
+        provider_message_id = _sendgrid_provider_message_id(payload)
+        if provider_message_id is None:
+            results.append(
+                ProviderDeliveryWebhookResult(
+                    status=ProcessProviderDeliveryCallbackStatus.IGNORED.value,
+                    reasons=["provider_message_id_missing"],
+                )
+            )
+            continue
+        results.append(
+            await process_provider_delivery_callback(
+                callback=ProviderDeliveryCallback(
+                    provider="sendgrid",
+                    provider_event_id=_sendgrid_provider_event_id(payload, provider_message_id),
+                    provider_message_id=provider_message_id,
+                    event_type=payload.event,
+                    status=_map_sendgrid_delivery_status(payload.event),
+                    occurred_at=datetime.fromtimestamp(payload.timestamp, UTC),
+                    failure_reason=payload.reason,
+                    payload_redacted=_sendgrid_payload_redacted(payload, provider_message_id),
+                ),
+                message_repository=bundle.message_repository,
+                provider_message_event_repository=bundle.provider_message_event_repository,
+                event_bus=bundle.event_bus,
+                now=now,
+            )
+        )
+    await bundle.session.commit()
+    return _provider_delivery_response(results)
+
+
+def _validate_twilio_payload(form_values: dict[str, str]) -> TwilioMessageStatusCallbackPayload:
+    try:
+        return TwilioMessageStatusCallbackPayload.model_validate(form_values)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+
+def _validate_sendgrid_payload(body: bytes) -> tuple[SendGridEventWebhookPayload, ...]:
+    try:
+        raw_payload = json.loads(body)
+        return TypeAdapter(tuple[SendGridEventWebhookPayload, ...]).validate_python(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid_json_payload",
+        ) from exc
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+
+def _verify_twilio_signature_if_configured(
+    *,
+    request: Request,
+    settings: Settings,
+    form_values: dict[str, str],
+) -> None:
+    auth_token = settings.twilio_auth_token
+    if auth_token is None:
+        return
+    signature = request.headers.get("X-Twilio-Signature")
+    if not signature:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="missing_twilio_signature"
+        )
+    validator = RequestValidator(auth_token.get_secret_value())
+    if not validator.validate(str(request.url), form_values, signature):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_twilio_signature"
+        )
+
+
+def _verify_sendgrid_signature_if_configured(
+    *,
+    request: Request,
+    settings: Settings,
+    body: bytes,
+) -> None:
+    public_key = settings.sendgrid_event_webhook_public_key
+    if public_key is None:
+        return
+    signature = request.headers.get("X-Twilio-Email-Event-Webhook-Signature")
+    timestamp = request.headers.get("X-Twilio-Email-Event-Webhook-Timestamp")
+    if not signature or not timestamp:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="missing_sendgrid_signature"
+        )
+    event_webhook = EventWebhook()
+    if not event_webhook.verify_signature(
+        public_key=event_webhook.convert_public_key_to_ecdsa(public_key.get_secret_value()),
+        payload=body.decode("utf-8"),
+        signature=signature,
+        timestamp=timestamp,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_sendgrid_signature"
+        )
+
+
+def _twilio_provider_event_id(payload: TwilioMessageStatusCallbackPayload) -> str:
+    error_code = payload.error_code or "none"
+    return f"{payload.provider_message_id}:{payload.message_status}:{error_code}"
+
+
+def _sendgrid_provider_event_id(
+    payload: SendGridEventWebhookPayload,
+    provider_message_id: str,
+) -> str:
+    if payload.sg_event_id:
+        return payload.sg_event_id
+    return f"{provider_message_id}:{payload.event}:{payload.timestamp}"
+
+
+def _map_twilio_delivery_status(message_status: str) -> ProviderDeliveryStatus:
+    normalized = message_status.strip().lower()
+    if normalized in {"queued", "accepted", "sending", "sent"}:
+        return ProviderDeliveryStatus.ACCEPTED
+    if normalized == "delivered":
+        return ProviderDeliveryStatus.DELIVERED
+    if normalized == "failed":
+        return ProviderDeliveryStatus.FAILED
+    if normalized == "undelivered":
+        return ProviderDeliveryStatus.UNDELIVERED
+    return ProviderDeliveryStatus.UNKNOWN
+
+
+def _map_sendgrid_delivery_status(event: str) -> ProviderDeliveryStatus:
+    normalized = event.strip().lower()
+    if normalized == "processed":
+        return ProviderDeliveryStatus.ACCEPTED
+    if normalized == "deferred":
+        return ProviderDeliveryStatus.DEFERRED
+    if normalized == "delivered":
+        return ProviderDeliveryStatus.DELIVERED
+    if normalized == "bounce":
+        return ProviderDeliveryStatus.BOUNCED
+    if normalized == "dropped":
+        return ProviderDeliveryStatus.DROPPED
+    return ProviderDeliveryStatus.UNKNOWN
+
+
+def _sendgrid_provider_message_id(payload: SendGridEventWebhookPayload) -> str | None:
+    if payload.sg_message_id:
+        return payload.sg_message_id.split(".", 1)[0]
+    if payload.smtp_id and payload.smtp_id.startswith("<") and "@" in payload.smtp_id:
+        return payload.smtp_id[1:].split("@", 1)[0]
+    return None
+
+
+def _twilio_payload_redacted(
+    payload: TwilioMessageStatusCallbackPayload,
+) -> dict[str, object]:
+    return {
+        "message_status": payload.message_status,
+        "error_code": payload.error_code,
+        "error_message": payload.error_message,
+    }
+
+
+def _sendgrid_payload_redacted(
+    payload: SendGridEventWebhookPayload,
+    provider_message_id: str,
+) -> dict[str, object]:
+    return {
+        "event": payload.event,
+        "provider_message_id": provider_message_id,
+        "sg_event_id": payload.sg_event_id,
+        "reason": payload.reason,
+        "response": payload.response,
+        "status": payload.status,
+    }
+
+
+def _provider_delivery_response(
+    results: tuple[ProcessProviderDeliveryCallbackResult, ...]
+    | list[ProcessProviderDeliveryCallbackResult | ProviderDeliveryWebhookResult],
+) -> ProviderDeliveryWebhookResponse:
+    serialized: list[ProviderDeliveryWebhookResult] = []
+    processed_count = 0
+    duplicate_count = 0
+    ignored_count = 0
+    for result in results:
+        if isinstance(result, ProviderDeliveryWebhookResult):
+            serialized.append(result)
+            if result.status == ProcessProviderDeliveryCallbackStatus.IGNORED.value:
+                ignored_count += 1
+            continue
+        serialized.append(
+            ProviderDeliveryWebhookResult(
+                status=result.status.value,
+                provider_event_id=result.provider_event_id,
+                message_id=result.message_id,
+                provider_delivery_status=(
+                    result.provider_delivery_status.value
+                    if result.provider_delivery_status is not None
+                    else None
+                ),
+                reasons=[reason.value for reason in result.reasons],
+            )
+        )
+        if result.status == ProcessProviderDeliveryCallbackStatus.PROCESSED:
+            processed_count += 1
+        elif result.status == ProcessProviderDeliveryCallbackStatus.DUPLICATE:
+            duplicate_count += 1
+        else:
+            ignored_count += 1
+    return ProviderDeliveryWebhookResponse(
+        processed_count=processed_count,
+        duplicate_count=duplicate_count,
+        ignored_count=ignored_count,
+        results=serialized,
     )

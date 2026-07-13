@@ -18,6 +18,7 @@ from app.domain.compliance.contactability import (
     SmsComplianceState,
     WorkspaceContactPolicy,
 )
+from app.domain.events import DomainEvent, DomainEventType
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.infrastructure.messaging.sink import SinkEmailProvider, SinkSMSProvider
 
@@ -110,6 +111,8 @@ class FakeOutboundMessageRepository:
 
 
 class FakeSMSProvider:
+    provider_name = "twilio"
+
     def __init__(self, result: str | Exception = "SM123") -> None:
         self.result = result
         self.messages: list[SMSMessage] = []
@@ -122,6 +125,8 @@ class FakeSMSProvider:
 
 
 class FakeEmailProvider:
+    provider_name = "sendgrid"
+
     def __init__(self, result: str | Exception = "msg-123") -> None:
         self.result = result
         self.messages: list[EmailMessage] = []
@@ -131,6 +136,14 @@ class FakeEmailProvider:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+class FakeEventBus:
+    def __init__(self) -> None:
+        self.events: list[DomainEvent] = []
+
+    async def publish(self, event: DomainEvent) -> None:
+        self.events.append(event)
 
 
 def _lead(
@@ -225,12 +238,59 @@ async def test_sends_pending_sms_message_and_persists_sent_state() -> None:
     assert result.message is not None
     assert result.message.status == OutboundMessageStatus.SENT
     assert result.message.provider_send_status == ProviderSendStatus.ACCEPTED
+    assert result.message.provider_name == "twilio"
     assert result.message.provider_message_id == "SM123"
     assert result.message.sent_at == NOW
     assert sms_provider.messages[0].to_phone == "+15551234567"
     assert lead_repository.locked_ids == [LEAD_ID]
     assert message_repository.locked_idempotency_keys == [result.message.idempotency_key]
     assert len(email_provider.messages) == 0
+
+
+async def test_sends_message_sent_event_after_successful_send() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    event_bus = FakeEventBus()
+
+    assert message_repository.message is not None
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=FakeSMSProvider("SM123"),
+        email_provider=FakeEmailProvider(),
+        now=NOW,
+        event_bus=event_bus,
+    )
+
+    assert result.status == SendOutboundMessageStatus.SENT
+    assert len(event_bus.events) == 1
+    assert event_bus.events[0].event_type == DomainEventType.MESSAGE_SENT
+    assert event_bus.events[0].payload["provider_message_id"] == "SM123"
+
+
+async def test_sends_message_failed_event_when_provider_send_fails() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    event_bus = FakeEventBus()
+
+    assert message_repository.message is not None
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=FakeSMSProvider(RuntimeError("provider down")),
+        email_provider=FakeEmailProvider(),
+        now=NOW,
+        event_bus=event_bus,
+    )
+
+    assert result.status == SendOutboundMessageStatus.FAILED
+    assert len(event_bus.events) == 1
+    assert event_bus.events[0].event_type == DomainEventType.MESSAGE_FAILED
+    assert event_bus.events[0].payload["failure_reason"] == "provider down"
 
 
 async def test_sends_pending_email_message_with_subject() -> None:
@@ -253,6 +313,7 @@ async def test_sends_pending_email_message_with_subject() -> None:
     assert result.status == SendOutboundMessageStatus.SENT
     assert result.message is not None
     assert result.message.channel == ContactChannel.EMAIL
+    assert result.message.provider_name == "sendgrid"
     assert result.message.provider_message_id == "msg-123"
 
 
@@ -324,6 +385,7 @@ async def test_marks_message_uncertain_when_provider_returns_empty_identifier() 
     assert result.message is not None
     assert result.message.status == OutboundMessageStatus.UNCERTAIN
     assert result.message.provider_send_status == ProviderSendStatus.UNCERTAIN
+    assert result.message.provider_name == "twilio"
     assert result.message.failure_reason == "provider_message_id_missing"
 
 
@@ -345,6 +407,7 @@ async def test_marks_message_failed_when_provider_raises() -> None:
     assert result.status == SendOutboundMessageStatus.FAILED
     assert result.message is not None
     assert result.message.status == OutboundMessageStatus.FAILED
+    assert result.message.provider_name == "twilio"
     assert result.message.failure_reason == "twilio unavailable"
     assert result.message.provider_send_status == ProviderSendStatus.NOT_ATTEMPTED
 

@@ -1,4 +1,5 @@
 from collections.abc import Coroutine
+from datetime import time
 from typing import TypeVar
 from uuid import UUID
 
@@ -8,13 +9,22 @@ from app.application.use_cases.workspace import (
     ListWorkspaceUsersStatus,
     ResendInvitationStatus,
     UpdateUserStatusStatus,
+    UpdateWorkspaceContactPolicyStatus,
+    UpdateWorkspaceHandoffConfigStatus,
     UpdateWorkspaceMembershipStatus,
+    UpdateWorkspaceTimezoneStatus,
+    WorkspaceSettingsReadStatus,
     create_workspace,
+    get_workspace_settings,
     list_workspace_users,
     resend_invitation,
     update_user_status,
+    update_workspace_contact_policy,
+    update_workspace_default_timezone,
+    update_workspace_handoff_config,
     update_workspace_membership,
 )
+from app.domain.compliance import SmsComplianceState
 from app.domain.identity import (
     AuthAuditEventType,
     UserStatus,
@@ -159,6 +169,7 @@ def test_resend_invitation_sends_new_email() -> None:
             audit_log_repository=deps.audit_log_repository,
             opaque_token_service=deps.opaque_token_service,
             email_provider=deps.email_provider,
+            frontend_app_base_url="https://app.millerschackman.test",
             now=NOW,
         ),
     )
@@ -167,6 +178,9 @@ def test_resend_invitation_sends_new_email() -> None:
     assert result.invitation is not None
     assert result.invitation.token_hash == "hash::invite-token"
     assert len(deps.email_provider.messages) == 1
+    assert "https://app.millerschackman.test/signup/invited?token=invite-token" in (
+        deps.email_provider.messages[0].body
+    )
     assert deps.audit_log_repository.logs[-1].event_type == AuthAuditEventType.INVITATION_RESENT
 
 
@@ -249,6 +263,117 @@ def test_update_user_status_disables_user() -> None:
     assert result.user is not None
     assert result.user.status == UserStatus.DISABLED
     assert deps.audit_log_repository.logs[-1].event_type == AuthAuditEventType.USER_DISABLED
+
+
+def test_get_workspace_settings_returns_defaults_when_missing() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        get_workspace_settings(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            contact_policy_repository=deps.workspace_contact_policy_repository,
+            handoff_config_repository=deps.workspace_handoff_config_repository,
+        ),
+    )
+
+    assert result.status == WorkspaceSettingsReadStatus.FOUND
+    assert result.view is not None
+    assert result.view.workspace.workspace_id == WORKSPACE_ID
+    assert result.view.contact_policy.sms_compliance_state == SmsComplianceState.NOT_APPROVED
+    assert result.view.handoff_config.crm_custom_fields == {}
+
+
+def test_update_workspace_contact_policy_persists_values() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_contact_policy(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            sms_compliance_state=SmsComplianceState.APPROVED,
+            quiet_hours_start=time(9, 0),
+            quiet_hours_end=time(16, 0),
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            contact_policy_repository=deps.workspace_contact_policy_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceContactPolicyStatus.UPDATED
+    assert result.contact_policy is not None
+    assert result.contact_policy.sms_compliance_state == SmsComplianceState.APPROVED
+    assert result.contact_policy.quiet_hours_start == time(9, 0)
+    assert deps.audit_log_repository.logs[-1].event_type == (
+        AuthAuditEventType.WORKSPACE_CONTACT_POLICY_UPDATED
+    )
+
+
+def test_update_workspace_handoff_config_normalizes_values() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_handoff_config(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            fallback_recipient_email=" fallback@example.com ",
+            crm_handoff_tag=" human_handoff_required ",
+            crm_custom_fields={" handoff_status ": " required ", "": "skip"},
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            handoff_config_repository=deps.workspace_handoff_config_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceHandoffConfigStatus.UPDATED
+    assert result.handoff_config is not None
+    assert result.handoff_config.fallback_recipient_email == "fallback@example.com"
+    assert result.handoff_config.crm_handoff_tag == "human_handoff_required"
+    assert dict(result.handoff_config.crm_custom_fields) == {"handoff_status": "required"}
+    assert deps.audit_log_repository.logs[-1].event_type == (
+        AuthAuditEventType.WORKSPACE_HANDOFF_CONFIG_UPDATED
+    )
+
+
+def test_update_workspace_default_timezone_updates_workspace() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_default_timezone(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            default_timezone="America/New_York",
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceTimezoneStatus.UPDATED
+    assert result.workspace is not None
+    assert result.workspace.default_timezone == "America/New_York"
+    assert deps.audit_log_repository.logs[-1].event_type == (
+        AuthAuditEventType.WORKSPACE_TIMEZONE_UPDATED
+    )
 
 
 def _run[T](coroutine: Coroutine[object, object, T]) -> T:

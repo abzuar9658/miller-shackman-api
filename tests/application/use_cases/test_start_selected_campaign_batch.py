@@ -6,6 +6,7 @@ import pytest
 from app.application.use_cases.campaign_enrollment_types import LeadStartStatus
 from app.application.use_cases.start_selected_campaign_batch import start_selected_campaign_batch
 from app.domain.campaigns.enrollment import CampaignEnrollmentSource, CampaignEnrollmentStatus
+from app.domain.events import DomainEvent, DomainEventType
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
 from tests.application.use_cases._campaign_enrollment_fakes import (
     FakeCampaignEnrollmentRepository,
@@ -23,6 +24,14 @@ class _Dependencies:
         self.temporal_workflow_starter = FakeTemporalWorkflowStarter()
 
 
+class FakeEventBus:
+    def __init__(self) -> None:
+        self.events: list[DomainEvent] = []
+
+    async def publish(self, event: DomainEvent) -> None:
+        self.events.append(event)
+
+
 NOW = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 CAMPAIGN_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -38,6 +47,8 @@ def base_dependencies() -> _Dependencies:
 
 
 async def test_starts_workflow_for_selected_lead(base_dependencies: _Dependencies) -> None:
+    event_bus = FakeEventBus()
+
     result = await start_selected_campaign_batch(
         workspace_id=WORKSPACE_ID,
         campaign_id=CAMPAIGN_ID,
@@ -51,6 +62,7 @@ async def test_starts_workflow_for_selected_lead(base_dependencies: _Dependencie
         lead_workflow_repository=base_dependencies.lead_workflow_repository,
         workflow_transition_repository=base_dependencies.workflow_transition_repository,
         temporal_workflow_starter=base_dependencies.temporal_workflow_starter,
+        event_bus=event_bus,
     )
 
     assert result.started_count == 1
@@ -87,6 +99,11 @@ async def test_starts_workflow_for_selected_lead(base_dependencies: _Dependencie
         base_dependencies.temporal_workflow_starter.calls[0]["campaign_version_id"]
         == CAMPAIGN_VERSION_ID
     )
+    assert [event.event_type for event in event_bus.events] == [
+        DomainEventType.CAMPAIGN_ENROLLED,
+        DomainEventType.WORKFLOW_TRANSITIONED,
+    ]
+    assert event_bus.events[0].payload["lead_id"] == str(LEAD_ID_1)
 
 
 async def test_skips_already_enrolled_lead(base_dependencies: _Dependencies) -> None:

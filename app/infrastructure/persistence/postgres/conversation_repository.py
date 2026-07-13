@@ -63,6 +63,22 @@ class PostgresInboundMessageRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[InboundMessage, ...]:
+        result = await self._session.execute(
+            select(InboundMessageModel)
+            .where(InboundMessageModel.workspace_id == workspace_id)
+            .where(InboundMessageModel.lead_id == lead_id)
+            .order_by(InboundMessageModel.received_at.desc())
+            .limit(limit),
+        )
+        return tuple(_model_to_inbound_message(model) for model in result.scalars().all())
+
     async def save(self, message: InboundMessage) -> InboundMessage:
         values = _inbound_message_to_values(message)
         update_values = {
@@ -103,6 +119,38 @@ class PostgresConversationSummaryRepository:
 class PostgresHandoffRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[Handoff, ...]:
+        result = await self._session.execute(
+            select(HandoffModel)
+            .where(HandoffModel.workspace_id == workspace_id)
+            .where(HandoffModel.lead_id == lead_id)
+            .order_by(HandoffModel.created_at.desc(), HandoffModel.handoff_id.desc())
+            .limit(limit),
+        )
+        models = result.scalars().all()
+        return tuple(_model_to_handoff(model) for model in models)
+
+    async def list_handoffs(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[Handoff, ...]:
+        result = await self._session.execute(
+            select(HandoffModel)
+            .where(HandoffModel.workspace_id == workspace_id)
+            .order_by(HandoffModel.created_at.desc(), HandoffModel.handoff_id.desc())
+            .limit(limit),
+        )
+        models = result.scalars().all()
+        return tuple(_model_to_handoff(model) for model in models)
 
     async def get_by_id(
         self,

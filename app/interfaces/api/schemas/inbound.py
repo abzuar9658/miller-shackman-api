@@ -4,7 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.domain.compliance.contactability import ContactChannel
+from app.domain.compliance.contactability import ContactChannel, ContactSuppressionKind
 
 
 class FollowUpBossInboundMessageRequest(BaseModel):
@@ -35,6 +35,17 @@ class FollowUpBossCRMHumanActivityRequest(BaseModel):
     payload_redacted: dict[str, Any] = Field(default_factory=dict)
 
 
+class FollowUpBossContactSuppressionRequest(BaseModel):
+    workspace_id: UUID
+    source_provider: str
+    provider_event_id: str
+    crm_lead_id: str
+    suppression_kind: ContactSuppressionKind
+    occurred_at: datetime
+    provider_message_id: str | None = None
+    payload_redacted: dict[str, Any] = Field(default_factory=dict)
+
+
 class InboundWebhookResponse(BaseModel):
     status: str
     external_event_id: UUID | None = None
@@ -58,6 +69,21 @@ class CRMHumanActivityWebhookResponse(BaseModel):
     activity_kind: str | None = None
     pause_reason: str | None = None
     pause_requested: bool = False
+    signal_sent: bool = False
+    signal_failure_reason: str | None = None
+    transition_skip_reason: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ContactSuppressionWebhookResponse(BaseModel):
+    status: str
+    external_event_id: UUID | None = None
+    lead_id: UUID | None = None
+    workflow_id: UUID | None = None
+    workflow_transition_id: UUID | None = None
+    suppression_kind: str | None = None
+    workflow_state: str | None = None
+    suppression_applied: bool = False
     signal_sent: bool = False
     signal_failure_reason: str | None = None
     transition_skip_reason: str | None = None

@@ -31,6 +31,8 @@ from app.application.use_cases.authentication import (
     sign_in,
     switch_active_workspace,
 )
+from app.domain.compliance import WorkspaceContactPolicy
+from app.domain.conversations import WorkspaceHandoffConfig
 from app.domain.identity import (
     AuthAuditEventType,
     AuthAuditLog,
@@ -84,6 +86,7 @@ def test_invite_workspace_user_creates_records_and_sends_email() -> None:
             audit_log_repository=deps.audit_log_repository,
             opaque_token_service=deps.opaque_token_service,
             email_provider=deps.email_provider,
+            frontend_app_base_url="https://app.millerschackman.test",
             now=NOW,
         ),
     )
@@ -96,6 +99,9 @@ def test_invite_workspace_user_creates_records_and_sends_email() -> None:
     assert result.invitation is not None
     assert result.invitation.token_hash == "hash::invite-token"
     assert len(deps.email_provider.messages) == 1
+    assert "https://app.millerschackman.test/signup/invited?token=invite-token" in (
+        deps.email_provider.messages[0].body
+    )
     assert "invite-token" in deps.email_provider.messages[0].body
     assert deps.audit_log_repository.logs[-1].event_type == AuthAuditEventType.USER_INVITED
 
@@ -457,6 +463,8 @@ class _Dependencies:
         self.users: dict[UUID, User] = {}
         self.workspaces: dict[UUID, Workspace] = {}
         self.memberships: dict[UUID, WorkspaceMembership] = {}
+        self.workspace_contact_policies: dict[UUID, WorkspaceContactPolicy] = {}
+        self.workspace_handoff_configs: dict[UUID, WorkspaceHandoffConfig] = {}
         self.credentials: dict[UUID, PasswordCredential] = {}
         self.refresh_sessions: dict[UUID, RefreshSession] = {}
         self.reset_tokens: dict[UUID, PasswordResetToken] = {}
@@ -464,6 +472,12 @@ class _Dependencies:
         self.user_repository = _FakeUserRepository(self.users)
         self.workspace_repository = _FakeWorkspaceRepository(self.workspaces)
         self.membership_repository = _FakeWorkspaceMembershipRepository(self.memberships)
+        self.workspace_contact_policy_repository = _FakeWorkspaceContactPolicyRepository(
+            self.workspace_contact_policies,
+        )
+        self.workspace_handoff_config_repository = _FakeWorkspaceHandoffConfigRepository(
+            self.workspace_handoff_configs,
+        )
         self.credential_repository = _FakePasswordCredentialRepository(self.credentials)
         self.refresh_session_repository = _FakeRefreshSessionRepository(self.refresh_sessions)
         self.reset_token_repository = _FakePasswordResetTokenRepository(self.reset_tokens)
@@ -546,6 +560,30 @@ class _FakeWorkspaceMembershipRepository:
     async def save(self, membership: WorkspaceMembership) -> WorkspaceMembership:
         self._memberships[membership.membership_id] = membership
         return membership
+
+
+class _FakeWorkspaceContactPolicyRepository:
+    def __init__(self, policies: dict[UUID, WorkspaceContactPolicy]) -> None:
+        self._policies = policies
+
+    async def get_by_workspace_id(self, workspace_id: UUID) -> WorkspaceContactPolicy | None:
+        return self._policies.get(workspace_id)
+
+    async def save(self, policy: WorkspaceContactPolicy) -> WorkspaceContactPolicy:
+        self._policies[policy.workspace_id] = policy
+        return policy
+
+
+class _FakeWorkspaceHandoffConfigRepository:
+    def __init__(self, configs: dict[UUID, WorkspaceHandoffConfig]) -> None:
+        self._configs = configs
+
+    async def get_by_workspace_id(self, workspace_id: UUID) -> WorkspaceHandoffConfig | None:
+        return self._configs.get(workspace_id)
+
+    async def save(self, config: WorkspaceHandoffConfig) -> WorkspaceHandoffConfig:
+        self._configs[config.workspace_id] = config
+        return config
 
 
 class _FakePasswordCredentialRepository:

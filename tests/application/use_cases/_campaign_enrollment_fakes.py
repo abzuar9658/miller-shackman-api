@@ -1,6 +1,9 @@
 from uuid import UUID
 
-from app.application.ports.temporal import PauseLeadNurtureWorkflowSignal
+from app.application.ports.temporal import (
+    PauseLeadNurtureWorkflowSignal,
+    ResumeLeadNurtureWorkflowSignal,
+)
 from app.domain.campaigns.enrollment import CampaignEnrollment
 from app.domain.common.ids import CampaignVersionId, LeadId, WorkspaceId
 from app.domain.workflows import LeadWorkflow, WorkflowTransition
@@ -115,3 +118,18 @@ class FakeLeadNurtureWorkflowSignaler:
         )
         if self.always_fail:
             raise RuntimeError("Temporal pause signal failed")
+
+    async def signal_resume_lead_nurture_workflow(
+        self,
+        *,
+        temporal_workflow_id: str,
+        signal: ResumeLeadNurtureWorkflowSignal,
+    ) -> None:
+        self.calls.append(
+            {
+                "temporal_workflow_id": temporal_workflow_id,
+                "signal": signal,
+            }
+        )
+        if self.always_fail:
+            raise RuntimeError("Temporal resume signal failed")

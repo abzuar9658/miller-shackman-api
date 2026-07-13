@@ -14,13 +14,23 @@ from app.application.use_cases.workspace import (
     ListWorkspaceUsersStatus,
     ResendInvitationStatus,
     UpdateUserStatusStatus,
+    UpdateWorkspaceContactPolicyStatus,
+    UpdateWorkspaceHandoffConfigStatus,
     UpdateWorkspaceMembershipStatus,
+    UpdateWorkspaceTimezoneStatus,
+    WorkspaceSettingsReadStatus,
     create_workspace,
+    get_workspace_settings,
     list_workspace_users,
     resend_invitation,
     update_user_status,
+    update_workspace_contact_policy,
+    update_workspace_default_timezone,
+    update_workspace_handoff_config,
     update_workspace_membership,
 )
+from app.domain.compliance import WorkspaceContactPolicy
+from app.domain.conversations import WorkspaceHandoffConfig
 from app.domain.identity import AuthenticatedActor, User, Workspace, WorkspaceMembership
 from app.interfaces.api.dependencies.auth import (
     AuthServiceBundle,
@@ -28,6 +38,10 @@ from app.interfaces.api.dependencies.auth import (
     get_current_actor,
 )
 from app.interfaces.api.dependencies.membership import get_workspace_actor
+from app.interfaces.api.dependencies.workspace_settings import (
+    WorkspaceSettingsBundle,
+    get_workspace_settings_bundle,
+)
 from app.interfaces.api.schemas.auth import (
     MembershipResponse,
     UserResponse,
@@ -42,8 +56,17 @@ from app.interfaces.api.schemas.workspace import (
     ResendInvitationResponse,
     UpdateUserStatusRequest,
     UpdateUserStatusResponse,
+    UpdateWorkspaceContactPolicyRequest,
+    UpdateWorkspaceContactPolicyResponse,
+    UpdateWorkspaceHandoffConfigRequest,
+    UpdateWorkspaceHandoffConfigResponse,
     UpdateWorkspaceMembershipRequest,
     UpdateWorkspaceMembershipResponse,
+    UpdateWorkspaceTimezoneRequest,
+    UpdateWorkspaceTimezoneResponse,
+    WorkspaceContactPolicyResponse,
+    WorkspaceHandoffConfigResponse,
+    WorkspaceSettingsResponse,
     WorkspaceUserResponse,
 )
 
@@ -106,6 +129,24 @@ def _membership_response(membership: WorkspaceMembership) -> MembershipResponse:
     )
 
 
+def _contact_policy_response(policy: WorkspaceContactPolicy) -> WorkspaceContactPolicyResponse:
+    return WorkspaceContactPolicyResponse(
+        workspace_id=policy.workspace_id,
+        sms_compliance_state=policy.sms_compliance_state.value,
+        quiet_hours_start=policy.quiet_hours_start,
+        quiet_hours_end=policy.quiet_hours_end,
+    )
+
+
+def _handoff_config_response(config: WorkspaceHandoffConfig) -> WorkspaceHandoffConfigResponse:
+    return WorkspaceHandoffConfigResponse(
+        workspace_id=config.workspace_id,
+        fallback_recipient_email=config.fallback_recipient_email,
+        crm_handoff_tag=config.crm_handoff_tag,
+        crm_custom_fields=dict(config.crm_custom_fields),
+    )
+
+
 @router.post(
     "",
     response_model=CreateWorkspaceResponse,
@@ -126,12 +167,147 @@ async def create_workspace_route(
         audit_log_repository=bundle.audit_log_repository,
         now=datetime.now(UTC),
     )
+    if bundle.session is not None:
+        await bundle.session.commit()
     if result.status == CreateWorkspaceStatus.REJECTED:
         _raise_for_reasons(result.reasons)
     return CreateWorkspaceResponse(
         status=result.status.value,
         workspace=_workspace_response(result.workspace) if result.workspace else None,
         membership=_membership_response(result.membership) if result.membership else None,
+    )
+
+
+@router.get(
+    "/{workspace_id}/settings",
+    response_model=WorkspaceSettingsResponse,
+)
+async def get_workspace_settings_route(
+    workspace_id: UUID,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[WorkspaceSettingsBundle, Depends(get_workspace_settings_bundle)],
+) -> WorkspaceSettingsResponse:
+    result = await get_workspace_settings(
+        actor=actor,
+        workspace_id=workspace_id,
+        workspace_repository=bundle.workspace_repository,
+        membership_repository=bundle.membership_repository,
+        contact_policy_repository=bundle.workspace_contact_policy_repository,
+        handoff_config_repository=bundle.workspace_handoff_config_repository,
+    )
+    if result.status == WorkspaceSettingsReadStatus.REJECTED:
+        _raise_for_reasons(result.reasons)
+    return WorkspaceSettingsResponse(
+        status=result.status.value,
+        workspace=_workspace_response(result.view.workspace) if result.view else None,
+        contact_policy=(
+            _contact_policy_response(result.view.contact_policy) if result.view else None
+        ),
+        handoff_config=(
+            _handoff_config_response(result.view.handoff_config) if result.view else None
+        ),
+    )
+
+
+@router.patch(
+    "/{workspace_id}/settings/contact-policy",
+    response_model=UpdateWorkspaceContactPolicyResponse,
+)
+async def update_workspace_contact_policy_route(
+    workspace_id: UUID,
+    request: UpdateWorkspaceContactPolicyRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[WorkspaceSettingsBundle, Depends(get_workspace_settings_bundle)],
+) -> UpdateWorkspaceContactPolicyResponse:
+    result = await update_workspace_contact_policy(
+        actor=actor,
+        workspace_id=workspace_id,
+        sms_compliance_state=request.sms_compliance_state,
+        quiet_hours_start=request.quiet_hours_start,
+        quiet_hours_end=request.quiet_hours_end,
+        workspace_repository=bundle.workspace_repository,
+        membership_repository=bundle.membership_repository,
+        contact_policy_repository=bundle.workspace_contact_policy_repository,
+        audit_log_repository=bundle.audit_log_repository,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    if result.status == UpdateWorkspaceContactPolicyStatus.REJECTED:
+        _raise_for_reasons(result.reasons)
+    return UpdateWorkspaceContactPolicyResponse(
+        status=result.status.value,
+        contact_policy=(
+            _contact_policy_response(result.contact_policy)
+            if result.contact_policy is not None
+            else None
+        ),
+    )
+
+
+@router.patch(
+    "/{workspace_id}/settings/handoff-config",
+    response_model=UpdateWorkspaceHandoffConfigResponse,
+)
+async def update_workspace_handoff_config_route(
+    workspace_id: UUID,
+    request: UpdateWorkspaceHandoffConfigRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[WorkspaceSettingsBundle, Depends(get_workspace_settings_bundle)],
+) -> UpdateWorkspaceHandoffConfigResponse:
+    result = await update_workspace_handoff_config(
+        actor=actor,
+        workspace_id=workspace_id,
+        fallback_recipient_email=(
+            str(request.fallback_recipient_email)
+            if request.fallback_recipient_email is not None
+            else None
+        ),
+        crm_handoff_tag=request.crm_handoff_tag,
+        crm_custom_fields=request.crm_custom_fields,
+        workspace_repository=bundle.workspace_repository,
+        membership_repository=bundle.membership_repository,
+        handoff_config_repository=bundle.workspace_handoff_config_repository,
+        audit_log_repository=bundle.audit_log_repository,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    if result.status == UpdateWorkspaceHandoffConfigStatus.REJECTED:
+        _raise_for_reasons(result.reasons)
+    return UpdateWorkspaceHandoffConfigResponse(
+        status=result.status.value,
+        handoff_config=(
+            _handoff_config_response(result.handoff_config)
+            if result.handoff_config is not None
+            else None
+        ),
+    )
+
+
+@router.patch(
+    "/{workspace_id}/settings/timezone",
+    response_model=UpdateWorkspaceTimezoneResponse,
+)
+async def update_workspace_timezone_route(
+    workspace_id: UUID,
+    request: UpdateWorkspaceTimezoneRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[WorkspaceSettingsBundle, Depends(get_workspace_settings_bundle)],
+) -> UpdateWorkspaceTimezoneResponse:
+    result = await update_workspace_default_timezone(
+        actor=actor,
+        workspace_id=workspace_id,
+        default_timezone=request.default_timezone,
+        workspace_repository=bundle.workspace_repository,
+        membership_repository=bundle.membership_repository,
+        audit_log_repository=bundle.audit_log_repository,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    if result.status == UpdateWorkspaceTimezoneStatus.REJECTED:
+        _raise_for_reasons(result.reasons)
+    return UpdateWorkspaceTimezoneResponse(
+        status=result.status.value,
+        workspace=_workspace_response(result.workspace) if result.workspace else None,
     )
 
 
@@ -150,6 +326,7 @@ async def list_workspace_users_route(
         workspace_repository=bundle.workspace_repository,
         membership_repository=bundle.membership_repository,
         user_repository=bundle.user_repository,
+        invitation_repository=bundle.invitation_repository,
     )
     if result.status == ListWorkspaceUsersStatus.REJECTED:
         _raise_for_reasons(result.reasons)
@@ -159,6 +336,7 @@ async def list_workspace_users_route(
             WorkspaceUserResponse(
                 user=_user_response(workspace_user.user),
                 membership=_membership_response(workspace_user.membership),
+                invitation_id=workspace_user.invitation_id,
             )
             for workspace_user in result.users
         ],
@@ -189,8 +367,11 @@ async def invite_workspace_user_route(
         audit_log_repository=bundle.audit_log_repository,
         opaque_token_service=bundle.opaque_token_service,
         email_provider=bundle.email_provider,
+        frontend_app_base_url=bundle.settings.frontend_app_base_url,
         now=datetime.now(UTC),
     )
+    if bundle.session is not None:
+        await bundle.session.commit()
     if result.status == InviteWorkspaceUserStatus.REJECTED:
         _raise_for_reasons(result.reasons)
     return InviteWorkspaceUserResponse(
@@ -220,8 +401,11 @@ async def resend_invitation_route(
         audit_log_repository=bundle.audit_log_repository,
         opaque_token_service=bundle.opaque_token_service,
         email_provider=bundle.email_provider,
+        frontend_app_base_url=bundle.settings.frontend_app_base_url,
         now=datetime.now(UTC),
     )
+    if bundle.session is not None:
+        await bundle.session.commit()
     if result.status == ResendInvitationStatus.REJECTED:
         _raise_for_reasons(result.reasons)
     return ResendInvitationResponse(
@@ -252,6 +436,8 @@ async def update_workspace_membership_route(
         audit_log_repository=bundle.audit_log_repository,
         now=datetime.now(UTC),
     )
+    if bundle.session is not None:
+        await bundle.session.commit()
     if result.status == UpdateWorkspaceMembershipStatus.REJECTED:
         _raise_for_reasons(result.reasons)
     return UpdateWorkspaceMembershipResponse(
@@ -282,6 +468,8 @@ async def update_user_status_route(
         audit_log_repository=bundle.audit_log_repository,
         now=datetime.now(UTC),
     )
+    if bundle.session is not None:
+        await bundle.session.commit()
     if result.status == UpdateUserStatusStatus.REJECTED:
         _raise_for_reasons(result.reasons)
     return UpdateUserStatusResponse(

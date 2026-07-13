@@ -21,6 +21,21 @@ class PostgresLeadWorkflowRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def list_latest_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadWorkflow, ...]:
+        result = await self._session.execute(
+            select(LeadWorkflowModel)
+            .where(LeadWorkflowModel.workspace_id == workspace_id)
+            .distinct(LeadWorkflowModel.lead_id)
+            .order_by(LeadWorkflowModel.lead_id, LeadWorkflowModel.last_transition_at.desc())
+            .limit(limit),
+        )
+        return tuple(_model_to_workflow(model) for model in result.scalars().all())
+
     async def get_latest_for_lead(
         self,
         workspace_id: WorkspaceId,

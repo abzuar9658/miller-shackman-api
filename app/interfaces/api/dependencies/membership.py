@@ -3,6 +3,7 @@ from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
 
+from app.core.database import set_postgres_workspace_context
 from app.domain.identity import (
     AuthenticatedActor,
     WorkspaceMembership,
@@ -50,6 +51,8 @@ async def get_workspace_actor(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Workspace not active",
         )
+
+    await set_postgres_workspace_context(bundle.session, str(workspace_id))
 
     if actor.active_workspace_id == workspace_id:
         return actor

@@ -1,6 +1,6 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +29,24 @@ class PostgresCampaignEnrollmentRepository:
         model = result.scalar_one_or_none()
         return _model_to_enrollment(model) if model is not None else None
 
+    async def count_started_today(
+        self,
+        workspace_id: WorkspaceId,
+        campaign_id: CampaignId,
+        now: datetime,
+    ) -> int:
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow_start = today_start + timedelta(days=1)
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(CampaignEnrollmentModel)
+            .where(CampaignEnrollmentModel.workspace_id == workspace_id)
+            .where(CampaignEnrollmentModel.campaign_id == campaign_id)
+            .where(CampaignEnrollmentModel.started_at >= today_start)
+            .where(CampaignEnrollmentModel.started_at < tomorrow_start),
+        )
+        return result.scalar() or 0
+
     async def save(self, enrollment: CampaignEnrollment) -> CampaignEnrollment:
         now = datetime.now(UTC)
         values = _enrollment_to_values(enrollment, created_at=now, updated_at=now)
@@ -41,8 +59,8 @@ class PostgresCampaignEnrollmentRepository:
             .values(**values)
             .on_conflict_do_update(
                 index_elements=["workspace_id", "campaign_id", "lead_id"],
-                index_where=CampaignEnrollmentModel.status.in_(
-                    [status.value for status in _ACTIVE_ENROLLMENT_STATUSES]
+                index_where=text(
+                    "status IN ('candidate', 'queued', 'active', 'paused', 'handoff')",
                 ),
                 set_=update_values,
             )
@@ -50,15 +68,6 @@ class PostgresCampaignEnrollmentRepository:
         )
         result = await self._session.execute(statement)
         return _model_to_enrollment(result.scalar_one())
-
-
-_ACTIVE_ENROLLMENT_STATUSES = (
-    CampaignEnrollmentStatus.CANDIDATE,
-    CampaignEnrollmentStatus.QUEUED,
-    CampaignEnrollmentStatus.ACTIVE,
-    CampaignEnrollmentStatus.PAUSED,
-    CampaignEnrollmentStatus.HANDOFF,
-)
 
 
 def _by_lead_and_campaign_statement(

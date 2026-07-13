@@ -5,6 +5,7 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.ports.crm import CRMClient
+from app.application.ports.event_bus import EventBus
 from app.application.ports.llm import LLMClient
 from app.application.ports.notifications import NotificationProvider
 from app.application.ports.repositories import (
@@ -17,6 +18,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     LeadWorkflowRepository,
     WorkflowTransitionRepository,
+    WorkspaceContactPolicyRepository,
     WorkspaceHandoffConfigRepository,
 )
 from app.application.ports.temporal import LeadNurtureWorkflowSignaler
@@ -33,9 +35,16 @@ from app.infrastructure.persistence.postgres.crm_sync_repository import (
     PostgresExternalEventRepository,
 )
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
+from app.infrastructure.persistence.postgres.outbox_event_repository import (
+    PostgresOutboxEventRepository,
+    PostgresTransactionalEventBus,
+)
 from app.infrastructure.persistence.postgres.workflow_repository import (
     PostgresLeadWorkflowRepository,
     PostgresWorkflowTransitionRepository,
+)
+from app.infrastructure.persistence.postgres.workspace_contact_policy_repository import (
+    PostgresWorkspaceContactPolicyRepository,
 )
 from app.infrastructure.persistence.postgres.workspace_handoff_config_repository import (
     PostgresWorkspaceHandoffConfigRepository,
@@ -65,11 +74,13 @@ class InboundServiceBundle:
     handoff_completion_repository: HandoffCompletionRepository
     lead_workflow_repository: LeadWorkflowRepository
     workflow_transition_repository: WorkflowTransitionRepository
+    workspace_contact_policy_repository: WorkspaceContactPolicyRepository
     workspace_handoff_config_repository: WorkspaceHandoffConfigRepository
     crm_client: CRMClient
     notification_provider: NotificationProvider
     llm_client: LLMClient
     lead_nurture_workflow_signaler: LeadNurtureWorkflowSignaler
+    event_bus: EventBus
 
 
 async def get_inbound_service_bundle(
@@ -87,9 +98,11 @@ async def get_inbound_service_bundle(
         handoff_completion_repository=PostgresHandoffCompletionRepository(session),
         lead_workflow_repository=PostgresLeadWorkflowRepository(session),
         workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
+        workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
         workspace_handoff_config_repository=PostgresWorkspaceHandoffConfigRepository(session),
         crm_client=build_crm_client(settings),
         notification_provider=build_notification_provider(settings),
         llm_client=build_llm_client(settings),
         lead_nurture_workflow_signaler=await build_temporal_workflow_signaler(settings),
+        event_bus=PostgresTransactionalEventBus(PostgresOutboxEventRepository(session)),
     )

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
@@ -7,8 +8,14 @@ from fastapi.testclient import TestClient
 
 from app.application.ports.crm import CRMClient
 from app.application.ports.notifications import NotificationProvider
-from app.domain.compliance.contactability import ContactPermissionStatus
+from app.domain.compliance import (
+    ContactPermissionStatus,
+    ContactSuppressionKind,
+    SmsComplianceState,
+    WorkspaceContactPolicy,
+)
 from app.domain.conversations import WorkspaceHandoffConfig
+from app.domain.events import DomainEvent
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workflows import LeadWorkflow, WorkflowState
 from app.interfaces.api.dependencies.inbound import InboundServiceBundle, get_inbound_service_bundle
@@ -17,6 +24,7 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeLeadRepository,
     FakeLeadWorkflowRepository,
     FakeWorkflowTransitionRepository,
+    FakeWorkspaceContactPolicyRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
     FakeLeadNurtureWorkflowSignaler,
@@ -53,6 +61,14 @@ class FakeSession:
         self.commit_count += 1
 
 
+class FakeEventBus:
+    def __init__(self) -> None:
+        self.events: list[DomainEvent] = []
+
+    async def publish(self, event: DomainEvent) -> None:
+        self.events.append(event)
+
+
 @pytest.fixture
 def webhook_bundle() -> InboundServiceBundle:
     workflow = LeadWorkflow(
@@ -82,6 +98,12 @@ def webhook_bundle() -> InboundServiceBundle:
         handoff_completion_repository=FakeHandoffCompletionRepository(),
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            WorkspaceContactPolicy(
+                workspace_id=WORKSPACE_ID,
+                sms_compliance_state=SmsComplianceState.APPROVED,
+            )
+        ),
         workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
             WorkspaceHandoffConfig(workspace_id=WORKSPACE_ID)
         ),
@@ -95,6 +117,7 @@ def webhook_bundle() -> InboundServiceBundle:
             ),
         ),
         lead_nurture_workflow_signaler=FakeLeadNurtureWorkflowSignaler(),
+        event_bus=FakeEventBus(),
     )
 
 
@@ -167,8 +190,13 @@ def _lead() -> CanonicalLeadRecord:
         assigned_agent_crm_id="agent-99",
         has_accountable_owner=True,
         primary_email="lead@example.com",
+        primary_phone="+15555550123",
         has_email=True,
+        has_phone=True,
+        has_sms_capable_phone=True,
         email_count=1,
+        phone_count=1,
+        sms_permission_status=ContactPermissionStatus.CONFIRMED,
         email_permission_status=ContactPermissionStatus.CONFIRMED,
         do_not_contact=False,
     )
@@ -224,6 +252,107 @@ def test_follow_up_boss_human_activity_webhook_returns_duplicate_on_replay(
     )
     second = webhook_client.post(
         "/api/v1/webhooks/follow-up-boss/human-activity-events",
+        json=payload,
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["reasons"] == ["duplicate_event"]
+
+
+def test_follow_up_boss_suppression_webhook_processes_sms_opt_out(
+    webhook_client: TestClient,
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    response = webhook_client.post(
+        "/api/v1/webhooks/follow-up-boss/suppression-events",
+        json={
+            "workspace_id": str(WORKSPACE_ID),
+            "source_provider": "twilio",
+            "provider_event_id": "evt-suppression-1",
+            "crm_lead_id": "crm-123",
+            "suppression_kind": ContactSuppressionKind.SMS_OPT_OUT.value,
+            "occurred_at": NOW.isoformat(),
+            "provider_message_id": "SM123",
+            "payload_redacted": {"event": "redacted"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "processed"
+    assert body["suppression_kind"] == "sms_opt_out"
+    assert body["workflow_state"] == "paused"
+    assert body["suppression_applied"] is True
+    assert body["signal_sent"] is True
+    saved_lead = cast(FakeLeadRepository, webhook_bundle.lead_repository).lead
+    assert saved_lead is not None
+    assert saved_lead.sms_opted_out is True
+    assert cast(FakeSession, webhook_bundle.session).commit_count == 1
+
+
+def test_follow_up_boss_suppression_webhook_processes_email_unsubscribe(
+    webhook_client: TestClient,
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    lead_repository = cast(FakeLeadRepository, webhook_bundle.lead_repository)
+    current_lead = lead_repository.lead
+    assert current_lead is not None
+    lead_repository._store(
+        replace(
+            current_lead,
+            primary_phone=None,
+            has_phone=False,
+            has_sms_capable_phone=False,
+            phone_count=0,
+            sms_permission_status=ContactPermissionStatus.UNKNOWN,
+        )
+    )
+
+    response = webhook_client.post(
+        "/api/v1/webhooks/follow-up-boss/suppression-events",
+        json={
+            "workspace_id": str(WORKSPACE_ID),
+            "source_provider": "sendgrid",
+            "provider_event_id": "evt-suppression-2",
+            "crm_lead_id": "crm-123",
+            "suppression_kind": ContactSuppressionKind.EMAIL_UNSUBSCRIBED.value,
+            "occurred_at": NOW.isoformat(),
+            "payload_redacted": {"event": "redacted"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "processed"
+    assert body["suppression_kind"] == "email_unsubscribed"
+    assert body["workflow_state"] == "suppressed"
+    assert body["suppression_applied"] is True
+    saved_lead = lead_repository.lead
+    assert saved_lead is not None
+    assert saved_lead.email_unsubscribed is True
+
+
+def test_follow_up_boss_suppression_webhook_returns_duplicate_on_replay(
+    webhook_client: TestClient,
+) -> None:
+    payload = {
+        "workspace_id": str(WORKSPACE_ID),
+        "source_provider": "twilio",
+        "provider_event_id": "evt-suppression-dup",
+        "crm_lead_id": "crm-123",
+        "suppression_kind": ContactSuppressionKind.SMS_OPT_OUT.value,
+        "occurred_at": NOW.isoformat(),
+        "payload_redacted": {"event": "redacted"},
+    }
+
+    first = webhook_client.post(
+        "/api/v1/webhooks/follow-up-boss/suppression-events",
+        json=payload,
+    )
+    second = webhook_client.post(
+        "/api/v1/webhooks/follow-up-boss/suppression-events",
         json=payload,
     )
 

@@ -7,6 +7,8 @@ from app.application.ports.messaging import EmailMessage
 
 
 class SendGridEmailProvider:
+    provider_name = "sendgrid"
+
     def __init__(self, api_key: str, from_email: str) -> None:
         self._client = SendGridAPIClient(api_key)
         self._from_email = from_email

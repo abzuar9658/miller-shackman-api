@@ -21,6 +21,22 @@ class PostgresLeadRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def list_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        result = await self._session.execute(
+            select(LeadModel)
+            .where(LeadModel.workspace_id == workspace_id)
+            .order_by(
+                LeadModel.last_activity_at.desc().nulls_last(), LeadModel.facts_derived_at.desc()
+            )
+            .limit(limit),
+        )
+        return tuple(_model_to_record(model) for model in result.scalars().all())
+
     async def get_by_id(
         self,
         workspace_id: WorkspaceId,

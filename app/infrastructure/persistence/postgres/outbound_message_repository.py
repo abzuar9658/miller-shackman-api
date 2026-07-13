@@ -4,9 +4,13 @@ from sqlalchemy import Select, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
+from app.domain.campaigns.outbound_message import (
+    OutboundMessage,
+    OutboundMessageStatus,
+    ProviderDeliveryStatus,
+)
 from app.domain.campaigns.pre_send import ProviderSendStatus
-from app.domain.common.ids import WorkspaceId
+from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.infrastructure.persistence.postgres.models import OutboundMessageModel
 
@@ -14,6 +18,22 @@ from app.infrastructure.persistence.postgres.models import OutboundMessageModel
 class PostgresOutboundMessageRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[OutboundMessage, ...]:
+        result = await self._session.execute(
+            select(OutboundMessageModel)
+            .where(OutboundMessageModel.workspace_id == workspace_id)
+            .where(OutboundMessageModel.lead_id == lead_id)
+            .order_by(OutboundMessageModel.created_at.desc())
+            .limit(limit),
+        )
+        return tuple(_model_to_message(model) for model in result.scalars().all())
 
     async def get_by_id(
         self,
@@ -59,6 +79,20 @@ class PostgresOutboundMessageRepository:
         model = result.scalar_one_or_none()
         return _model_to_message(model) if model else None
 
+    async def get_by_provider_message_id_for_update(
+        self,
+        provider_name: str,
+        provider_message_id: str,
+    ) -> OutboundMessage | None:
+        result = await self._session.execute(
+            select(OutboundMessageModel)
+            .where(OutboundMessageModel.provider_name == provider_name)
+            .where(OutboundMessageModel.provider_message_id == provider_message_id)
+            .with_for_update(),
+        )
+        model = result.scalar_one_or_none()
+        return _model_to_message(model) if model else None
+
     async def save(self, message: OutboundMessage) -> OutboundMessage:
         values = _message_to_values(message)
         update_values = {key: value for key, value in values.items() if key != "message_id"}
@@ -93,7 +127,15 @@ def _message_to_values(message: OutboundMessage) -> dict[str, object]:
         "sent_at": message.sent_at,
         "message_version": message.message_version,
         "provider_send_status": message.provider_send_status.value,
+        "provider_name": message.provider_name,
         "provider_message_id": message.provider_message_id,
+        "provider_delivery_status": (
+            message.provider_delivery_status.value
+            if message.provider_delivery_status is not None
+            else None
+        ),
+        "provider_status_updated_at": message.provider_status_updated_at,
+        "delivered_at": message.delivered_at,
         "failure_reason": message.failure_reason,
         "draft_prompt_version": message.draft_prompt_version,
         "draft_model": message.draft_model,
@@ -125,7 +167,15 @@ def _model_to_message(model: OutboundMessageModel) -> OutboundMessage:
         sent_at=model.sent_at,
         message_version=model.message_version,
         provider_send_status=ProviderSendStatus(model.provider_send_status),
+        provider_name=model.provider_name,
         provider_message_id=model.provider_message_id,
+        provider_delivery_status=(
+            ProviderDeliveryStatus(model.provider_delivery_status)
+            if model.provider_delivery_status is not None
+            else None
+        ),
+        provider_status_updated_at=model.provider_status_updated_at,
+        delivered_at=model.delivered_at,
         failure_reason=model.failure_reason,
         draft_prompt_version=model.draft_prompt_version,
         draft_model=model.draft_model,

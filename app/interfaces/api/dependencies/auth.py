@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Protocol
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
@@ -40,6 +40,11 @@ from app.infrastructure.providers import (
 )
 
 
+class SessionCommitter(Protocol):
+    async def commit(self) -> None:
+        raise NotImplementedError
+
+
 @dataclass
 class AuthServiceBundle:
     user_repository: UserRepository
@@ -55,6 +60,7 @@ class AuthServiceBundle:
     opaque_token_service: OpaqueTokenService
     email_provider: EmailProvider
     settings: Settings
+    session: SessionCommitter | None = None
 
 
 def get_email_provider(settings: Annotated[Settings, Depends(get_settings)]) -> EmailProvider:
@@ -80,6 +86,7 @@ async def get_auth_service_bundle(
         opaque_token_service=build_opaque_token_service(settings),
         email_provider=email_provider,
         settings=settings,
+        session=session,
     )
 
 

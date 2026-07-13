@@ -61,6 +61,12 @@ services:
       timeout: 5s
       retries: 10
 
+  mailpit:
+    image: axllent/mailpit:v1.27.8
+    ports:
+      - "51025:1025"
+      - "58025:8025"
+
   temporal-postgres:
     image: postgres:16-alpine
     environment:

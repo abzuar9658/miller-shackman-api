@@ -29,8 +29,16 @@ from app.application.use_cases.process_inbound_message_event import (
     ProcessInboundMessageEventStatus,
     process_inbound_message_event,
 )
+from app.application.use_cases.process_provider_delivery_callback import (
+    ProcessProviderDeliveryCallbackStatus,
+    ProviderDeliveryCallback,
+    process_provider_delivery_callback,
+)
 from app.application.use_cases.start_selected_campaign_batch import start_selected_campaign_batch
+from app.core.database import set_postgres_workspace_context
+from app.domain.campaigns.admin import CampaignAdminAuditAction, CampaignAdminAuditLog
 from app.domain.campaigns.enrollment import CampaignEnrollmentSource
+from app.domain.campaigns.outbound_message import ProviderDeliveryStatus
 from app.domain.common.ids import WorkspaceId
 from app.domain.compliance.contactability import (
     ContactChannel,
@@ -43,6 +51,9 @@ from app.domain.crm_sync import CRMSyncJobStatus, CRMSyncType, ExternalEventStat
 from app.domain.identity import Workspace, WorkspaceStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
+from app.infrastructure.persistence.postgres.campaign_admin_repository import (
+    PostgresCampaignAdminAuditLogRepository,
+)
 from app.infrastructure.persistence.postgres.campaign_enrollment_repository import (
     PostgresCampaignEnrollmentRepository,
 )
@@ -76,6 +87,10 @@ from app.infrastructure.persistence.postgres.models import (
 from app.infrastructure.persistence.postgres.outbound_message_repository import (
     PostgresOutboundMessageRepository,
 )
+from app.infrastructure.persistence.postgres.provider_message_event_repository import (
+    PostgresProviderMessageEventRepository,
+)
+from app.infrastructure.persistence.postgres.reporting_repository import PostgresReportingRepository
 from app.infrastructure.persistence.postgres.workflow_repository import (
     PostgresLeadWorkflowRepository,
     PostgresWorkflowTransitionRepository,
@@ -97,6 +112,7 @@ BASE_TIME = datetime(2026, 7, 11, 15, 0, tzinfo=UTC)
 SYNC_TIME = BASE_TIME
 ENROLL_TIME = BASE_TIME + timedelta(minutes=1)
 EXECUTE_TIME = BASE_TIME + timedelta(minutes=2)
+DELIVERY_TIME = BASE_TIME + timedelta(minutes=2, seconds=30)
 INBOUND_TIME = BASE_TIME + timedelta(minutes=3)
 
 WORKSPACE_ID = UUID("10000000-0000-0000-0000-000000000001")
@@ -207,12 +223,14 @@ async def test_business_flow_harness_runs_against_real_postgres(
     workspace_repository = PostgresWorkspaceRepository(postgres_session)
     workspace_contact_policy_repository = PostgresWorkspaceContactPolicyRepository(postgres_session)
     message_repository = PostgresOutboundMessageRepository(postgres_session)
+    provider_message_event_repository = PostgresProviderMessageEventRepository(postgres_session)
     conversation_repository = PostgresConversationRepository(postgres_session)
     inbound_message_repository = PostgresInboundMessageRepository(postgres_session)
     conversation_summary_repository = PostgresConversationSummaryRepository(postgres_session)
     handoff_repository = PostgresHandoffRepository(postgres_session)
     handoff_completion_repository = PostgresHandoffCompletionRepository(postgres_session)
     workspace_handoff_config_repository = PostgresWorkspaceHandoffConfigRepository(postgres_session)
+    reporting_repository = PostgresReportingRepository(postgres_session)
     crm_client = FakeCRMClient()
     notification_provider = FakeNotificationProvider()
 
@@ -290,6 +308,24 @@ async def test_business_flow_harness_runs_against_real_postgres(
     assert execute_result.workflow is not None
     assert execute_result.workflow.state == WorkflowState.WAITING_FOR_RESPONSE
     assert execute_result.outbound_message_id is not None
+
+    delivery_result = await process_provider_delivery_callback(
+        callback=ProviderDeliveryCallback(
+            provider="sendgrid",
+            provider_event_id="delivery-evt-1",
+            provider_message_id="email-123",
+            event_type="delivered",
+            status=ProviderDeliveryStatus.DELIVERED,
+            occurred_at=DELIVERY_TIME,
+            payload_redacted={"event": "delivered"},
+        ),
+        message_repository=message_repository,
+        provider_message_event_repository=provider_message_event_repository,
+        now=DELIVERY_TIME,
+    )
+
+    assert delivery_result.status == ProcessProviderDeliveryCallbackStatus.PROCESSED
+    assert delivery_result.provider_delivery_status == ProviderDeliveryStatus.DELIVERED
 
     inbound_result = await process_inbound_message_event(
         event=_event(),
@@ -389,6 +425,37 @@ async def test_business_flow_harness_runs_against_real_postgres(
     )
     assert persisted_message is not None
     assert persisted_message.status == "sent"
+    assert persisted_message.provider_delivery_status == ProviderDeliveryStatus.DELIVERED.value
+
+    audit_repository = PostgresCampaignAdminAuditLogRepository(postgres_session)
+    await audit_repository.append(
+        CampaignAdminAuditLog(
+            audit_log_id=UUID("10000000-0000-0000-0000-000000000013"),
+            workspace_id=WORKSPACE_ID,
+            campaign_id=CAMPAIGN_ID,
+            campaign_version_id=CAMPAIGN_VERSION_ID,
+            action=CampaignAdminAuditAction.BATCH_LAUNCHED,
+            actor_user_id=ACTOR_ID,
+            details={"started_count": 1},
+            created_at=DELIVERY_TIME,
+        )
+    )
+
+    await set_postgres_workspace_context(postgres_session, str(WORKSPACE_ID))
+    workspace_report = await reporting_repository.get_workspace_operations_summary(WORKSPACE_ID)
+    campaign_report = await reporting_repository.get_campaign_operations_summary(
+        WORKSPACE_ID,
+        CAMPAIGN_ID,
+    )
+    audit_entries = await reporting_repository.list_campaign_audit_logs(WORKSPACE_ID, CAMPAIGN_ID)
+
+    assert workspace_report.active_campaigns == 1
+    assert workspace_report.workflow_counts.human_handoff == 1
+    assert workspace_report.message_counts.delivered == 1
+    assert campaign_report is not None
+    assert campaign_report.enrollment_counts.queued == 1
+    assert campaign_report.handoff_counts.notified == 1
+    assert audit_entries[0].action == CampaignAdminAuditAction.BATCH_LAUNCHED
 
 
 async def _seed_business_flow_prerequisites(session: AsyncSession) -> None:

@@ -1,13 +1,13 @@
 .PHONY: infra-up infra-down infra-logs infra-ps run worker test lint format typecheck check migrate revision
 
 infra-up:
-	docker compose up -d postgres rabbitmq redis temporal temporal-ui
+	docker compose up -d postgres rabbitmq redis temporal temporal-ui mailpit
 
 infra-down:
 	docker compose down
 
 infra-logs:
-	docker compose logs -f postgres rabbitmq redis temporal temporal-ui
+	docker compose logs -f postgres rabbitmq redis temporal temporal-ui mailpit
 
 infra-ps:
 	docker compose ps

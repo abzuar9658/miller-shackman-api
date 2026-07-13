@@ -7,7 +7,7 @@ from app.domain.campaigns.execution import (
     CampaignVersionStatus,
 )
 from app.domain.campaigns.start_queue import CampaignStatus
-from app.domain.common.ids import CampaignVersionId, WorkspaceId
+from app.domain.common.ids import CampaignId, CampaignVersionId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.infrastructure.persistence.postgres.models import (
     CampaignCadenceStepModel,
@@ -33,10 +33,41 @@ class PostgresCampaignExecutionRepository:
             return None
 
         version, campaign = row
-        steps_result = await self._session.execute(
-            _steps_statement(workspace_id=workspace_id, campaign_version_id=campaign_version_id)
+        return await self._build_config(version=version, campaign=campaign)
+
+    async def get_active_for_campaign(
+        self,
+        workspace_id: WorkspaceId,
+        campaign_id: CampaignId,
+    ) -> CampaignExecutionConfig | None:
+        campaign_result = await self._session.execute(
+            select(CampaignModel)
+            .where(CampaignModel.workspace_id == workspace_id)
+            .where(CampaignModel.campaign_id == campaign_id)
         )
-        steps = tuple(_model_to_step(model) for model in steps_result.scalars().all())
+        campaign = campaign_result.scalar_one_or_none()
+        if campaign is None or campaign.active_version_id is None:
+            return None
+        return await self.get_by_version_id(
+            workspace_id=workspace_id,
+            campaign_version_id=campaign.active_version_id,
+        )
+
+    async def _build_config(
+        self,
+        *,
+        version: CampaignVersionModel,
+        campaign: CampaignModel,
+        steps: tuple[CampaignCadenceStep, ...] | None = None,
+    ) -> CampaignExecutionConfig:
+        if steps is None:
+            steps_result = await self._session.execute(
+                _steps_statement(
+                    workspace_id=version.workspace_id,
+                    campaign_version_id=version.campaign_version_id,
+                )
+            )
+            steps = tuple(_model_to_step(model) for model in steps_result.scalars().all())
         return CampaignExecutionConfig(
             campaign_id=campaign.campaign_id,
             campaign_version_id=version.campaign_version_id,

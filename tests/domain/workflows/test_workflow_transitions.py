@@ -125,6 +125,23 @@ def test_human_owned_workflow_requires_explicit_authorized_resume() -> None:
         )
 
 
+@pytest.mark.parametrize("state", [WorkflowState.HUMAN_HANDOFF, WorkflowState.HUMAN_OWNED])
+def test_human_controlled_workflow_can_reenter_active_nurture_when_explicitly_resumed(
+    state: WorkflowState,
+) -> None:
+    result = transition_workflow(
+        workflow=_workflow(state),
+        to_state=WorkflowState.ACTIVE_NURTURE,
+        reason_code=WorkflowTransitionReasonCode.MANUAL_RESUME,
+        transition_id=TRANSITION_ID,
+        now=NOW,
+        resume_reason="authorized resume",
+    )
+
+    assert result.workflow.state == WorkflowState.ACTIVE_NURTURE
+    assert result.workflow.resume_reason == "authorized resume"
+
+
 def _workflow(state: WorkflowState) -> LeadWorkflow:
     return LeadWorkflow(
         workflow_id=WORKFLOW_ID,

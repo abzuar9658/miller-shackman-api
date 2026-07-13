@@ -6,6 +6,8 @@ from app.application.ports.messaging import SMSMessage
 
 
 class TwilioSMSProvider:
+    provider_name = "twilio"
+
     def __init__(self, account_sid: str, auth_token: str, from_phone: str) -> None:
         self._client = Client(account_sid, auth_token)
         self._from_phone = from_phone

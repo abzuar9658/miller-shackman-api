@@ -78,6 +78,16 @@ def build_email_provider(settings: Settings | None = None) -> EmailProvider:
             api_key=api_key,
             from_email=settings.sendgrid_from_email,
         )
+    if settings.email_provider == "mailpit":
+        from app.infrastructure.messaging.mailpit import MailpitEmailProvider
+
+        if not settings.sendgrid_from_email:
+            raise ValueError("SENDGRID_FROM_EMAIL is required for EMAIL_PROVIDER=mailpit")
+        return MailpitEmailProvider(
+            smtp_host=settings.mailpit_smtp_host,
+            smtp_port=settings.mailpit_smtp_port,
+            from_email=settings.sendgrid_from_email,
+        )
     if settings.email_provider == "sink":
         from app.infrastructure.messaging.sink import SinkEmailProvider
 

@@ -11,6 +11,8 @@ class SinkSMSProvider(SMSProvider):
     safely in tests and local development.
     """
 
+    provider_name = "sink"
+
     def __init__(self) -> None:
         self.messages: list[SMSMessage] = []
 

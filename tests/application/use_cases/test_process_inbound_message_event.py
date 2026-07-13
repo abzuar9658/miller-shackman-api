@@ -14,6 +14,7 @@ from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.conversations import Conversation, ConversationSummary, Handoff, InboundMessage
 from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
+from app.domain.events import DomainEvent, DomainEventType
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 
 NOW = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
@@ -31,9 +32,7 @@ class FakeLeadRepository:
         self.lead = lead
 
     async def get_by_id(
-        self,
-        workspace_id: WorkspaceId,
-        lead_id: LeadId,
+        self, workspace_id: WorkspaceId, lead_id: LeadId
     ) -> CanonicalLeadRecord | None:
         return self.lead
 
@@ -129,15 +128,24 @@ class FakeConversationSummaryRepository:
 class FakeHandoffRepository:
     def __init__(self) -> None:
         self.saved: list[Handoff] = []
-        self.by_id: dict[tuple[WorkspaceId, UUID], Handoff] = {}
 
     async def get_by_id(self, workspace_id: WorkspaceId, handoff_id: UUID) -> Handoff | None:
-        return self.by_id.get((workspace_id, handoff_id))
+        for handoff in self.saved:
+            if handoff.workspace_id == workspace_id and handoff.handoff_id == handoff_id:
+                return handoff
+        return None
 
     async def save(self, handoff: Handoff) -> Handoff:
         self.saved.append(handoff)
-        self.by_id[(handoff.workspace_id, handoff.handoff_id)] = handoff
         return handoff
+
+
+class FakeEventBus:
+    def __init__(self) -> None:
+        self.events: list[DomainEvent] = []
+
+    async def publish(self, event: DomainEvent) -> None:
+        self.events.append(event)
 
 
 class FakeLLMClient:
@@ -229,9 +237,7 @@ async def test_returns_duplicate_when_external_event_already_exists() -> None:
     await external_events.save(existing)
     llm = FakeLLMClient(
         _classification_json(
-            intent="human_requested",
-            handoff_required=True,
-            handoff_reason="human_requested",
+            intent="human_requested", handoff_required=True, handoff_reason="human_requested"
         )
     )
 
@@ -257,6 +263,7 @@ async def test_creates_handoff_for_human_request() -> None:
     inbound_messages = FakeInboundMessageRepository()
     summaries = FakeConversationSummaryRepository()
     handoffs = FakeHandoffRepository()
+    event_bus = FakeEventBus()
 
     result = await process_inbound_message_event(
         event=_event(),
@@ -279,6 +286,7 @@ async def test_creates_handoff_for_human_request() -> None:
         inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
         summary_id_factory=lambda: SUMMARY_ID,
         handoff_id_factory=lambda: HANDOFF_ID,
+        event_bus=event_bus,
     )
 
     assert result.status == ProcessInboundMessageEventStatus.PROCESSED
@@ -290,6 +298,11 @@ async def test_creates_handoff_for_human_request() -> None:
     assert handoffs.saved[0].reason_code.value == "human_requested"
     assert summaries.saved[0].summary_id == SUMMARY_ID
     assert conversations.by_id[CONVERSATION_ID].status.value == "human_handoff"
+    assert [event.event_type for event in event_bus.events] == [
+        DomainEventType.MESSAGE_RECEIVED,
+        DomainEventType.HANDOFF_CREATED,
+    ]
+    assert event_bus.events[1].payload["handoff_id"] == str(HANDOFF_ID)
 
 
 async def test_processes_opt_out_without_handoff() -> None:

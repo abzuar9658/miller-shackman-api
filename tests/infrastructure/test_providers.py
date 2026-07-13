@@ -2,6 +2,7 @@ import pytest
 from pydantic import SecretStr
 
 from app.core.config import Settings
+from app.infrastructure.messaging.mailpit import MailpitEmailProvider
 from app.infrastructure.messaging.sink import SinkEmailProvider, SinkSMSProvider
 from app.infrastructure.providers import (
     build_cache_provider,
@@ -32,7 +33,11 @@ def test_build_llm_client_requires_api_key() -> None:
 
 
 def test_build_sms_provider_requires_credentials() -> None:
-    settings = Settings(twilio_account_sid=SecretStr("sid"), twilio_auth_token=SecretStr(""))
+    settings = Settings(
+        sms_provider="twilio",
+        twilio_account_sid=SecretStr("sid"),
+        twilio_auth_token=SecretStr(""),
+    )
     with pytest.raises(ValueError, match="TWILIO"):
         build_sms_provider(settings)
 
@@ -44,7 +49,7 @@ def test_build_sms_provider_returns_sink_adapter() -> None:
 
 
 def test_build_email_provider_requires_api_key() -> None:
-    settings = Settings(sendgrid_api_key=SecretStr(""))
+    settings = Settings(email_provider="sendgrid", sendgrid_api_key=SecretStr(""))
     with pytest.raises(ValueError, match="SENDGRID_API_KEY"):
         build_email_provider(settings)
 
@@ -53,6 +58,23 @@ def test_build_email_provider_returns_sink_adapter() -> None:
     settings = Settings(email_provider="sink")
     provider = build_email_provider(settings)
     assert isinstance(provider, SinkEmailProvider)
+
+
+def test_build_email_provider_requires_from_email_for_mailpit() -> None:
+    settings = Settings(email_provider="mailpit", sendgrid_from_email="")
+    with pytest.raises(ValueError, match="SENDGRID_FROM_EMAIL"):
+        build_email_provider(settings)
+
+
+def test_build_email_provider_returns_mailpit_adapter() -> None:
+    settings = Settings(
+        email_provider="mailpit",
+        sendgrid_from_email="noreply@example.test",
+        mailpit_smtp_host="localhost",
+        mailpit_smtp_port=51025,
+    )
+    provider = build_email_provider(settings)
+    assert isinstance(provider, MailpitEmailProvider)
 
 
 def test_build_storage_provider_returns_s3_adapter() -> None:
