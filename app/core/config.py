@@ -10,9 +10,15 @@ class Settings(BaseSettings):
     environment: str = Field(default="local")
     debug: bool = False
     log_level: str = "INFO"
+    frontend_app_base_url: str = "http://localhost:5173"
 
     api_v1_prefix: str = "/api/v1"
-    allowed_origins: list[str] = ["http://localhost:5173"]
+    allowed_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+    ]
 
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:55432/miller_schackman"
     database_migration_url: str = (
@@ -38,10 +44,13 @@ class Settings(BaseSettings):
     twilio_auth_token: SecretStr | None = None
     twilio_from_phone: str = ""
 
-    # Valid values: "sendgrid" or "sink" (dev-only, no external calls).
+    # Valid values: "sendgrid", "mailpit" (dev SMTP inbox), or "sink".
     email_provider: str = "sendgrid"
     sendgrid_api_key: SecretStr | None = None
+    sendgrid_event_webhook_public_key: SecretStr | None = None
     sendgrid_from_email: str = ""
+    mailpit_smtp_host: str = "localhost"
+    mailpit_smtp_port: int = 51025
 
     storage_provider: str = "s3"
     aws_access_key_id: SecretStr | None = None

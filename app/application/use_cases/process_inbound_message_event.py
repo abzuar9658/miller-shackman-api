@@ -5,6 +5,7 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from app.application.ports.crm import CRMClient
+from app.application.ports.event_bus import EventBus
 from app.application.ports.llm import LLMClient
 from app.application.ports.notifications import NotificationProvider
 from app.application.ports.repositories import (
@@ -45,6 +46,7 @@ from app.domain.conversations import (
     InboundMessageClassificationStatus,
 )
 from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
+from app.domain.events import AggregateType, DomainEvent, DomainEventType
 from app.domain.leads import CRMProvider
 
 
@@ -117,6 +119,7 @@ async def process_inbound_message_event(
     now: datetime,
     lead_workflow_repository: LeadWorkflowRepository | None = None,
     workflow_transition_repository: WorkflowTransitionRepository | None = None,
+    event_bus: EventBus | None = None,
     external_event_id_factory: Callable[[], UUID] | None = None,
     conversation_id_factory: Callable[[], UUID] | None = None,
     inbound_message_id_factory: Callable[[], UUID] | None = None,
@@ -270,6 +273,15 @@ async def process_inbound_message_event(
             classification_reasons=tuple(reason.value for reason in classification.reasons),
             transition_id_factory=workflow_transition_id_factory,
         )
+        await _publish_inbound_events(
+            event_bus=event_bus,
+            event=event,
+            inbound_message=inbound_message,
+            workflow_transition=workflow_transition,
+            handoff=None,
+            opt_out_detected=False,
+            now=now,
+        )
         return ProcessInboundMessageEventResult(
             status=ProcessInboundMessageEventStatus.PROCESSED,
             external_event_id=saved_event.external_event_id,
@@ -401,6 +413,15 @@ async def process_inbound_message_event(
             updated_at=now,
         ),
     )
+    await _publish_inbound_events(
+        event_bus=event_bus,
+        event=event,
+        inbound_message=inbound_message,
+        workflow_transition=workflow_transition,
+        handoff=handoff,
+        opt_out_detected=classification.opt_out_detected,
+        now=now,
+    )
     return ProcessInboundMessageEventResult(
         status=ProcessInboundMessageEventStatus.PROCESSED,
         external_event_id=saved_event.external_event_id,
@@ -474,3 +495,87 @@ async def _apply_workflow_transition_if_configured(
         classification_reasons=classification_reasons,
         transition_id_factory=transition_id_factory,
     )
+
+
+async def _publish_inbound_events(
+    *,
+    event_bus: EventBus | None,
+    event: InboundMessageEvent,
+    inbound_message: InboundMessage,
+    workflow_transition: InboundWorkflowTransitionOutcome,
+    handoff: Handoff | None,
+    opt_out_detected: bool,
+    now: datetime,
+) -> None:
+    if event_bus is None:
+        return
+    await event_bus.publish(
+        DomainEvent(
+            workspace_id=event.workspace_id,
+            aggregate_type=AggregateType.MESSAGE,
+            aggregate_id=inbound_message.inbound_message_id,
+            event_type=DomainEventType.MESSAGE_RECEIVED,
+            payload={
+                "inbound_message_id": str(inbound_message.inbound_message_id),
+                "conversation_id": str(inbound_message.conversation_id),
+                "lead_id": str(inbound_message.lead_id),
+                "channel": inbound_message.channel.value,
+                "provider": inbound_message.provider,
+                "provider_message_id": inbound_message.provider_message_id,
+                "received_at": inbound_message.received_at.isoformat(),
+                "processed_at": now.isoformat(),
+            },
+        ),
+    )
+    if opt_out_detected:
+        await event_bus.publish(
+            DomainEvent(
+                workspace_id=event.workspace_id,
+                aggregate_type=AggregateType.LEAD,
+                aggregate_id=inbound_message.lead_id,
+                event_type=DomainEventType.LEAD_OPTED_OUT,
+                payload={
+                    "lead_id": str(inbound_message.lead_id),
+                    "channel": inbound_message.channel.value,
+                    "provider": event.provider,
+                    "provider_event_id": event.provider_event_id,
+                    "occurred_at": event.received_at.isoformat(),
+                },
+            ),
+        )
+    if handoff is not None:
+        await event_bus.publish(
+            DomainEvent(
+                workspace_id=handoff.workspace_id,
+                aggregate_type=AggregateType.HANDOFF,
+                aggregate_id=handoff.handoff_id,
+                event_type=DomainEventType.HANDOFF_CREATED,
+                payload={
+                    "handoff_id": str(handoff.handoff_id),
+                    "lead_id": str(handoff.lead_id),
+                    "conversation_id": str(handoff.conversation_id),
+                    "inbound_message_id": str(handoff.inbound_message_id),
+                    "reason_code": handoff.reason_code.value,
+                    "created_at": handoff.created_at.isoformat(),
+                },
+            ),
+        )
+    if workflow_transition.status == InboundWorkflowTransitionStatus.UPDATED:
+        assert workflow_transition.workflow is not None
+        assert workflow_transition.transition_id is not None
+        await event_bus.publish(
+            DomainEvent(
+                workspace_id=event.workspace_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_transition.workflow.workflow_id,
+                event_type=DomainEventType.WORKFLOW_TRANSITIONED,
+                payload={
+                    "workflow_id": str(workflow_transition.workflow.workflow_id),
+                    "transition_id": str(workflow_transition.transition_id),
+                    "lead_id": str(workflow_transition.workflow.lead_id),
+                    "campaign_id": str(workflow_transition.workflow.campaign_id),
+                    "to_state": workflow_transition.workflow.state.value,
+                    "occurred_at": now.isoformat(),
+                },
+            ),
+        )

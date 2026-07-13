@@ -43,6 +43,9 @@ class WorkspaceMembershipStatus(StrEnum):
 
 class AuthAuditEventType(StrEnum):
     WORKSPACE_CREATED = "workspace_created"
+    WORKSPACE_TIMEZONE_UPDATED = "workspace_timezone_updated"
+    WORKSPACE_CONTACT_POLICY_UPDATED = "workspace_contact_policy_updated"
+    WORKSPACE_HANDOFF_CONFIG_UPDATED = "workspace_handoff_config_updated"
     USER_INVITED = "user_invited"
     INVITATION_RESENT = "invitation_resent"
     INVITATION_ACCEPTED = "invitation_accepted"

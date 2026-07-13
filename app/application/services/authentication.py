@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 from pydantic import EmailStr, TypeAdapter, ValidationError
@@ -25,6 +26,7 @@ from app.domain.identity import (
     UserStatus,
     Workspace,
     WorkspaceMembership,
+    WorkspaceMembershipRole,
     WorkspaceMembershipStatus,
     WorkspaceStatus,
 )
@@ -66,6 +68,42 @@ def is_valid_email_address(email: str) -> bool:
     except ValidationError:
         return False
     return True
+
+
+def build_invited_signup_url(*, frontend_app_base_url: str, invitation_token: str) -> str:
+    parsed_base_url = urlsplit(frontend_app_base_url)
+    base_path = parsed_base_url.path.rstrip("/")
+    path = f"{base_path}/signup/invited" if base_path else "/signup/invited"
+    query_items = parse_qsl(parsed_base_url.query, keep_blank_values=True)
+    query_items.append(("token", invitation_token))
+    return urlunsplit(
+        (
+            parsed_base_url.scheme,
+            parsed_base_url.netloc,
+            path,
+            urlencode(query_items),
+            parsed_base_url.fragment,
+        ),
+    )
+
+
+def render_invitation_email_body(
+    *,
+    workspace_name: str,
+    role: WorkspaceMembershipRole,
+    invitation_token: str,
+    frontend_app_base_url: str,
+) -> str:
+    signup_url = build_invited_signup_url(
+        frontend_app_base_url=frontend_app_base_url,
+        invitation_token=invitation_token,
+    )
+    return (
+        f"You've been invited to join {workspace_name} as {role.value}.\n\n"
+        f"Complete signup: {signup_url}\n\n"
+        "If the link does not open, paste this invitation token into the invited signup form:\n"
+        f"{invitation_token}"
+    )
 
 
 def authenticated_actor_from_context(identity: AuthIdentityContext) -> AuthenticatedActor:

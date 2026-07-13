@@ -32,6 +32,7 @@ from app.application.services.authentication import (
     issue_session_tokens,
     list_identity_contexts_for_user,
     normalize_email_address,
+    render_invitation_email_body,
     revoke_user_refresh_sessions,
 )
 from app.application.services.refresh_sessions import (
@@ -229,6 +230,7 @@ async def invite_workspace_user(
     audit_log_repository: AuthAuditLogRepository,
     opaque_token_service: OpaqueTokenService,
     email_provider: EmailProvider,
+    frontend_app_base_url: str,
     now: datetime,
     invitation_ttl: timedelta = DEFAULT_INVITATION_TOKEN_TTL,
 ) -> InviteWorkspaceUserResult:
@@ -334,10 +336,11 @@ async def invite_workspace_user(
         EmailMessage(
             to_email=saved_user.email,
             subject=f"You're invited to {workspace.name}",
-            body=_invitation_email_body(
+            body=render_invitation_email_body(
                 workspace_name=workspace.name,
                 role=role,
                 invitation_token=invitation_token.plaintext,
+                frontend_app_base_url=frontend_app_base_url,
             ),
             idempotency_key=f"auth-invitation:{saved_invitation.invitation_id}:{saved_invitation.expires_at.isoformat()}",
         ),
@@ -1147,18 +1150,6 @@ def _normalized_optional_text(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
-
-
-def _invitation_email_body(
-    *,
-    workspace_name: str,
-    role: WorkspaceMembershipRole,
-    invitation_token: str,
-) -> str:
-    return (
-        f"You've been invited to join {workspace_name} as {role.value}. "
-        f"Use this invitation token to complete signup: {invitation_token}"
-    )
 
 
 def _password_reset_email_body(reset_token: str) -> str:

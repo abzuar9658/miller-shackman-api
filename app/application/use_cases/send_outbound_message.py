@@ -2,6 +2,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 
+from app.application.ports.event_bus import EventBus
 from app.application.ports.messaging import EmailMessage, EmailProvider, SMSMessage, SMSProvider
 from app.application.ports.repositories import LeadRepository, OutboundMessageRepository
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
@@ -22,6 +23,7 @@ from app.domain.compliance.contactability import (
     WorkspaceContactPolicy,
     evaluate_contactability,
 )
+from app.domain.events import AggregateType, DomainEvent, DomainEventType
 
 
 class SendOutboundMessageStatus(StrEnum):
@@ -78,6 +80,7 @@ async def send_outbound_message(
     sms_provider: SMSProvider,
     email_provider: EmailProvider,
     now: datetime,
+    event_bus: EventBus | None = None,
 ) -> SendOutboundMessageResult:
     message = await message_repository.get_by_idempotency_key_for_update(
         workspace_id,
@@ -154,6 +157,7 @@ async def send_outbound_message(
         )
 
     if message.channel == ContactChannel.SMS:
+        provider_name = _provider_name(sms_provider, default="sms")
         destination = lead.primary_phone if lead.has_sms_capable_phone else None
         if destination is None:
             return SendOutboundMessageResult(
@@ -174,9 +178,12 @@ async def send_outbound_message(
                 message_repository=message_repository,
                 pre_send_decision=pre_send_decision,
                 failure_reason=str(exc),
+                provider_name=provider_name,
+                event_bus=event_bus,
                 now=now,
             )
     else:
+        provider_name = _provider_name(email_provider, default="email")
         destination = lead.primary_email if lead.has_email else None
         if destination is None:
             return SendOutboundMessageResult(
@@ -204,6 +211,8 @@ async def send_outbound_message(
                 message_repository=message_repository,
                 pre_send_decision=pre_send_decision,
                 failure_reason=str(exc),
+                provider_name=provider_name,
+                event_bus=event_bus,
                 now=now,
             )
 
@@ -212,12 +221,19 @@ async def send_outbound_message(
             message,
             status=OutboundMessageStatus.SENT,
             provider_send_status=ProviderSendStatus.ACCEPTED,
+            provider_name=provider_name,
             provider_message_id=provider_message_id,
             failure_reason=None,
             sent_at=now,
             updated_at=now,
         )
         saved = await message_repository.save(sent_message)
+        await _publish_message_event(
+            event_bus=event_bus,
+            event_type=DomainEventType.MESSAGE_SENT,
+            message=saved,
+            now=now,
+        )
         return SendOutboundMessageResult(
             status=SendOutboundMessageStatus.SENT,
             message=saved,
@@ -228,6 +244,7 @@ async def send_outbound_message(
         message,
         status=OutboundMessageStatus.UNCERTAIN,
         provider_send_status=ProviderSendStatus.UNCERTAIN,
+        provider_name=provider_name,
         provider_message_id=None,
         failure_reason="provider_message_id_missing",
         updated_at=now,
@@ -297,15 +314,24 @@ async def _failed_send_result(
     message_repository: OutboundMessageRepository,
     pre_send_decision: PreSendDecision,
     failure_reason: str,
+    provider_name: str,
+    event_bus: EventBus | None,
     now: datetime,
 ) -> SendOutboundMessageResult:
     failed_message = replace(
         message,
         status=OutboundMessageStatus.FAILED,
+        provider_name=provider_name,
         failure_reason=failure_reason,
         updated_at=now,
     )
     saved = await message_repository.save(failed_message)
+    await _publish_message_event(
+        event_bus=event_bus,
+        event_type=DomainEventType.MESSAGE_FAILED,
+        message=saved,
+        now=now,
+    )
     return SendOutboundMessageResult(
         status=SendOutboundMessageStatus.FAILED,
         message=saved,
@@ -315,3 +341,39 @@ async def _failed_send_result(
 
 class _ProviderSendFailed(Exception):
     pass
+
+
+def _provider_name(provider: object, *, default: str) -> str:
+    provider_name = getattr(provider, "provider_name", default)
+    return provider_name if isinstance(provider_name, str) and provider_name else default
+
+
+async def _publish_message_event(
+    *,
+    event_bus: EventBus | None,
+    event_type: DomainEventType,
+    message: OutboundMessage,
+    now: datetime,
+) -> None:
+    if event_bus is None:
+        return
+    await event_bus.publish(
+        DomainEvent(
+            workspace_id=message.workspace_id,
+            aggregate_type=AggregateType.MESSAGE,
+            aggregate_id=message.message_id,
+            event_type=event_type,
+            payload={
+                "message_id": str(message.message_id),
+                "lead_id": str(message.lead_id),
+                "campaign_id": str(message.campaign_id),
+                "cadence_step_id": message.cadence_step_id,
+                "channel": message.channel.value,
+                "status": message.status.value,
+                "provider_name": message.provider_name,
+                "provider_message_id": message.provider_message_id,
+                "failure_reason": message.failure_reason,
+                "occurred_at": now.isoformat(),
+            },
+        ),
+    )

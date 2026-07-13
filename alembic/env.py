@@ -9,7 +9,9 @@ from sqlalchemy import (
     String,
     Table,
     engine_from_config,
+    inspect,
     pool,
+    text,
 )
 
 from alembic import context
@@ -25,6 +27,11 @@ settings = get_settings()
 config.set_main_option("sqlalchemy.url", settings.database_migration_url)
 
 target_metadata = Base.metadata
+
+_VERSION_TABLE_NAME = config.get_main_option("version_table") or "alembic_version"
+_VERSION_TABLE_SCHEMA = config.get_main_option("version_table_schema") or None
+_VERSION_TABLE_COLUMN = "version_num"
+_LONG_REVISION_LENGTH = 255
 
 
 def _long_revision_version_table_impl(
@@ -48,9 +55,45 @@ def _long_revision_version_table_impl(
     return table
 
 
+def _repair_legacy_version_table(connection: Any) -> None:
+    inspector = inspect(connection)
+    if not inspector.has_table(_VERSION_TABLE_NAME, schema=_VERSION_TABLE_SCHEMA):
+        return
+
+    columns = inspector.get_columns(_VERSION_TABLE_NAME, schema=_VERSION_TABLE_SCHEMA)
+    version_column = next(
+        (column for column in columns if column["name"] == _VERSION_TABLE_COLUMN),
+        None,
+    )
+    if version_column is None:
+        return
+
+    current_length = getattr(version_column["type"], "length", None)
+    if current_length is None or current_length >= _LONG_REVISION_LENGTH:
+        return
+
+    table_name = _qualified_table_name(connection)
+    column_name = connection.dialect.identifier_preparer.quote_identifier(_VERSION_TABLE_COLUMN)
+    connection.execute(
+        text(
+            f"ALTER TABLE {table_name} ALTER COLUMN {column_name} "
+            f"TYPE VARCHAR({_LONG_REVISION_LENGTH})"
+        )
+    )
+
+
+def _qualified_table_name(connection: Any) -> str:
+    quote_identifier = connection.dialect.identifier_preparer.quote_identifier
+    table_name = str(quote_identifier(_VERSION_TABLE_NAME))
+    if _VERSION_TABLE_SCHEMA is None:
+        return table_name
+    schema_name = str(quote_identifier(_VERSION_TABLE_SCHEMA))
+    return f"{schema_name}.{table_name}"
+
+
 # Alembic defaults the version table column to VARCHAR(32), but this repository
 # uses descriptive revision identifiers longer than 32 characters.
-DefaultImpl.version_table_impl = _long_revision_version_table_impl
+DefaultImpl.version_table_impl = _long_revision_version_table_impl  # type: ignore[method-assign]
 
 
 def run_migrations_offline() -> None:
@@ -74,6 +117,9 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        _repair_legacy_version_table(connection)
+        if connection.in_transaction():
+            connection.commit()
         context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():

@@ -135,13 +135,18 @@ def _validate_transition(from_state: WorkflowState, to_state: WorkflowState) -> 
         raise WorkflowTransitionError(
             f"Cannot transition workflow from terminal state {from_state.value}."
         )
-    if from_state == WorkflowState.HUMAN_OWNED:
+    if from_state == WorkflowState.HUMAN_OWNED and to_state != WorkflowState.ACTIVE_NURTURE:
         raise WorkflowTransitionError("Human-owned workflows require explicit authorized resume.")
     if to_state in {WorkflowState.PAUSED, WorkflowState.HUMAN_HANDOFF, WorkflowState.SUPPRESSED}:
         return
     if from_state == WorkflowState.QUEUED and to_state == WorkflowState.ACTIVE_NURTURE:
         return
     if from_state == WorkflowState.PAUSED and to_state == WorkflowState.ACTIVE_NURTURE:
+        return
+    if (
+        from_state in {WorkflowState.HUMAN_HANDOFF, WorkflowState.HUMAN_OWNED}
+        and to_state == WorkflowState.ACTIVE_NURTURE
+    ):
         return
     if (
         from_state == WorkflowState.WAITING_FOR_RESPONSE

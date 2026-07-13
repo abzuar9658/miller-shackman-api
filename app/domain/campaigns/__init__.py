@@ -1,3 +1,11 @@
+from app.domain.campaigns.admin import (
+    CampaignAdminAuditAction,
+    CampaignAdminAuditLog,
+    CampaignAdminCadenceStep,
+    CampaignAdminCampaign,
+    CampaignAdminVersion,
+    CampaignAdminView,
+)
 from app.domain.campaigns.enrollment import (
     CampaignEnrollment,
     CampaignEnrollmentSource,
@@ -32,6 +40,12 @@ from app.domain.campaigns.start_queue import (
 )
 
 __all__ = [
+    "CampaignAdminAuditAction",
+    "CampaignAdminAuditLog",
+    "CampaignAdminCadenceStep",
+    "CampaignAdminCampaign",
+    "CampaignAdminVersion",
+    "CampaignAdminView",
     "CampaignEnrollment",
     "CampaignEnrollmentSource",
     "CampaignEnrollmentStatus",

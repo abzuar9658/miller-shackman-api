@@ -13,7 +13,7 @@ from app.domain.identity.models import (
 class PermissionCapability(StrEnum):
     CREATE_WORKSPACE = "create_workspace"
     INVITE_WORKSPACE_USER = "invite_workspace_user"
-    MANAGE_WORKSPACE_USERS = "manage_workspace_users"
+    VIEW_WORKSPACE_REPORTING = "view_workspace_reporting"
     VIEW_OWN_ASSIGNED_LEAD = "view_own_assigned_lead"
     ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS = "enroll_own_lead_when_campaign_allows"
     ENROLL_ANY_ELIGIBLE_LEAD = "enroll_any_eligible_lead"
@@ -139,6 +139,7 @@ def _role_allows(
 
     if role == WorkspaceMembershipRole.MANAGER:
         return capability in {
+            PermissionCapability.VIEW_WORKSPACE_REPORTING,
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
             PermissionCapability.ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS,
             PermissionCapability.ENROLL_ANY_ELIGIBLE_LEAD,
@@ -152,7 +153,7 @@ def _role_allows(
         return capability in {
             PermissionCapability.CREATE_WORKSPACE,
             PermissionCapability.INVITE_WORKSPACE_USER,
-            PermissionCapability.MANAGE_WORKSPACE_USERS,
+            PermissionCapability.VIEW_WORKSPACE_REPORTING,
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
             PermissionCapability.ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS,
             PermissionCapability.ENROLL_ANY_ELIGIBLE_LEAD,
