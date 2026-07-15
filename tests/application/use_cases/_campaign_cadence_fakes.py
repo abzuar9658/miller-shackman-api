@@ -5,8 +5,10 @@ from app.application.ports.llm import LLMCompletionRequest, LLMResult
 from app.application.ports.messaging import EmailMessage, SMSMessage
 from app.domain.campaigns.execution import CampaignExecutionConfig
 from app.domain.campaigns.outbound_message import OutboundMessage
+from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import WorkspaceContactPolicy
+from app.domain.conversations import CrmConversationEvent
 from app.domain.identity import Workspace
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workflows import LeadWorkflow, WorkflowTransition
@@ -199,18 +201,64 @@ class FakeOutboundMessageRepository:
         return message
 
 
+class FakeCrmConversationEventRepository:
+    def __init__(self, events: tuple[CrmConversationEvent, ...] = ()) -> None:
+        self.saved: list[CrmConversationEvent] = list(events)
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[CrmConversationEvent, ...]:
+        events = tuple(
+            event
+            for event in self.saved
+            if event.workspace_id == workspace_id and event.lead_id == lead_id
+        )
+        return events[:limit]
+
+    async def save(self, event: CrmConversationEvent) -> CrmConversationEvent:
+        self.saved = [
+            existing
+            for existing in self.saved
+            if not (
+                existing.workspace_id == event.workspace_id
+                and existing.crm_provider == event.crm_provider
+                and existing.crm_activity_id == event.crm_activity_id
+            )
+        ]
+        self.saved.append(event)
+        return event
+
+
+class FakeRejectedDraftReviewRepository:
+    def __init__(self) -> None:
+        self.saved: list[RejectedDraftReview] = []
+
+    async def save(self, review: RejectedDraftReview) -> RejectedDraftReview:
+        self.saved.append(review)
+        return review
+
+
 class FakeLLMClient:
     def __init__(
-        self, *, body: str = "Hi — just checking in.", subject: str | None = "Quick check-in"
+        self,
+        *,
+        body: str = "Hi — just checking in.",
+        subject: str | None = "Quick check-in",
+        confidence: float = 0.91,
+        safety_flags: tuple[str, ...] = (),
     ) -> None:
         self.requests: list[LLMCompletionRequest] = []
         self._text = json.dumps(
             {
                 "body": body,
                 "subject": subject,
-                "confidence": 0.91,
+                "confidence": confidence,
                 "personalization_notes": ["Used safe canonical context."],
-                "safety_flags": [],
+                "safety_flags": list(safety_flags),
             }
         )
 

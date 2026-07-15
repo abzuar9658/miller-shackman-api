@@ -3,9 +3,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.application.ports.llm import LLMClient, LLMCompletionRequest
+from app.application.services.llm.structured_json import (
+    coerce_llm_confidence,
+    coerce_string_tuple,
+    normalize_llm_json_text,
+)
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord
 
@@ -57,6 +62,8 @@ class OutboundMessageDraftResult:
     usage_tokens: int | None = None
     body: str | None = None
     subject: str | None = None
+    raw_llm_response_text: str | None = None
+    validation_error: str | None = None
     confidence: float | None = None
     personalization_notes: tuple[str, ...] = ()
     safety_flags: tuple[str, ...] = ()
@@ -69,6 +76,16 @@ class _LLMOutboundMessageDraft(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     personalization_notes: tuple[str, ...] = ()
     safety_flags: tuple[str, ...] = ()
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _coerce_confidence(cls, value: object) -> object:
+        return coerce_llm_confidence(value)
+
+    @field_validator("personalization_notes", "safety_flags", mode="before")
+    @classmethod
+    def _coerce_string_collections(cls, value: object) -> object:
+        return coerce_string_tuple(value)
 
 
 async def draft_outbound_message(
@@ -99,14 +116,18 @@ async def draft_outbound_message(
     )
 
     try:
-        draft = _LLMOutboundMessageDraft.model_validate_json(llm_result.text)
-    except ValidationError:
+        draft = _LLMOutboundMessageDraft.model_validate_json(
+            normalize_llm_json_text(llm_result.text)
+        )
+    except ValidationError as exc:
         return OutboundMessageDraftResult(
             status=OutboundMessageDraftStatus.REJECTED,
             prompt_version=llm_result.prompt_version,
             model=llm_result.model,
             latency_ms=llm_result.latency_ms,
             usage_tokens=llm_result.usage_tokens,
+            raw_llm_response_text=llm_result.text,
+            validation_error=str(exc),
             reasons=(OutboundMessageDraftReasonCode.INVALID_LLM_RESPONSE,),
         )
 
@@ -121,8 +142,8 @@ async def draft_outbound_message(
         model=llm_result.model,
         latency_ms=llm_result.latency_ms,
         usage_tokens=llm_result.usage_tokens,
-        body=draft.body if not reasons else None,
-        subject=draft.subject if not reasons else None,
+        body=draft.body,
+        subject=draft.subject,
         confidence=draft.confidence,
         personalization_notes=draft.personalization_notes,
         safety_flags=draft.safety_flags,

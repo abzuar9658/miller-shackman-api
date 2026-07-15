@@ -2,6 +2,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
+from app.application.ports.lead_activity import (
+    LeadActivityItem,
+    LeadActivityRepository,
+    LeadActivitySummary,
+)
 from app.application.ports.lead_read import (
     LeadReadHandoffRepository,
     LeadReadInboundMessageRepository,
@@ -11,7 +16,10 @@ from app.application.ports.lead_read import (
     LeadReadWorkflowRepository,
     LeadReadWorkflowTransitionRepository,
 )
+from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
+from app.application.services.lead_assignment import is_actor_assigned_to_lead
 from app.domain.campaigns.outbound_message import OutboundMessage
+from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
 from app.domain.common.ids import LeadId, UserId, WorkspaceId
 from app.domain.conversations import Handoff, InboundMessage
 from app.domain.identity import (
@@ -42,6 +50,7 @@ class LeadReadView:
     assigned_agent_name: str | None
     latest_workflow: LeadWorkflow | None
     latest_handoff: Handoff | None
+    activity_summary: LeadActivitySummary | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +64,8 @@ class LeadListResult:
 class LeadDetailView:
     lead: LeadReadView
     workflow_transitions: tuple[WorkflowTransition, ...]
+    rejected_draft_reviews: tuple[RejectedDraftReview, ...]
+    activity_items: tuple[LeadActivityItem, ...]
     inbound_messages: tuple[InboundMessage, ...]
     outbound_messages: tuple[OutboundMessage, ...]
     handoffs: tuple[Handoff, ...]
@@ -73,6 +84,9 @@ async def list_lead_views(
     workspace_id: WorkspaceId,
     lead_repository: LeadReadLeadRepository,
     workflow_repository: LeadReadWorkflowRepository,
+    activity_repository: LeadActivityRepository,
+    rejected_draft_review_repository: RejectedDraftReviewRepository,
+    inbound_message_repository: LeadReadInboundMessageRepository,
     handoff_repository: LeadReadHandoffRepository,
     user_repository: LeadReadUserRepository,
     limit: int = 100,
@@ -98,6 +112,18 @@ async def list_lead_views(
     latest_handoffs: dict[LeadId, Handoff] = {}
     for handoff in await handoff_repository.list_handoffs(workspace_id, limit=limit * 3):
         latest_handoffs.setdefault(handoff.lead_id, handoff)
+    visible_leads = tuple(
+        lead
+        for lead in leads
+        if scoped_actor is None or _can_view_assigned_lead(scoped_actor, lead)
+    )
+    activity_summaries = {
+        summary.lead_id: summary
+        for summary in await activity_repository.list_summaries(
+            workspace_id,
+            tuple(lead.lead_id for lead in visible_leads),
+        )
+    }
     user_name_cache: dict[UserId, str | None] = {}
     views = [
         LeadReadView(
@@ -105,9 +131,9 @@ async def list_lead_views(
             assigned_agent_name=await _assigned_agent_name(lead, user_repository, user_name_cache),
             latest_workflow=latest_workflows.get(lead.lead_id),
             latest_handoff=latest_handoffs.get(lead.lead_id),
+            activity_summary=activity_summaries.get(lead.lead_id),
         )
-        for lead in leads
-        if scoped_actor is None or _can_view_assigned_lead(scoped_actor, lead)
+        for lead in visible_leads
     ]
     return LeadListResult(status=LeadReadStatus.OK, views=tuple(views))
 
@@ -120,6 +146,8 @@ async def get_lead_detail_view(
     lead_repository: LeadReadLeadRepository,
     workflow_repository: LeadReadWorkflowRepository,
     workflow_transition_repository: LeadReadWorkflowTransitionRepository,
+    activity_repository: LeadActivityRepository,
+    rejected_draft_review_repository: RejectedDraftReviewRepository,
     inbound_message_repository: LeadReadInboundMessageRepository,
     outbound_message_repository: LeadReadOutboundMessageRepository,
     handoff_repository: LeadReadHandoffRepository,
@@ -147,18 +175,24 @@ async def get_lead_detail_view(
         else ()
     )
     handoffs = await handoff_repository.list_for_lead(workspace_id, lead_id)
+    activity_summaries = await activity_repository.list_summaries(workspace_id, (lead_id,))
     user_name_cache: dict[UserId, str | None] = {}
     lead_view = LeadReadView(
         lead=lead,
         assigned_agent_name=await _assigned_agent_name(lead, user_repository, user_name_cache),
         latest_workflow=latest_workflow,
         latest_handoff=handoffs[0] if handoffs else None,
+        activity_summary=activity_summaries[0] if activity_summaries else None,
     )
     return LeadDetailResult(
         status=LeadReadStatus.OK,
         view=LeadDetailView(
             lead=lead_view,
             workflow_transitions=transitions,
+            rejected_draft_reviews=await rejected_draft_review_repository.list_for_lead(
+                workspace_id, lead_id
+            ),
+            activity_items=await activity_repository.list_for_lead(workspace_id, lead_id),
             inbound_messages=await inbound_message_repository.list_for_lead(workspace_id, lead_id),
             outbound_messages=await outbound_message_repository.list_for_lead(
                 workspace_id, lead_id
@@ -207,5 +241,4 @@ def _can_view_assigned_lead(actor: AuthenticatedActor, lead: CanonicalLeadRecord
 
 
 def _acts_on_assigned_lead(actor: AuthenticatedActor, lead: CanonicalLeadRecord) -> bool:
-    assigned_agent_user_id = _assigned_agent_user_id(lead)
-    return assigned_agent_user_id is not None and assigned_agent_user_id == actor.user_id
+    return is_actor_assigned_to_lead(actor, lead)

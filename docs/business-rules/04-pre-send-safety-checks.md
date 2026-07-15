@@ -64,7 +64,7 @@ Those belong to separate rules, use cases, or infrastructure adapters.
 5. Any inbound reply blocks pending automated messages until explicitly handled.
 6. Unknown or incomplete safety data must fail safe.
 7. Frequency limits are hard limits.
-8. SMS requires explicit A2P 10DLC approval at send time.
+8. SMS compliance state may be stored for future use, but it does not block sends in V1.
 9. Duplicate send attempts must be blocked by idempotency.
 10. This decision must run inside an application transaction with a pessimistic lock on the send-relevant lead/workflow state.
 
@@ -72,61 +72,61 @@ Those belong to separate rules, use cases, or infrastructure adapters.
 
 ### Rule 1: Campaign and workflow must be sendable
 
-| Condition | Result |
-| --- | --- |
-| Campaign is active and workflow is in a sendable state | Continue |
+| Condition                                                                                 | Result     |
+| ----------------------------------------------------------------------------------------- | ---------- |
+| Campaign is active and workflow is in a sendable state                                    | Continue   |
 | Campaign is paused, draft, inactive, completed, suppressed, human handoff, or human owned | Block send |
 
 ### Rule 2: Message must be current and not already sent
 
-| Condition | Result |
-| --- | --- |
-| Message version matches the active cadence step and has not been sent | Continue |
-| Message is stale, cancelled, already accepted by provider, or already sent | Block send |
-| Idempotency key was already used | Block send |
-| Previous provider status is uncertain | Block send until reconciled |
+| Condition                                                                  | Result                      |
+| -------------------------------------------------------------------------- | --------------------------- |
+| Message version matches the active cadence step and has not been sent      | Continue                    |
+| Message is stale, cancelled, already accepted by provider, or already sent | Block send                  |
+| Idempotency key was already used                                           | Block send                  |
+| Previous provider status is uncertain                                      | Block send until reconciled |
 
 ### Rule 3: Channel must be allowed now
 
-| Condition | Result |
-| --- | --- |
-| Channel is enabled for campaign and currently contactable | Continue |
-| Channel is disabled, opted out, suppressed, lacks consent, or SMS compliance is not approved | Block send |
+| Condition                                                    | Result     |
+| ------------------------------------------------------------ | ---------- |
+| Channel is enabled for campaign and currently contactable    | Continue   |
+| Channel is disabled, opted out, suppressed, or lacks consent | Block send |
 
 This rule consumes the current contactability decision from `01-lead-contactability.md`; it does not duplicate that logic.
 
 ### Rule 4: Human-control conditions must not exist
 
-| Condition | Result |
-| --- | --- |
-| No lead reply, no recent manual agent activity, no active handoff, and owner is unchanged | Continue |
-| Lead replied after scheduling | Block send |
-| Agent contacted or handled the lead after scheduling | Block send |
-| Lead entered handoff or human-owned state | Block send |
-| Assigned/accountable owner changed after scheduling | Block send |
+| Condition                                                                                 | Result     |
+| ----------------------------------------------------------------------------------------- | ---------- |
+| No lead reply, no recent manual agent activity, no active handoff, and owner is unchanged | Continue   |
+| Lead replied after scheduling                                                             | Block send |
+| Agent contacted or handled the lead after scheduling                                      | Block send |
+| Lead entered handoff or human-owned state                                                 | Block send |
+| Assigned/accountable owner changed after scheduling                                       | Block send |
 
 ### Rule 5: Pre-flight veto must still be respected
 
-| Condition | Result |
-| --- | --- |
-| Candidate was not vetoed or veto does not apply | Continue |
-| Candidate was vetoed for this campaign/batch | Block send |
+| Condition                                       | Result     |
+| ----------------------------------------------- | ---------- |
+| Candidate was not vetoed or veto does not apply | Continue   |
+| Candidate was vetoed for this campaign/batch    | Block send |
 
 ### Rule 6: Timing and frequency must allow the send
 
-| Condition | Result |
-| --- | --- |
-| Current brokerage-local time is within allowed sending hours and no frequency limit is exceeded | Continue |
-| Outside allowed sending hours | Block send |
-| Any applicable global, campaign, or channel frequency limit is exceeded | Block send |
+| Condition                                                                                       | Result     |
+| ----------------------------------------------------------------------------------------------- | ---------- |
+| Current brokerage-local time is within allowed sending hours and no frequency limit is exceeded | Continue   |
+| Outside allowed sending hours                                                                   | Block send |
+| Any applicable global, campaign, or channel frequency limit is exceeded                         | Block send |
 
 Phase One defaults are brokerage timezone, 10 AM to 5 PM allowed sending hours, and no more than one automated outreach attempt to the same lead within 24 hours across all channels.
 
 ### Rule 7: Mixed-channel sequencing must be respected
 
-| Condition | Result |
-| --- | --- |
-| Campaign allows this channel at this cadence step | Continue |
+| Condition                                                                                                       | Result     |
+| --------------------------------------------------------------------------------------------------------------- | ---------- |
+| Campaign allows this channel at this cadence step                                                               | Continue   |
 | Campaign does not allow simultaneous SMS and email and another channel was already sent in the protected window | Block send |
 
 ## Decision precedence

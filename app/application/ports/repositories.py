@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -11,7 +12,8 @@ from app.domain.common.ids import (
     WorkspaceMembershipId,
 )
 from app.domain.compliance import WorkspaceContactPolicy
-from app.domain.conversations import Handoff, WorkspaceHandoffConfig
+from app.domain.conversations import CrmConversationEvent, Handoff, WorkspaceHandoffConfig
+from app.domain.crm_sync import CRMSyncJob
 from app.domain.identity import (
     AuthAuditLog,
     PasswordCredential,
@@ -49,6 +51,20 @@ class LeadRepository(Protocol):
         raise NotImplementedError
 
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
+        raise NotImplementedError
+
+
+class CrmConversationEventRepository(Protocol):
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[CrmConversationEvent, ...]:
+        raise NotImplementedError
+
+    async def save(self, event: CrmConversationEvent) -> CrmConversationEvent:
         raise NotImplementedError
 
 
@@ -404,11 +420,55 @@ class ProviderMessageEventRepository(Protocol):
 
 
 class CRMSyncJobRepository(Protocol):
-    async def get_by_id(self, workspace_id: WorkspaceId, sync_job_id: UUID) -> Any | None:
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        sync_job_id: UUID,
+    ) -> CRMSyncJob | None:
         raise NotImplementedError
 
-    async def list_recent(self, workspace_id: WorkspaceId, limit: int = 100) -> tuple[Any, ...]:
+    async def list_recent(
+        self,
+        workspace_id: WorkspaceId,
+        limit: int = 100,
+    ) -> tuple[CRMSyncJob, ...]:
         raise NotImplementedError
 
-    async def save(self, job: Any) -> Any:
+    async def get_latest_for_workspace_provider(
+        self,
+        workspace_id: WorkspaceId,
+        crm_provider: str,
+    ) -> CRMSyncJob | None:
+        raise NotImplementedError
+
+    async def get_latest_completed_for_workspace_provider(
+        self,
+        workspace_id: WorkspaceId,
+        crm_provider: str,
+    ) -> CRMSyncJob | None:
+        raise NotImplementedError
+
+    async def get_active_for_workspace_provider(
+        self,
+        workspace_id: WorkspaceId,
+        crm_provider: str,
+    ) -> CRMSyncJob | None:
+        raise NotImplementedError
+
+    async def insert_pending_if_no_active(
+        self,
+        job: CRMSyncJob,
+    ) -> CRMSyncJob | None:
+        raise NotImplementedError
+
+    async def claim_pending_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        sync_job_id: UUID,
+        *,
+        now: datetime,
+    ) -> CRMSyncJob | None:
+        raise NotImplementedError
+
+    async def save(self, job: CRMSyncJob) -> CRMSyncJob:
         raise NotImplementedError

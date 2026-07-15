@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, datetime
 from uuid import UUID
 
+from app.application.ports.lead_activity import LeadActivityItem, LeadActivityKind
 from app.application.use_cases.lead_read import (
     LeadReadReasonCode,
     LeadReadStatus,
@@ -10,6 +11,10 @@ from app.application.use_cases.lead_read import (
 )
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
 from app.domain.campaigns.pre_send import ProviderSendStatus
+from app.domain.campaigns.rejected_draft_review import (
+    RejectedDraftReview,
+    RejectedDraftReviewStatus,
+)
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.conversations import (
     Handoff,
@@ -35,9 +40,11 @@ from app.domain.workflows import (
 from tests.application.use_cases._lead_read_fakes import (
     FakeHandoffRepository,
     FakeInboundMessageRepository,
+    FakeLeadActivityRepository,
     FakeLeadRepository,
     FakeLeadWorkflowRepository,
     FakeOutboundMessageRepository,
+    FakeRejectedDraftReviewRepository,
     FakeUserRepository,
     FakeWorkflowTransitionRepository,
 )
@@ -60,6 +67,11 @@ def test_list_lead_views_returns_owner_and_workflow() -> None:
             workspace_id=WORKSPACE_ID,
             lead_repository=FakeLeadRepository((_lead(),)),
             workflow_repository=FakeLeadWorkflowRepository((_workflow(),)),
+            activity_repository=FakeLeadActivityRepository(_activity_items()),
+            rejected_draft_review_repository=FakeRejectedDraftReviewRepository(
+                (_rejected_draft_review(),)
+            ),
+            inbound_message_repository=FakeInboundMessageRepository((_inbound_message(),)),
             handoff_repository=FakeHandoffRepository((_handoff(),)),
             user_repository=FakeUserRepository({USER_ID: _user()}),
         )
@@ -68,6 +80,8 @@ def test_list_lead_views_returns_owner_and_workflow() -> None:
     assert result.status == LeadReadStatus.OK
     assert result.views[0].assigned_agent_name == "Jordan Agent"
     assert result.views[0].latest_workflow is not None
+    assert result.views[0].activity_summary is not None
+    assert result.views[0].activity_summary.activity_count == 3
 
 
 def test_get_lead_detail_view_returns_messages_and_transitions() -> None:
@@ -79,6 +93,10 @@ def test_get_lead_detail_view_returns_messages_and_transitions() -> None:
             lead_repository=FakeLeadRepository((_lead(),)),
             workflow_repository=FakeLeadWorkflowRepository((_workflow(),)),
             workflow_transition_repository=FakeWorkflowTransitionRepository((_transition(),)),
+            activity_repository=FakeLeadActivityRepository(_activity_items()),
+            rejected_draft_review_repository=FakeRejectedDraftReviewRepository(
+                (_rejected_draft_review(),)
+            ),
             inbound_message_repository=FakeInboundMessageRepository((_inbound_message(),)),
             outbound_message_repository=FakeOutboundMessageRepository((_outbound_message(),)),
             handoff_repository=FakeHandoffRepository((_handoff(),)),
@@ -89,6 +107,7 @@ def test_get_lead_detail_view_returns_messages_and_transitions() -> None:
     assert result.status == LeadReadStatus.OK
     assert result.view is not None
     assert len(result.view.workflow_transitions) == 1
+    assert len(result.view.rejected_draft_reviews) == 1
     assert len(result.view.inbound_messages) == 1
     assert len(result.view.outbound_messages) == 1
     assert len(result.view.handoffs) == 1
@@ -101,6 +120,9 @@ def test_assigned_agent_list_lead_views_returns_only_owned_leads() -> None:
             workspace_id=WORKSPACE_ID,
             lead_repository=FakeLeadRepository((_lead(), _other_lead())),
             workflow_repository=FakeLeadWorkflowRepository((_workflow(),)),
+            activity_repository=FakeLeadActivityRepository(_activity_items()),
+            rejected_draft_review_repository=FakeRejectedDraftReviewRepository(()),
+            inbound_message_repository=FakeInboundMessageRepository((_inbound_message(),)),
             handoff_repository=FakeHandoffRepository((_handoff(),)),
             user_repository=FakeUserRepository({USER_ID: _user()}),
         )
@@ -120,6 +142,8 @@ def test_assigned_agent_get_lead_detail_view_rejects_unowned_lead() -> None:
             lead_repository=FakeLeadRepository((_other_lead(),)),
             workflow_repository=FakeLeadWorkflowRepository(()),
             workflow_transition_repository=FakeWorkflowTransitionRepository(()),
+            activity_repository=FakeLeadActivityRepository(()),
+            rejected_draft_review_repository=FakeRejectedDraftReviewRepository(()),
             inbound_message_repository=FakeInboundMessageRepository(()),
             outbound_message_repository=FakeOutboundMessageRepository(()),
             handoff_repository=FakeHandoffRepository(()),
@@ -247,6 +271,71 @@ def _user() -> User:
         full_name="Jordan Agent",
         status=UserStatus.ACTIVE,
         email_verified_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _activity_items() -> tuple[LeadActivityItem, ...]:
+    return (
+        LeadActivityItem(
+            activity_id=INBOUND_ID,
+            lead_id=LEAD_ID,
+            kind=LeadActivityKind.INBOUND_MESSAGE,
+            occurred_at=NOW,
+            title="Inbound reply received",
+            preview="Still interested",
+            channel="sms",
+            direction="inbound",
+            status="classified",
+            actor_name="twilio",
+        ),
+        LeadActivityItem(
+            activity_id=MESSAGE_ID,
+            lead_id=LEAD_ID,
+            kind=LeadActivityKind.OUTBOUND_MESSAGE,
+            occurred_at=NOW,
+            title="Outbound outreach logged",
+            preview="Checking in",
+            channel="sms",
+            direction="outbound",
+            status="sent",
+        ),
+        LeadActivityItem(
+            activity_id=HANDOFF_ID,
+            lead_id=LEAD_ID,
+            kind=LeadActivityKind.HANDOFF,
+            occurred_at=NOW,
+            title="Human handoff created",
+            preview="Lead asked for a callback.",
+            status="created",
+        ),
+    )
+
+
+def _rejected_draft_review() -> RejectedDraftReview:
+    return RejectedDraftReview(
+        review_id=UUID("00000000-0000-0000-0000-000000000012"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        workflow_id=WORKFLOW_ID,
+        workflow_transition_id=UUID("00000000-0000-0000-0000-000000000013"),
+        campaign_id=CAMPAIGN_ID,
+        campaign_version_id=UUID("00000000-0000-0000-0000-000000000014"),
+        cadence_step_id=UUID("00000000-0000-0000-0000-000000000015"),
+        channel=ContactChannel.SMS,
+        status=RejectedDraftReviewStatus.PENDING_REVIEW,
+        reason_codes=("draft_rejected",),
+        draft_reason_codes=("low_confidence",),
+        review_blockers=(),
+        draft_safety_flags=(),
+        draft_personalization_notes=("Used safe canonical context.",),
+        draft_body="Checking in about your plans.",
+        explanation="Planning blocked: draft rejected.",
+        draft_confidence=0.42,
+        draft_model="openai/gpt-4o-mini",
+        draft_prompt_version="outbound_message_draft:v1",
+        can_approve_send=True,
         created_at=NOW,
         updated_at=NOW,
     )

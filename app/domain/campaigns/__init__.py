@@ -28,6 +28,10 @@ from app.domain.campaigns.pre_send import (
     WorkflowState,
     evaluate_pre_send_safety,
 )
+from app.domain.campaigns.rejected_draft_review import (
+    RejectedDraftReview,
+    RejectedDraftReviewStatus,
+)
 from app.domain.campaigns.start_queue import (
     CampaignStartBatchDecision,
     CampaignStartCandidate,
@@ -65,6 +69,8 @@ __all__ = [
     "PreSendPolicy",
     "PreSendReasonCode",
     "ProviderSendStatus",
+    "RejectedDraftReview",
+    "RejectedDraftReviewStatus",
     "ScheduledMessageStatus",
     "StartQueueReasonCode",
     "WorkflowState",

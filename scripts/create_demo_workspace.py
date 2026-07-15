@@ -1071,6 +1071,8 @@ def _campaign_config() -> CampaignConfigInput:
         timezone="America/Chicago",
         sms_compliance_required=True,
         preflight_digest_enabled=True,
+        crm_enrollment_tag="ai_nurture",
+        allow_assigned_agent_manual_enrollment=True,
         prompt_version="v1",
         approved_model="openai/gpt-4o-mini",
         cadence_steps=(

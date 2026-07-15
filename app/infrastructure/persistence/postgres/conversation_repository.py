@@ -1,15 +1,18 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.ports.lead_read import LeadReadConversationSummary
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.conversations import (
     Conversation,
     ConversationStatus,
     ConversationSummary,
+    CrmConversationEvent,
+    CrmConversationEventDirection,
     Handoff,
     HandoffCompletionRecord,
     HandoffReasonCode,
@@ -20,6 +23,7 @@ from app.domain.conversations import (
 from app.infrastructure.persistence.postgres.models import (
     ConversationModel,
     ConversationSummaryModel,
+    CrmConversationEventModel,
     HandoffCompletionModel,
     HandoffModel,
     InboundMessageModel,
@@ -62,6 +66,69 @@ class PostgresConversationRepository:
 class PostgresInboundMessageRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def list_lead_summaries(
+        self,
+        workspace_id: WorkspaceId,
+        lead_ids: tuple[LeadId, ...],
+    ) -> tuple[LeadReadConversationSummary, ...]:
+        if len(lead_ids) == 0:
+            return ()
+
+        lead_filter = InboundMessageModel.lead_id.in_(lead_ids)
+        counts_subquery = (
+            select(
+                InboundMessageModel.lead_id.label("lead_id"),
+                func.count().label("inbound_message_count"),
+                func.max(InboundMessageModel.received_at).label("latest_inbound_at"),
+            )
+            .where(InboundMessageModel.workspace_id == workspace_id)
+            .where(lead_filter)
+            .group_by(InboundMessageModel.lead_id)
+            .subquery()
+        )
+        latest_message_subquery = (
+            select(
+                InboundMessageModel.lead_id.label("lead_id"),
+                InboundMessageModel.body.label("latest_inbound_body"),
+                func.row_number()
+                .over(
+                    partition_by=InboundMessageModel.lead_id,
+                    order_by=(
+                        InboundMessageModel.received_at.desc(),
+                        InboundMessageModel.inbound_message_id.desc(),
+                    ),
+                )
+                .label("row_number"),
+            )
+            .where(InboundMessageModel.workspace_id == workspace_id)
+            .where(lead_filter)
+            .subquery()
+        )
+        result = await self._session.execute(
+            select(
+                counts_subquery.c.lead_id,
+                counts_subquery.c.inbound_message_count,
+                counts_subquery.c.latest_inbound_at,
+                latest_message_subquery.c.latest_inbound_body,
+            ).join(
+                latest_message_subquery,
+                and_(
+                    latest_message_subquery.c.lead_id == counts_subquery.c.lead_id,
+                    latest_message_subquery.c.row_number == 1,
+                ),
+            )
+        )
+        return tuple(
+            LeadReadConversationSummary(
+                lead_id=row.lead_id,
+                inbound_message_count=int(row.inbound_message_count),
+                latest_inbound_at=row.latest_inbound_at,
+                latest_inbound_preview=_preview_inbound_text(row.latest_inbound_body),
+            )
+            for row in result.all()
+            if row.latest_inbound_at is not None and row.latest_inbound_body is not None
+        )
 
     async def list_for_lead(
         self,
@@ -278,6 +345,13 @@ def _model_to_inbound_message(model: InboundMessageModel) -> InboundMessage:
     )
 
 
+def _preview_inbound_text(body: str, max_length: int = 120) -> str:
+    normalized = " ".join(body.split())
+    if len(normalized) <= max_length:
+        return normalized
+    return f"{normalized[: max_length - 1].rstrip()}…"
+
+
 def _conversation_summary_to_values(summary: ConversationSummary) -> dict[str, object]:
     return {
         "summary_id": summary.summary_id,
@@ -385,4 +459,94 @@ def _model_to_handoff_completion(model: HandoffCompletionModel) -> HandoffComple
         completed_at=model.completed_at,
         last_attempted_at=model.last_attempted_at,
         failure_reason=model.failure_reason,
+    )
+
+
+class PostgresCrmConversationEventRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[CrmConversationEvent, ...]:
+        result = await self._session.execute(
+            select(CrmConversationEventModel)
+            .where(CrmConversationEventModel.workspace_id == workspace_id)
+            .where(CrmConversationEventModel.lead_id == lead_id)
+            .order_by(CrmConversationEventModel.occurred_at.desc())
+            .limit(limit),
+        )
+        return tuple(_model_to_crm_conversation_event(model) for model in result.scalars().all())
+
+    async def save(self, event: CrmConversationEvent) -> CrmConversationEvent:
+        values = _crm_conversation_event_to_values(event)
+        update_values = {
+            key: value
+            for key, value in values.items()
+            if key
+            not in (
+                "crm_conversation_event_id",
+                "workspace_id",
+                "crm_provider",
+                "crm_activity_id",
+            )
+        }
+        statement = (
+            insert(CrmConversationEventModel)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=["workspace_id", "crm_provider", "crm_activity_id"],
+                set_=update_values,
+            )
+            .returning(CrmConversationEventModel)
+        )
+        result = await self._session.execute(statement)
+        return _model_to_crm_conversation_event(result.scalar_one())
+
+
+def _crm_conversation_event_to_values(event: CrmConversationEvent) -> dict[str, object]:
+    return {
+        "crm_conversation_event_id": event.crm_conversation_event_id,
+        "workspace_id": event.workspace_id,
+        "lead_id": event.lead_id,
+        "conversation_id": event.conversation_id,
+        "crm_provider": event.crm_provider,
+        "crm_activity_id": event.crm_activity_id,
+        "activity_type": event.activity_type,
+        "direction": event.direction.value if event.direction is not None else None,
+        "occurred_at": event.occurred_at,
+        "content": event.content,
+        "actor_agent_id": event.actor_agent_id,
+        "actor_name": event.actor_name,
+        "source_payload_version": event.source_payload_version,
+        "created_at": event.created_at,
+        "updated_at": event.updated_at,
+    }
+
+
+def _model_to_crm_conversation_event(model: CrmConversationEventModel) -> CrmConversationEvent:
+    return CrmConversationEvent(
+        crm_conversation_event_id=model.crm_conversation_event_id,
+        workspace_id=model.workspace_id,
+        lead_id=model.lead_id,
+        conversation_id=model.conversation_id,
+        crm_provider=model.crm_provider,
+        crm_activity_id=model.crm_activity_id,
+        activity_type=model.activity_type,
+        direction=(
+            CrmConversationEventDirection(model.direction)
+            if model.direction is not None
+            else None
+        ),
+        occurred_at=model.occurred_at,
+        content=model.content,
+        actor_agent_id=model.actor_agent_id,
+        actor_name=model.actor_name,
+        source_payload_version=model.source_payload_version,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
     )

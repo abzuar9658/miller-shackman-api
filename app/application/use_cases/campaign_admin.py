@@ -56,6 +56,12 @@ class PauseCampaignStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class ResumeCampaignStatus(StrEnum):
+    RESUMED = "resumed"
+    ALREADY_ACTIVE = "already_active"
+    REJECTED = "rejected"
+
+
 class CampaignReadStatus(StrEnum):
     OK = "ok"
     NOT_FOUND = "not_found"
@@ -81,6 +87,8 @@ class CampaignConfigInput:
     timezone: str
     sms_compliance_required: bool
     preflight_digest_enabled: bool
+    crm_enrollment_tag: str | None
+    allow_assigned_agent_manual_enrollment: bool
     prompt_version: str
     approved_model: str
     cadence_steps: tuple[CampaignCadenceStepInput, ...]
@@ -110,6 +118,13 @@ class PublishCampaignVersionResult:
 @dataclass(frozen=True)
 class PauseCampaignResult:
     status: PauseCampaignStatus
+    view: CampaignAdminView | None = None
+    reasons: tuple[CampaignAdminReasonCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class ResumeCampaignResult:
+    status: ResumeCampaignStatus
     view: CampaignAdminView | None = None
     reasons: tuple[CampaignAdminReasonCode, ...] = ()
 
@@ -443,6 +458,67 @@ async def pause_campaign(
     return PauseCampaignResult(status=PauseCampaignStatus.PAUSED, view=view)
 
 
+async def resume_campaign(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: WorkspaceId,
+    campaign_id: CampaignId,
+    campaign_admin_repository: CampaignAdminRepository,
+    audit_log_repository: CampaignAdminAuditLogRepository,
+    now: datetime,
+    reason: str | None = None,
+    event_bus: EventBus | None = None,
+) -> ResumeCampaignResult:
+    permission = evaluate_permission(actor, PermissionCapability.PAUSE_CAMPAIGN)
+    if not permission.allowed:
+        return ResumeCampaignResult(
+            status=ResumeCampaignStatus.REJECTED,
+            reasons=(CampaignAdminReasonCode.PERMISSION_DENIED,),
+        )
+    campaign = await campaign_admin_repository.get_campaign(workspace_id, campaign_id)
+    if campaign is None:
+        return ResumeCampaignResult(
+            status=ResumeCampaignStatus.REJECTED,
+            reasons=(CampaignAdminReasonCode.CAMPAIGN_NOT_FOUND,),
+        )
+    if campaign.status == CampaignStatus.ACTIVE:
+        return ResumeCampaignResult(
+            status=ResumeCampaignStatus.ALREADY_ACTIVE,
+            view=await _active_view(campaign_admin_repository, campaign),
+        )
+    if campaign.status != CampaignStatus.PAUSED or campaign.active_version_id is None:
+        return ResumeCampaignResult(
+            status=ResumeCampaignStatus.REJECTED,
+            reasons=(CampaignAdminReasonCode.INVALID_CAMPAIGN_STATUS,),
+        )
+
+    resumed_campaign = await campaign_admin_repository.save_campaign(
+        replace(campaign, status=CampaignStatus.ACTIVE, updated_at=now),
+    )
+    view = await _active_view(campaign_admin_repository, resumed_campaign)
+    if view is None:
+        return ResumeCampaignResult(
+            status=ResumeCampaignStatus.REJECTED,
+            reasons=(CampaignAdminReasonCode.VERSION_NOT_FOUND,),
+        )
+    await _append_audit(
+        audit_log_repository=audit_log_repository,
+        action=CampaignAdminAuditAction.CAMPAIGN_RESUMED,
+        actor=actor,
+        view=view,
+        now=now,
+        extra_details={"reason": reason.strip()} if reason and reason.strip() else None,
+    )
+    await _publish_event(
+        event_bus=event_bus,
+        event_type=DomainEventType.CAMPAIGN_RESUMED,
+        view=view,
+        actor=actor,
+        extra_payload={"reason": reason.strip()} if reason and reason.strip() else None,
+    )
+    return ResumeCampaignResult(status=ResumeCampaignStatus.RESUMED, view=view)
+
+
 async def list_campaign_admin_views(
     *,
     actor: AuthenticatedActor,
@@ -598,6 +674,8 @@ def _build_version(
         timezone=config.timezone.strip(),
         sms_compliance_required=config.sms_compliance_required,
         preflight_digest_enabled=config.preflight_digest_enabled,
+        crm_enrollment_tag=_normalized_optional_tag(config.crm_enrollment_tag),
+        allow_assigned_agent_manual_enrollment=config.allow_assigned_agent_manual_enrollment,
         prompt_version=config.prompt_version.strip(),
         approved_model=config.approved_model.strip(),
         created_by_user_id=actor.user_id,
@@ -619,9 +697,18 @@ def _replace_version_config(
         timezone=config.timezone.strip(),
         sms_compliance_required=config.sms_compliance_required,
         preflight_digest_enabled=config.preflight_digest_enabled,
+        crm_enrollment_tag=_normalized_optional_tag(config.crm_enrollment_tag),
+        allow_assigned_agent_manual_enrollment=config.allow_assigned_agent_manual_enrollment,
         prompt_version=config.prompt_version.strip(),
         approved_model=config.approved_model.strip(),
     )
+
+
+def _normalized_optional_tag(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
 
 
 def _build_steps(

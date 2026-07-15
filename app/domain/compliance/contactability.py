@@ -52,6 +52,8 @@ def _empty_suppressions() -> frozenset[SuppressionType]:
 @dataclass(frozen=True)
 class LeadContactabilityFacts:
     do_not_contact: bool | None
+    has_sms_destination: bool = False
+    has_email_destination: bool = False
     sms_consent_status: ContactPermissionStatus | None = None
     email_permission_status: ContactPermissionStatus | None = None
     suppressions: frozenset[SuppressionType] = field(default_factory=_empty_suppressions)
@@ -89,6 +91,8 @@ def evaluate_contactability(
     policy: WorkspaceContactPolicy,
     channel: ContactChannel,
 ) -> ContactabilityDecision:
+    _ = policy
+
     if facts.do_not_contact is True:
         return ContactabilityDecision(
             allowed=False,
@@ -99,7 +103,7 @@ def evaluate_contactability(
     reasons: list[ContactabilityReasonCode] = []
 
     if channel == ContactChannel.SMS:
-        reasons.extend(_evaluate_sms_reasons(facts, policy))
+        reasons.extend(_evaluate_sms_reasons(facts))
     else:
         reasons.extend(_evaluate_email_reasons(facts))
 
@@ -113,19 +117,16 @@ def evaluate_contactability(
     )
 
 
-def _evaluate_sms_reasons(
-    facts: LeadContactabilityFacts,
-    policy: WorkspaceContactPolicy,
-) -> list[ContactabilityReasonCode]:
+def _evaluate_sms_reasons(facts: LeadContactabilityFacts) -> list[ContactabilityReasonCode]:
     reasons: list[ContactabilityReasonCode] = []
 
     if SuppressionType.SMS_OPT_OUT in facts.suppressions:
         reasons.append(ContactabilityReasonCode.SMS_OPTED_OUT)
 
-    if policy.sms_compliance_state != SmsComplianceState.APPROVED:
-        reasons.append(ContactabilityReasonCode.SMS_COMPLIANCE_NOT_APPROVED)
-
-    if facts.sms_consent_status in (None, ContactPermissionStatus.UNKNOWN):
+    if (
+        facts.sms_consent_status in (None, ContactPermissionStatus.UNKNOWN)
+        and not facts.has_sms_destination
+    ):
         reasons.append(ContactabilityReasonCode.MISSING_SMS_CONSENT)
     elif facts.sms_consent_status == ContactPermissionStatus.DENIED:
         reasons.append(ContactabilityReasonCode.SMS_PERMISSION_DENIED)
@@ -141,7 +142,10 @@ def _evaluate_email_reasons(
     if SuppressionType.EMAIL_UNSUBSCRIBED in facts.suppressions:
         reasons.append(ContactabilityReasonCode.EMAIL_UNSUBSCRIBED)
 
-    if facts.email_permission_status in (None, ContactPermissionStatus.UNKNOWN):
+    if (
+        facts.email_permission_status in (None, ContactPermissionStatus.UNKNOWN)
+        and not facts.has_email_destination
+    ):
         reasons.append(ContactabilityReasonCode.MISSING_EMAIL_PERMISSION)
     elif facts.email_permission_status == ContactPermissionStatus.DENIED:
         reasons.append(ContactabilityReasonCode.EMAIL_PERMISSION_DENIED)

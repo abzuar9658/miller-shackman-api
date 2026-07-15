@@ -1,12 +1,22 @@
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.common.ids import LeadId, WorkspaceId
-from app.domain.conversations import Handoff, InboundMessage
+from app.domain.conversations import CrmConversationEvent, Handoff, InboundMessage
 from app.domain.identity import User
 from app.domain.leads import CanonicalLeadRecord
 from app.domain.workflows import LeadWorkflow, WorkflowTransition
+
+
+@dataclass(frozen=True)
+class LeadReadConversationSummary:
+    lead_id: LeadId
+    inbound_message_count: int
+    latest_inbound_at: datetime
+    latest_inbound_preview: str
 
 
 class LeadReadLeadRepository(Protocol):
@@ -54,6 +64,13 @@ class LeadReadWorkflowTransitionRepository(Protocol):
 
 
 class LeadReadInboundMessageRepository(Protocol):
+    async def list_lead_summaries(
+        self,
+        workspace_id: WorkspaceId,
+        lead_ids: tuple[LeadId, ...],
+    ) -> tuple[LeadReadConversationSummary, ...]:
+        raise NotImplementedError
+
     async def list_for_lead(
         self,
         workspace_id: WorkspaceId,
@@ -76,6 +93,14 @@ class LeadReadOutboundMessageRepository(Protocol):
 
 
 class LeadReadHandoffRepository(Protocol):
+    async def list_handoffs(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[Handoff, ...]:
+        raise NotImplementedError
+
     async def list_for_lead(
         self,
         workspace_id: WorkspaceId,
@@ -83,6 +108,17 @@ class LeadReadHandoffRepository(Protocol):
         *,
         limit: int = 100,
     ) -> tuple[Handoff, ...]:
+        raise NotImplementedError
+
+
+class LeadReadCrmConversationEventRepository(Protocol):
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[CrmConversationEvent, ...]:
         raise NotImplementedError
 
 

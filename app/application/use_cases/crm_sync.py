@@ -5,11 +5,22 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from app.application.ports.crm import CRMActivity
 from app.application.ports.crm_sync import CanonicalLeadSnapshotSource
 from app.application.ports.event_bus import EventBus
-from app.application.ports.repositories import LeadRepository
-from app.domain.common.ids import WorkspaceId
-from app.domain.crm_sync import CRMSyncJob, CRMSyncJobStatus, CRMSyncType
+from app.application.ports.repositories import (
+    CrmConversationEventRepository,
+    CRMSyncJobRepository,
+    LeadRepository,
+)
+from app.domain.common.ids import LeadId, WorkspaceId
+from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
+from app.domain.crm_sync import (
+    CRMSyncJob,
+    CRMSyncJobStatus,
+    CRMSyncLeadSort,
+    CRMSyncType,
+)
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
 from app.domain.leads import CRMProvider
 
@@ -63,54 +74,13 @@ class ActiveWorkspaceIdRepository(Protocol):
         raise NotImplementedError
 
 
-class LeadSnapshotSyncJobRepository(Protocol):
-    async def list_recent(
+class CRMActivitySource(Protocol):
+    async def get_recent_activity(
         self,
         workspace_id: WorkspaceId,
-        limit: int = 100,
-    ) -> tuple[CRMSyncJob, ...]:
-        raise NotImplementedError
-
-    async def save(self, job: CRMSyncJob) -> CRMSyncJob:
-        raise NotImplementedError
-
-
-class CRMSyncRequestJobRepository(Protocol):
-    async def get_active_for_workspace_provider(
-        self,
-        workspace_id: WorkspaceId,
-        crm_provider: str,
-    ) -> CRMSyncJob | None:
-        raise NotImplementedError
-
-    async def insert_pending_if_no_active(self, job: CRMSyncJob) -> CRMSyncJob | None:
-        raise NotImplementedError
-
-
-class QueuedCRMSyncJobRepository(LeadSnapshotSyncJobRepository, Protocol):
-    async def claim_pending_by_id(
-        self,
-        workspace_id: WorkspaceId,
-        sync_job_id: UUID,
-        *,
-        now: datetime,
-    ) -> CRMSyncJob | None:
-        raise NotImplementedError
-
-
-class DueCRMSyncJobRepository(CRMSyncRequestJobRepository, Protocol):
-    async def get_latest_for_workspace_provider(
-        self,
-        workspace_id: WorkspaceId,
-        crm_provider: str,
-    ) -> CRMSyncJob | None:
-        raise NotImplementedError
-
-    async def get_latest_completed_for_workspace_provider(
-        self,
-        workspace_id: WorkspaceId,
-        crm_provider: str,
-    ) -> CRMSyncJob | None:
+        crm_lead_id: str,
+        limit: int = 50,
+    ) -> list[CRMActivity]:
         raise NotImplementedError
 
 
@@ -119,18 +89,28 @@ async def run_follow_up_boss_lead_snapshot_sync(
     workspace_id: WorkspaceId,
     lead_snapshot_source: CanonicalLeadSnapshotSource,
     lead_repository: LeadRepository,
-    crm_sync_job_repository: LeadSnapshotSyncJobRepository,
+    crm_sync_job_repository: CRMSyncJobRepository,
     now: datetime,
     sync_type: CRMSyncType = CRMSyncType.INCREMENTAL,
     page_size: int = 100,
+    max_leads: int | None = None,
+    latest_by: CRMSyncLeadSort | None = None,
     created_by_user_id: UUID | None = None,
     updated_after: datetime | None = None,
     mapped_custom_field_keys: tuple[str, ...] = (),
     sync_job_id_factory: Callable[[], UUID] | None = None,
     sync_job: CRMSyncJob | None = None,
+    crm_activity_source: CRMActivitySource | None = None,
+    crm_conversation_event_repository: CrmConversationEventRepository | None = None,
+    activity_limit: int = 50,
 ) -> RunFollowUpBossLeadSyncResult:
     if not 1 <= page_size <= 100:
         raise ValueError("page_size must be between 1 and 100")
+    max_leads, latest_by = _normalize_recent_limit(
+        sync_type=sync_type,
+        max_leads=max_leads,
+        latest_by=latest_by,
+    )
 
     cursor_started_at = await _resolve_cursor_started_at(
         workspace_id=workspace_id,
@@ -153,16 +133,23 @@ async def run_follow_up_boss_lead_snapshot_sync(
     )
 
     next_cursor: str | None = None
+    remaining_leads = max_leads
     page_count = 0
     first_failure: str | None = None
     try:
         while True:
+            request_page_size = page_size
+            if remaining_leads is not None:
+                if remaining_leads <= 0:
+                    break
+                request_page_size = min(page_size, remaining_leads)
             page = await lead_snapshot_source.list_lead_snapshots(
                 workspace_id=workspace_id,
-                page_size=page_size,
+                page_size=request_page_size,
                 cursor=next_cursor,
                 updated_after=cursor_started_at,
                 updated_before=cursor_finished_at,
+                sort_by=latest_by,
                 mapped_custom_field_keys=mapped_custom_field_keys,
             )
             page_count += 1
@@ -171,8 +158,22 @@ async def run_follow_up_boss_lead_snapshot_sync(
             total_failed = job.total_failed
             for lead in page.leads:
                 try:
-                    await lead_repository.upsert(lead)
+                    upserted_lead = await lead_repository.upsert(lead)
                     total_upserted += 1
+                    if (
+                        crm_activity_source is not None
+                        and crm_conversation_event_repository is not None
+                    ):
+                        await _sync_recent_crm_activity_for_lead(
+                            workspace_id=workspace_id,
+                            lead_id=upserted_lead.lead_id,
+                            crm_provider=upserted_lead.crm_provider,
+                            crm_lead_id=upserted_lead.crm_lead_id,
+                            crm_activity_source=crm_activity_source,
+                            crm_conversation_event_repository=crm_conversation_event_repository,
+                            activity_limit=activity_limit,
+                            now=now,
+                        )
                 except Exception as exc:
                     total_failed += 1
                     if first_failure is None:
@@ -186,6 +187,10 @@ async def run_follow_up_boss_lead_snapshot_sync(
                     updated_at=now,
                 ),
             )
+            if remaining_leads is not None:
+                remaining_leads -= len(page.leads)
+                if remaining_leads <= 0:
+                    break
             if page.next_cursor is None:
                 break
             next_cursor = page.next_cursor
@@ -234,12 +239,19 @@ async def request_crm_sync(
     *,
     workspace_id: WorkspaceId,
     sync_type: CRMSyncType,
-    crm_sync_job_repository: CRMSyncRequestJobRepository,
+    max_leads: int | None = None,
+    latest_by: CRMSyncLeadSort | None = None,
+    crm_sync_job_repository: CRMSyncJobRepository,
     event_bus: EventBus,
     now: datetime,
     created_by_user_id: UUID | None = None,
     sync_job_id_factory: Callable[[], UUID] | None = None,
 ) -> RequestCRMSyncResult:
+    max_leads, latest_by = _normalize_recent_limit(
+        sync_type=sync_type,
+        max_leads=max_leads,
+        latest_by=latest_by,
+    )
     job = CRMSyncJob(
         sync_job_id=(sync_job_id_factory or uuid4)(),
         workspace_id=workspace_id,
@@ -278,6 +290,8 @@ async def request_crm_sync(
                 "sync_job_id": str(inserted.sync_job_id),
                 "crm_provider": inserted.crm_provider,
                 "sync_type": inserted.sync_type.value,
+                "max_leads": max_leads,
+                "latest_by": latest_by.value if latest_by is not None else None,
             },
         ),
     )
@@ -290,10 +304,15 @@ async def execute_queued_follow_up_boss_crm_sync(
     sync_job_id: UUID,
     lead_snapshot_source: CanonicalLeadSnapshotSource,
     lead_repository: LeadRepository,
-    crm_sync_job_repository: QueuedCRMSyncJobRepository,
+    crm_sync_job_repository: CRMSyncJobRepository,
     now: datetime,
     page_size: int = 100,
+    max_leads: int | None = None,
+    latest_by: CRMSyncLeadSort | None = None,
     mapped_custom_field_keys: tuple[str, ...] = (),
+    crm_activity_source: CRMActivitySource | None = None,
+    crm_conversation_event_repository: CrmConversationEventRepository | None = None,
+    activity_limit: int = 50,
 ) -> ExecuteQueuedCRMSyncResult:
     claimed = await crm_sync_job_repository.claim_pending_by_id(
         workspace_id,
@@ -311,9 +330,14 @@ async def execute_queued_follow_up_boss_crm_sync(
         now=now,
         sync_type=claimed.sync_type,
         page_size=page_size,
+        max_leads=max_leads,
+        latest_by=latest_by,
         created_by_user_id=claimed.created_by_user_id,
         mapped_custom_field_keys=mapped_custom_field_keys,
         sync_job=claimed,
+        crm_activity_source=crm_activity_source,
+        crm_conversation_event_repository=crm_conversation_event_repository,
+        activity_limit=activity_limit,
     )
     return ExecuteQueuedCRMSyncResult(
         status=ExecuteQueuedCRMSyncStatus(result.status.value),
@@ -325,7 +349,7 @@ async def execute_queued_follow_up_boss_crm_sync(
 async def enqueue_due_follow_up_boss_crm_syncs(
     *,
     workspace_repository: ActiveWorkspaceIdRepository,
-    crm_sync_job_repository: DueCRMSyncJobRepository,
+    crm_sync_job_repository: CRMSyncJobRepository,
     event_bus: EventBus,
     now: datetime,
     minimum_interval: timedelta,
@@ -380,7 +404,7 @@ async def enqueue_due_follow_up_boss_crm_syncs(
 async def _resolve_cursor_started_at(
     *,
     workspace_id: WorkspaceId,
-    crm_sync_job_repository: LeadSnapshotSyncJobRepository,
+    crm_sync_job_repository: CRMSyncJobRepository,
     sync_type: CRMSyncType,
     updated_after: datetime | None,
 ) -> datetime | None:
@@ -399,6 +423,85 @@ async def _resolve_cursor_started_at(
 def _page_failure_reason(exc: Exception) -> str:
     detail = str(exc) or exc.__class__.__name__
     return f"sync page fetch failed: {detail}"
+
+
+async def _sync_recent_crm_activity_for_lead(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    crm_provider: CRMProvider,
+    crm_lead_id: str,
+    crm_activity_source: CRMActivitySource,
+    crm_conversation_event_repository: CrmConversationEventRepository,
+    activity_limit: int,
+    now: datetime,
+) -> None:
+    activities = await crm_activity_source.get_recent_activity(
+        workspace_id=workspace_id,
+        crm_lead_id=crm_lead_id,
+        limit=activity_limit,
+    )
+    for activity in activities:
+        event = _map_crm_activity_to_event(
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            crm_provider=crm_provider,
+            activity=activity,
+            now=now,
+        )
+        await crm_conversation_event_repository.save(event)
+
+
+def _map_crm_activity_to_event(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    crm_provider: CRMProvider,
+    activity: CRMActivity,
+    now: datetime,
+) -> CrmConversationEvent:
+    return CrmConversationEvent(
+        crm_conversation_event_id=uuid4(),
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        crm_provider=crm_provider.value,
+        crm_activity_id=activity.crm_activity_id,
+        activity_type=activity.activity_type,
+        occurred_at=activity.timestamp,
+        content=activity.content,
+        actor_agent_id=activity.agent_id,
+        actor_name=activity.actor_name,
+        direction=_crm_activity_direction(activity.direction),
+        source_payload_version="follow_up_boss/v1",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _crm_activity_direction(value: str | None) -> CrmConversationEventDirection | None:
+    if value is None:
+        return None
+    try:
+        return CrmConversationEventDirection(value)
+    except ValueError:
+        return None
+
+
+def _normalize_recent_limit(
+    *,
+    sync_type: CRMSyncType,
+    max_leads: int | None,
+    latest_by: CRMSyncLeadSort | None,
+) -> tuple[int | None, CRMSyncLeadSort | None]:
+    if latest_by is not None and max_leads is None:
+        raise ValueError("latest_by requires max_leads")
+    if max_leads is None:
+        return None, None
+    if max_leads < 1:
+        raise ValueError("max_leads must be greater than 0")
+    if sync_type != CRMSyncType.FULL:
+        raise ValueError("max_leads is only supported for full syncs")
+    return max_leads, latest_by or CRMSyncLeadSort.UPDATED
 
 
 def _lead_failure_reason(total_failed: int, first_failure: str | None) -> str | None:

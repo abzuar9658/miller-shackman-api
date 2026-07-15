@@ -61,6 +61,8 @@ async def test_resume_eligibility_returns_resumable_for_contactable_paused_workf
 
 async def test_resume_eligibility_blocks_when_no_contactable_channels_exist() -> None:
     blocked_lead = _lead(
+        has_sms_capable_phone=False,
+        has_email=False,
         sms_permission_status=ContactPermissionStatus.UNKNOWN,
         email_permission_status=ContactPermissionStatus.UNKNOWN,
     )
@@ -130,6 +132,8 @@ async def test_resume_lead_workflow_rejects_assigned_agent_for_unowned_lead() ->
 def _lead(
     *,
     assigned_agent_user_id: UUID = USER_ID,
+    has_sms_capable_phone: bool = True,
+    has_email: bool = True,
     sms_permission_status: ContactPermissionStatus = ContactPermissionStatus.CONFIRMED,
     email_permission_status: ContactPermissionStatus = ContactPermissionStatus.CONFIRMED,
 ) -> CanonicalLeadRecord:
@@ -142,11 +146,11 @@ def _lead(
         source_payload_version="test:v1",
         has_accountable_owner=True,
         mapped_custom_fields={"assigned_agent_user_id": str(assigned_agent_user_id)},
-        primary_email="lead@example.com",
-        primary_phone="+15555550100",
-        has_email=True,
-        has_phone=True,
-        has_sms_capable_phone=True,
+        primary_email="lead@example.com" if has_email else None,
+        primary_phone="+15555550100" if has_sms_capable_phone else None,
+        has_email=has_email,
+        has_phone=has_sms_capable_phone,
+        has_sms_capable_phone=has_sms_capable_phone,
         sms_permission_status=sms_permission_status,
         email_permission_status=email_permission_status,
         do_not_contact=False,

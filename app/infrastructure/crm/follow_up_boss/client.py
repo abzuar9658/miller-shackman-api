@@ -1,4 +1,9 @@
+import asyncio
+import html
+import math
+import re
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 from uuid import UUID
 
@@ -7,11 +12,13 @@ import structlog
 
 from app.application.ports.crm import CanonicalLead, CRMActivity, CRMAgent
 from app.application.ports.crm_sync import CanonicalLeadSnapshotPage
+from app.domain.crm_sync import CRMSyncLeadSort
 from app.infrastructure.crm.follow_up_boss.lead_mapper import (
     map_follow_up_boss_person_to_canonical_lead,
 )
 
 logger = structlog.get_logger(__name__)
+TAG_RE = re.compile(r"<[^>]+>")
 
 
 class FollowUpBossCRMClient:
@@ -19,6 +26,9 @@ class FollowUpBossCRMClient:
     supports_tags: bool = True
     supports_notes: bool = True
     supports_webhooks: bool = False
+    _activity_retry_max_attempts: int = 3
+    _activity_retry_base_delay_seconds: float = 1.0
+    _activity_retry_max_delay_seconds: float = 8.0
 
     def __init__(self, api_key: str, base_url: str = "https://api.followupboss.com/v1") -> None:
         self._base_url = base_url.rstrip("/")
@@ -58,6 +68,7 @@ class FollowUpBossCRMClient:
         cursor: str | None = None,
         updated_after: datetime | None = None,
         updated_before: datetime | None = None,
+        sort_by: CRMSyncLeadSort | None = None,
         mapped_custom_field_keys: tuple[str, ...] = (),
     ) -> CanonicalLeadSnapshotPage:
         params: dict[str, Any] = {"limit": max(1, min(page_size, 100))}
@@ -67,6 +78,8 @@ class FollowUpBossCRMClient:
             params["updatedAfter"] = self._format_datetime(updated_after)
         if updated_before is not None:
             params["updatedBefore"] = self._format_datetime(updated_before)
+        if sort_by is not None:
+            params["sort"] = f"-{sort_by.value}"
 
         response = await self._client.get("/people", params=params)
         response.raise_for_status()
@@ -96,13 +109,73 @@ class FollowUpBossCRMClient:
         crm_lead_id: str,
         limit: int = 50,
     ) -> list[CRMActivity]:
-        response = await self._client.get(
-            f"/people/{crm_lead_id}/activities",
-            params={"limit": limit},
+        _ = workspace_id
+        collections: list[list[CRMActivity]] = []
+        requests = (
+            self._activity_collection_request(
+                label="events",
+                path="/events",
+                params={"personId": crm_lead_id, "limit": limit},
+                collection_key="events",
+                mapper=lambda payload: self._map_event_activity(payload),
+            ),
+            self._activity_collection_request(
+                label="notes",
+                path="/notes",
+                params={"personId": crm_lead_id, "limit": limit},
+                collection_key="notes",
+                mapper=lambda payload: self._map_note_activity(payload),
+            ),
+            self._activity_collection_request(
+                label="text_messages",
+                path="/textMessages",
+                params={"personId": crm_lead_id, "limit": limit},
+                collection_key="textMessages",
+                mapper=lambda payload: self._map_text_message_activity(payload),
+            ),
+            self._activity_collection_request(
+                label="calls",
+                path="/calls",
+                params={"personId": crm_lead_id, "limit": limit},
+                collection_key="calls",
+                mapper=lambda payload: self._map_call_activity(payload),
+            ),
         )
-        response.raise_for_status()
-        data = response.json()
-        return [self._map_activity(a) for a in data.get("activities", [])]
+        for request in requests:
+            collections.append(await self._fetch_activity_collection(**request))
+
+        merged = sorted(
+            [activity for collection in collections for activity in collection],
+            key=lambda activity: activity.timestamp,
+            reverse=True,
+        )
+        deduped: list[CRMActivity] = []
+        seen_ids: set[str] = set()
+        for activity in merged:
+            if activity.crm_activity_id in seen_ids:
+                continue
+            seen_ids.add(activity.crm_activity_id)
+            deduped.append(activity)
+            if len(deduped) >= limit:
+                break
+        return deduped
+
+    def _activity_collection_request(
+        self,
+        *,
+        label: str,
+        path: str,
+        params: dict[str, Any],
+        collection_key: str,
+        mapper: Any,
+    ) -> dict[str, Any]:
+        return {
+            "label": label,
+            "path": path,
+            "params": params,
+            "collection_key": collection_key,
+            "mapper": mapper,
+        }
 
     async def get_assigned_agent(
         self,
@@ -159,13 +232,144 @@ class FollowUpBossCRMClient:
             updated_at=self._parse_datetime(payload.get("updated")),
         )
 
-    def _map_activity(self, payload: dict[str, Any]) -> CRMActivity:
+    async def _fetch_activity_collection(
+        self,
+        *,
+        label: str,
+        path: str,
+        params: dict[str, Any],
+        collection_key: str,
+        mapper: Any,
+    ) -> list[CRMActivity]:
+        attempt = 1
+        while True:
+            try:
+                response = await self._client.get(path, params=params)
+                response.raise_for_status()
+                break
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429 and attempt < self._activity_retry_max_attempts:
+                    delay_seconds = self._retry_after_seconds(
+                        exc.response.headers.get("Retry-After")
+                    )
+                    if delay_seconds is None:
+                        delay_seconds = self._backoff_delay_seconds(attempt)
+                    logger.warning(
+                        "Follow Up Boss CRM activity collection rate limited; retrying",
+                        collection=label,
+                        path=path,
+                        attempt=attempt,
+                        retry_in_seconds=delay_seconds,
+                    )
+                    await asyncio.sleep(delay_seconds)
+                    attempt += 1
+                    continue
+                logger.warning(
+                    "Failed to fetch Follow Up Boss CRM activity collection",
+                    collection=label,
+                    path=path,
+                    error=str(exc),
+                    attempt=attempt,
+                )
+                return []
+            except Exception as exc:
+                logger.warning(
+                    "Failed to fetch Follow Up Boss CRM activity collection",
+                    collection=label,
+                    path=path,
+                    error=str(exc),
+                    attempt=attempt,
+                )
+                return []
+
+        data = response.json()
+        items = data.get(collection_key, [])
+        if not isinstance(items, list):
+            return []
+        return [mapper(item) for item in items if isinstance(item, dict)]
+
+    def _retry_after_seconds(self, value: str | None) -> float | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return max(float(stripped), 0.0)
+        except ValueError:
+            pass
+        try:
+            retry_at = parsedate_to_datetime(stripped)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        return max((retry_at - datetime.now(UTC)).total_seconds(), 0.0)
+
+    def _backoff_delay_seconds(self, attempt: int) -> float:
+        delay = self._activity_retry_base_delay_seconds * math.pow(2, max(attempt - 1, 0))
+        return min(delay, self._activity_retry_max_delay_seconds)
+
+    def _map_event_activity(self, payload: dict[str, Any]) -> CRMActivity:
         return CRMActivity(
             crm_activity_id=str(payload.get("id", "")),
             activity_type=payload.get("type", "unknown"),
             timestamp=self._parse_datetime(payload.get("created")) or datetime.utcnow(),
-            content=payload.get("note") or payload.get("description"),
-            agent_id=payload.get("userId"),
+            content=self._normalize_content(
+                payload.get("message") or payload.get("note") or payload.get("description"),
+            ),
+            agent_id=(
+                str(payload.get("userId")) if payload.get("userId") is not None else None
+            ),
+            actor_name=self._first_non_empty(payload.get("userName"), payload.get("user")),
+        )
+
+    def _map_note_activity(self, payload: dict[str, Any]) -> CRMActivity:
+        return CRMActivity(
+            crm_activity_id=f"note:{payload.get('id', '')}",
+            activity_type="Note",
+            timestamp=self._parse_datetime(payload.get("created") or payload.get("updated"))
+            or datetime.utcnow(),
+            content=self._normalize_content(
+                payload.get("body") or payload.get("note") or payload.get("description"),
+                is_html=bool(payload.get("isHtml")),
+            ),
+            agent_id=str(payload.get("userId")) if payload.get("userId") is not None else None,
+            actor_name=self._first_non_empty(
+                payload.get("userName"),
+                payload.get("createdByName"),
+            ),
+            direction="internal",
+        )
+
+    def _map_text_message_activity(self, payload: dict[str, Any]) -> CRMActivity:
+        is_incoming = self._is_incoming(payload)
+        return CRMActivity(
+            crm_activity_id=f"text_message:{payload.get('id', '')}",
+            activity_type="Text message",
+            timestamp=self._parse_datetime(
+                payload.get("created") or payload.get("sent") or payload.get("updated"),
+            )
+            or datetime.utcnow(),
+            content=self._normalize_content(payload.get("message") or payload.get("body")),
+            agent_id=str(payload.get("userId")) if payload.get("userId") is not None else None,
+            actor_name=self._first_non_empty(payload.get("userName"), payload.get("fromName")),
+            direction="inbound" if is_incoming else "outbound",
+        )
+
+    def _map_call_activity(self, payload: dict[str, Any]) -> CRMActivity:
+        is_incoming = self._is_incoming(payload)
+        return CRMActivity(
+            crm_activity_id=f"call:{payload.get('id', '')}",
+            activity_type="Call",
+            timestamp=self._parse_datetime(
+                payload.get("created") or payload.get("called") or payload.get("updated"),
+            )
+            or datetime.utcnow(),
+            content=self._normalize_content(payload.get("note") or payload.get("description")),
+            agent_id=str(payload.get("userId")) if payload.get("userId") is not None else None,
+            actor_name=self._first_non_empty(payload.get("userName"), payload.get("fromName")),
+            direction="inbound" if is_incoming else "outbound",
         )
 
     def _map_agent(self, payload: dict[str, Any]) -> CRMAgent:
@@ -188,3 +392,27 @@ class FollowUpBossCRMClient:
 
     def _format_datetime(self, value: datetime) -> str:
         return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def _normalize_content(self, value: Any, *, is_html: bool = False) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = html.unescape(value)
+        if is_html:
+            normalized = TAG_RE.sub(" ", normalized)
+        normalized = " ".join(normalized.split())
+        return normalized or None
+
+    def _first_non_empty(self, *values: Any) -> str | None:
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            normalized = value.strip()
+            if normalized:
+                return normalized
+        return None
+
+    def _is_incoming(self, payload: dict[str, Any]) -> bool:
+        if isinstance(payload.get("isIncoming"), bool):
+            return bool(payload["isIncoming"])
+        direction = self._first_non_empty(payload.get("direction"))
+        return direction == "inbound"

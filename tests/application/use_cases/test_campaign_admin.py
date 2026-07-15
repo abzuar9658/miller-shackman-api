@@ -10,12 +10,14 @@ from app.application.use_cases.campaign_admin import (
     CreateDraftCampaignStatus,
     PauseCampaignStatus,
     PublishCampaignVersionStatus,
+    ResumeCampaignStatus,
     UpdateDraftCampaignStatus,
     create_draft_campaign,
     get_campaign_admin_view,
     list_campaign_admin_views,
     pause_campaign,
     publish_campaign_version,
+    resume_campaign,
     update_draft_campaign,
 )
 from app.domain.campaigns.admin import (
@@ -225,6 +227,32 @@ def test_manager_can_pause_active_campaign() -> None:
     assert event_bus.events[-1].event_type == DomainEventType.CAMPAIGN_PAUSED
 
 
+def test_manager_can_resume_paused_campaign() -> None:
+    repo = FakeCampaignAdminRepository()
+    repo.campaigns[CAMPAIGN_ID] = _campaign(status=CampaignStatus.PAUSED)
+    repo.versions[VERSION_ID] = _version(status=CampaignVersionStatus.PUBLISHED)
+    repo.steps[VERSION_ID] = _step_tuple(VERSION_ID)
+    event_bus = FakeEventBus()
+
+    result = _run(
+        resume_campaign(
+            actor=_actor(role=WorkspaceMembershipRole.MANAGER),
+            workspace_id=WORKSPACE_ID,
+            campaign_id=CAMPAIGN_ID,
+            reason="Resume after review",
+            campaign_admin_repository=repo,
+            audit_log_repository=FakeCampaignAdminAuditLogRepository(),
+            event_bus=event_bus,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == ResumeCampaignStatus.RESUMED
+    assert result.view is not None
+    assert result.view.campaign.status == CampaignStatus.ACTIVE
+    assert event_bus.events[-1].event_type == DomainEventType.CAMPAIGN_RESUMED
+
+
 def _config(*, daily_start_cap: int = 50) -> CampaignConfigInput:
     return CampaignConfigInput(
         enabled_channels=(ContactChannel.EMAIL,),
@@ -235,6 +263,8 @@ def _config(*, daily_start_cap: int = 50) -> CampaignConfigInput:
         timezone="America/Chicago",
         sms_compliance_required=True,
         preflight_digest_enabled=True,
+        crm_enrollment_tag="ai_nurture",
+        allow_assigned_agent_manual_enrollment=True,
         prompt_version="v1",
         approved_model="openai/gpt-4o-mini",
         cadence_steps=(
@@ -282,6 +312,8 @@ def _version(
         timezone="America/Chicago",
         sms_compliance_required=True,
         preflight_digest_enabled=True,
+        crm_enrollment_tag="ai_nurture",
+        allow_assigned_agent_manual_enrollment=True,
         prompt_version="v1",
         approved_model="openai/gpt-4o-mini",
         created_by_user_id=ACTOR_ID,

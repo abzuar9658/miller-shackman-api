@@ -213,7 +213,10 @@ async def test_falls_back_to_email_when_sms_is_not_contactable() -> None:
         campaign_id=CAMPAIGN_ID,
         context=_planning_context(enabled_channels=(ContactChannel.SMS, ContactChannel.EMAIL)),
         lead_repository=FakeLeadRepository(
-            _lead(sms_permission_status=ContactPermissionStatus.UNKNOWN),
+            _lead(
+                has_sms_capable_phone=False,
+                sms_permission_status=ContactPermissionStatus.UNKNOWN,
+            ),
         ),
         message_repository=FakeOutboundMessageRepository(),
         llm_client=FakeLLMClient(_draft_json(subject="Checking in")),

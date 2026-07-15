@@ -19,6 +19,11 @@ class CRMSyncType(StrEnum):
     INCREMENTAL = "incremental"
 
 
+class CRMSyncLeadSort(StrEnum):
+    UPDATED = "updated"
+    CREATED = "created"
+
+
 class ExternalEventStatus(StrEnum):
     PENDING = "pending"
     PROCESSED = "processed"

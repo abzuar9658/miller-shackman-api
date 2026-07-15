@@ -15,6 +15,7 @@ class CampaignAdminAuditAction(StrEnum):
     DRAFT_UPDATED = "campaign_draft_updated"
     VERSION_PUBLISHED = "campaign_version_published"
     CAMPAIGN_PAUSED = "campaign_paused"
+    CAMPAIGN_RESUMED = "campaign_resumed"
     BATCH_LAUNCHED = "campaign_batch_launched"
 
 
@@ -61,6 +62,8 @@ class CampaignAdminVersion:
     timezone: str
     sms_compliance_required: bool
     preflight_digest_enabled: bool
+    crm_enrollment_tag: str | None
+    allow_assigned_agent_manual_enrollment: bool
     prompt_version: str
     approved_model: str
     created_by_user_id: UserId

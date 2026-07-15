@@ -44,6 +44,7 @@ class CampaignExecutionConfig:
     timezone: str
     sms_compliance_required: bool
     preflight_digest_enabled: bool
+    crm_enrollment_tag: str | None
     prompt_version: str
     approved_model: str
     cadence_steps: tuple[CampaignCadenceStep, ...]

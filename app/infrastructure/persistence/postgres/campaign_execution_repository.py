@@ -83,6 +83,7 @@ class PostgresCampaignExecutionRepository:
             timezone=version.timezone,
             sms_compliance_required=version.sms_compliance_required,
             preflight_digest_enabled=version.preflight_digest_enabled,
+            crm_enrollment_tag=version.crm_enrollment_tag,
             prompt_version=version.prompt_version,
             approved_model=version.approved_model,
             cadence_steps=steps,

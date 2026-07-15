@@ -104,7 +104,101 @@ async def test_rejects_invalid_json_response() -> None:
     assert result.body is None
 
 
-async def test_rejects_safety_flags_and_does_not_return_sendable_body() -> None:
+async def test_accepts_markdown_fenced_json_response() -> None:
+    result = await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(),
+        llm_client=FakeLLMClient(f"```json\n{_draft_json()}\n```"),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.DRAFTED
+    assert result.body is not None
+
+
+async def test_accepts_common_llm_schema_variants() -> None:
+    result = await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.EMAIL,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(),
+        llm_client=FakeLLMClient(
+            json.dumps(
+                {
+                    "body": "Checking in to see if you still want to continue the conversation.",
+                    "subject": "Quick follow-up",
+                    "confidence": "high",
+                    "personalization_notes": (
+                        "Lead is interested in a specific property and looking to buy soon."
+                    ),
+                    "safety_flags": [],
+                }
+            )
+        ),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.DRAFTED
+    assert result.confidence == 0.9
+    assert result.personalization_notes == (
+        "Lead is interested in a specific property and looking to buy soon.",
+    )
+
+
+async def test_rejects_markdown_fenced_json_when_schema_is_invalid() -> None:
+    result = await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(),
+        llm_client=FakeLLMClient(
+            "```json\n{\n"
+            '  "body": "Checking in.",\n'
+            '  "subject": null,\n'
+            '  "confidence": 0.91,\n'
+            '  "personalization_notes": ["Used safe lead stage context."],\n'
+            '  "safety_flags": true\n'
+            "}\n```"
+        ),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.REJECTED
+    assert result.reasons == (OutboundMessageDraftReasonCode.INVALID_LLM_RESPONSE,)
+    assert result.raw_llm_response_text is not None
+
+
+async def test_rejects_invalid_confidence_string_outside_known_aliases() -> None:
+    result = await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(),
+        llm_client=FakeLLMClient(
+            json.dumps(
+                {
+                    "body": "Checking in.",
+                    "subject": None,
+                    "confidence": "very high",
+                    "personalization_notes": ["Used safe lead stage context."],
+                    "safety_flags": [],
+                }
+            )
+        ),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.REJECTED
+    assert result.reasons == (OutboundMessageDraftReasonCode.INVALID_LLM_RESPONSE,)
+
+
+async def test_rejects_safety_flags_but_keeps_reviewable_body() -> None:
     result = await draft_outbound_message(
         lead=_lead(),
         channel=ContactChannel.SMS,
@@ -117,7 +211,7 @@ async def test_rejects_safety_flags_and_does_not_return_sendable_body() -> None:
 
     assert result.status == OutboundMessageDraftStatus.REJECTED
     assert result.reasons == (OutboundMessageDraftReasonCode.SAFETY_FLAGS_PRESENT,)
-    assert result.body is None
+    assert result.body == "Hi — are you still thinking about making a move this year?"
 
 
 async def test_rejects_email_without_subject() -> None:

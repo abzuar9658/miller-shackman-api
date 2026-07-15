@@ -19,6 +19,7 @@ from app.domain.campaigns.pre_send import (
     PreSendDecision,
     PreSendFacts,
     PreSendPolicy,
+    PreSendReasonCode,
     ProviderSendStatus,
     ScheduledMessageStatus,
     WorkflowState,
@@ -48,6 +49,23 @@ class PlanOutboundMessageReasonCode(StrEnum):
     PRE_SEND_BLOCKED = "pre_send_blocked"
     DRAFT_REJECTED = "draft_rejected"
     DUPLICATE_PLAN = "duplicate_plan"
+
+
+class ChannelEvaluationOutcome(StrEnum):
+    SELECTED = "selected"
+    DUPLICATE = "duplicate"
+    MISSING_DESTINATION = "missing_destination"
+    NOT_CONTACTABLE = "not_contactable"
+    PRE_SEND_BLOCKED = "pre_send_blocked"
+
+
+@dataclass(frozen=True)
+class ChannelEvaluation:
+    channel: ContactChannel
+    outcome: ChannelEvaluationOutcome
+    reasons: tuple[PlanOutboundMessageReasonCode, ...] = ()
+    pre_send_reasons: tuple[PreSendReasonCode, ...] = ()
+    next_allowed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +103,7 @@ class PlanOutboundMessageResult:
     draft_result: OutboundMessageDraftResult | None = None
     reasons: tuple[PlanOutboundMessageReasonCode, ...] = ()
     draft_reasons: tuple[OutboundMessageDraftReasonCode, ...] = ()
+    channel_evaluations: tuple[ChannelEvaluation, ...] = ()
 
 
 async def plan_outbound_message(
@@ -151,11 +170,13 @@ async def plan_outbound_message_for_lead_record(
             selected_channel=selected.channel,
             pre_send_decision=selected.pre_send_decision,
             reasons=(PlanOutboundMessageReasonCode.DUPLICATE_PLAN,),
+            channel_evaluations=selected.evaluations,
         )
     if selected.channel is None or selected.pre_send_decision is None:
         return PlanOutboundMessageResult(
             status=PlanOutboundMessageStatus.REJECTED,
             reasons=tuple(dict.fromkeys(selected.reasons)),
+            channel_evaluations=selected.evaluations,
         )
 
     draft_result = await draft_outbound_message(
@@ -175,6 +196,7 @@ async def plan_outbound_message_for_lead_record(
             draft_result=draft_result,
             reasons=(PlanOutboundMessageReasonCode.DRAFT_REJECTED,),
             draft_reasons=draft_result.reasons,
+            channel_evaluations=selected.evaluations,
         )
 
     idempotency_key = _outbound_idempotency_key(
@@ -217,6 +239,7 @@ async def plan_outbound_message_for_lead_record(
         selected_channel=selected.channel,
         pre_send_decision=selected.pre_send_decision,
         draft_result=draft_result,
+        channel_evaluations=selected.evaluations,
     )
 
 
@@ -226,6 +249,7 @@ class _ChannelSelection:
     pre_send_decision: PreSendDecision | None = None
     duplicate_message: OutboundMessage | None = None
     reasons: tuple[PlanOutboundMessageReasonCode, ...] = ()
+    evaluations: tuple[ChannelEvaluation, ...] = ()
 
 
 async def _select_channel(
@@ -238,10 +262,18 @@ async def _select_channel(
     now: datetime,
 ) -> _ChannelSelection:
     rejection_reasons: list[PlanOutboundMessageReasonCode] = []
+    evaluations: list[ChannelEvaluation] = []
     contactability_facts = contactability_facts_from_canonical_lead(lead)
     for channel in context.enabled_channels:
         if not _has_destination_for_channel(lead, channel):
             rejection_reasons.append(PlanOutboundMessageReasonCode.CHANNEL_DESTINATION_MISSING)
+            evaluations.append(
+                ChannelEvaluation(
+                    channel=channel,
+                    outcome=ChannelEvaluationOutcome.MISSING_DESTINATION,
+                    reasons=(PlanOutboundMessageReasonCode.CHANNEL_DESTINATION_MISSING,),
+                )
+            )
             continue
 
         contactability_decision = evaluate_contactability(
@@ -276,9 +308,25 @@ async def _select_channel(
         )
         if not contactability_decision.allowed:
             rejection_reasons.append(PlanOutboundMessageReasonCode.CHANNEL_NOT_CONTACTABLE)
+            evaluations.append(
+                ChannelEvaluation(
+                    channel=channel,
+                    outcome=ChannelEvaluationOutcome.NOT_CONTACTABLE,
+                    reasons=(PlanOutboundMessageReasonCode.CHANNEL_NOT_CONTACTABLE,),
+                )
+            )
             continue
         if not pre_send_decision.allowed:
             rejection_reasons.append(PlanOutboundMessageReasonCode.PRE_SEND_BLOCKED)
+            evaluations.append(
+                ChannelEvaluation(
+                    channel=channel,
+                    outcome=ChannelEvaluationOutcome.PRE_SEND_BLOCKED,
+                    reasons=(PlanOutboundMessageReasonCode.PRE_SEND_BLOCKED,),
+                    pre_send_reasons=pre_send_decision.reasons,
+                    next_allowed_at=pre_send_decision.next_allowed_at,
+                )
+            )
             continue
 
         idempotency_key = _outbound_idempotency_key(
@@ -295,12 +343,35 @@ async def _select_channel(
                 channel=channel,
                 pre_send_decision=pre_send_decision,
                 duplicate_message=existing,
+                evaluations=tuple(
+                    [
+                        *evaluations,
+                        ChannelEvaluation(
+                            channel=channel,
+                            outcome=ChannelEvaluationOutcome.DUPLICATE,
+                            reasons=(PlanOutboundMessageReasonCode.DUPLICATE_PLAN,),
+                        ),
+                    ]
+                ),
             )
-        return _ChannelSelection(channel=channel, pre_send_decision=pre_send_decision)
+        return _ChannelSelection(
+            channel=channel,
+            pre_send_decision=pre_send_decision,
+            evaluations=tuple(
+                [
+                    *evaluations,
+                    ChannelEvaluation(
+                        channel=channel,
+                        outcome=ChannelEvaluationOutcome.SELECTED,
+                    ),
+                ]
+            ),
+        )
 
     return _ChannelSelection(
         channel=None,
         reasons=tuple(rejection_reasons),
+        evaluations=tuple(evaluations),
     )
 
 

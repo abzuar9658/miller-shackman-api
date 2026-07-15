@@ -3,9 +3,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.application.ports.llm import LLMClient, LLMCompletionRequest
+from app.application.services.llm.structured_json import (
+    coerce_llm_confidence,
+    normalize_llm_json_text,
+)
 from app.domain.conversations import HandoffReasonCode
 from app.domain.leads import CanonicalLeadRecord
 
@@ -65,6 +69,11 @@ class _LLMReplyClassification(BaseModel):
     summary_text: str = Field(min_length=1, max_length=600)
     preferences: dict[str, str] = Field(default_factory=dict)
 
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _coerce_confidence(cls, value: object) -> object:
+        return coerce_llm_confidence(value)
+
 
 async def classify_inbound_reply(
     *,
@@ -83,7 +92,9 @@ async def classify_inbound_reply(
     )
 
     try:
-        classification = _LLMReplyClassification.model_validate_json(llm_result.text)
+        classification = _LLMReplyClassification.model_validate_json(
+            normalize_llm_json_text(llm_result.text)
+        )
     except ValidationError:
         return ReplyClassificationResult(
             status=ReplyClassificationStatus.REJECTED,

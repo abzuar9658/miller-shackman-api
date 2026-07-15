@@ -3,8 +3,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
+from app.application.ports.lead_activity import LeadActivityItem, LeadActivityRepository
 from app.application.ports.llm import LLMClient
-from app.application.ports.repositories import LeadRepository, OutboundMessageRepository
+from app.application.ports.repositories import (
+    CrmConversationEventRepository,
+    LeadRepository,
+    OutboundMessageRepository,
+)
 from app.application.services.canonical_lead_inputs import (
     approved_outbound_context_from_canonical_lead,
 )
@@ -19,6 +24,7 @@ from app.domain.campaigns.pre_send import PreSendPolicy, WorkflowState
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import CampaignId, LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel, WorkspaceContactPolicy
+from app.domain.conversations import CrmConversationEvent
 
 
 def _empty_preferences() -> Mapping[str, str]:
@@ -52,6 +58,7 @@ class PlanNextOutboundMessageContext:
     latest_lead_request: str | None = None
     extracted_preferences: Mapping[str, str] = field(default_factory=_empty_preferences)
     allowed_mapped_custom_field_keys: tuple[str, ...] = ()
+    activity_items: tuple[LeadActivityItem, ...] = ()
 
 
 async def plan_next_outbound_message_for_lead(
@@ -62,6 +69,8 @@ async def plan_next_outbound_message_for_lead(
     context: PlanNextOutboundMessageContext,
     lead_repository: LeadRepository,
     message_repository: OutboundMessageRepository,
+    lead_activity_repository: LeadActivityRepository | None = None,
+    crm_conversation_event_repository: CrmConversationEventRepository | None = None,
     llm_client: LLMClient,
     now: datetime,
     message_id_factory: Callable[[], UUID] | None = None,
@@ -71,6 +80,22 @@ async def plan_next_outbound_message_for_lead(
         return PlanOutboundMessageResult(
             status=PlanOutboundMessageStatus.REJECTED,
             reasons=(PlanOutboundMessageReasonCode.LEAD_NOT_FOUND,),
+        )
+
+    activity_items = context.activity_items
+    if not activity_items and lead_activity_repository is not None:
+        activity_items = await lead_activity_repository.list_for_lead(
+            workspace_id,
+            lead_id,
+            limit=8,
+        )
+
+    crm_conversation_events: tuple[CrmConversationEvent, ...] = ()
+    if not activity_items and crm_conversation_event_repository is not None:
+        crm_conversation_events = await crm_conversation_event_repository.list_for_lead(
+            workspace_id,
+            lead_id,
+            limit=8,
         )
 
     planning_context = OutboundPlanningContext(
@@ -92,6 +117,8 @@ async def plan_next_outbound_message_for_lead(
             latest_lead_request=context.latest_lead_request,
             extracted_preferences=context.extracted_preferences,
             allowed_mapped_custom_field_keys=context.allowed_mapped_custom_field_keys,
+            activity_items=activity_items,
+            crm_conversation_events=crm_conversation_events,
         ),
         preflight_vetoed=context.preflight_vetoed,
         handoff_active=context.handoff_active,

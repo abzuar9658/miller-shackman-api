@@ -207,3 +207,69 @@ async def test_lead_nurture_workflow_retries_after_blocked_step_resume(
     ]
     assert snapshot.last_activity_status == "sent"
     assert snapshot.provider_message_id == "email-1"
+
+
+async def test_lead_nurture_workflow_accepts_dict_activity_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_instance = LeadNurtureWorkflow()
+
+    async def fake_execute_activity(name: str, arg: object, **_: object) -> object:
+        if name == "schedule-next-campaign-cadence-step":
+            return {
+                "status": "scheduled",
+                "workflow_id": str(WORKFLOW_ID),
+                "cadence_step_id": str(STEP_ONE_ID),
+                "scheduled_for": NOW.isoformat(),
+                "skip_reason": None,
+            }
+        if name == "execute-campaign-cadence-step":
+            return {
+                "status": "sent",
+                "workflow_id": str(WORKFLOW_ID),
+                "transition_id": str(TRANSITION_ID),
+                "cadence_step_id": str(STEP_ONE_ID),
+                "outbound_message_id": str(MESSAGE_ID),
+                "provider_message_id": "email-1",
+                "skip_reason": None,
+                "has_more_steps": False,
+            }
+        raise AssertionError(f"unexpected activity {name}")
+
+    async def fake_wait_condition(predicate: object) -> None:
+        _ = predicate
+        workflow_instance.close()
+
+    async def fake_sleep(_: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.execute_activity",
+        fake_execute_activity,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.wait_condition",
+        fake_wait_condition,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.sleep",
+        fake_sleep,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.now",
+        lambda: NOW,
+    )
+
+    snapshot = await workflow_instance.run(
+        LeadNurtureWorkflowInput(
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            campaign_version_id=CAMPAIGN_VERSION_ID,
+        )
+    )
+
+    assert snapshot.current_step_id == STEP_ONE_ID
+    assert snapshot.workflow_id == WORKFLOW_ID
+    assert snapshot.transition_id == TRANSITION_ID
+    assert snapshot.outbound_message_id == MESSAGE_ID
+    assert snapshot.provider_message_id == "email-1"

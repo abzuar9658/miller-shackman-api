@@ -5,6 +5,7 @@ from app.application.ports.temporal import (
     PauseLeadNurtureWorkflowSignal,
     ResumeLeadNurtureWorkflowSignal,
     TemporalWorkflowStarter,
+    UnblockLeadNurtureWorkflowSignal,
 )
 from app.core.config import Settings, get_settings
 from app.domain.common.ids import CampaignVersionId, LeadId, WorkspaceId
@@ -13,6 +14,7 @@ from app.infrastructure.workflows.temporal.lead_nurture import (
     LeadNurtureWorkflowInput,
     PauseWorkflowSignal,
     ResumeWorkflowSignal,
+    UnblockWorkflowSignal,
 )
 from app.infrastructure.workflows.temporal.worker import connect_temporal_client
 
@@ -70,6 +72,25 @@ class TemporalClientWorkflowStarter:
         await handle.signal(
             LeadNurtureWorkflow.resume_requested,
             ResumeWorkflowSignal(
+                workspace_id=signal.workspace_id,
+                lead_id=signal.lead_id,
+                occurred_at=signal.occurred_at,
+                reason=signal.reason,
+                actor_user_id=signal.actor_user_id,
+                external_event_id=signal.external_event_id,
+            ),
+        )
+
+    async def signal_unblock_lead_nurture_workflow(
+        self,
+        *,
+        temporal_workflow_id: str,
+        signal: UnblockLeadNurtureWorkflowSignal,
+    ) -> None:
+        handle = self._client.get_workflow_handle(temporal_workflow_id)
+        await handle.signal(
+            LeadNurtureWorkflow.blocked_review_completed,
+            UnblockWorkflowSignal(
                 workspace_id=signal.workspace_id,
                 lead_id=signal.lead_id,
                 occurred_at=signal.occurred_at,

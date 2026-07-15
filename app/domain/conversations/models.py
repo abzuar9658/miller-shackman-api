@@ -29,6 +29,12 @@ class HandoffReasonCode(StrEnum):
     SPECIFIC_PROPERTY_OR_ADVICE = "specific_property_or_advice"
 
 
+class CrmConversationEventDirection(StrEnum):
+    INBOUND = "inbound"
+    OUTBOUND = "outbound"
+    INTERNAL = "internal"
+
+
 class HandoffStatus(StrEnum):
     CREATED = "created"
     NOTIFIED = "notified"
@@ -140,3 +146,22 @@ class Handoff:
     status: HandoffStatus = HandoffStatus.CREATED
     notified_at: datetime | None = None
     acknowledged_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class CrmConversationEvent:
+    crm_conversation_event_id: UUID
+    workspace_id: WorkspaceId
+    lead_id: LeadId
+    crm_provider: str
+    crm_activity_id: str
+    activity_type: str
+    occurred_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    conversation_id: UUID | None = None
+    direction: CrmConversationEventDirection | None = None
+    content: str | None = None
+    actor_agent_id: str | None = None
+    actor_name: str | None = None
+    source_payload_version: str = "follow_up_boss/v1"

@@ -11,7 +11,6 @@ from sqlalchemy import (
     String,
     Time,
     UniqueConstraint,
-    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -218,6 +217,12 @@ class CampaignVersionModel(Base):
     timezone: Mapped[str] = mapped_column(String(100), nullable=False)
     sms_compliance_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     preflight_digest_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    crm_enrollment_tag: Mapped[str | None] = mapped_column(String(255))
+    allow_assigned_agent_manual_enrollment: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
     prompt_version: Mapped[str] = mapped_column(String(100), nullable=False)
     approved_model: Mapped[str] = mapped_column(String(100), nullable=False)
     created_by_user_id: Mapped[UUID] = mapped_column(
@@ -297,23 +302,7 @@ class CampaignAdminAuditLogModel(Base):
 
 class CRMSyncJobModel(Base):
     __tablename__ = "crm_sync_jobs"
-    __table_args__ = (
-        Index("ix_crm_sync_jobs_workspace_created", "workspace_id", "created_at"),
-        Index(
-            "ix_crm_sync_jobs_workspace_provider_created",
-            "workspace_id",
-            "crm_provider",
-            "created_at",
-        ),
-        Index("ix_crm_sync_jobs_workspace_status_created", "workspace_id", "status", "created_at"),
-        Index(
-            "uq_crm_sync_jobs_one_active_workspace_provider",
-            "workspace_id",
-            "crm_provider",
-            unique=True,
-            postgresql_where=text("status IN ('pending', 'running')"),
-        ),
-    )
+    __table_args__ = (Index("ix_crm_sync_jobs_workspace_created", "workspace_id", "created_at"),)
 
     sync_job_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4
@@ -597,6 +586,52 @@ class InboundMessageModel(Base):
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     classification_status: Mapped[str] = mapped_column(String(50), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CrmConversationEventModel(Base):
+    __tablename__ = "crm_conversation_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "crm_provider",
+            "crm_activity_id",
+            name="uq_crm_conversation_events_workspace_provider_activity",
+        ),
+        Index(
+            "ix_crm_conversation_events_workspace_lead_occurred",
+            "workspace_id",
+            "lead_id",
+            "occurred_at",
+        ),
+    )
+
+    crm_conversation_event_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    lead_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("leads.lead_id"),
+        nullable=False,
+    )
+    conversation_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("conversations.conversation_id")
+    )
+    crm_provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    crm_activity_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    activity_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    direction: Mapped[str | None] = mapped_column(String(50))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    content: Mapped[str | None] = mapped_column(String)
+    actor_agent_id: Mapped[str | None] = mapped_column(String(255))
+    actor_name: Mapped[str | None] = mapped_column(String(255))
+    source_payload_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class ConversationSummaryModel(Base):

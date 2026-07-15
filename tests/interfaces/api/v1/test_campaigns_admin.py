@@ -59,6 +59,7 @@ def test_create_draft_campaign_route_returns_201(
     assert body["status"] == "created"
     assert body["campaign"]["name"] == "Dormant Buyers"
     assert body["version"]["status"] == "draft"
+    assert body["version"]["allow_assigned_agent_manual_enrollment"] is True
     assert len(body["cadence_steps"]) == 1
     assert campaign_admin_client.audit_repository.logs[-1].action.value == "campaign_draft_created"
     assert campaign_admin_client.event_bus.events[-1].event_type.value == "campaign.draft_created"
@@ -150,6 +151,16 @@ def test_publish_and_pause_campaign_routes_return_200(
     assert pause_body["status"] == "paused"
     assert pause_body["campaign"]["status"] == CampaignStatus.PAUSED.value
 
+    resume_response = campaign_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/campaigns/{campaign_id}/resume",
+        json={"reason": "Resume after review"},
+    )
+
+    assert resume_response.status_code == 200
+    resume_body = resume_response.json()
+    assert resume_body["status"] == "resumed"
+    assert resume_body["campaign"]["status"] == CampaignStatus.ACTIVE.value
+
 
 def _client_for_role(role: WorkspaceMembershipRole) -> CampaignAdminTestClient:
     app = create_app()
@@ -200,6 +211,8 @@ def _payload() -> dict[str, Any]:
         "timezone": "America/Chicago",
         "sms_compliance_required": True,
         "preflight_digest_enabled": True,
+        "crm_enrollment_tag": "ai_nurture",
+        "allow_assigned_agent_manual_enrollment": True,
         "prompt_version": "v1",
         "approved_model": "openai/gpt-4o-mini",
         "cadence_steps": [

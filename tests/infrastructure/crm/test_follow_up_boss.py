@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 import pytest
 
+from app.domain.crm_sync import CRMSyncLeadSort
 from app.infrastructure.crm.follow_up_boss.client import FollowUpBossCRMClient
 
 
@@ -131,3 +132,320 @@ async def test_list_lead_snapshots_sends_incremental_filters_and_cursor(
     assert captured["next"] == "cursor-2"
     assert captured["updatedAfter"] == "2026-07-01T00:00:00Z"
     assert captured["updatedBefore"] == "2026-07-08T00:00:00Z"
+
+
+async def test_list_lead_snapshots_sends_sort_for_recent_limited_sync(
+    workspace_id: uuid.UUID,
+) -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(dict(request.url.params))
+        return httpx.Response(200, json={"_metadata": {}, "people": []})
+
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    await client.list_lead_snapshots(
+        workspace_id=workspace_id,
+        page_size=50,
+        sort_by=CRMSyncLeadSort.UPDATED,
+    )
+
+    assert captured["limit"] == "50"
+    assert captured["sort"] == "-updated"
+
+
+async def test_get_recent_activity_uses_events_endpoint_with_person_id(
+    workspace_id: uuid.UUID,
+) -> None:
+    captured_requests: list[tuple[str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        captured_requests.append((request.url.path, params))
+        if request.url.path == "/v1/events":
+            return httpx.Response(
+                200,
+                json={
+                    "events": [
+                        {
+                            "id": 99,
+                            "type": "Inquiry",
+                            "created": "2026-07-14T10:00:00Z",
+                            "message": "We are hoping to move before school starts.",
+                            "userId": 42,
+                            "userName": "Agent Ada",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/v1/notes":
+            return httpx.Response(
+                200,
+                json={
+                    "notes": [
+                        {
+                            "id": 17,
+                            "created": "2026-07-14T10:05:00Z",
+                            "body": "<p>Agent follow-up note</p>",
+                            "isHtml": True,
+                            "userId": 7,
+                            "userName": "Agent Ada",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/v1/textMessages":
+            return httpx.Response(
+                200,
+                json={
+                    "textMessages": [
+                        {
+                            "id": 88,
+                            "created": "2026-07-14T10:10:00Z",
+                            "message": "Checking whether you are still looking.",
+                            "isIncoming": False,
+                            "userId": 42,
+                            "userName": "Agent Ada",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/v1/calls":
+            return httpx.Response(
+                200,
+                json={
+                    "calls": [
+                        {
+                            "id": 55,
+                            "created": "2026-07-14T10:15:00Z",
+                            "description": "Left voicemail",
+                            "isIncoming": False,
+                            "userId": 42,
+                            "userName": "Agent Ada",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"message": "not found"})
+
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    activities = await client.get_recent_activity(workspace_id, "12401", limit=25)
+
+    assert [path for path, _ in captured_requests] == [
+        "/v1/events",
+        "/v1/notes",
+        "/v1/textMessages",
+        "/v1/calls",
+    ]
+    for _, params in captured_requests:
+        assert params["personId"] == "12401"
+        assert params["limit"] == "25"
+    assert [activity.crm_activity_id for activity in activities] == [
+        "call:55",
+        "text_message:88",
+        "note:17",
+        "99",
+    ]
+    assert activities[0].activity_type == "Call"
+    assert activities[0].direction == "outbound"
+    assert activities[1].activity_type == "Text message"
+    assert activities[1].actor_name == "Agent Ada"
+    assert activities[2].content == "Agent follow-up note"
+    assert activities[2].direction == "internal"
+    assert activities[3].activity_type == "Inquiry"
+    assert activities[3].content == "We are hoping to move before school starts."
+    assert activities[3].agent_id == "42"
+
+
+async def test_get_recent_activity_accepts_empty_events_list(
+    workspace_id: uuid.UUID,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/events":
+            return httpx.Response(200, json={"events": []})
+        if request.url.path == "/v1/notes":
+            return httpx.Response(200, json={"notes": []})
+        if request.url.path == "/v1/textMessages":
+            return httpx.Response(200, json={"textMessages": []})
+        if request.url.path == "/v1/calls":
+            return httpx.Response(200, json={"calls": []})
+        return httpx.Response(404, json={"message": "not found"})
+
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    activities = await client.get_recent_activity(workspace_id, "12401")
+
+    assert activities == []
+
+
+async def test_get_recent_activity_continues_when_one_surface_fails(
+    workspace_id: uuid.UUID,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/events":
+            return httpx.Response(
+                200,
+                json={
+                    "events": [
+                        {
+                            "id": 99,
+                            "type": "Inquiry",
+                            "created": "2026-07-14T10:00:00Z",
+                            "message": "Need more info.",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/v1/notes":
+            return httpx.Response(500, json={"message": "boom"})
+        if request.url.path == "/v1/textMessages":
+            return httpx.Response(200, json={"textMessages": []})
+        if request.url.path == "/v1/calls":
+            return httpx.Response(200, json={"calls": []})
+        return httpx.Response(404, json={"message": "not found"})
+
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    activities = await client.get_recent_activity(workspace_id, "12401")
+
+    assert len(activities) == 1
+    assert activities[0].crm_activity_id == "99"
+
+
+async def test_get_recent_activity_retries_rate_limited_collection_with_retry_after(
+    workspace_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_paths: list[str] = []
+    sleep_delays: list[float] = []
+    attempts = {"events": 0}
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_paths.append(request.url.path)
+        if request.url.path == "/v1/events":
+            attempts["events"] += 1
+            if attempts["events"] == 1:
+                return httpx.Response(
+                    429,
+                    headers={"Retry-After": "2"},
+                    json={"message": "rate limited"},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "events": [
+                        {
+                            "id": 99,
+                            "type": "Inquiry",
+                            "created": "2026-07-14T10:00:00Z",
+                            "message": "Need more info.",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/v1/notes":
+            return httpx.Response(200, json={"notes": []})
+        if request.url.path == "/v1/textMessages":
+            return httpx.Response(200, json={"textMessages": []})
+        if request.url.path == "/v1/calls":
+            return httpx.Response(200, json={"calls": []})
+        return httpx.Response(404, json={"message": "not found"})
+
+    monkeypatch.setattr("app.infrastructure.crm.follow_up_boss.client.asyncio.sleep", fake_sleep)
+
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    activities = await client.get_recent_activity(workspace_id, "12401")
+
+    assert sleep_delays == [2.0]
+    assert request_paths == [
+        "/v1/events",
+        "/v1/events",
+        "/v1/notes",
+        "/v1/textMessages",
+        "/v1/calls",
+    ]
+    assert len(activities) == 1
+    assert activities[0].crm_activity_id == "99"
+
+
+async def test_get_recent_activity_uses_exponential_backoff_without_retry_after(
+    workspace_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleep_delays: list[float] = []
+    attempts = {"events": 0}
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/events":
+            attempts["events"] += 1
+            if attempts["events"] < 3:
+                return httpx.Response(429, json={"message": "rate limited"})
+            return httpx.Response(
+                200,
+                json={
+                    "events": [
+                        {
+                            "id": 99,
+                            "type": "Inquiry",
+                            "created": "2026-07-14T10:00:00Z",
+                            "message": "Need more info.",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/v1/notes":
+            return httpx.Response(200, json={"notes": []})
+        if request.url.path == "/v1/textMessages":
+            return httpx.Response(200, json={"textMessages": []})
+        if request.url.path == "/v1/calls":
+            return httpx.Response(200, json={"calls": []})
+        return httpx.Response(404, json={"message": "not found"})
+
+    monkeypatch.setattr("app.infrastructure.crm.follow_up_boss.client.asyncio.sleep", fake_sleep)
+
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    activities = await client.get_recent_activity(workspace_id, "12401")
+
+    assert sleep_delays == [1.0, 2.0]
+    assert len(activities) == 1
+    assert activities[0].crm_activity_id == "99"

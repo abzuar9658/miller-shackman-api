@@ -122,7 +122,11 @@ not be duplicated in broad fact snapshots unnecessarily.
 | `permission_evidence`     | Non-sensitive source/timestamp metadata where available |
 
 These are facts. `01-lead-contactability.md` still decides whether a channel is
-contactable. Unknown permission must remain unknown, not inferred.
+contactable. Stored permission facts remain explicit, but the contactability rule may
+still treat a usable email address or SMS-capable phone as sufficient permission in V1
+when no explicit denial or suppression exists. When the canonical record has no explicit
+`do_not_contact` value, the contactability mapping derives `False` if any email or phone
+destination is present and `True` otherwise.
 
 ### Activity and timing facts
 

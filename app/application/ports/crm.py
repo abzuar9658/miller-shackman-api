@@ -31,6 +31,8 @@ class CRMActivity(BaseModel):
     timestamp: datetime
     content: str | None = None
     agent_id: str | None = None
+    actor_name: str | None = None
+    direction: str | None = None
 
 
 class CRMClient(Protocol):

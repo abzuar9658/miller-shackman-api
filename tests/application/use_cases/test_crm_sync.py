@@ -2,17 +2,20 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+from app.application.ports.crm import CRMActivity
 from app.application.ports.crm_sync import CanonicalLeadSnapshotPage
 from app.application.use_cases.crm_sync import (
     ExecuteQueuedCRMSyncStatus,
     RequestCRMSyncStatus,
     RunFollowUpBossLeadSyncStatus,
+    _map_crm_activity_to_event,
     enqueue_due_follow_up_boss_crm_syncs,
     execute_queued_follow_up_boss_crm_sync,
     request_crm_sync,
     run_follow_up_boss_lead_snapshot_sync,
 )
-from app.domain.crm_sync import CRMSyncJob, CRMSyncJobStatus, CRMSyncType
+from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
+from app.domain.crm_sync import CRMSyncJob, CRMSyncJobStatus, CRMSyncLeadSort, CRMSyncType
 from app.domain.events import DomainEvent, DomainEventType
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 
@@ -181,6 +184,7 @@ class FakeLeadSnapshotSource:
         cursor: str | None = None,
         updated_after: datetime | None = None,
         updated_before: datetime | None = None,
+        sort_by: CRMSyncLeadSort | None = None,
         mapped_custom_field_keys: tuple[str, ...] = (),
     ) -> CanonicalLeadSnapshotPage:
         self.requests.append(
@@ -190,12 +194,56 @@ class FakeLeadSnapshotSource:
                 "cursor": cursor,
                 "updated_after": updated_after,
                 "updated_before": updated_before,
+                "sort_by": sort_by,
                 "mapped_custom_field_keys": mapped_custom_field_keys,
             },
         )
         if self.error is not None:
             raise self.error
         return self.pages.pop(0)
+
+
+class FakeCRMActivitySource:
+    def __init__(
+        self,
+        activities_by_lead: dict[str, tuple[CRMActivity, ...]] | None = None,
+    ) -> None:
+        self.activities_by_lead = activities_by_lead or {}
+        self.calls: list[dict[str, object]] = []
+
+    async def get_recent_activity(
+        self,
+        workspace_id: UUID,
+        crm_lead_id: str,
+        limit: int = 50,
+    ) -> list[CRMActivity]:
+        self.calls.append(
+            {
+                "workspace_id": workspace_id,
+                "crm_lead_id": crm_lead_id,
+                "limit": limit,
+            }
+        )
+        return list(self.activities_by_lead.get(crm_lead_id, ()))
+
+
+class FakeCrmConversationEventRepository:
+    def __init__(self) -> None:
+        self.saved: list[CrmConversationEvent] = []
+
+    async def list_for_lead(
+        self,
+        workspace_id: UUID,
+        lead_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> tuple[CrmConversationEvent, ...]:
+        _ = (workspace_id, lead_id, limit)
+        return ()
+
+    async def save(self, event: CrmConversationEvent) -> CrmConversationEvent:
+        self.saved.append(event)
+        return event
 
 
 def _lead(crm_lead_id: str) -> CanonicalLeadRecord:
@@ -206,6 +254,23 @@ def _lead(crm_lead_id: str) -> CanonicalLeadRecord:
         crm_lead_id=crm_lead_id,
         facts_derived_at=NOW,
         source_payload_version="follow_up_boss_person:v1",
+    )
+
+
+def _activity(
+    *,
+    crm_activity_id: str,
+    activity_type: str = "Note",
+    direction: str | None = "internal",
+) -> CRMActivity:
+    return CRMActivity(
+        crm_activity_id=crm_activity_id,
+        activity_type=activity_type,
+        timestamp=NOW,
+        content=f"content::{crm_activity_id}",
+        agent_id="42",
+        actor_name="Agent Ada",
+        direction=direction,
     )
 
 
@@ -311,6 +376,78 @@ async def test_incremental_sync_uses_latest_completed_cursor_finished_at() -> No
     assert source.requests[0]["updated_before"] == NOW
 
 
+async def test_runs_limited_full_sync_for_most_recent_leads_only() -> None:
+    source = FakeLeadSnapshotSource(
+        pages=(
+            CanonicalLeadSnapshotPage(leads=(_lead("1"), _lead("2")), next_cursor="cursor-2"),
+            CanonicalLeadSnapshotPage(leads=(_lead("3"),), next_cursor="cursor-3"),
+        ),
+    )
+    lead_repository = FakeLeadRepository()
+
+    result = await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=source,
+        lead_repository=lead_repository,
+        crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        now=NOW,
+        sync_type=CRMSyncType.FULL,
+        page_size=2,
+        max_leads=3,
+        latest_by=CRMSyncLeadSort.UPDATED,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+
+    assert result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+    assert result.page_count == 2
+    assert result.job.total_seen == 3
+    assert [lead.crm_lead_id for lead in lead_repository.saved] == ["1", "2", "3"]
+    assert source.requests[0]["page_size"] == 2
+    assert source.requests[0]["sort_by"] == CRMSyncLeadSort.UPDATED
+    assert source.requests[1]["page_size"] == 1
+    assert len(source.requests) == 2
+
+
+async def test_limited_full_sync_imports_activity_for_selected_leads_only() -> None:
+    source = FakeLeadSnapshotSource(
+        pages=(
+            CanonicalLeadSnapshotPage(leads=(_lead("1"), _lead("2")), next_cursor="cursor-2"),
+            CanonicalLeadSnapshotPage(leads=(_lead("3"),), next_cursor="cursor-3"),
+        ),
+    )
+    activity_source = FakeCRMActivitySource(
+        {
+            "1": (_activity(crm_activity_id="a-1"),),
+            "2": (_activity(crm_activity_id="a-2", direction="outbound"),),
+            "3": (_activity(crm_activity_id="a-3", direction="inbound"),),
+        }
+    )
+    conversation_repository = FakeCrmConversationEventRepository()
+
+    result = await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=source,
+        lead_repository=FakeLeadRepository(),
+        crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        crm_activity_source=activity_source,
+        crm_conversation_event_repository=conversation_repository,
+        activity_limit=25,
+        now=NOW,
+        sync_type=CRMSyncType.FULL,
+        page_size=2,
+        max_leads=2,
+        latest_by=CRMSyncLeadSort.CREATED,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+
+    assert result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+    assert [call["crm_lead_id"] for call in activity_source.calls] == ["1", "2"]
+    assert all(call["limit"] == 25 for call in activity_source.calls)
+    assert [event.crm_activity_id for event in conversation_repository.saved] == ["a-1", "a-2"]
+    assert source.requests[0]["sort_by"] == CRMSyncLeadSort.CREATED
+    assert len(source.requests) == 1
+
+
 async def test_marks_job_failed_when_some_leads_fail_to_upsert() -> None:
     source = FakeLeadSnapshotSource(
         pages=(CanonicalLeadSnapshotPage(leads=(_lead("1"), _lead("2"))),),
@@ -374,6 +511,24 @@ async def test_request_crm_sync_creates_pending_job_and_outbox_event() -> None:
     assert event_bus.events[0].payload["sync_job_id"] == str(SYNC_JOB_ID)
 
 
+async def test_request_crm_sync_includes_recent_limit_options_in_event_payload() -> None:
+    job_repository = FakeCRMSyncJobRepository()
+    event_bus = FakeEventBus()
+
+    await request_crm_sync(
+        workspace_id=WORKSPACE_ID,
+        sync_type=CRMSyncType.FULL,
+        max_leads=50,
+        crm_sync_job_repository=job_repository,
+        event_bus=event_bus,
+        now=NOW,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+
+    assert event_bus.events[0].payload["max_leads"] == 50
+    assert event_bus.events[0].payload["latest_by"] == CRMSyncLeadSort.UPDATED.value
+
+
 async def test_request_crm_sync_returns_active_job_without_publishing_duplicate() -> None:
     active = replace(_pending_job(), status=CRMSyncJobStatus.RUNNING, started_at=NOW)
     event_bus = FakeEventBus()
@@ -410,6 +565,31 @@ async def test_execute_queued_sync_claims_pending_job_and_runs_snapshot_sync() -
     assert result.job.status == CRMSyncJobStatus.COMPLETED
     assert result.job.created_at == NOW
     assert result.page_count == 1
+
+
+async def test_execute_queued_sync_passes_activity_dependencies_and_recent_limit() -> None:
+    source = FakeLeadSnapshotSource(pages=(CanonicalLeadSnapshotPage(leads=(_lead("1"),)),))
+    activity_source = FakeCRMActivitySource({"1": (_activity(crm_activity_id="a-1"),)})
+    conversation_repository = FakeCrmConversationEventRepository()
+    job_repository = FakeCRMSyncJobRepository()
+    await job_repository.insert_pending_if_no_active(_pending_job())
+
+    result = await execute_queued_follow_up_boss_crm_sync(
+        workspace_id=WORKSPACE_ID,
+        sync_job_id=SYNC_JOB_ID,
+        lead_snapshot_source=source,
+        crm_activity_source=activity_source,
+        lead_repository=FakeLeadRepository(),
+        crm_sync_job_repository=job_repository,
+        crm_conversation_event_repository=conversation_repository,
+        now=NOW,
+        max_leads=1,
+        latest_by=CRMSyncLeadSort.UPDATED,
+    )
+
+    assert result.status == ExecuteQueuedCRMSyncStatus.COMPLETED
+    assert [call["crm_lead_id"] for call in activity_source.calls] == ["1"]
+    assert [event.crm_activity_id for event in conversation_repository.saved] == ["a-1"]
 
 
 async def test_execute_queued_sync_is_noop_when_job_was_already_claimed() -> None:
@@ -476,3 +656,18 @@ async def test_scheduler_skips_active_or_not_due_workspaces() -> None:
 
     assert result.requested_count == 0
     assert result.skipped_active_count == 1
+
+
+def test_map_crm_activity_to_event_preserves_direction_and_actor_name() -> None:
+    event = _map_crm_activity_to_event(
+        workspace_id=WORKSPACE_ID,
+        lead_id=_lead("1").lead_id,
+        crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+        activity=_activity(crm_activity_id="text_message:88", direction="outbound"),
+        now=NOW,
+    )
+
+    assert event.crm_activity_id == "text_message:88"
+    assert event.actor_agent_id == "42"
+    assert event.actor_name == "Agent Ada"
+    assert event.direction == CrmConversationEventDirection.OUTBOUND

@@ -93,6 +93,30 @@ async def test_rejects_invalid_json_response() -> None:
     assert result.reasons == (ReplyClassificationReasonCode.INVALID_LLM_RESPONSE,)
 
 
+async def test_accepts_markdown_fenced_json_response() -> None:
+    result = await classify_inbound_reply(
+        lead=_lead(),
+        inbound_text="Can someone call me today?",
+        llm_client=FakeLLMClient(f"```json\n{_classification_json()}\n```"),
+    )
+
+    assert result.status == ReplyClassificationStatus.CLASSIFIED
+    assert result.handoff_required is True
+
+
+async def test_accepts_confidence_alias_string() -> None:
+    result = await classify_inbound_reply(
+        lead=_lead(),
+        inbound_text="Can someone call me today?",
+        llm_client=FakeLLMClient(
+            _classification_json(confidence="high")
+        ),
+    )
+
+    assert result.status == ReplyClassificationStatus.CLASSIFIED
+    assert result.confidence == 0.9
+
+
 async def test_rejects_low_confidence_response() -> None:
     result = await classify_inbound_reply(
         lead=_lead(),

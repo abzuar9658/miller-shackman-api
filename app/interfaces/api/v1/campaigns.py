@@ -12,6 +12,7 @@ from app.application.use_cases.campaign_admin import (
     CreateDraftCampaignStatus,
     PauseCampaignStatus,
     PublishCampaignVersionStatus,
+    ResumeCampaignStatus,
     UpdateDraftCampaignStatus,
     create_draft_campaign,
     get_campaign_admin_view,
@@ -19,6 +20,7 @@ from app.application.use_cases.campaign_admin import (
     pause_campaign,
     publish_campaign_version,
     record_campaign_batch_launch_audit,
+    resume_campaign,
     update_draft_campaign,
 )
 from app.application.use_cases.preflight_digest import (
@@ -53,6 +55,7 @@ from app.interfaces.api.schemas.campaigns import (
     PauseCampaignRequest,
     RecordPreflightVetoRequest,
     RecordPreflightVetoResponse,
+    ResumeCampaignRequest,
     RunDormantSelectorRequest,
     RunDormantSelectorResponse,
 )
@@ -223,6 +226,33 @@ async def pause_campaign_route(
 
 
 @router.post(
+    "/{workspace_id}/campaigns/{campaign_id}/resume",
+    response_model=CampaignAdminResponse,
+)
+async def resume_campaign_route(
+    workspace_id: UUID,
+    campaign_id: UUID,
+    request: ResumeCampaignRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[CampaignServiceBundle, Depends(get_campaign_service_bundle)],
+) -> CampaignAdminResponse:
+    result = await resume_campaign(
+        actor=actor,
+        workspace_id=workspace_id,
+        campaign_id=campaign_id,
+        reason=request.reason,
+        campaign_admin_repository=bundle.campaign_admin_repository,
+        audit_log_repository=bundle.campaign_admin_audit_log_repository,
+        event_bus=bundle.event_bus,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    if result.status == ResumeCampaignStatus.REJECTED:
+        _raise_campaign_admin_rejection(result.reasons)
+    return _admin_response(result.status.value, result.view, result.reasons)
+
+
+@router.post(
     "/{workspace_id}/campaigns/{campaign_id}/dormant-selector-runs",
     response_model=RunDormantSelectorResponse,
 )
@@ -379,6 +409,8 @@ def _config_from_request(request: CampaignDraftRequest) -> CampaignConfigInput:
         timezone=request.timezone,
         sms_compliance_required=request.sms_compliance_required,
         preflight_digest_enabled=request.preflight_digest_enabled,
+        crm_enrollment_tag=request.crm_enrollment_tag,
+        allow_assigned_agent_manual_enrollment=request.allow_assigned_agent_manual_enrollment,
         prompt_version=request.prompt_version,
         approved_model=request.approved_model,
         cadence_steps=tuple(
@@ -441,6 +473,8 @@ def _version_response(view: CampaignAdminView) -> CampaignVersionResponse:
         timezone=version.timezone,
         sms_compliance_required=version.sms_compliance_required,
         preflight_digest_enabled=version.preflight_digest_enabled,
+        crm_enrollment_tag=version.crm_enrollment_tag,
+        allow_assigned_agent_manual_enrollment=version.allow_assigned_agent_manual_enrollment,
         prompt_version=version.prompt_version,
         approved_model=version.approved_model,
         created_by_user_id=version.created_by_user_id,
@@ -504,6 +538,8 @@ def _admin_response(
             timezone=version.timezone,
             sms_compliance_required=version.sms_compliance_required,
             preflight_digest_enabled=version.preflight_digest_enabled,
+            crm_enrollment_tag=version.crm_enrollment_tag,
+            allow_assigned_agent_manual_enrollment=version.allow_assigned_agent_manual_enrollment,
             prompt_version=version.prompt_version,
             approved_model=version.approved_model,
             created_by_user_id=version.created_by_user_id,

@@ -22,10 +22,19 @@ from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
 from app.infrastructure.persistence.postgres.campaign_execution_repository import (
     PostgresCampaignExecutionRepository,
 )
+from app.infrastructure.persistence.postgres.conversation_repository import (
+    PostgresCrmConversationEventRepository,
+)
 from app.infrastructure.persistence.postgres.identity_repository import PostgresWorkspaceRepository
+from app.infrastructure.persistence.postgres.lead_activity_repository import (
+    PostgresLeadActivityRepository,
+)
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
 from app.infrastructure.persistence.postgres.outbound_message_repository import (
     PostgresOutboundMessageRepository,
+)
+from app.infrastructure.persistence.postgres.rejected_draft_review_repository import (
+    PostgresRejectedDraftReviewRepository,
 )
 from app.infrastructure.persistence.postgres.workflow_repository import (
     PostgresLeadWorkflowRepository,
@@ -169,6 +178,9 @@ async def execute_campaign_cadence_step_activity(
             lead_workflow_repository=PostgresLeadWorkflowRepository(session),
             workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
             message_repository=PostgresOutboundMessageRepository(session),
+            rejected_draft_review_repository=PostgresRejectedDraftReviewRepository(session),
+            lead_activity_repository=PostgresLeadActivityRepository(session),
+            crm_conversation_event_repository=PostgresCrmConversationEventRepository(session),
             llm_client=build_llm_client(),
             sms_provider=build_sms_provider(),
             email_provider=build_email_provider(),

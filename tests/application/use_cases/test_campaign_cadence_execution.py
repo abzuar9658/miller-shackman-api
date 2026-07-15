@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, time, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.application.use_cases.campaign_cadence_execution import (
     CadenceStepExecutionStatus,
@@ -15,16 +15,19 @@ from app.domain.compliance.contactability import (
     SmsComplianceState,
     WorkspaceContactPolicy,
 )
+from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
 from app.domain.identity import Workspace, WorkspaceStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransitionReasonCode
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCampaignExecutionRepository,
+    FakeCrmConversationEventRepository,
     FakeEmailProvider,
     FakeLeadRepository,
     FakeLeadWorkflowRepository,
     FakeLLMClient,
     FakeOutboundMessageRepository,
+    FakeRejectedDraftReviewRepository,
     FakeSMSProvider,
     FakeWorkflowTransitionRepository,
     FakeWorkspaceContactPolicyRepository,
@@ -40,6 +43,27 @@ WORKFLOW_ID = UUID("00000000-0000-0000-0000-000000000005")
 ENROLLMENT_ID = UUID("00000000-0000-0000-0000-000000000006")
 STEP_ONE_ID = UUID("00000000-0000-0000-0000-000000000007")
 STEP_TWO_ID = UUID("00000000-0000-0000-0000-000000000008")
+
+
+def _crm_event(
+    *,
+    crm_activity_id: str,
+    content: str,
+    direction: CrmConversationEventDirection,
+) -> CrmConversationEvent:
+    return CrmConversationEvent(
+        crm_conversation_event_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        crm_provider=CRMProvider.FOLLOW_UP_BOSS.value,
+        crm_activity_id=crm_activity_id,
+        activity_type="Note",
+        direction=direction,
+        occurred_at=NOW,
+        content=content,
+        created_at=NOW,
+        updated_at=NOW,
+    )
 
 
 async def test_schedule_next_campaign_cadence_step_sets_due_time_and_current_step() -> None:
@@ -66,6 +90,7 @@ async def test_schedule_next_campaign_cadence_step_sets_due_time_and_current_ste
 async def test_execute_campaign_cadence_step_sends_first_step_and_advances_cursor() -> None:
     workflow_repository = FakeLeadWorkflowRepository()
     transition_repository = FakeWorkflowTransitionRepository()
+    llm_client = FakeLLMClient()
     await workflow_repository.save(_workflow())
     schedule_result = await schedule_next_campaign_cadence_step(
         workspace_id=WORKSPACE_ID,
@@ -93,7 +118,21 @@ async def test_execute_campaign_cadence_step_sends_first_step_and_advances_curso
         lead_workflow_repository=workflow_repository,
         workflow_transition_repository=transition_repository,
         message_repository=message_repository,
-        llm_client=FakeLLMClient(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(
+            (
+                _crm_event(
+                    crm_activity_id="act-1",
+                    content="Sent a check-in email last week.",
+                    direction=CrmConversationEventDirection.OUTBOUND,
+                ),
+                _crm_event(
+                    crm_activity_id="act-2",
+                    content="We are hoping to move before school starts.",
+                    direction=CrmConversationEventDirection.INBOUND,
+                ),
+            )
+        ),
+        llm_client=llm_client,
         sms_provider=FakeSMSProvider(),
         email_provider=email_provider,
         now=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
@@ -115,6 +154,9 @@ async def test_execute_campaign_cadence_step_sends_first_step_and_advances_curso
         WorkflowTransitionReasonCode.CADENCE_STEP_STARTED,
         WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_SENT,
     ]
+    assert len(llm_client.requests) == 1
+    assert "Recent CRM conversation history:" in llm_client.requests[0].prompt
+    assert "We are hoping to move before school starts." in llm_client.requests[0].prompt
 
 
 async def test_schedule_next_campaign_cadence_step_schedules_second_step_after_first_send() -> None:
@@ -230,12 +272,88 @@ async def test_execute_campaign_cadence_step_pauses_when_planning_is_blocked() -
     assert result.workflow.current_step_id == STEP_ONE_ID
     assert result.workflow.next_action_at is None
     assert email_provider.messages == []
-    assert list(transition_repository.transitions.values())[-1].reason_code == (
+    last_transition = list(transition_repository.transitions.values())[-1]
+    assert last_transition.reason_code == (
         WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED
     )
+    assert last_transition.metadata["block_stage"] == "planning"
+    assert last_transition.metadata["reason_codes"] == ["channel_destination_missing"]
+    assert last_transition.metadata["evaluated_channels"] == ["email"]
+    assert last_transition.metadata["channel_block_outcomes"] == ["missing_destination"]
+    assert "Planning blocked: channel destination missing." in last_transition.metadata[
+        "explanation"
+    ]
 
 
-async def test_execute_campaign_cadence_step_blocks_sms_when_compliance_not_approved() -> None:
+async def test_execute_campaign_cadence_step_persists_rich_draft_rejection_details() -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    review_repository = FakeRejectedDraftReviewRepository()
+    await workflow_repository.save(_workflow())
+    schedule_result = await schedule_next_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        lead_workflow_repository=workflow_repository,
+        now=NOW,
+    )
+
+    result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=STEP_ONE_ID,
+        scheduled_for=schedule_result.scheduled_for or NOW,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        message_repository=FakeOutboundMessageRepository(),
+        rejected_draft_review_repository=review_repository,
+        llm_client=FakeLLMClient(
+            safety_flags=("property_advice_requested", "tour_request_detected"),
+        ),
+        sms_provider=FakeSMSProvider(),
+        email_provider=FakeEmailProvider(),
+        now=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
+    )
+
+    assert result.status == CadenceStepExecutionStatus.REJECTED
+    assert result.workflow is not None
+    assert result.workflow.state == WorkflowState.PAUSED
+    last_transition = list(transition_repository.transitions.values())[-1]
+    assert last_transition.reason_code == (
+        WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED
+    )
+    assert last_transition.metadata["block_stage"] == "planning"
+    assert last_transition.metadata["reason_codes"] == ["draft_rejected"]
+    assert last_transition.metadata["draft_reasons"] == ["safety_flags_present"]
+    assert last_transition.metadata["draft_safety_flags"] == [
+        "property_advice_requested",
+        "tour_request_detected",
+    ]
+    assert last_transition.metadata["draft_confidence"] == 0.91
+    assert last_transition.metadata["draft_model"] == "openai/gpt-4o-mini"
+    assert last_transition.metadata["draft_prompt_version"] == "outbound_message_draft:v1"
+    assert last_transition.metadata["selected_channel"] == "email"
+    assert "Draft validation failed: safety flags present." in last_transition.metadata[
+        "explanation"
+    ]
+    assert "Safety flags: property advice requested, tour request detected." in (
+        last_transition.metadata["explanation"]
+    )
+    assert len(review_repository.saved) == 1
+    assert review_repository.saved[0].draft_body == "Hi — just checking in."
+    assert review_repository.saved[0].review_blockers == ("safety_flags_present",)
+    assert review_repository.saved[0].can_approve_send is False
+
+
+async def test_execute_campaign_cadence_step_allows_sms_without_compliance_gate() -> None:
     workflow_repository = FakeLeadWorkflowRepository()
     transition_repository = FakeWorkflowTransitionRepository()
     await workflow_repository.save(_workflow())
@@ -273,9 +391,9 @@ async def test_execute_campaign_cadence_step_blocks_sms_when_compliance_not_appr
         now=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
     )
 
-    assert result.status == CadenceStepExecutionStatus.REJECTED
+    assert result.status == CadenceStepExecutionStatus.SENT
     assert result.workflow is not None
-    assert result.workflow.state == WorkflowState.PAUSED
+    assert result.workflow.state == WorkflowState.WAITING_FOR_RESPONSE
 
 
 async def test_execute_campaign_cadence_step_respects_persisted_quiet_hours() -> None:
@@ -318,6 +436,13 @@ async def test_execute_campaign_cadence_step_respects_persisted_quiet_hours() ->
     assert result.status == CadenceStepExecutionStatus.REJECTED
     assert result.workflow is not None
     assert result.workflow.state == WorkflowState.PAUSED
+    last_transition = list(transition_repository.transitions.values())[-1]
+    assert last_transition.metadata["block_stage"] == "planning"
+    assert last_transition.metadata["reason_codes"] == ["pre_send_blocked"]
+    assert last_transition.metadata["evaluated_channels"] == ["email"]
+    assert last_transition.metadata["channel_block_outcomes"] == ["pre_send_blocked"]
+    assert last_transition.metadata["pre_send_reasons"] == ["outside_allowed_hours"]
+    assert last_transition.metadata["next_allowed_at"] == "2026-07-10T15:00:00+00:00"
 
 
 async def _send_first_step(
@@ -442,6 +567,7 @@ def _config(
         timezone="America/Chicago",
         sms_compliance_required=True,
         preflight_digest_enabled=False,
+        crm_enrollment_tag=None,
         prompt_version="v1",
         approved_model="openai/gpt-4o-mini",
         cadence_steps=_steps(channels=channels),

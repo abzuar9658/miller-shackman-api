@@ -24,6 +24,12 @@ Production-ready FastAPI backend scaffold for the AI-assisted real estate lead n
 6. Start the API with `make run`.
 7. Start the Temporal worker in a separate terminal with `make worker`.
 
+For the CRM sync loop, start these in separate terminals as needed:
+
+- `make crm-sync-scheduler`
+- `make crm-sync-publisher`
+- `make crm-sync-worker`
+
 For local frontend development, the default API CORS configuration now allows these dev origins:
 
 - `http://localhost:5173`

@@ -24,6 +24,8 @@ class CampaignDraftRequest(BaseModel):
     timezone: str = Field(min_length=1, max_length=100)
     sms_compliance_required: bool = True
     preflight_digest_enabled: bool = False
+    crm_enrollment_tag: str | None = Field(default=None, max_length=255)
+    allow_assigned_agent_manual_enrollment: bool = True
     prompt_version: str = Field(min_length=1, max_length=100)
     approved_model: str = Field(min_length=1, max_length=100)
     cadence_steps: list[CampaignCadenceStepRequest] = Field(min_length=1)
@@ -39,6 +41,10 @@ class CampaignDraftRequest(BaseModel):
 
 
 class PauseCampaignRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class ResumeCampaignRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
@@ -67,6 +73,8 @@ class CampaignVersionResponse(BaseModel):
     timezone: str
     sms_compliance_required: bool
     preflight_digest_enabled: bool
+    crm_enrollment_tag: str | None
+    allow_assigned_agent_manual_enrollment: bool
     prompt_version: str
     approved_model: str
     created_by_user_id: UUID

@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Protocol
 
 from app.domain.common.ids import WorkspaceId
+from app.domain.crm_sync import CRMSyncLeadSort
 from app.domain.leads import CanonicalLeadRecord
 
 
@@ -21,6 +22,7 @@ class CanonicalLeadSnapshotSource(Protocol):
         cursor: str | None = None,
         updated_after: datetime | None = None,
         updated_before: datetime | None = None,
+        sort_by: CRMSyncLeadSort | None = None,
         mapped_custom_field_keys: tuple[str, ...] = (),
     ) -> CanonicalLeadSnapshotPage:
         raise NotImplementedError
