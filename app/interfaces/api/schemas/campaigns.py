@@ -14,8 +14,7 @@ class CampaignCadenceStepRequest(BaseModel):
     max_attempts: int = Field(ge=1)
 
 
-class CampaignDraftRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=255)
+class CampaignConfigRequest(BaseModel):
     enabled_channels: list[ContactChannel] = Field(min_length=1)
     daily_start_cap: int = Field(gt=0)
     dormant_threshold_days: int = Field(gt=0)
@@ -38,6 +37,14 @@ class CampaignDraftRequest(BaseModel):
         if isinstance(start, time) and value <= start:
             raise ValueError("quiet_hours_end must be after quiet_hours_start")
         return value
+
+
+class CampaignDraftRequest(CampaignConfigRequest):
+    name: str = Field(min_length=1, max_length=255)
+
+
+class NurtureSettingsDraftRequest(CampaignConfigRequest):
+    pass
 
 
 class PauseCampaignRequest(BaseModel):
@@ -118,6 +125,67 @@ class CampaignDetailResponse(BaseModel):
     campaign: CampaignResponse
     version: CampaignVersionResponse
     cadence_steps: list[CampaignCadenceStepResponse]
+
+
+class NurtureSettingsPolicyResponse(BaseModel):
+    nurture_settings_id: UUID
+    workspace_id: UUID
+    name: str
+    status: str
+    active_settings_version_id: UUID | None
+    created_by_user_id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class NurtureSettingsConfigResponse(BaseModel):
+    settings_version_id: UUID
+    nurture_settings_id: UUID
+    workspace_id: UUID
+    revision: int
+    status: str
+    enabled_channels: list[str]
+    daily_start_cap: int
+    dormant_threshold_days: int
+    quiet_hours_start: time
+    quiet_hours_end: time
+    timezone: str
+    sms_compliance_required: bool
+    preflight_digest_enabled: bool
+    crm_enrollment_tag: str | None
+    allow_assigned_agent_manual_enrollment: bool
+    prompt_version: str
+    approved_model: str
+    created_by_user_id: UUID
+    created_at: datetime
+    published_at: datetime | None
+
+
+class NurtureCadenceStepResponse(BaseModel):
+    step_id: UUID
+    settings_version_id: UUID
+    step_order: int
+    channel: str
+    delay_hours: int
+    message_goal: str
+    template_key: str
+    max_attempts: int
+    created_at: datetime
+
+
+class NurtureSettingsAdminResponse(BaseModel):
+    status: str
+    nurture_settings: NurtureSettingsPolicyResponse | None
+    settings: NurtureSettingsConfigResponse | None
+    cadence: list[NurtureCadenceStepResponse]
+    reasons: list[str]
+
+
+class NurtureSettingsDetailResponse(BaseModel):
+    status: str
+    nurture_settings: NurtureSettingsPolicyResponse
+    settings: NurtureSettingsConfigResponse
+    cadence: list[NurtureCadenceStepResponse]
 
 
 class RunDormantSelectorRequest(BaseModel):

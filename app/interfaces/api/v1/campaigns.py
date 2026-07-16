@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.application.ports.repositories import CampaignAdminRepository
 from app.application.use_cases.campaign_admin import (
     CampaignAdminReasonCode,
     CampaignCadenceStepInput,
@@ -33,7 +34,11 @@ from app.application.use_cases.run_dormant_selector_batch import (
     DormantSelectorBatchStatus,
     run_dormant_selector_batch,
 )
-from app.domain.campaigns.admin import CampaignAdminCadenceStep, CampaignAdminView
+from app.domain.campaigns.admin import (
+    CampaignAdminCadenceStep,
+    CampaignAdminCampaign,
+    CampaignAdminView,
+)
 from app.domain.identity import AuthenticatedActor, WorkspaceMembershipRole
 from app.domain.identity.permissions import PermissionCapability, evaluate_permission
 from app.interfaces.api.dependencies.campaign import (
@@ -46,12 +51,19 @@ from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.interfaces.api.schemas.campaigns import (
     CampaignAdminResponse,
     CampaignCadenceStepResponse,
+    CampaignConfigRequest,
     CampaignDetailResponse,
     CampaignDraftRequest,
     CampaignListResponse,
     CampaignResponse,
     CampaignSummaryResponse,
     CampaignVersionResponse,
+    NurtureCadenceStepResponse,
+    NurtureSettingsAdminResponse,
+    NurtureSettingsConfigResponse,
+    NurtureSettingsDetailResponse,
+    NurtureSettingsDraftRequest,
+    NurtureSettingsPolicyResponse,
     PauseCampaignRequest,
     RecordPreflightVetoRequest,
     RecordPreflightVetoResponse,
@@ -65,6 +77,7 @@ router = APIRouter(tags=["campaigns"])
 _ALLOWED_DORMANT_SELECTOR_ROLES: frozenset[WorkspaceMembershipRole] = frozenset(
     {WorkspaceMembershipRole.BROKERAGE_ADMIN, WorkspaceMembershipRole.MANAGER},
 )
+_WORKSPACE_NURTURE_POLICY_NAME = "Workspace Nurture Settings"
 
 
 @router.get(
@@ -114,6 +127,186 @@ async def get_campaign_route(
         )
     assert result.view is not None
     return _campaign_detail_response(result.status.value, result.view)
+
+
+@router.get(
+    "/{workspace_id}/nurture-settings",
+    response_model=NurtureSettingsDetailResponse,
+)
+async def get_nurture_settings_route(
+    workspace_id: UUID,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[CampaignReadBundle, Depends(get_campaign_read_bundle)],
+) -> NurtureSettingsDetailResponse:
+    _require_permission(actor, PermissionCapability.VIEW_WORKSPACE_REPORTING)
+    campaign = await _require_single_workspace_nurture_campaign(
+        workspace_id=workspace_id,
+        campaign_admin_repository=bundle.campaign_admin_repository,
+    )
+    view = await _current_nurture_settings_view(
+        actor=actor,
+        workspace_id=workspace_id,
+        campaign=campaign,
+        campaign_admin_repository=bundle.campaign_admin_repository,
+    )
+    return _nurture_settings_detail_response(CampaignReadStatus.OK.value, view)
+
+
+@router.put(
+    "/{workspace_id}/nurture-settings/draft",
+    response_model=NurtureSettingsAdminResponse,
+)
+async def upsert_nurture_settings_draft_route(
+    workspace_id: UUID,
+    request: NurtureSettingsDraftRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[CampaignServiceBundle, Depends(get_campaign_service_bundle)],
+) -> NurtureSettingsAdminResponse:
+    _require_permission(actor, PermissionCapability.LAUNCH_OR_PUBLISH_CAMPAIGN)
+    campaign = await _single_workspace_nurture_campaign_or_none(
+        workspace_id=workspace_id,
+        campaign_admin_repository=bundle.campaign_admin_repository,
+    )
+    if campaign is None:
+        create_result = await create_draft_campaign(
+            actor=actor,
+            workspace_id=workspace_id,
+            name=_WORKSPACE_NURTURE_POLICY_NAME,
+            config=_config_from_request(request),
+            campaign_admin_repository=bundle.campaign_admin_repository,
+            audit_log_repository=bundle.campaign_admin_audit_log_repository,
+            event_bus=bundle.event_bus,
+            now=datetime.now(UTC),
+        )
+        await bundle.session.commit()
+        if create_result.status == CreateDraftCampaignStatus.REJECTED:
+            _raise_campaign_admin_rejection(create_result.reasons)
+        return _nurture_settings_admin_response(
+            create_result.status.value,
+            create_result.view,
+            create_result.reasons,
+        )
+
+    update_result = await update_draft_campaign(
+        actor=actor,
+        workspace_id=workspace_id,
+        campaign_id=campaign.campaign_id,
+        name=_WORKSPACE_NURTURE_POLICY_NAME,
+        config=_config_from_request(request),
+        campaign_admin_repository=bundle.campaign_admin_repository,
+        audit_log_repository=bundle.campaign_admin_audit_log_repository,
+        event_bus=bundle.event_bus,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    if update_result.status == UpdateDraftCampaignStatus.REJECTED:
+        _raise_campaign_admin_rejection(update_result.reasons)
+    return _nurture_settings_admin_response(
+        update_result.status.value,
+        update_result.view,
+        update_result.reasons,
+    )
+
+
+@router.post(
+    "/{workspace_id}/nurture-settings/publish",
+    response_model=NurtureSettingsAdminResponse,
+)
+async def publish_nurture_settings_route(
+    workspace_id: UUID,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[CampaignServiceBundle, Depends(get_campaign_service_bundle)],
+) -> NurtureSettingsAdminResponse:
+    _require_permission(actor, PermissionCapability.LAUNCH_OR_PUBLISH_CAMPAIGN)
+    campaign = await _require_single_workspace_nurture_campaign(
+        workspace_id=workspace_id,
+        campaign_admin_repository=bundle.campaign_admin_repository,
+    )
+    draft_version = await bundle.campaign_admin_repository.get_latest_draft_version(
+        workspace_id,
+        campaign.campaign_id,
+    )
+    if draft_version is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=[CampaignAdminReasonCode.VERSION_NOT_FOUND.value],
+        )
+    result = await publish_campaign_version(
+        actor=actor,
+        workspace_id=workspace_id,
+        campaign_id=campaign.campaign_id,
+        campaign_version_id=draft_version.campaign_version_id,
+        campaign_admin_repository=bundle.campaign_admin_repository,
+        audit_log_repository=bundle.campaign_admin_audit_log_repository,
+        event_bus=bundle.event_bus,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    if result.status == PublishCampaignVersionStatus.REJECTED:
+        _raise_campaign_admin_rejection(result.reasons)
+    return _nurture_settings_admin_response(result.status.value, result.view, result.reasons)
+
+
+@router.post(
+    "/{workspace_id}/nurture-settings/pause",
+    response_model=NurtureSettingsAdminResponse,
+)
+async def pause_nurture_settings_route(
+    workspace_id: UUID,
+    request: PauseCampaignRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[CampaignServiceBundle, Depends(get_campaign_service_bundle)],
+) -> NurtureSettingsAdminResponse:
+    _require_permission(actor, PermissionCapability.PAUSE_CAMPAIGN)
+    campaign = await _require_single_workspace_nurture_campaign(
+        workspace_id=workspace_id,
+        campaign_admin_repository=bundle.campaign_admin_repository,
+    )
+    result = await pause_campaign(
+        actor=actor,
+        workspace_id=workspace_id,
+        campaign_id=campaign.campaign_id,
+        reason=request.reason,
+        campaign_admin_repository=bundle.campaign_admin_repository,
+        audit_log_repository=bundle.campaign_admin_audit_log_repository,
+        event_bus=bundle.event_bus,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    if result.status == PauseCampaignStatus.REJECTED:
+        _raise_campaign_admin_rejection(result.reasons)
+    return _nurture_settings_admin_response(result.status.value, result.view, result.reasons)
+
+
+@router.post(
+    "/{workspace_id}/nurture-settings/resume",
+    response_model=NurtureSettingsAdminResponse,
+)
+async def resume_nurture_settings_route(
+    workspace_id: UUID,
+    request: ResumeCampaignRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[CampaignServiceBundle, Depends(get_campaign_service_bundle)],
+) -> NurtureSettingsAdminResponse:
+    _require_permission(actor, PermissionCapability.PAUSE_CAMPAIGN)
+    campaign = await _require_single_workspace_nurture_campaign(
+        workspace_id=workspace_id,
+        campaign_admin_repository=bundle.campaign_admin_repository,
+    )
+    result = await resume_campaign(
+        actor=actor,
+        workspace_id=workspace_id,
+        campaign_id=campaign.campaign_id,
+        reason=request.reason,
+        campaign_admin_repository=bundle.campaign_admin_repository,
+        audit_log_repository=bundle.campaign_admin_audit_log_repository,
+        event_bus=bundle.event_bus,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    if result.status == ResumeCampaignStatus.REJECTED:
+        _raise_campaign_admin_rejection(result.reasons)
+    return _nurture_settings_admin_response(result.status.value, result.view, result.reasons)
 
 
 @router.post(
@@ -399,7 +592,85 @@ def _raise_campaign_admin_rejection(reasons: tuple[CampaignAdminReasonCode, ...]
     raise HTTPException(status_code=status_code, detail=[reason.value for reason in reasons])
 
 
-def _config_from_request(request: CampaignDraftRequest) -> CampaignConfigInput:
+def _require_permission(actor: AuthenticatedActor, capability: PermissionCapability) -> None:
+    if evaluate_permission(actor, capability).allowed:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=[CampaignAdminReasonCode.PERMISSION_DENIED.value],
+    )
+
+
+async def _single_workspace_nurture_campaign_or_none(
+    *,
+    workspace_id: UUID,
+    campaign_admin_repository: CampaignAdminRepository,
+) -> CampaignAdminCampaign | None:
+    campaigns = await campaign_admin_repository.list_campaigns(workspace_id)
+    if len(campaigns) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=["multiple_nurture_policies_configured"],
+        )
+    return campaigns[0] if campaigns else None
+
+
+async def _require_single_workspace_nurture_campaign(
+    *,
+    workspace_id: UUID,
+    campaign_admin_repository: CampaignAdminRepository,
+) -> CampaignAdminCampaign:
+    campaign = await _single_workspace_nurture_campaign_or_none(
+        workspace_id=workspace_id,
+        campaign_admin_repository=campaign_admin_repository,
+    )
+    if campaign is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=["nurture_settings_not_found"],
+        )
+    return campaign
+
+
+async def _current_nurture_settings_view(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: UUID,
+    campaign: CampaignAdminCampaign,
+    campaign_admin_repository: CampaignAdminRepository,
+) -> CampaignAdminView:
+    result = await get_campaign_admin_view(
+        actor=actor,
+        workspace_id=workspace_id,
+        campaign_id=campaign.campaign_id,
+        campaign_admin_repository=campaign_admin_repository,
+    )
+    if result.status == CampaignReadStatus.REJECTED:
+        _raise_campaign_admin_rejection(result.reasons)
+    if result.status == CampaignReadStatus.NOT_FOUND:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=[reason.value for reason in result.reasons],
+        )
+    assert result.view is not None
+    draft_version = await campaign_admin_repository.get_latest_draft_version(
+        workspace_id,
+        campaign.campaign_id,
+    )
+    if draft_version is None:
+        return result.view
+    steps = await campaign_admin_repository.get_cadence_steps(
+        workspace_id,
+        draft_version.campaign_version_id,
+    )
+    return CampaignAdminView(
+        campaign=result.view.campaign,
+        version=draft_version,
+        cadence_steps=steps,
+    )
+
+
+def _config_from_request(request: CampaignConfigRequest) -> CampaignConfigInput:
     return CampaignConfigInput(
         enabled_channels=tuple(request.enabled_channels),
         daily_start_cap=request.daily_start_cap,
@@ -443,6 +714,18 @@ def _campaign_detail_response(status_value: str, view: CampaignAdminView) -> Cam
     )
 
 
+def _nurture_settings_detail_response(
+    status_value: str,
+    view: CampaignAdminView,
+) -> NurtureSettingsDetailResponse:
+    return NurtureSettingsDetailResponse(
+        status=status_value,
+        nurture_settings=_nurture_settings_policy_response(view),
+        settings=_nurture_settings_config_response(view),
+        cadence=[_nurture_cadence_step_response(step) for step in view.cadence_steps],
+    )
+
+
 def _campaign_response(view: CampaignAdminView) -> CampaignResponse:
     campaign = view.campaign
     return CampaignResponse(
@@ -483,10 +766,70 @@ def _version_response(view: CampaignAdminView) -> CampaignVersionResponse:
     )
 
 
+def _nurture_settings_policy_response(
+    view: CampaignAdminView,
+) -> NurtureSettingsPolicyResponse:
+    campaign = view.campaign
+    return NurtureSettingsPolicyResponse(
+        nurture_settings_id=campaign.campaign_id,
+        workspace_id=campaign.workspace_id,
+        name=campaign.name,
+        status=campaign.status.value,
+        active_settings_version_id=campaign.active_version_id,
+        created_by_user_id=campaign.created_by_user_id,
+        created_at=campaign.created_at,
+        updated_at=campaign.updated_at,
+    )
+
+
+def _nurture_settings_config_response(
+    view: CampaignAdminView,
+) -> NurtureSettingsConfigResponse:
+    version = view.version
+    return NurtureSettingsConfigResponse(
+        settings_version_id=version.campaign_version_id,
+        nurture_settings_id=version.campaign_id,
+        workspace_id=version.workspace_id,
+        revision=version.version_number,
+        status=version.status.value,
+        enabled_channels=[channel.value for channel in version.enabled_channels],
+        daily_start_cap=version.daily_start_cap,
+        dormant_threshold_days=version.dormant_threshold_days,
+        quiet_hours_start=version.quiet_hours_start,
+        quiet_hours_end=version.quiet_hours_end,
+        timezone=version.timezone,
+        sms_compliance_required=version.sms_compliance_required,
+        preflight_digest_enabled=version.preflight_digest_enabled,
+        crm_enrollment_tag=version.crm_enrollment_tag,
+        allow_assigned_agent_manual_enrollment=version.allow_assigned_agent_manual_enrollment,
+        prompt_version=version.prompt_version,
+        approved_model=version.approved_model,
+        created_by_user_id=version.created_by_user_id,
+        created_at=version.created_at,
+        published_at=version.published_at,
+    )
+
+
 def _cadence_step_response(step: CampaignAdminCadenceStep) -> CampaignCadenceStepResponse:
     return CampaignCadenceStepResponse(
         cadence_step_id=step.cadence_step_id,
         campaign_version_id=step.campaign_version_id,
+        step_order=step.step_order,
+        channel=step.channel.value,
+        delay_hours=step.delay_hours,
+        message_goal=step.message_goal,
+        template_key=step.template_key,
+        max_attempts=step.max_attempts,
+        created_at=step.created_at,
+    )
+
+
+def _nurture_cadence_step_response(
+    step: CampaignAdminCadenceStep,
+) -> NurtureCadenceStepResponse:
+    return NurtureCadenceStepResponse(
+        step_id=step.cadence_step_id,
+        settings_version_id=step.campaign_version_id,
         step_order=step.step_order,
         channel=step.channel.value,
         delay_hours=step.delay_hours,
@@ -560,5 +903,27 @@ def _admin_response(
             )
             for step in view.cadence_steps
         ],
+        reasons=[str(reason) for reason in reasons],
+    )
+
+
+def _nurture_settings_admin_response(
+    status_value: str,
+    view: CampaignAdminView | None,
+    reasons: tuple[object, ...],
+) -> NurtureSettingsAdminResponse:
+    if view is None:
+        return NurtureSettingsAdminResponse(
+            status=status_value,
+            nurture_settings=None,
+            settings=None,
+            cadence=[],
+            reasons=[str(reason) for reason in reasons],
+        )
+    return NurtureSettingsAdminResponse(
+        status=status_value,
+        nurture_settings=_nurture_settings_policy_response(view),
+        settings=_nurture_settings_config_response(view),
+        cadence=[_nurture_cadence_step_response(step) for step in view.cadence_steps],
         reasons=[str(reason) for reason in reasons],
     )
