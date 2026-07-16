@@ -162,6 +162,133 @@ def test_publish_and_pause_campaign_routes_return_200(
     assert resume_body["campaign"]["status"] == CampaignStatus.ACTIVE.value
 
 
+def test_upsert_nurture_settings_creates_default_workspace_policy(
+    campaign_admin_client: CampaignAdminTestClient,
+) -> None:
+    response = campaign_admin_client.client.put(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/nurture-settings/draft",
+        json=_nurture_payload(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "created"
+    assert body["nurture_settings"]["name"] == "Workspace Nurture Settings"
+    assert body["settings"]["daily_start_cap"] == 50
+    assert cast(_FakeSession, campaign_admin_client.session).commits == 1
+
+
+def test_get_nurture_settings_prefers_latest_draft_over_active_version(
+    campaign_admin_client: CampaignAdminTestClient,
+) -> None:
+    create_response = campaign_admin_client.client.put(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/nurture-settings/draft",
+        json=_nurture_payload(),
+    )
+    nurture_settings_id = create_response.json()["nurture_settings"]["nurture_settings_id"]
+
+    publish_response = campaign_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/nurture-settings/publish"
+    )
+
+    assert publish_response.status_code == 200
+
+    updated_payload = _nurture_payload()
+    updated_payload["daily_start_cap"] = 75
+    updated_payload["prompt_version"] = "v2"
+    update_response = campaign_admin_client.client.put(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/nurture-settings/draft",
+        json=updated_payload,
+    )
+
+    assert update_response.status_code == 200
+    assert update_response.json()["status"] == "updated"
+    assert (
+        update_response.json()["nurture_settings"]["nurture_settings_id"]
+        == nurture_settings_id
+    )
+
+    detail_response = campaign_admin_client.client.get(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/nurture-settings"
+    )
+
+    assert detail_response.status_code == 200
+    detail_body = detail_response.json()
+    assert detail_body["settings"]["status"] == "draft"
+    assert detail_body["settings"]["daily_start_cap"] == 75
+    assert detail_body["settings"]["prompt_version"] == "v2"
+
+
+def test_publish_pause_and_resume_nurture_settings_routes_return_200(
+    campaign_admin_client: CampaignAdminTestClient,
+) -> None:
+    create_response = campaign_admin_client.client.put(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/nurture-settings/draft",
+        json=_nurture_payload(),
+    )
+
+    assert create_response.status_code == 200
+
+    publish_response = campaign_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/nurture-settings/publish"
+    )
+
+    assert publish_response.status_code == 200
+    assert publish_response.json()["status"] == "published"
+    assert publish_response.json()["nurture_settings"]["status"] == CampaignStatus.ACTIVE.value
+
+    pause_response = campaign_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/nurture-settings/pause",
+        json={"reason": "Pilot pause"},
+    )
+
+    assert pause_response.status_code == 200
+    assert pause_response.json()["status"] == "paused"
+    assert pause_response.json()["nurture_settings"]["status"] == CampaignStatus.PAUSED.value
+
+    resume_response = campaign_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/nurture-settings/resume",
+        json={"reason": "Resume after review"},
+    )
+
+    assert resume_response.status_code == 200
+    assert resume_response.json()["status"] == "resumed"
+    assert resume_response.json()["nurture_settings"]["status"] == CampaignStatus.ACTIVE.value
+
+
+def test_nurture_settings_routes_reject_multiple_workspace_policies(
+    campaign_admin_client: CampaignAdminTestClient,
+) -> None:
+    first = _payload()
+    second = _payload()
+    second["name"] = "Seller Reactivation"
+
+    first_response = campaign_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/campaigns",
+        json=first,
+    )
+    second_response = campaign_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/campaigns",
+        json=second,
+    )
+
+    assert first_response.status_code == 201
+    assert second_response.status_code == 201
+
+    detail_response = campaign_admin_client.client.get(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/nurture-settings"
+    )
+    update_response = campaign_admin_client.client.put(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/nurture-settings/draft",
+        json=_nurture_payload(),
+    )
+
+    assert detail_response.status_code == 409
+    assert detail_response.json()["detail"] == ["multiple_nurture_policies_configured"]
+    assert update_response.status_code == 409
+    assert update_response.json()["detail"] == ["multiple_nurture_policies_configured"]
+
+
 def _client_for_role(role: WorkspaceMembershipRole) -> CampaignAdminTestClient:
     app = create_app()
     campaign_repository = FakeCampaignAdminRepository()
@@ -226,6 +353,12 @@ def _payload() -> dict[str, Any]:
             }
         ],
     }
+
+
+def _nurture_payload() -> dict[str, Any]:
+    payload = _payload()
+    payload.pop("name")
+    return payload
 
 
 def _actor(role: WorkspaceMembershipRole) -> AuthenticatedActor:
