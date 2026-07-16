@@ -43,6 +43,7 @@ class LeadActivityItem:
     occurred_at: datetime
     title: str
     preview: str
+    content: str | None = None
     channel: str | None = None
     direction: str | None = None
     status: str | None = None

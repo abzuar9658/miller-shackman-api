@@ -13,7 +13,7 @@ from app.domain.common.ids import (
 )
 from app.domain.compliance import WorkspaceContactPolicy
 from app.domain.conversations import CrmConversationEvent, Handoff, WorkspaceHandoffConfig
-from app.domain.crm_sync import CRMSyncJob
+from app.domain.crm_sync import CRMSyncJob, WorkspaceCRMSyncConfig, WorkspaceCRMSyncScheduleTarget
 from app.domain.identity import (
     AuthAuditLog,
     PasswordCredential,
@@ -25,6 +25,8 @@ from app.domain.identity import (
     WorkspaceMembership,
 )
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.llm import WorkspaceLLMConfig
+from app.domain.workspace_automation import WorkspaceOperationalControl
 
 
 class LeadRepository(Protocol):
@@ -47,6 +49,20 @@ class LeadRepository(Protocol):
         workspace_id: WorkspaceId,
         crm_provider: CRMProvider,
         crm_lead_id: str,
+    ) -> CanonicalLeadRecord | None:
+        raise NotImplementedError
+
+    async def get_by_primary_phone(
+        self,
+        workspace_id: WorkspaceId,
+        phone_number: str,
+    ) -> CanonicalLeadRecord | None:
+        raise NotImplementedError
+
+    async def get_by_primary_email(
+        self,
+        workspace_id: WorkspaceId,
+        email_address: str,
     ) -> CanonicalLeadRecord | None:
         raise NotImplementedError
 
@@ -260,6 +276,18 @@ class HandoffCompletionRepository(Protocol):
         raise NotImplementedError
 
 
+class InboundMessageCRMCompletionRepository(Protocol):
+    async def get_by_inbound_message_id(
+        self,
+        workspace_id: WorkspaceId,
+        inbound_message_id: UUID,
+    ) -> Any | None:
+        raise NotImplementedError
+
+    async def save(self, completion: Any) -> Any:
+        raise NotImplementedError
+
+
 class WorkspaceHandoffConfigRepository(Protocol):
     async def get_by_workspace_id(
         self,
@@ -268,6 +296,50 @@ class WorkspaceHandoffConfigRepository(Protocol):
         raise NotImplementedError
 
     async def save(self, config: WorkspaceHandoffConfig) -> WorkspaceHandoffConfig:
+        raise NotImplementedError
+
+
+class WorkspaceCRMSyncConfigRepository(Protocol):
+    async def get_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceCRMSyncConfig | None:
+        raise NotImplementedError
+
+    async def list_active_workspace_schedule_targets(
+        self,
+        *,
+        limit: int = 100,
+        default_interval_seconds: int,
+    ) -> tuple[WorkspaceCRMSyncScheduleTarget, ...]:
+        raise NotImplementedError
+
+    async def save(self, config: WorkspaceCRMSyncConfig) -> WorkspaceCRMSyncConfig:
+        raise NotImplementedError
+
+
+class WorkspaceLLMConfigRepository(Protocol):
+    async def get_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceLLMConfig | None:
+        raise NotImplementedError
+
+    async def save(self, config: WorkspaceLLMConfig) -> WorkspaceLLMConfig:
+        raise NotImplementedError
+
+
+class WorkspaceOperationalControlRepository(Protocol):
+    async def get_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceOperationalControl | None:
+        raise NotImplementedError
+
+    async def save(
+        self,
+        control: WorkspaceOperationalControl,
+    ) -> WorkspaceOperationalControl:
         raise NotImplementedError
 
 
@@ -396,7 +468,6 @@ class WorkspaceContactPolicyRepository(Protocol):
 class ProviderDeliveryMessageRepository(Protocol):
     async def get_by_provider_message_id_for_update(
         self,
-        workspace_id: WorkspaceId,
         provider_name: str,
         provider_message_id: str,
     ) -> Any | None:
@@ -409,7 +480,6 @@ class ProviderDeliveryMessageRepository(Protocol):
 class ProviderMessageEventRepository(Protocol):
     async def get_by_external_provider_event_id(
         self,
-        workspace_id: WorkspaceId,
         provider_name: str,
         external_event_id: str,
     ) -> Any | None:

@@ -64,6 +64,7 @@ from app.domain.identity import (
 
 class AuthReasonCode(StrEnum):
     PERMISSION_DENIED = "permission_denied"
+    VALIDATION_ERROR = "validation_error"
     INVALID_EMAIL = "invalid_email"
     INVALID_ROLE = "invalid_role"
     FULL_NAME_REQUIRED = "full_name_required"

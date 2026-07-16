@@ -80,12 +80,14 @@ async def classify_inbound_reply(
     lead: CanonicalLeadRecord,
     inbound_text: str,
     llm_client: LLMClient,
+    model: str | None = None,
     min_confidence: float = MIN_REPLY_CLASSIFICATION_CONFIDENCE,
 ) -> ReplyClassificationResult:
     llm_result = await llm_client.complete(
         LLMCompletionRequest(
             prompt=_build_prompt(lead=lead, inbound_text=inbound_text),
             prompt_version=INBOUND_REPLY_CLASSIFICATION_PROMPT_VERSION,
+            model=model,
             temperature=0.1,
             max_tokens=500,
         ),

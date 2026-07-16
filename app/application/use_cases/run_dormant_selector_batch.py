@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -14,6 +15,7 @@ from app.application.ports.repositories import (
     LeadWorkflowRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
+    WorkspaceOperationalControlRepository,
 )
 from app.application.ports.temporal import TemporalWorkflowStarter
 from app.application.services.canonical_lead_inputs import (
@@ -97,6 +99,8 @@ async def run_dormant_selector_batch(
     crm_client: CRMClient,
     now: datetime,
     event_bus: EventBus | None = None,
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
+    commit: Callable[[], Awaitable[None]] | None = None,
 ) -> DormantSelectorBatchResult:
     batch_id = batch_id or str(uuid4())
     config = await campaign_execution_repository.get_active_for_campaign(
@@ -150,7 +154,7 @@ async def run_dormant_selector_batch(
     started_today_count = await campaign_enrollment_repository.count_started_today(
         workspace_id=workspace_id,
         campaign_id=campaign_id,
-        now=now,
+        started_since=now,
     )
     initial_context = _initial_context(
         campaign_status=config.campaign_status,
@@ -213,8 +217,10 @@ async def run_dormant_selector_batch(
             lead_workflow_repository=lead_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
             temporal_workflow_starter=temporal_workflow_starter,
+            commit=commit,
             now=now,
             event_bus=event_bus,
+            workspace_operational_control_repository=workspace_operational_control_repository,
         )
         started_count = start_result.started_count
     else:

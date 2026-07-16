@@ -281,10 +281,12 @@ async def run_dormant_selector_route(
         lead_workflow_repository=bundle.lead_workflow_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
         temporal_workflow_starter=bundle.temporal_workflow_starter,
+        commit=bundle.session.commit,
         preflight_digest_repository=bundle.preflight_digest_repository,
         notification_provider=bundle.notification_provider,
         crm_client=bundle.crm_client,
         event_bus=bundle.event_bus,
+        workspace_operational_control_repository=bundle.workspace_operational_control_repository,
         now=datetime.now(UTC),
     )
     if result.status == DormantSelectorBatchStatus.CAMPAIGN_INACTIVE:

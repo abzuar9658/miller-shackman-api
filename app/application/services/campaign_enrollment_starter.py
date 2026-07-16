@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -7,8 +7,14 @@ from app.application.ports.repositories import (
     CampaignEnrollmentRepository,
     LeadWorkflowRepository,
     WorkflowTransitionRepository,
+    WorkspaceOperationalControlRepository,
 )
 from app.application.ports.temporal import TemporalWorkflowStarter
+from app.application.services.workspace_automation_control import (
+    resolve_workspace_operational_control,
+    workspace_automation_block_reason,
+    workspace_automation_is_active,
+)
 from app.application.use_cases.campaign_enrollment_types import LeadStartResult, LeadStartStatus
 from app.domain.campaigns.enrollment import (
     CampaignEnrollment,
@@ -46,7 +52,20 @@ async def start_single_campaign_enrollment(
     temporal_workflow_id: str | None = None,
     metadata: Mapping[str, object] | None = None,
     event_bus: EventBus | None = None,
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
+    commit: Callable[[], Awaitable[None]] | None = None,
 ) -> LeadStartResult:
+    operational_control = await resolve_workspace_operational_control(
+        workspace_id=workspace_id,
+        workspace_operational_control_repository=workspace_operational_control_repository,
+    )
+    if not workspace_automation_is_active(operational_control):
+        return LeadStartResult(
+            lead_id=lead_id,
+            status=LeadStartStatus.FAILED,
+            error=workspace_automation_block_reason(operational_control),
+        )
+
     campaign_enrollment_id = campaign_enrollment_id or uuid4()
     workflow_id = workflow_id or uuid4()
     transition_id = transition_id or uuid4()
@@ -110,12 +129,6 @@ async def start_single_campaign_enrollment(
         await campaign_enrollment_repository.save(enrollment)
         await lead_workflow_repository.save(workflow)
         await workflow_transition_repository.append(transition)
-        await temporal_workflow_starter.start_lead_nurture_workflow(
-            workspace_id=workspace_id,
-            lead_id=lead_id,
-            campaign_version_id=campaign_version_id,
-            temporal_workflow_id=temporal_workflow_id,
-        )
         await _publish_enrollment_events(
             event_bus=event_bus,
             enrollment=enrollment,
@@ -123,6 +136,14 @@ async def start_single_campaign_enrollment(
             transition=transition,
             temporal_workflow_id=temporal_workflow_id,
             now=now,
+        )
+        if commit is not None:
+            await commit()
+        await temporal_workflow_starter.start_lead_nurture_workflow(
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            campaign_version_id=campaign_version_id,
+            temporal_workflow_id=temporal_workflow_id,
         )
     except Exception as error:
         return LeadStartResult(

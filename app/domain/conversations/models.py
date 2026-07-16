@@ -81,6 +81,21 @@ class HandoffCompletionRecord:
 
 
 @dataclass(frozen=True)
+class InboundMessageCRMCompletionRecord:
+    inbound_message_id: UUID
+    workspace_id: WorkspaceId
+    crm_note_idempotency_key: str
+    crm_refreshed_at: datetime | None = None
+    crm_lead_updated_at: datetime | None = None
+    crm_latest_activity_at: datetime | None = None
+    crm_updates_detected: bool = False
+    crm_note_written_at: datetime | None = None
+    completed_at: datetime | None = None
+    last_attempted_at: datetime | None = None
+    failure_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class Conversation:
     conversation_id: UUID
     workspace_id: WorkspaceId

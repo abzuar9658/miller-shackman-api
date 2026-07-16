@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, time, timedelta
+from typing import cast
 from uuid import UUID, uuid4
 
 from app.application.use_cases.campaign_cadence_execution import (
@@ -280,9 +281,8 @@ async def test_execute_campaign_cadence_step_pauses_when_planning_is_blocked() -
     assert last_transition.metadata["reason_codes"] == ["channel_destination_missing"]
     assert last_transition.metadata["evaluated_channels"] == ["email"]
     assert last_transition.metadata["channel_block_outcomes"] == ["missing_destination"]
-    assert "Planning blocked: channel destination missing." in last_transition.metadata[
-        "explanation"
-    ]
+    explanation = cast(str, last_transition.metadata["explanation"])
+    assert "Planning blocked: channel destination missing." in explanation
 
 
 async def test_execute_campaign_cadence_step_persists_rich_draft_rejection_details() -> None:
@@ -339,14 +339,11 @@ async def test_execute_campaign_cadence_step_persists_rich_draft_rejection_detai
     ]
     assert last_transition.metadata["draft_confidence"] == 0.91
     assert last_transition.metadata["draft_model"] == "openai/gpt-4o-mini"
-    assert last_transition.metadata["draft_prompt_version"] == "outbound_message_draft:v1"
+    assert last_transition.metadata["draft_prompt_version"] == "outbound_message_draft:v2"
     assert last_transition.metadata["selected_channel"] == "email"
-    assert "Draft validation failed: safety flags present." in last_transition.metadata[
-        "explanation"
-    ]
-    assert "Safety flags: property advice requested, tour request detected." in (
-        last_transition.metadata["explanation"]
-    )
+    explanation = cast(str, last_transition.metadata["explanation"])
+    assert "Draft validation failed: safety flags present." in explanation
+    assert "Safety flags: property advice requested, tour request detected." in explanation
     assert len(review_repository.saved) == 1
     assert review_repository.saved[0].draft_body == "Hi — just checking in."
     assert review_repository.saved[0].review_blockers == ("safety_flags_present",)
@@ -445,6 +442,49 @@ async def test_execute_campaign_cadence_step_respects_persisted_quiet_hours() ->
     assert last_transition.metadata["next_allowed_at"] == "2026-07-10T15:00:00+00:00"
 
 
+async def test_execute_campaign_cadence_step_ignores_quiet_hour_window_when_disabled() -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    await workflow_repository.save(_workflow())
+    schedule_result = await schedule_next_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        lead_workflow_repository=workflow_repository,
+        now=NOW,
+    )
+
+    result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=STEP_ONE_ID,
+        scheduled_for=schedule_result.scheduled_for or NOW,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy(
+                quiet_hours_enabled=False,
+                quiet_hours_start=time(10, 0),
+                quiet_hours_end=time(17, 0),
+            )
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        message_repository=FakeOutboundMessageRepository(),
+        llm_client=FakeLLMClient(),
+        sms_provider=FakeSMSProvider(),
+        email_provider=FakeEmailProvider(),
+        now=datetime(2026, 7, 10, 13, 0, tzinfo=UTC),
+    )
+
+    assert result.status == CadenceStepExecutionStatus.SENT
+    assert result.workflow is not None
+    assert result.workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+
+
 async def _send_first_step(
     *,
     workflow_repository: FakeLeadWorkflowRepository,
@@ -514,12 +554,14 @@ def _workspace() -> Workspace:
 def _workspace_contact_policy(
     *,
     sms_compliance_state: SmsComplianceState = SmsComplianceState.APPROVED,
+    quiet_hours_enabled: bool = True,
     quiet_hours_start: time = time(10, 0),
     quiet_hours_end: time = time(17, 0),
 ) -> WorkspaceContactPolicy:
     return WorkspaceContactPolicy(
         workspace_id=WORKSPACE_ID,
         sms_compliance_state=sms_compliance_state,
+        quiet_hours_enabled=quiet_hours_enabled,
         quiet_hours_start=quiet_hours_start,
         quiet_hours_end=quiet_hours_end,
     )

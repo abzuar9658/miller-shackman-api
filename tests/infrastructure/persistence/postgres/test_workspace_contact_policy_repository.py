@@ -73,8 +73,10 @@ def _policy_model() -> WorkspaceContactPolicyModel:
     return WorkspaceContactPolicyModel(
         workspace_id=WORKSPACE_ID,
         sms_compliance_state=SmsComplianceState.APPROVED.value,
+        quiet_hours_enabled=True,
         quiet_hours_start=time(10, 0),
         quiet_hours_end=time(17, 0),
+        inbound_email_address="inbound@example.com",
         created_at=NOW,
         updated_at=NOW,
     )
@@ -84,8 +86,10 @@ def _policy() -> WorkspaceContactPolicy:
     return WorkspaceContactPolicy(
         workspace_id=WORKSPACE_ID,
         sms_compliance_state=SmsComplianceState.APPROVED,
+        quiet_hours_enabled=True,
         quiet_hours_start=time(10, 0),
         quiet_hours_end=time(17, 0),
+        inbound_email_address="inbound@example.com",
     )
 
 

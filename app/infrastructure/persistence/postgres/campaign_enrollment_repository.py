@@ -33,9 +33,9 @@ class PostgresCampaignEnrollmentRepository:
         self,
         workspace_id: WorkspaceId,
         campaign_id: CampaignId,
-        now: datetime,
+        started_since: datetime,
     ) -> int:
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = started_since.replace(hour=0, minute=0, second=0, microsecond=0)
         tomorrow_start = today_start + timedelta(days=1)
         result = await self._session.execute(
             select(func.count())

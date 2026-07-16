@@ -10,8 +10,11 @@ from app.application.use_cases.workspace import (
     ResendInvitationStatus,
     UpdateUserStatusStatus,
     UpdateWorkspaceContactPolicyStatus,
+    UpdateWorkspaceCRMSyncConfigStatus,
     UpdateWorkspaceHandoffConfigStatus,
+    UpdateWorkspaceLLMConfigStatus,
     UpdateWorkspaceMembershipStatus,
+    UpdateWorkspaceOperationalControlStatus,
     UpdateWorkspaceTimezoneStatus,
     WorkspaceSettingsReadStatus,
     create_workspace,
@@ -20,17 +23,26 @@ from app.application.use_cases.workspace import (
     resend_invitation,
     update_user_status,
     update_workspace_contact_policy,
+    update_workspace_crm_sync_config,
     update_workspace_default_timezone,
     update_workspace_handoff_config,
+    update_workspace_llm_config,
     update_workspace_membership,
+    update_workspace_operational_control,
 )
-from app.domain.compliance import SmsComplianceState
+from app.domain.compliance import SmsComplianceState, WorkspaceContactPolicy
+from app.domain.crm_sync import default_workspace_crm_sync_config
 from app.domain.identity import (
     AuthAuditEventType,
     UserStatus,
     WorkspaceMembershipRole,
     WorkspaceMembershipStatus,
     WorkspaceStatus,
+)
+from app.domain.llm import default_workspace_llm_config
+from app.domain.workspace_automation import (
+    WorkspaceAutomationStatus,
+    default_workspace_operational_control,
 )
 from tests.application.use_cases.test_authentication import (
     ADMIN_ID,
@@ -42,6 +54,7 @@ from tests.application.use_cases.test_authentication import (
     WORKSPACE_ID,
     _actor,
     _Dependencies,
+    _FakeWorkspaceContactPolicyRepository,
     _invitation,
     _membership,
     _user,
@@ -351,7 +364,10 @@ def test_get_workspace_settings_returns_defaults_when_missing() -> None:
             workspace_repository=deps.workspace_repository,
             membership_repository=deps.membership_repository,
             contact_policy_repository=deps.workspace_contact_policy_repository,
+            crm_sync_config_repository=deps.workspace_crm_sync_config_repository,
+            workspace_llm_config_repository=deps.workspace_llm_config_repository,
             handoff_config_repository=deps.workspace_handoff_config_repository,
+            workspace_operational_control_repository=deps.workspace_operational_control_repository,
         ),
     )
 
@@ -359,6 +375,9 @@ def test_get_workspace_settings_returns_defaults_when_missing() -> None:
     assert result.view is not None
     assert result.view.workspace.workspace_id == WORKSPACE_ID
     assert result.view.contact_policy.sms_compliance_state == SmsComplianceState.NOT_APPROVED
+    assert result.view.crm_sync_config == default_workspace_crm_sync_config(WORKSPACE_ID)
+    assert result.view.llm_config == default_workspace_llm_config(WORKSPACE_ID)
+    assert result.view.operational_control == default_workspace_operational_control(WORKSPACE_ID)
     assert result.view.handoff_config.crm_custom_fields == {}
 
 
@@ -373,6 +392,7 @@ def test_update_workspace_contact_policy_persists_values() -> None:
             actor=actor,
             workspace_id=WORKSPACE_ID,
             sms_compliance_state=SmsComplianceState.APPROVED,
+            quiet_hours_enabled=False,
             quiet_hours_start=time(9, 0),
             quiet_hours_end=time(16, 0),
             workspace_repository=deps.workspace_repository,
@@ -386,10 +406,107 @@ def test_update_workspace_contact_policy_persists_values() -> None:
     assert result.status == UpdateWorkspaceContactPolicyStatus.UPDATED
     assert result.contact_policy is not None
     assert result.contact_policy.sms_compliance_state == SmsComplianceState.APPROVED
+    assert result.contact_policy.quiet_hours_enabled is False
     assert result.contact_policy.quiet_hours_start == time(9, 0)
     assert deps.audit_log_repository.logs[-1].event_type == (
         AuthAuditEventType.WORKSPACE_CONTACT_POLICY_UPDATED
     )
+
+
+def test_update_workspace_contact_policy_persists_inbound_email_address() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_contact_policy(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            sms_compliance_state=SmsComplianceState.APPROVED,
+            quiet_hours_enabled=True,
+            quiet_hours_start=time(9, 0),
+            quiet_hours_end=time(16, 0),
+            inbound_email_address="inbound@example.com",
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            contact_policy_repository=deps.workspace_contact_policy_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceContactPolicyStatus.UPDATED
+    assert result.contact_policy is not None
+    assert result.contact_policy.inbound_email_address == "inbound@example.com"
+
+
+def test_update_workspace_contact_policy_preserves_inbound_email_when_not_provided() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    deps.workspace_contact_policy_repository = _FakeWorkspaceContactPolicyRepository(
+        {
+            WORKSPACE_ID: WorkspaceContactPolicy(
+                workspace_id=WORKSPACE_ID,
+                sms_compliance_state=SmsComplianceState.APPROVED,
+                quiet_hours_enabled=True,
+                quiet_hours_start=time(9, 0),
+                quiet_hours_end=time(16, 0),
+                inbound_email_address="inbound@example.com",
+            ),
+        }
+    )
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_contact_policy(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            sms_compliance_state=SmsComplianceState.APPROVED,
+            quiet_hours_enabled=True,
+            quiet_hours_start=time(9, 0),
+            quiet_hours_end=time(16, 0),
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            contact_policy_repository=deps.workspace_contact_policy_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceContactPolicyStatus.UPDATED
+    assert result.contact_policy is not None
+    assert result.contact_policy.inbound_email_address == "inbound@example.com"
+
+
+def test_update_workspace_contact_policy_disables_quiet_hours_without_clearing_window() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_contact_policy(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            sms_compliance_state=SmsComplianceState.APPROVED,
+            quiet_hours_enabled=False,
+            quiet_hours_start=time(10, 0),
+            quiet_hours_end=time(17, 0),
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            contact_policy_repository=deps.workspace_contact_policy_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceContactPolicyStatus.UPDATED
+    assert result.contact_policy is not None
+    assert result.contact_policy.quiet_hours_enabled is False
+    assert result.contact_policy.quiet_hours_start == time(10, 0)
+    assert result.contact_policy.quiet_hours_end == time(17, 0)
 
 
 def test_update_workspace_handoff_config_normalizes_values() -> None:
@@ -420,6 +537,116 @@ def test_update_workspace_handoff_config_normalizes_values() -> None:
     assert dict(result.handoff_config.crm_custom_fields) == {"handoff_status": "required"}
     assert deps.audit_log_repository.logs[-1].event_type == (
         AuthAuditEventType.WORKSPACE_HANDOFF_CONFIG_UPDATED
+    )
+
+
+def test_update_workspace_crm_sync_config_persists_values() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_crm_sync_config(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            crm_sync_enabled=False,
+            crm_sync_interval_seconds=900,
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            crm_sync_config_repository=deps.workspace_crm_sync_config_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceCRMSyncConfigStatus.UPDATED
+    assert result.crm_sync_config is not None
+    assert result.crm_sync_config.crm_sync_enabled is False
+    assert result.crm_sync_config.crm_sync_interval_seconds == 900
+    assert deps.audit_log_repository.logs[-1].event_type == (
+        AuthAuditEventType.WORKSPACE_CRM_SYNC_CONFIG_UPDATED
+    )
+
+
+def test_update_workspace_llm_config_persists_values() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_llm_config(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            openrouter_model="openai/gpt-4.1-mini",
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            workspace_llm_config_repository=deps.workspace_llm_config_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+            allowed_openrouter_models=("openai/gpt-4o-mini", "openai/gpt-4.1-mini"),
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceLLMConfigStatus.UPDATED
+    assert result.llm_config is not None
+    assert result.llm_config.openrouter_model == "openai/gpt-4.1-mini"
+    assert deps.audit_log_repository.logs[-1].event_type == (
+        AuthAuditEventType.WORKSPACE_LLM_CONFIG_UPDATED
+    )
+
+
+def test_update_workspace_llm_config_rejects_unapproved_model() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_llm_config(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            openrouter_model="anthropic/claude-3.5-sonnet",
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            workspace_llm_config_repository=deps.workspace_llm_config_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+            allowed_openrouter_models=("openai/gpt-4o-mini",),
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceLLMConfigStatus.REJECTED
+    assert result.reasons == (AuthReasonCode.VALIDATION_ERROR,)
+
+
+def test_update_workspace_operational_control_persists_values() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_operational_control(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            automation_status=WorkspaceAutomationStatus.PAUSED,
+            pause_reason="Brokerage requested a temporary pause.",
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            workspace_operational_control_repository=deps.workspace_operational_control_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceOperationalControlStatus.UPDATED
+    assert result.operational_control is not None
+    assert result.operational_control.automation_status == WorkspaceAutomationStatus.PAUSED
+    assert result.operational_control.pause_reason == "Brokerage requested a temporary pause."
+    assert deps.audit_log_repository.logs[-1].event_type == (
+        AuthAuditEventType.WORKSPACE_OPERATIONAL_CONTROL_UPDATED
     )
 
 

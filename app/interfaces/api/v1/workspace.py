@@ -15,8 +15,11 @@ from app.application.use_cases.workspace import (
     ResendInvitationStatus,
     UpdateUserStatusStatus,
     UpdateWorkspaceContactPolicyStatus,
+    UpdateWorkspaceCRMSyncConfigStatus,
     UpdateWorkspaceHandoffConfigStatus,
+    UpdateWorkspaceLLMConfigStatus,
     UpdateWorkspaceMembershipStatus,
+    UpdateWorkspaceOperationalControlStatus,
     UpdateWorkspaceTimezoneStatus,
     WorkspaceSettingsReadStatus,
     create_workspace,
@@ -25,13 +28,19 @@ from app.application.use_cases.workspace import (
     resend_invitation,
     update_user_status,
     update_workspace_contact_policy,
+    update_workspace_crm_sync_config,
     update_workspace_default_timezone,
     update_workspace_handoff_config,
+    update_workspace_llm_config,
     update_workspace_membership,
+    update_workspace_operational_control,
 )
 from app.domain.compliance import WorkspaceContactPolicy
 from app.domain.conversations import WorkspaceHandoffConfig
+from app.domain.crm_sync import WorkspaceCRMSyncConfig
 from app.domain.identity import AuthenticatedActor, User, Workspace, WorkspaceMembership
+from app.domain.llm import WorkspaceLLMConfig
+from app.domain.workspace_automation import WorkspaceOperationalControl
 from app.interfaces.api.dependencies.auth import (
     AuthServiceBundle,
     get_auth_service_bundle,
@@ -58,14 +67,23 @@ from app.interfaces.api.schemas.workspace import (
     UpdateUserStatusResponse,
     UpdateWorkspaceContactPolicyRequest,
     UpdateWorkspaceContactPolicyResponse,
+    UpdateWorkspaceCRMSyncConfigRequest,
+    UpdateWorkspaceCRMSyncConfigResponse,
     UpdateWorkspaceHandoffConfigRequest,
     UpdateWorkspaceHandoffConfigResponse,
+    UpdateWorkspaceLLMConfigRequest,
+    UpdateWorkspaceLLMConfigResponse,
     UpdateWorkspaceMembershipRequest,
     UpdateWorkspaceMembershipResponse,
+    UpdateWorkspaceOperationalControlRequest,
+    UpdateWorkspaceOperationalControlResponse,
     UpdateWorkspaceTimezoneRequest,
     UpdateWorkspaceTimezoneResponse,
     WorkspaceContactPolicyResponse,
+    WorkspaceCRMSyncConfigResponse,
     WorkspaceHandoffConfigResponse,
+    WorkspaceLLMConfigResponse,
+    WorkspaceOperationalControlResponse,
     WorkspaceSettingsResponse,
     WorkspaceUserResponse,
 )
@@ -133,8 +151,10 @@ def _contact_policy_response(policy: WorkspaceContactPolicy) -> WorkspaceContact
     return WorkspaceContactPolicyResponse(
         workspace_id=policy.workspace_id,
         sms_compliance_state=policy.sms_compliance_state.value,
+        quiet_hours_enabled=policy.quiet_hours_enabled,
         quiet_hours_start=policy.quiet_hours_start,
         quiet_hours_end=policy.quiet_hours_end,
+        inbound_email_address=policy.inbound_email_address,
     )
 
 
@@ -144,6 +164,36 @@ def _handoff_config_response(config: WorkspaceHandoffConfig) -> WorkspaceHandoff
         fallback_recipient_email=config.fallback_recipient_email,
         crm_handoff_tag=config.crm_handoff_tag,
         crm_custom_fields=dict(config.crm_custom_fields),
+    )
+
+
+def _crm_sync_config_response(config: WorkspaceCRMSyncConfig) -> WorkspaceCRMSyncConfigResponse:
+    return WorkspaceCRMSyncConfigResponse(
+        workspace_id=config.workspace_id,
+        crm_sync_enabled=config.crm_sync_enabled,
+        crm_sync_interval_seconds=config.crm_sync_interval_seconds,
+    )
+
+
+def _llm_config_response(
+    config: WorkspaceLLMConfig,
+    *,
+    allowed_openrouter_models: tuple[str, ...],
+) -> WorkspaceLLMConfigResponse:
+    return WorkspaceLLMConfigResponse(
+        workspace_id=config.workspace_id,
+        openrouter_model=config.openrouter_model,
+        allowed_openrouter_models=list(allowed_openrouter_models),
+    )
+
+
+def _operational_control_response(
+    control: WorkspaceOperationalControl,
+) -> WorkspaceOperationalControlResponse:
+    return WorkspaceOperationalControlResponse(
+        workspace_id=control.workspace_id,
+        automation_status=control.automation_status.value,
+        pause_reason=control.pause_reason,
     )
 
 
@@ -193,7 +243,12 @@ async def get_workspace_settings_route(
         workspace_repository=bundle.workspace_repository,
         membership_repository=bundle.membership_repository,
         contact_policy_repository=bundle.workspace_contact_policy_repository,
+        crm_sync_config_repository=bundle.workspace_crm_sync_config_repository,
+        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
         handoff_config_repository=bundle.workspace_handoff_config_repository,
+        workspace_operational_control_repository=bundle.workspace_operational_control_repository,
+        default_crm_sync_interval_seconds=bundle.default_crm_sync_interval_seconds,
+        default_openrouter_model=bundle.default_openrouter_model,
     )
     if result.status == WorkspaceSettingsReadStatus.REJECTED:
         _raise_for_reasons(result.reasons)
@@ -203,8 +258,24 @@ async def get_workspace_settings_route(
         contact_policy=(
             _contact_policy_response(result.view.contact_policy) if result.view else None
         ),
+        crm_sync_config=(
+            _crm_sync_config_response(result.view.crm_sync_config) if result.view else None
+        ),
+        llm_config=(
+            _llm_config_response(
+                result.view.llm_config,
+                allowed_openrouter_models=bundle.allowed_openrouter_models,
+            )
+            if result.view
+            else None
+        ),
         handoff_config=(
             _handoff_config_response(result.view.handoff_config) if result.view else None
+        ),
+        operational_control=(
+            _operational_control_response(result.view.operational_control)
+            if result.view
+            else None
         ),
     )
 
@@ -223,8 +294,10 @@ async def update_workspace_contact_policy_route(
         actor=actor,
         workspace_id=workspace_id,
         sms_compliance_state=request.sms_compliance_state,
+        quiet_hours_enabled=request.quiet_hours_enabled,
         quiet_hours_start=request.quiet_hours_start,
         quiet_hours_end=request.quiet_hours_end,
+        inbound_email_address=request.inbound_email_address,
         workspace_repository=bundle.workspace_repository,
         membership_repository=bundle.membership_repository,
         contact_policy_repository=bundle.workspace_contact_policy_repository,
@@ -239,6 +312,113 @@ async def update_workspace_contact_policy_route(
         contact_policy=(
             _contact_policy_response(result.contact_policy)
             if result.contact_policy is not None
+            else None
+        ),
+    )
+
+
+@router.patch(
+    "/{workspace_id}/settings/crm-sync",
+    response_model=UpdateWorkspaceCRMSyncConfigResponse,
+)
+async def update_workspace_crm_sync_config_route(
+    workspace_id: UUID,
+    request: UpdateWorkspaceCRMSyncConfigRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[WorkspaceSettingsBundle, Depends(get_workspace_settings_bundle)],
+) -> UpdateWorkspaceCRMSyncConfigResponse:
+    result = await update_workspace_crm_sync_config(
+        actor=actor,
+        workspace_id=workspace_id,
+        crm_sync_enabled=request.crm_sync_enabled,
+        crm_sync_interval_seconds=request.crm_sync_interval_seconds,
+        workspace_repository=bundle.workspace_repository,
+        membership_repository=bundle.membership_repository,
+        crm_sync_config_repository=bundle.workspace_crm_sync_config_repository,
+        audit_log_repository=bundle.audit_log_repository,
+        now=datetime.now(UTC),
+        default_crm_sync_interval_seconds=bundle.default_crm_sync_interval_seconds,
+    )
+    await bundle.session.commit()
+    if result.status == UpdateWorkspaceCRMSyncConfigStatus.REJECTED:
+        _raise_for_reasons(result.reasons)
+    return UpdateWorkspaceCRMSyncConfigResponse(
+        status=result.status.value,
+        crm_sync_config=(
+            _crm_sync_config_response(result.crm_sync_config)
+            if result.crm_sync_config is not None
+            else None
+        ),
+    )
+
+
+@router.patch(
+    "/{workspace_id}/settings/llm",
+    response_model=UpdateWorkspaceLLMConfigResponse,
+)
+async def update_workspace_llm_config_route(
+    workspace_id: UUID,
+    request: UpdateWorkspaceLLMConfigRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[WorkspaceSettingsBundle, Depends(get_workspace_settings_bundle)],
+) -> UpdateWorkspaceLLMConfigResponse:
+    result = await update_workspace_llm_config(
+        actor=actor,
+        workspace_id=workspace_id,
+        openrouter_model=request.openrouter_model,
+        workspace_repository=bundle.workspace_repository,
+        membership_repository=bundle.membership_repository,
+        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
+        audit_log_repository=bundle.audit_log_repository,
+        now=datetime.now(UTC),
+        default_openrouter_model=bundle.default_openrouter_model,
+        allowed_openrouter_models=bundle.allowed_openrouter_models,
+    )
+    await bundle.session.commit()
+    if result.status == UpdateWorkspaceLLMConfigStatus.REJECTED:
+        _raise_for_reasons(result.reasons)
+    return UpdateWorkspaceLLMConfigResponse(
+        status=result.status.value,
+        llm_config=(
+            _llm_config_response(
+                result.llm_config,
+                allowed_openrouter_models=bundle.allowed_openrouter_models,
+            )
+            if result.llm_config is not None
+            else None
+        ),
+    )
+
+
+@router.patch(
+    "/{workspace_id}/settings/automation",
+    response_model=UpdateWorkspaceOperationalControlResponse,
+)
+async def update_workspace_operational_control_route(
+    workspace_id: UUID,
+    request: UpdateWorkspaceOperationalControlRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[WorkspaceSettingsBundle, Depends(get_workspace_settings_bundle)],
+) -> UpdateWorkspaceOperationalControlResponse:
+    result = await update_workspace_operational_control(
+        actor=actor,
+        workspace_id=workspace_id,
+        automation_status=request.automation_status,
+        pause_reason=request.pause_reason,
+        workspace_repository=bundle.workspace_repository,
+        membership_repository=bundle.membership_repository,
+        workspace_operational_control_repository=bundle.workspace_operational_control_repository,
+        audit_log_repository=bundle.audit_log_repository,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    if result.status == UpdateWorkspaceOperationalControlStatus.REJECTED:
+        _raise_for_reasons(result.reasons)
+    return UpdateWorkspaceOperationalControlResponse(
+        status=result.status.value,
+        operational_control=(
+            _operational_control_response(result.operational_control)
+            if result.operational_control is not None
             else None
         ),
     )

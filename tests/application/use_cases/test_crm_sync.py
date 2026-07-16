@@ -15,7 +15,14 @@ from app.application.use_cases.crm_sync import (
     run_follow_up_boss_lead_snapshot_sync,
 )
 from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
-from app.domain.crm_sync import CRMSyncJob, CRMSyncJobStatus, CRMSyncLeadSort, CRMSyncType
+from app.domain.crm_sync import (
+    CRMSyncJob,
+    CRMSyncJobStatus,
+    CRMSyncLeadSort,
+    CRMSyncType,
+    WorkspaceCRMSyncConfig,
+    WorkspaceCRMSyncScheduleTarget,
+)
 from app.domain.events import DomainEvent, DomainEventType
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 
@@ -46,6 +53,22 @@ class FakeLeadRepository:
         crm_provider: CRMProvider,
         crm_lead_id: str,
     ) -> CanonicalLeadRecord | None:
+        return None
+
+    async def get_by_primary_phone(
+        self,
+        workspace_id: UUID,
+        phone_number: str,
+    ) -> CanonicalLeadRecord | None:
+        _ = (workspace_id, phone_number)
+        return None
+
+    async def get_by_primary_email(
+        self,
+        workspace_id: UUID,
+        email_address: str,
+    ) -> CanonicalLeadRecord | None:
+        _ = (workspace_id, email_address)
         return None
 
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
@@ -152,18 +175,28 @@ class FakeEventBus:
         self.events.append(event)
 
 
-class FakeWorkspaceRepository:
-    def __init__(self, workspace_ids: tuple[UUID, ...]) -> None:
-        self.workspace_ids = workspace_ids
+class FakeWorkspaceCRMSyncConfigRepository:
+    def __init__(
+        self,
+        targets: tuple[WorkspaceCRMSyncScheduleTarget, ...],
+    ) -> None:
+        self.targets = targets
 
-    async def get_by_id(self, workspace_id: UUID) -> None:
+    async def get_by_workspace_id(self, workspace_id: UUID) -> None:
+        _ = workspace_id
         return None
 
-    async def list_active_ids(self, *, limit: int = 100) -> tuple[UUID, ...]:
-        return self.workspace_ids[:limit]
+    async def list_active_workspace_schedule_targets(
+        self,
+        *,
+        limit: int = 100,
+        default_interval_seconds: int,
+    ) -> tuple[WorkspaceCRMSyncScheduleTarget, ...]:
+        _ = default_interval_seconds
+        return self.targets[:limit]
 
-    async def save(self, workspace: object) -> object:
-        return workspace
+    async def save(self, config: WorkspaceCRMSyncConfig) -> WorkspaceCRMSyncConfig:
+        return config
 
 
 class FakeLeadSnapshotSource:
@@ -611,11 +644,19 @@ async def test_scheduler_enqueues_full_until_first_success_then_incremental_when
     never_synced_repository = FakeCRMSyncJobRepository()
 
     first_result = await enqueue_due_follow_up_boss_crm_syncs(
-        workspace_repository=FakeWorkspaceRepository((WORKSPACE_ID,)),
+        workspace_crm_sync_config_repository=FakeWorkspaceCRMSyncConfigRepository(
+            (
+                WorkspaceCRMSyncScheduleTarget(
+                    workspace_id=WORKSPACE_ID,
+                    crm_sync_enabled=True,
+                    crm_sync_interval_seconds=300,
+                ),
+            ),
+        ),
         crm_sync_job_repository=never_synced_repository,
         event_bus=event_bus,
         now=NOW,
-        minimum_interval=timedelta(minutes=5),
+        default_interval_seconds=300,
     )
 
     assert first_result.requested_count == 1
@@ -628,11 +669,19 @@ async def test_scheduler_enqueues_full_until_first_success_then_incremental_when
     )
 
     second_result = await enqueue_due_follow_up_boss_crm_syncs(
-        workspace_repository=FakeWorkspaceRepository((WORKSPACE_ID,)),
+        workspace_crm_sync_config_repository=FakeWorkspaceCRMSyncConfigRepository(
+            (
+                WorkspaceCRMSyncScheduleTarget(
+                    workspace_id=WORKSPACE_ID,
+                    crm_sync_enabled=True,
+                    crm_sync_interval_seconds=300,
+                ),
+            ),
+        ),
         crm_sync_job_repository=due_repository,
         event_bus=event_bus,
         now=NOW,
-        minimum_interval=timedelta(minutes=5),
+        default_interval_seconds=300,
     )
 
     assert second_result.requested_count == 1
@@ -647,15 +696,44 @@ async def test_scheduler_skips_active_or_not_due_workspaces() -> None:
     )
 
     result = await enqueue_due_follow_up_boss_crm_syncs(
-        workspace_repository=FakeWorkspaceRepository((WORKSPACE_ID,)),
+        workspace_crm_sync_config_repository=FakeWorkspaceCRMSyncConfigRepository(
+            (
+                WorkspaceCRMSyncScheduleTarget(
+                    workspace_id=WORKSPACE_ID,
+                    crm_sync_enabled=True,
+                    crm_sync_interval_seconds=300,
+                ),
+            ),
+        ),
         crm_sync_job_repository=repository,
         event_bus=FakeEventBus(),
         now=NOW,
-        minimum_interval=timedelta(minutes=5),
+        default_interval_seconds=300,
     )
 
     assert result.requested_count == 0
     assert result.skipped_active_count == 1
+
+
+async def test_scheduler_skips_disabled_workspaces() -> None:
+    result = await enqueue_due_follow_up_boss_crm_syncs(
+        workspace_crm_sync_config_repository=FakeWorkspaceCRMSyncConfigRepository(
+            (
+                WorkspaceCRMSyncScheduleTarget(
+                    workspace_id=WORKSPACE_ID,
+                    crm_sync_enabled=False,
+                    crm_sync_interval_seconds=300,
+                ),
+            ),
+        ),
+        crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        event_bus=FakeEventBus(),
+        now=NOW,
+        default_interval_seconds=300,
+    )
+
+    assert result.requested_count == 0
+    assert result.skipped_disabled_count == 1
 
 
 def test_map_crm_activity_to_event_preserves_direction_and_actor_name() -> None:

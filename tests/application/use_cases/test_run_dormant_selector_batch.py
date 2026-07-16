@@ -158,6 +158,7 @@ def _config(*, preflight_digest_enabled: bool = True) -> CampaignExecutionConfig
         timezone="UTC",
         sms_compliance_required=False,
         preflight_digest_enabled=preflight_digest_enabled,
+        crm_enrollment_tag=None,
         prompt_version="v1",
         approved_model="openai/gpt-4o-mini",
         cadence_steps=(),

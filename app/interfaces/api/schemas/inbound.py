@@ -1,8 +1,10 @@
 from datetime import datetime
+from email.parser import HeaderParser
+from email.utils import parseaddr
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.compliance.contactability import ContactChannel, ContactSuppressionKind
 
@@ -18,6 +20,86 @@ class FollowUpBossInboundMessageRequest(BaseModel):
     from_address_redacted: str | None = None
     to_address_redacted: str | None = None
     payload_redacted: dict[str, Any] = Field(default_factory=dict)
+
+
+class TwilioInboundMessagePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    message_sid: str | None = Field(default=None, alias="MessageSid")
+    sms_sid: str | None = Field(default=None, alias="SmsSid")
+    from_phone: str = Field(alias="From")
+    to_phone: str = Field(alias="To")
+    body: str = Field(alias="Body")
+    account_sid: str | None = Field(default=None, alias="AccountSid")
+    num_media: str | None = Field(default=None, alias="NumMedia")
+
+    @model_validator(mode="after")
+    def validate_provider_message_id(self) -> "TwilioInboundMessagePayload":
+        if self.message_sid or self.sms_sid:
+            return self
+        raise ValueError("MessageSid or SmsSid is required")
+
+    @property
+    def provider_message_id(self) -> str:
+        return self.message_sid or self.sms_sid or ""
+
+
+class SendGridInboundParsePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    headers: str | None = None
+    raw_email: str | None = Field(default=None, alias="email")
+    to_email: str = Field(alias="to")
+    from_email: str = Field(alias="from")
+    subject: str | None = None
+    text: str | None = None
+    html: str | None = None
+    attachments: str | None = None
+    attachment_info: str | None = Field(default=None, alias="attachment-info")
+    content_ids: str | None = Field(default=None, alias="content-ids")
+    charsets: str | None = None
+    envelope: str | None = None
+    sender_ip: str | None = None
+    spam_score: str | None = None
+
+    @model_validator(mode="after")
+    def validate_provider_message_id(self) -> "SendGridInboundParsePayload":
+        if self.provider_message_id is not None:
+            return self
+        raise ValueError("headers or email must contain a Message-ID")
+
+    @property
+    def provider_message_id(self) -> str | None:
+        return _message_id_from_headers(self.headers or self.raw_email)
+
+    @property
+    def body(self) -> str:
+        return self.text or ""
+
+    @property
+    def from_email_address(self) -> str | None:
+        return _normalized_email_address(self.from_email)
+
+    @property
+    def to_email_address(self) -> str | None:
+        return _normalized_email_address(self.to_email)
+
+
+def _message_id_from_headers(raw_headers: str | None) -> str | None:
+    if raw_headers is None or not raw_headers.strip():
+        return None
+    headers = HeaderParser().parsestr(raw_headers, headersonly=True)
+    message_id = headers.get("Message-ID")
+    if message_id is None:
+        return None
+    normalized = " ".join(message_id.split())
+    return normalized or None
+
+
+def _normalized_email_address(raw_address: str) -> str | None:
+    _, email_address = parseaddr(raw_address)
+    normalized = email_address.strip().lower()
+    return normalized or None
 
 
 class FollowUpBossCRMHumanActivityRequest(BaseModel):

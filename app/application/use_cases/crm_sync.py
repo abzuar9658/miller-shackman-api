@@ -12,17 +12,14 @@ from app.application.ports.repositories import (
     CrmConversationEventRepository,
     CRMSyncJobRepository,
     LeadRepository,
+    WorkspaceCRMSyncConfigRepository,
 )
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
-from app.domain.crm_sync import (
-    CRMSyncJob,
-    CRMSyncJobStatus,
-    CRMSyncLeadSort,
-    CRMSyncType,
-)
+from app.domain.crm_sync import CRMSyncJob, CRMSyncJobStatus, CRMSyncLeadSort, CRMSyncType
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
 from app.domain.leads import CRMProvider
+from app.domain.workspace_automation import WorkspaceAutomationStatus
 
 
 class RunFollowUpBossLeadSyncStatus(StrEnum):
@@ -65,13 +62,10 @@ class ExecuteQueuedCRMSyncResult:
 class EnqueueDueCRMSyncsResult:
     scanned_count: int
     requested_count: int
+    skipped_disabled_count: int
+    skipped_automation_blocked_count: int
     skipped_active_count: int
     skipped_not_due_count: int
-
-
-class ActiveWorkspaceIdRepository(Protocol):
-    async def list_active_ids(self, *, limit: int = 100) -> tuple[WorkspaceId, ...]:
-        raise NotImplementedError
 
 
 class CRMActivitySource(Protocol):
@@ -348,20 +342,35 @@ async def execute_queued_follow_up_boss_crm_sync(
 
 async def enqueue_due_follow_up_boss_crm_syncs(
     *,
-    workspace_repository: ActiveWorkspaceIdRepository,
+    workspace_crm_sync_config_repository: WorkspaceCRMSyncConfigRepository,
     crm_sync_job_repository: CRMSyncJobRepository,
     event_bus: EventBus,
     now: datetime,
-    minimum_interval: timedelta,
+    default_interval_seconds: int,
     workspace_limit: int = 100,
 ) -> EnqueueDueCRMSyncsResult:
-    workspace_ids = await workspace_repository.list_active_ids(limit=workspace_limit)
+    schedule_targets = (
+        await workspace_crm_sync_config_repository.list_active_workspace_schedule_targets(
+            limit=workspace_limit,
+            default_interval_seconds=default_interval_seconds,
+        )
+    )
     requested_count = 0
+    skipped_disabled_count = 0
+    skipped_automation_blocked_count = 0
     skipped_active_count = 0
     skipped_not_due_count = 0
-    for workspace_id in workspace_ids:
+    for target in schedule_targets:
+        if not target.crm_sync_enabled:
+            skipped_disabled_count += 1
+            continue
+
+        if target.automation_status != WorkspaceAutomationStatus.ACTIVE:
+            skipped_automation_blocked_count += 1
+            continue
+
         active = await crm_sync_job_repository.get_active_for_workspace_provider(
-            workspace_id,
+            target.workspace_id,
             CRMProvider.FOLLOW_UP_BOSS.value,
         )
         if active is not None:
@@ -369,22 +378,24 @@ async def enqueue_due_follow_up_boss_crm_syncs(
             continue
 
         latest = await crm_sync_job_repository.get_latest_for_workspace_provider(
-            workspace_id,
+            target.workspace_id,
             CRMProvider.FOLLOW_UP_BOSS.value,
         )
-        if latest is not None and _latest_attempt_at(latest) > now - minimum_interval:
+        if latest is not None and _latest_attempt_at(latest) > now - timedelta(
+            seconds=target.crm_sync_interval_seconds,
+        ):
             skipped_not_due_count += 1
             continue
 
         latest_completed = (
             await crm_sync_job_repository.get_latest_completed_for_workspace_provider(
-                workspace_id,
+                target.workspace_id,
                 CRMProvider.FOLLOW_UP_BOSS.value,
             )
         )
         sync_type = CRMSyncType.INCREMENTAL if latest_completed else CRMSyncType.FULL
         request = await request_crm_sync(
-            workspace_id=workspace_id,
+            workspace_id=target.workspace_id,
             sync_type=sync_type,
             crm_sync_job_repository=crm_sync_job_repository,
             event_bus=event_bus,
@@ -394,8 +405,10 @@ async def enqueue_due_follow_up_boss_crm_syncs(
             requested_count += 1
 
     return EnqueueDueCRMSyncsResult(
-        scanned_count=len(workspace_ids),
+        scanned_count=len(schedule_targets),
         requested_count=requested_count,
+        skipped_disabled_count=skipped_disabled_count,
+        skipped_automation_blocked_count=skipped_automation_blocked_count,
         skipped_active_count=skipped_active_count,
         skipped_not_due_count=skipped_not_due_count,
     )

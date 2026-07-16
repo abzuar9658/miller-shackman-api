@@ -33,6 +33,7 @@ from app.application.use_cases.authentication import (
 )
 from app.domain.compliance import WorkspaceContactPolicy
 from app.domain.conversations import WorkspaceHandoffConfig
+from app.domain.crm_sync import WorkspaceCRMSyncConfig, WorkspaceCRMSyncScheduleTarget
 from app.domain.identity import (
     AuthAuditEventType,
     AuthAuditLog,
@@ -49,6 +50,11 @@ from app.domain.identity import (
     WorkspaceMembershipRole,
     WorkspaceMembershipStatus,
     WorkspaceStatus,
+)
+from app.domain.llm import WorkspaceLLMConfig
+from app.domain.workspace_automation import (
+    WorkspaceAutomationStatus,
+    WorkspaceOperationalControl,
 )
 
 T = TypeVar("T")
@@ -501,6 +507,9 @@ class _Dependencies:
         self.workspaces: dict[UUID, Workspace] = {}
         self.memberships: dict[UUID, WorkspaceMembership] = {}
         self.workspace_contact_policies: dict[UUID, WorkspaceContactPolicy] = {}
+        self.workspace_crm_sync_configs: dict[UUID, WorkspaceCRMSyncConfig] = {}
+        self.workspace_llm_configs: dict[UUID, WorkspaceLLMConfig] = {}
+        self.workspace_operational_controls: dict[UUID, WorkspaceOperationalControl] = {}
         self.workspace_handoff_configs: dict[UUID, WorkspaceHandoffConfig] = {}
         self.credentials: dict[UUID, PasswordCredential] = {}
         self.refresh_sessions: dict[UUID, RefreshSession] = {}
@@ -511,6 +520,17 @@ class _Dependencies:
         self.membership_repository = _FakeWorkspaceMembershipRepository(self.memberships)
         self.workspace_contact_policy_repository = _FakeWorkspaceContactPolicyRepository(
             self.workspace_contact_policies,
+        )
+        self.workspace_crm_sync_config_repository = _FakeWorkspaceCRMSyncConfigRepository(
+            self.workspace_crm_sync_configs,
+        )
+        self.workspace_llm_config_repository = _FakeWorkspaceLLMConfigRepository(
+            self.workspace_llm_configs,
+        )
+        self.workspace_operational_control_repository = (
+            _FakeWorkspaceOperationalControlRepository(
+                self.workspace_operational_controls,
+            )
         )
         self.workspace_handoff_config_repository = _FakeWorkspaceHandoffConfigRepository(
             self.workspace_handoff_configs,
@@ -621,6 +641,62 @@ class _FakeWorkspaceHandoffConfigRepository:
     async def save(self, config: WorkspaceHandoffConfig) -> WorkspaceHandoffConfig:
         self._configs[config.workspace_id] = config
         return config
+
+
+class _FakeWorkspaceCRMSyncConfigRepository:
+    def __init__(self, configs: dict[UUID, WorkspaceCRMSyncConfig]) -> None:
+        self._configs = configs
+
+    async def get_by_workspace_id(self, workspace_id: UUID) -> WorkspaceCRMSyncConfig | None:
+        return self._configs.get(workspace_id)
+
+    async def list_active_workspace_schedule_targets(
+        self,
+        *,
+        limit: int = 100,
+        default_interval_seconds: int,
+    ) -> tuple[WorkspaceCRMSyncScheduleTarget, ...]:
+        targets = [
+            WorkspaceCRMSyncScheduleTarget(
+                workspace_id=workspace_id,
+                crm_sync_enabled=config.crm_sync_enabled,
+                crm_sync_interval_seconds=config.crm_sync_interval_seconds,
+                automation_status=WorkspaceAutomationStatus.ACTIVE,
+            )
+            for workspace_id, config in self._configs.items()
+        ]
+        return tuple(targets[:limit])
+
+    async def save(self, config: WorkspaceCRMSyncConfig) -> WorkspaceCRMSyncConfig:
+        self._configs[config.workspace_id] = config
+        return config
+
+
+class _FakeWorkspaceLLMConfigRepository:
+    def __init__(self, configs: dict[UUID, WorkspaceLLMConfig]) -> None:
+        self._configs = configs
+
+    async def get_by_workspace_id(self, workspace_id: UUID) -> WorkspaceLLMConfig | None:
+        return self._configs.get(workspace_id)
+
+    async def save(self, config: WorkspaceLLMConfig) -> WorkspaceLLMConfig:
+        self._configs[config.workspace_id] = config
+        return config
+
+
+class _FakeWorkspaceOperationalControlRepository:
+    def __init__(self, controls: dict[UUID, WorkspaceOperationalControl]) -> None:
+        self._controls = controls
+
+    async def get_by_workspace_id(self, workspace_id: UUID) -> WorkspaceOperationalControl | None:
+        return self._controls.get(workspace_id)
+
+    async def save(
+        self,
+        control: WorkspaceOperationalControl,
+    ) -> WorkspaceOperationalControl:
+        self._controls[control.workspace_id] = control
+        return control
 
 
 class _FakePasswordCredentialRepository:

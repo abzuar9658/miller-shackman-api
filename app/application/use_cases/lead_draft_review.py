@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
@@ -7,16 +8,22 @@ from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
     CampaignExecutionRepository,
+    ExternalEventRepository,
     LeadRepository,
     LeadWorkflowRepository,
     OutboundMessageRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
+    WorkspaceOperationalControlRepository,
     WorkspaceRepository,
 )
 from app.application.ports.temporal import (
     LeadNurtureWorkflowSignaler,
     UnblockLeadNurtureWorkflowSignal,
+)
+from app.application.services.internal_external_events import (
+    create_internal_external_event,
+    update_internal_external_event_status,
 )
 from app.application.use_cases.campaign_cadence_execution import (
     _pre_send_policy,
@@ -33,6 +40,7 @@ from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessa
 from app.domain.campaigns.pre_send import ProviderSendStatus, WorkflowState
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReviewStatus
 from app.domain.common.ids import LeadId, WorkspaceId
+from app.domain.crm_sync import ExternalEventStatus
 from app.domain.identity import AuthenticatedActor
 
 
@@ -71,7 +79,10 @@ async def approve_rejected_draft_review_and_send(
     campaign_execution_repository: CampaignExecutionRepository,
     workspace_repository: WorkspaceRepository,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository,
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
     message_repository: OutboundMessageRepository,
+    external_event_repository: ExternalEventRepository,
+    commit: Callable[[], Awaitable[None]],
     sms_provider: SMSProvider,
     email_provider: EmailProvider,
     lead_nurture_workflow_signaler: LeadNurtureWorkflowSignaler,
@@ -185,6 +196,7 @@ async def approve_rejected_draft_review_and_send(
         message_repository=message_repository,
         sms_provider=sms_provider,
         email_provider=email_provider,
+        workspace_operational_control_repository=workspace_operational_control_repository,
         now=now,
     )
     if send_result.status not in {
@@ -225,6 +237,15 @@ async def approve_rejected_draft_review_and_send(
             updated_at=now,
         )
     )
+    external_event = await create_internal_external_event(
+        external_event_repository=external_event_repository,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        event_type="lead.rejected_draft_review_unblock_requested",
+        now=now,
+        payload_redacted={"actor_user_id": str(actor.user_id), "review_id": str(review.review_id)},
+    )
+    await commit()
     try:
         await lead_nurture_workflow_signaler.signal_unblock_lead_nurture_workflow(
             temporal_workflow_id=workflow.temporal_workflow_id,
@@ -234,10 +255,17 @@ async def approve_rejected_draft_review_and_send(
                 occurred_at=now,
                 reason=reason.strip(),
                 actor_user_id=actor.user_id,
-                external_event_id=uuid4(),
+                external_event_id=external_event.external_event_id,
             ),
         )
     except Exception as exc:
+        await update_internal_external_event_status(
+            external_event_repository=external_event_repository,
+            event=external_event,
+            status=ExternalEventStatus.FAILED,
+            now=now,
+            failure_reason=str(exc),
+        )
         return ApproveRejectedDraftReviewResult(
             status=ApproveRejectedDraftReviewStatus.SIGNAL_FAILED,
             review_id=review.review_id,
@@ -245,6 +273,12 @@ async def approve_rejected_draft_review_and_send(
             workflow_id=workflow.workflow_id,
             signal_failure_reason=str(exc),
         )
+    await update_internal_external_event_status(
+        external_event_repository=external_event_repository,
+        event=external_event,
+        status=ExternalEventStatus.PROCESSED,
+        now=now,
+    )
     return ApproveRejectedDraftReviewResult(
         status=ApproveRejectedDraftReviewStatus.SENT,
         review_id=review.review_id,

@@ -6,6 +6,7 @@ from app.application.ports.auth import AccessTokenService, OpaqueTokenService, P
 from app.application.ports.cache import CacheProvider
 from app.application.ports.crm import CRMClient
 from app.application.ports.crm_sync import CanonicalLeadSnapshotSource
+from app.application.ports.listing_search import ListingSearchClient
 from app.application.ports.llm import LLMClient
 from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.notifications import NotificationProvider
@@ -129,6 +130,16 @@ def build_cache_provider(settings: Settings | None = None) -> CacheProvider:
 
         return RedisCacheProvider(redis_url=settings.redis_url)
     raise ValueError(f"Unsupported cache provider: {settings.cache_provider}")
+
+
+def build_listing_search_client(settings: Settings | None = None) -> ListingSearchClient:
+    settings = settings or get_settings()
+    from app.infrastructure.listing_sources.streeteasy import StreetEasyListingSearchClient
+
+    return StreetEasyListingSearchClient(
+        timeout_seconds=settings.streeteasy_timeout_seconds,
+        user_agent=settings.streeteasy_user_agent,
+    )
 
 
 def build_password_hasher(settings: Settings | None = None) -> PasswordHasher:

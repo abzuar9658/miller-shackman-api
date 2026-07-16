@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -7,6 +7,7 @@ from app.application.ports.repositories import (
     CampaignEnrollmentRepository,
     LeadWorkflowRepository,
     WorkflowTransitionRepository,
+    WorkspaceOperationalControlRepository,
 )
 from app.application.ports.temporal import TemporalWorkflowStarter
 from app.application.services.campaign_enrollment_starter import start_single_campaign_enrollment
@@ -41,6 +42,8 @@ async def start_selected_campaign_batch(
     now: datetime,
     metadata: Mapping[str, object] | None = None,
     event_bus: EventBus | None = None,
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
+    commit: Callable[[], Awaitable[None]] | None = None,
 ) -> StartSelectedCampaignBatchResult:
     lead_results: list[LeadStartResult] = []
     started_count = 0
@@ -75,7 +78,9 @@ async def start_selected_campaign_batch(
             campaign_enrollment_repository=campaign_enrollment_repository,
             lead_workflow_repository=lead_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
+            workspace_operational_control_repository=workspace_operational_control_repository,
             temporal_workflow_starter=temporal_workflow_starter,
+            commit=commit,
             now=now,
             metadata=metadata,
             event_bus=event_bus,

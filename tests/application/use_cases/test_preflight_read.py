@@ -1,14 +1,16 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from app.application.ports.preflight_digest import (
     PreflightDigestEntry,
     PreflightDigestIssueStatus,
     PreflightDigestRecord,
+    PreflightDigestRepository,
     PreflightVetoRecord,
 )
 from app.application.use_cases.preflight_read import (
+    PreflightDigestViewStatus,
     PreflightReadStatus,
     get_preflight_digest_view,
     list_preflight_digest_views,
@@ -28,18 +30,42 @@ CAMPAIGN_ID = UUID("00000000-0000-0000-0000-000000000003")
 LEAD_ID = UUID("00000000-0000-0000-0000-000000000004")
 
 
-class FakePreflightDigestRepository:
+class FakePreflightDigestRepository(PreflightDigestRepository):
     def __init__(self, digests: tuple[PreflightDigestRecord, ...]) -> None:
         self._digests = {digest.digest_id: digest for digest in digests}
 
-    async def list_digests_for_workspace(self, workspace_id: UUID, *, limit: int = 50):
+    async def list_digests_for_workspace(
+        self,
+        workspace_id: UUID,
+        *,
+        limit: int = 50,
+    ) -> tuple[PreflightDigestRecord, ...]:
         return tuple(d for d in self._digests.values() if d.workspace_id == workspace_id)[:limit]
 
-    async def get_digest_by_id(self, workspace_id: UUID, digest_id: str):
+    async def get_digest_by_id(
+        self,
+        workspace_id: UUID,
+        digest_id: str,
+    ) -> PreflightDigestRecord | None:
         digest = self._digests.get(digest_id)
         if digest is None or digest.workspace_id != workspace_id:
             return None
         return digest
+
+    async def get_digest(
+        self,
+        workspace_id: UUID,
+        campaign_id: UUID,
+        batch_id: str,
+    ) -> PreflightDigestRecord | None:
+        _ = (campaign_id, batch_id)
+        for digest in self._digests.values():
+            if digest.workspace_id == workspace_id:
+                return digest
+        return None
+
+    async def save_digest(self, record: PreflightDigestRecord) -> None:
+        self._digests[record.digest_id] = record
 
 
 def test_list_preflight_digest_views_returns_summary_for_admin() -> None:
@@ -48,12 +74,28 @@ def test_list_preflight_digest_views_returns_summary_for_admin() -> None:
             actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
             workspace_id=WORKSPACE_ID,
             repository=FakePreflightDigestRepository((_digest(),)),
+            now=NOW - timedelta(hours=1),
         )
     )
 
     assert result.status == PreflightReadStatus.OK
+    assert result.views[0].status == PreflightDigestViewStatus.PENDING
     assert result.views[0].lead_count == 1
     assert result.views[0].veto_count == 1
+
+
+def test_list_preflight_digest_views_marks_issued_digest_ready_after_window_expires() -> None:
+    result = asyncio.run(
+        list_preflight_digest_views(
+            actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            repository=FakePreflightDigestRepository((_digest(),)),
+            now=NOW + timedelta(hours=1),
+        )
+    )
+
+    assert result.status == PreflightReadStatus.OK
+    assert result.views[0].status == PreflightDigestViewStatus.READY
 
 
 def test_get_preflight_digest_view_rejects_assigned_agent() -> None:
@@ -69,13 +111,31 @@ def test_get_preflight_digest_view_rejects_assigned_agent() -> None:
     assert result.status == PreflightReadStatus.REJECTED
 
 
-def _digest() -> PreflightDigestRecord:
+def test_get_preflight_digest_view_preserves_failed_digest_status() -> None:
+    result = asyncio.run(
+        get_preflight_digest_view(
+            actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            digest_id=str(DIGEST_ID),
+            repository=FakePreflightDigestRepository((_digest(status=PreflightDigestIssueStatus.FAILED),)),
+            now=NOW + timedelta(hours=1),
+        )
+    )
+
+    assert result.status == PreflightReadStatus.OK
+    assert result.view is not None
+    assert result.view.status == PreflightDigestViewStatus.FAILED
+
+
+def _digest(
+    *, status: PreflightDigestIssueStatus = PreflightDigestIssueStatus.ISSUED
+) -> PreflightDigestRecord:
     return PreflightDigestRecord(
         digest_id=str(DIGEST_ID),
         workspace_id=WORKSPACE_ID,
         campaign_id=CAMPAIGN_ID,
         batch_id="batch-1",
-        status=PreflightDigestIssueStatus.ISSUED,
+        status=status,
         entries=(
             PreflightDigestEntry(
                 lead_id=LEAD_ID,

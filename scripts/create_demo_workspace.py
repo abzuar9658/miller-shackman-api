@@ -90,7 +90,7 @@ from app.domain.compliance.contactability import (
     WorkspaceContactPolicy,
 )
 from app.domain.conversations import HandoffStatus, WorkspaceHandoffConfig
-from app.domain.crm_sync import CRMSyncType
+from app.domain.crm_sync import CRMSyncLeadSort, CRMSyncType
 from app.domain.identity import (
     AuthenticatedActor,
     PasswordCredential,
@@ -230,8 +230,18 @@ class DemoLeadSnapshotSource:
         cursor: str | None = None,
         updated_after: datetime | None = None,
         updated_before: datetime | None = None,
+        sort_by: CRMSyncLeadSort | None = None,
         mapped_custom_field_keys: tuple[str, ...] = (),
     ) -> CanonicalLeadSnapshotPage:
+        _ = (
+            workspace_id,
+            page_size,
+            cursor,
+            updated_after,
+            updated_before,
+            sort_by,
+            mapped_custom_field_keys,
+        )
         if self._served:
             return CanonicalLeadSnapshotPage()
         self._served = True

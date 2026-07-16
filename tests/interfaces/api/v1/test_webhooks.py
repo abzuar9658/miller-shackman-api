@@ -1,13 +1,19 @@
+import base64
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
 import pytest
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
+from twilio.request_validator import RequestValidator
 
 from app.application.ports.crm import CRMClient
 from app.application.ports.notifications import NotificationProvider
+from app.core.config import Settings, get_settings
 from app.domain.compliance import (
     ContactPermissionStatus,
     ContactSuppressionKind,
@@ -18,19 +24,22 @@ from app.domain.conversations import WorkspaceHandoffConfig
 from app.domain.events import DomainEvent
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workflows import LeadWorkflow, WorkflowState
-from app.interfaces.api.dependencies.inbound import InboundServiceBundle, get_inbound_service_bundle
+from app.interfaces.api.dependencies.inbound import (
+    InboundServiceBundle,
+    get_inbound_service_bundle,
+)
 from app.main import create_app
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeLeadRepository,
     FakeLeadWorkflowRepository,
     FakeWorkflowTransitionRepository,
     FakeWorkspaceContactPolicyRepository,
+    FakeWorkspaceLLMConfigRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
     FakeLeadNurtureWorkflowSignaler,
 )
 from tests.application.use_cases.test_complete_handoff import (
-    FakeCRMClient,
     FakeHandoffCompletionRepository,
     FakeNotificationProvider,
     FakeWorkspaceHandoffConfigRepository,
@@ -40,8 +49,10 @@ from tests.application.use_cases.test_process_inbound_message_event import (
     WORKSPACE_ID,
     FakeConversationRepository,
     FakeConversationSummaryRepository,
+    FakeCRMClient,
     FakeExternalEventRepository,
     FakeHandoffRepository,
+    FakeInboundMessageCRMCompletionRepository,
     FakeInboundMessageRepository,
     FakeLLMClient,
     _classification_json,
@@ -96,17 +107,20 @@ def webhook_bundle() -> InboundServiceBundle:
         conversation_summary_repository=FakeConversationSummaryRepository(),
         handoff_repository=FakeHandoffRepository(),
         handoff_completion_repository=FakeHandoffCompletionRepository(),
+        inbound_message_crm_completion_repository=FakeInboundMessageCRMCompletionRepository(),
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             WorkspaceContactPolicy(
                 workspace_id=WORKSPACE_ID,
                 sms_compliance_state=SmsComplianceState.APPROVED,
+                inbound_email_address="nurture@inbound.example.com",
             )
         ),
         workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
             WorkspaceHandoffConfig(workspace_id=WORKSPACE_ID)
         ),
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
         crm_client=cast(CRMClient, FakeCRMClient()),
         notification_provider=cast(NotificationProvider, FakeNotificationProvider()),
         llm_client=FakeLLMClient(
@@ -118,13 +132,28 @@ def webhook_bundle() -> InboundServiceBundle:
         ),
         lead_nurture_workflow_signaler=FakeLeadNurtureWorkflowSignaler(),
         event_bus=FakeEventBus(),
+        default_openrouter_model="openai/gpt-4o-mini",
     )
 
 
 @pytest.fixture
 def webhook_client(webhook_bundle: InboundServiceBundle) -> TestClient:
+    return _build_webhook_client(webhook_bundle)
+
+
+def _build_webhook_client(
+    webhook_bundle: InboundServiceBundle,
+    settings: Settings | None = None,
+) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_inbound_service_bundle] = lambda: webhook_bundle
+    app.dependency_overrides[get_settings] = lambda: (
+        settings
+        or Settings(
+            twilio_auth_token=None,
+            sendgrid_event_webhook_public_key=None,
+        )
+    )
     return TestClient(app)
 
 
@@ -175,6 +204,401 @@ def test_follow_up_boss_inbound_webhook_returns_duplicate_on_replay(
     assert second.status_code == 200
     assert second.json()["status"] == "duplicate"
     assert second.json()["reasons"] == ["duplicate_event"]
+
+
+def test_twilio_inbound_webhook_processes_sms_reply_with_workspace_scoped_route(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    settings = Settings(twilio_auth_token=None, twilio_from_phone="+15551234567")
+
+    with _build_webhook_client(webhook_bundle, settings) as client:
+        response = client.post(
+            f"/api/v1/webhooks/twilio/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "MessageSid": "SM-IN-1",
+                "From": "+1 (555) 555-0123",
+                "To": "+15551234567",
+                "Body": "Can someone call me today?",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "processed"
+    assert body["handoff_required"] is True
+    assert body["intent"] == "human_requested"
+    assert cast(FakeSession, webhook_bundle.session).commit_count == 1
+
+
+def test_twilio_inbound_webhook_returns_duplicate_on_replay(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    settings = Settings(twilio_auth_token=None, twilio_from_phone="+15551234567")
+    payload = {
+        "MessageSid": "SM-IN-DUP",
+        "From": "+15555550123",
+        "To": "+15551234567",
+        "Body": "Can someone call me today?",
+    }
+
+    with _build_webhook_client(webhook_bundle, settings) as client:
+        first = client.post(
+            f"/api/v1/webhooks/twilio/inbound-messages/{WORKSPACE_ID}",
+            data=payload,
+        )
+        second = client.post(
+            f"/api/v1/webhooks/twilio/inbound-messages/{WORKSPACE_ID}",
+            data=payload,
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["reasons"] == ["duplicate_event"]
+
+
+def test_twilio_inbound_webhook_rejects_when_lead_is_not_found(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    workflow = LeadWorkflow(
+        workflow_id=WORKFLOW_ID,
+        temporal_workflow_id="workflow-123",
+        workspace_id=WORKSPACE_ID,
+        campaign_enrollment_id=ENROLLMENT_ID,
+        campaign_id=CAMPAIGN_ID,
+        lead_id=LEAD_ID,
+        state=WorkflowState.WAITING_FOR_RESPONSE,
+        last_transition_at=NOW,
+        state_version=3,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    lead_workflow_repository = FakeLeadWorkflowRepository()
+    lead_workflow_repository.workflows[workflow.workflow_id] = workflow
+    lead_workflow_repository.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow
+    bundle = replace(
+        webhook_bundle,
+        lead_repository=FakeLeadRepository(None),
+        lead_workflow_repository=lead_workflow_repository,
+    )
+
+    with _build_webhook_client(
+        bundle,
+        Settings(twilio_auth_token=None, twilio_from_phone="+15551234567"),
+    ) as client:
+        response = client.post(
+            f"/api/v1/webhooks/twilio/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "MessageSid": "SM-IN-MISSING",
+                "From": "+15555550999",
+                "To": "+15551234567",
+                "Body": "Hello?",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
+    assert response.json()["reasons"] == ["lead_not_found"]
+
+
+def test_twilio_inbound_signature_is_required_when_auth_token_is_configured(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    settings = Settings(
+        twilio_auth_token=SecretStr("secret-token"),
+        twilio_from_phone="+15551234567",
+    )
+    validator = RequestValidator("secret-token")
+    form_data = {
+        "MessageSid": "SM-IN-SIGNED",
+        "From": "+15555550123",
+        "To": "+15551234567",
+        "Body": "Can someone call me today?",
+    }
+    signature = validator.compute_signature(
+        f"http://testserver/api/v1/webhooks/twilio/inbound-messages/{WORKSPACE_ID}",
+        form_data,
+    )
+
+    with _build_webhook_client(webhook_bundle, settings) as client:
+        good = client.post(
+            f"/api/v1/webhooks/twilio/inbound-messages/{WORKSPACE_ID}",
+            data=form_data,
+            headers={"X-Twilio-Signature": signature},
+        )
+        bad = client.post(
+            f"/api/v1/webhooks/twilio/inbound-messages/{WORKSPACE_ID}",
+            data=form_data,
+            headers={"X-Twilio-Signature": "bad-signature"},
+        )
+
+    assert good.status_code == 200
+    assert bad.status_code == 401
+
+
+def test_sendgrid_inbound_webhook_processes_email_reply_with_workspace_scoped_route(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    with _build_webhook_client(webhook_bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/sendgrid/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "headers": (
+                    "From: Lead Person <lead@example.com>\n"
+                    "To: nurture@inbound.example.com\n"
+                    "Subject: Re: Checking in\n"
+                    "Message-ID: <sendgrid-inbound-1@example.com>\n"
+                ),
+                "from": "Lead Person <lead@example.com>",
+                "to": "nurture@inbound.example.com",
+                "subject": "Re: Checking in",
+                "text": "Can someone call me today?",
+                "attachments": "0",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "processed"
+    assert body["handoff_required"] is True
+    assert body["intent"] == "human_requested"
+    assert cast(FakeSession, webhook_bundle.session).commit_count == 1
+
+
+def test_sendgrid_inbound_webhook_returns_duplicate_on_replay(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    payload = {
+        "headers": (
+            "From: Lead Person <lead@example.com>\n"
+            "To: nurture@inbound.example.com\n"
+            "Subject: Re: Checking in\n"
+            "Message-ID: <sendgrid-inbound-dup@example.com>\n"
+        ),
+        "from": "Lead Person <lead@example.com>",
+        "to": "nurture@inbound.example.com",
+        "subject": "Re: Checking in",
+        "text": "Can someone call me today?",
+        "attachments": "0",
+    }
+
+    with _build_webhook_client(webhook_bundle) as client:
+        first = client.post(
+            f"/api/v1/webhooks/sendgrid/inbound-messages/{WORKSPACE_ID}",
+            data=payload,
+        )
+        second = client.post(
+            f"/api/v1/webhooks/sendgrid/inbound-messages/{WORKSPACE_ID}",
+            data=payload,
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["reasons"] == ["duplicate_event"]
+
+
+def test_sendgrid_inbound_webhook_rejects_when_lead_is_not_found(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    workflow = LeadWorkflow(
+        workflow_id=WORKFLOW_ID,
+        temporal_workflow_id="workflow-123",
+        workspace_id=WORKSPACE_ID,
+        campaign_enrollment_id=ENROLLMENT_ID,
+        campaign_id=CAMPAIGN_ID,
+        lead_id=LEAD_ID,
+        state=WorkflowState.WAITING_FOR_RESPONSE,
+        last_transition_at=NOW,
+        state_version=3,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    lead_workflow_repository = FakeLeadWorkflowRepository()
+    lead_workflow_repository.workflows[workflow.workflow_id] = workflow
+    lead_workflow_repository.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow
+    bundle = replace(
+        webhook_bundle,
+        lead_repository=FakeLeadRepository(None),
+        lead_workflow_repository=lead_workflow_repository,
+    )
+
+    with _build_webhook_client(bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/sendgrid/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "headers": (
+                    "From: Missing Person <missing@example.com>\n"
+                    "To: nurture@inbound.example.com\n"
+                    "Message-ID: <sendgrid-missing@example.com>\n"
+                ),
+                "from": "Missing Person <missing@example.com>",
+                "to": "nurture@inbound.example.com",
+                "text": "Hello?",
+                "attachments": "0",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
+    assert response.json()["reasons"] == ["lead_not_found"]
+
+
+def test_sendgrid_inbound_signature_is_required_when_public_key_is_configured(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key_pem = (
+        private_key.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode()
+    )
+    public_key = "".join(
+        line.strip()
+        for line in public_key_pem.splitlines()
+        if "BEGIN" not in line and "END" not in line
+    )
+    settings = Settings(sendgrid_event_webhook_public_key=SecretStr(public_key))
+    boundary = "sendgrid-boundary-123"
+    multipart_body = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="headers"\r\n\r\n'
+        "From: Lead Person <lead@example.com>\n"
+        "To: nurture@inbound.example.com\n"
+        "Message-ID: <sendgrid-signed@example.com>\n\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="from"\r\n\r\n'
+        "Lead Person <lead@example.com>\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="to"\r\n\r\n'
+        "nurture@inbound.example.com\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="text"\r\n\r\n'
+        "Can someone call me today?\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="attachments"\r\n\r\n'
+        "1\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="attachment1"; filename="note.txt"\r\n'
+        "Content-Type: text/plain\r\n\r\n"
+        "hello from attachment\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+    timestamp = str(int(NOW.timestamp()))
+    signature = base64.b64encode(
+        private_key.sign(timestamp.encode() + multipart_body, ec.ECDSA(hashes.SHA256()))
+    ).decode()
+
+    with _build_webhook_client(webhook_bundle, settings) as client:
+        good = client.post(
+            f"/api/v1/webhooks/sendgrid/inbound-messages/{WORKSPACE_ID}",
+            content=multipart_body,
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "X-Twilio-Email-Event-Webhook-Signature": signature,
+                "X-Twilio-Email-Event-Webhook-Timestamp": timestamp,
+            },
+        )
+        bad = client.post(
+            f"/api/v1/webhooks/sendgrid/inbound-messages/{WORKSPACE_ID}",
+            content=multipart_body,
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "X-Twilio-Email-Event-Webhook-Signature": "bad-signature",
+                "X-Twilio-Email-Event-Webhook-Timestamp": timestamp,
+            },
+        )
+
+    assert good.status_code == 200
+    assert bad.status_code == 401
+
+
+def test_sendgrid_inbound_webhook_rejects_when_to_address_does_not_match_configured_inbound_email(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    with _build_webhook_client(webhook_bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/sendgrid/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "headers": (
+                    "From: Lead Person <lead@example.com>\n"
+                    "To: wrong@inbound.example.com\n"
+                    "Subject: Re: Checking in\n"
+                    "Message-ID: <sendgrid-mismatch@example.com>\n"
+                ),
+                "from": "Lead Person <lead@example.com>",
+                "to": "wrong@inbound.example.com",
+                "subject": "Re: Checking in",
+                "text": "Can someone call me today?",
+                "attachments": "0",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "rejected"
+    assert body["reasons"] == ["inbound_email_address_mismatch"]
+
+
+def test_sendgrid_inbound_webhook_rejects_when_to_address_is_unparseable(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    with _build_webhook_client(webhook_bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/sendgrid/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "headers": (
+                    "From: Lead Person <lead@example.com>\n"
+                    "To: \n"
+                    "Subject: Re: Checking in\n"
+                    "Message-ID: <sendgrid-unparseable@example.com>\n"
+                ),
+                "from": "Lead Person <lead@example.com>",
+                "to": "",
+                "subject": "Re: Checking in",
+                "text": "Can someone call me today?",
+                "attachments": "0",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "rejected"
+    assert body["reasons"] == ["invalid_to_address"]
+
+
+def test_sendgrid_inbound_webhook_allows_when_no_contact_policy_is_configured(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    bundle = replace(
+        webhook_bundle,
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(None),
+    )
+
+    with _build_webhook_client(bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/sendgrid/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "headers": (
+                    "From: Lead Person <lead@example.com>\n"
+                    "To: any@inbound.example.com\n"
+                    "Subject: Re: Checking in\n"
+                    "Message-ID: <sendgrid-no-policy@example.com>\n"
+                ),
+                "from": "Lead Person <lead@example.com>",
+                "to": "any@inbound.example.com",
+                "subject": "Re: Checking in",
+                "text": "Can someone call me today?",
+                "attachments": "0",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "processed"
 
 
 def _lead() -> CanonicalLeadRecord:

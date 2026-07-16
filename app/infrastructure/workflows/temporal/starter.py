@@ -55,7 +55,7 @@ class TemporalClientWorkflowStarter:
             PauseWorkflowSignal(
                 workspace_id=signal.workspace_id,
                 lead_id=signal.lead_id,
-                occurred_at=signal.occurred_at,
+                occurred_at=signal.occurred_at.isoformat(),
                 reason=signal.reason,
                 actor_user_id=signal.actor_user_id,
                 external_event_id=signal.external_event_id,
@@ -74,7 +74,7 @@ class TemporalClientWorkflowStarter:
             ResumeWorkflowSignal(
                 workspace_id=signal.workspace_id,
                 lead_id=signal.lead_id,
-                occurred_at=signal.occurred_at,
+                occurred_at=signal.occurred_at.isoformat(),
                 reason=signal.reason,
                 actor_user_id=signal.actor_user_id,
                 external_event_id=signal.external_event_id,
@@ -93,7 +93,7 @@ class TemporalClientWorkflowStarter:
             UnblockWorkflowSignal(
                 workspace_id=signal.workspace_id,
                 lead_id=signal.lead_id,
-                occurred_at=signal.occurred_at,
+                occurred_at=signal.occurred_at.isoformat(),
                 reason=signal.reason,
                 actor_user_id=signal.actor_user_id,
                 external_event_id=signal.external_event_id,

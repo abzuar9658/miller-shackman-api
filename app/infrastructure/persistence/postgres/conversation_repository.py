@@ -17,6 +17,7 @@ from app.domain.conversations import (
     HandoffCompletionRecord,
     HandoffReasonCode,
     HandoffStatus,
+    InboundMessageCRMCompletionRecord,
     InboundMessage,
     InboundMessageClassificationStatus,
 )
@@ -26,6 +27,7 @@ from app.infrastructure.persistence.postgres.models import (
     CrmConversationEventModel,
     HandoffCompletionModel,
     HandoffModel,
+    InboundMessageCRMCompletionModel,
     InboundMessageModel,
 )
 
@@ -275,6 +277,41 @@ class PostgresHandoffCompletionRepository:
         return _model_to_handoff_completion(result.scalar_one())
 
 
+class PostgresInboundMessageCRMCompletionRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_by_inbound_message_id(
+        self,
+        workspace_id: WorkspaceId,
+        inbound_message_id: UUID,
+    ) -> InboundMessageCRMCompletionRecord | None:
+        result = await self._session.execute(
+            select(InboundMessageCRMCompletionModel)
+            .where(InboundMessageCRMCompletionModel.workspace_id == workspace_id)
+            .where(InboundMessageCRMCompletionModel.inbound_message_id == inbound_message_id),
+        )
+        model = result.scalar_one_or_none()
+        return _model_to_inbound_message_crm_completion(model) if model is not None else None
+
+    async def save(
+        self,
+        record: InboundMessageCRMCompletionRecord,
+    ) -> InboundMessageCRMCompletionRecord:
+        values = _inbound_message_crm_completion_to_values(record)
+        update_values = {
+            key: value for key, value in values.items() if key != "inbound_message_id"
+        }
+        statement = (
+            insert(InboundMessageCRMCompletionModel)
+            .values(**values)
+            .on_conflict_do_update(index_elements=["inbound_message_id"], set_=update_values)
+            .returning(InboundMessageCRMCompletionModel)
+        )
+        result = await self._session.execute(statement)
+        return _model_to_inbound_message_crm_completion(result.scalar_one())
+
+
 def _conversation_to_values(conversation: Conversation) -> dict[str, object]:
     return {
         "conversation_id": conversation.conversation_id,
@@ -456,6 +493,42 @@ def _model_to_handoff_completion(model: HandoffCompletionModel) -> HandoffComple
         crm_note_written_at=model.crm_note_written_at,
         crm_tag_applied_at=model.crm_tag_applied_at,
         crm_custom_fields_updated_at=model.crm_custom_fields_updated_at,
+        completed_at=model.completed_at,
+        last_attempted_at=model.last_attempted_at,
+        failure_reason=model.failure_reason,
+    )
+
+
+def _inbound_message_crm_completion_to_values(
+    record: InboundMessageCRMCompletionRecord,
+) -> dict[str, object]:
+    return {
+        "inbound_message_id": record.inbound_message_id,
+        "workspace_id": record.workspace_id,
+        "crm_note_idempotency_key": record.crm_note_idempotency_key,
+        "crm_refreshed_at": record.crm_refreshed_at,
+        "crm_lead_updated_at": record.crm_lead_updated_at,
+        "crm_latest_activity_at": record.crm_latest_activity_at,
+        "crm_updates_detected": record.crm_updates_detected,
+        "crm_note_written_at": record.crm_note_written_at,
+        "completed_at": record.completed_at,
+        "last_attempted_at": record.last_attempted_at,
+        "failure_reason": record.failure_reason,
+    }
+
+
+def _model_to_inbound_message_crm_completion(
+    model: InboundMessageCRMCompletionModel,
+) -> InboundMessageCRMCompletionRecord:
+    return InboundMessageCRMCompletionRecord(
+        inbound_message_id=model.inbound_message_id,
+        workspace_id=model.workspace_id,
+        crm_note_idempotency_key=model.crm_note_idempotency_key,
+        crm_refreshed_at=model.crm_refreshed_at,
+        crm_lead_updated_at=model.crm_lead_updated_at,
+        crm_latest_activity_at=model.crm_latest_activity_at,
+        crm_updates_detected=model.crm_updates_detected,
+        crm_note_written_at=model.crm_note_written_at,
         completed_at=model.completed_at,
         last_attempted_at=model.last_attempted_at,
         failure_reason=model.failure_reason,

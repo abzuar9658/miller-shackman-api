@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -82,6 +82,48 @@ class PostgresLeadRepository:
         )
         model = result.scalar_one_or_none()
         return _model_to_record(model) if model else None
+
+    async def get_by_primary_phone(
+        self,
+        workspace_id: WorkspaceId,
+        phone_number: str,
+    ) -> CanonicalLeadRecord | None:
+        normalized_candidates = _phone_match_candidates(phone_number)
+        if not normalized_candidates:
+            return None
+        normalized_phone = func.regexp_replace(LeadModel.primary_phone, "[^0-9]", "", "g")
+        result = await self._session.execute(
+            select(LeadModel)
+            .where(LeadModel.workspace_id == workspace_id)
+            .where(LeadModel.primary_phone.is_not(None))
+            .where(normalized_phone.in_(tuple(normalized_candidates)))
+            .limit(2),
+        )
+        models = result.scalars().all()
+        if len(models) != 1:
+            return None
+        return _model_to_record(models[0])
+
+    async def get_by_primary_email(
+        self,
+        workspace_id: WorkspaceId,
+        email_address: str,
+    ) -> CanonicalLeadRecord | None:
+        normalized_email = _normalized_email(email_address)
+        if normalized_email is None:
+            return None
+        normalized_primary_email = func.lower(func.btrim(LeadModel.primary_email))
+        result = await self._session.execute(
+            select(LeadModel)
+            .where(LeadModel.workspace_id == workspace_id)
+            .where(LeadModel.primary_email.is_not(None))
+            .where(normalized_primary_email == normalized_email)
+            .limit(2),
+        )
+        models = result.scalars().all()
+        if len(models) != 1:
+            return None
+        return _model_to_record(models[0])
 
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         now = datetime.now(UTC)
@@ -212,6 +254,29 @@ def _model_to_record(model: LeadModel) -> CanonicalLeadRecord:
         latest_property_price_band=model.latest_property_price_band,
         latest_property_context_present=model.latest_property_context_present,
     )
+
+
+def _phone_match_candidates(phone_number: str) -> tuple[str, ...]:
+    digits_only = "".join(character for character in phone_number if character.isdigit())
+    if not digits_only:
+        return ()
+    candidates: list[str] = [digits_only]
+    if len(digits_only) == 11 and digits_only.startswith("1"):
+        candidates.append(digits_only[1:])
+    elif len(digits_only) == 10:
+        candidates.append(f"1{digits_only}")
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return tuple(ordered)
+
+
+def _normalized_email(email_address: str) -> str | None:
+    normalized = email_address.strip().lower()
+    return normalized or None
 
 
 def _by_id_statement(

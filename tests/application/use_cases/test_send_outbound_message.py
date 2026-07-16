@@ -59,6 +59,32 @@ class FakeLeadRepository:
     ) -> CanonicalLeadRecord | None:
         return None
 
+    async def get_by_primary_phone(
+        self,
+        workspace_id: WorkspaceId,
+        phone_number: str,
+    ) -> CanonicalLeadRecord | None:
+        if (
+            self.lead
+            and self.lead.workspace_id == workspace_id
+            and self.lead.primary_phone == phone_number
+        ):
+            return self.lead
+        return None
+
+    async def get_by_primary_email(
+        self,
+        workspace_id: WorkspaceId,
+        email_address: str,
+    ) -> CanonicalLeadRecord | None:
+        if (
+            self.lead
+            and self.lead.workspace_id == workspace_id
+            and self.lead.primary_email == email_address
+        ):
+            return self.lead
+        return None
+
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         self.lead = record
         return record

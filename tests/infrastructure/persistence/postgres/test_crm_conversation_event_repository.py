@@ -48,7 +48,7 @@ class _FakeResult:
 class _FakeSession:
     def __init__(self, result: _FakeResult) -> None:
         self._result = result
-        self.statements: list[object] = []
+        self.statements: list[Any] = []
 
     async def execute(self, statement: object) -> _FakeResult:
         self.statements.append(statement)

@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -11,6 +12,7 @@ from app.application.ports.repositories import (
     CampaignEnrollmentRepository,
     LeadWorkflowRepository,
     WorkflowTransitionRepository,
+    WorkspaceOperationalControlRepository,
 )
 from app.application.ports.temporal import TemporalWorkflowStarter
 from app.application.services.campaign_enrollment_starter import start_single_campaign_enrollment
@@ -203,6 +205,8 @@ async def start_lead_manual_enrollment(
     temporal_workflow_starter: TemporalWorkflowStarter,
     event_bus: EventBus | None,
     now: datetime,
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
+    commit: Callable[[], Awaitable[None]] | None = None,
 ) -> StartLeadManualEnrollmentResult:
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
     if lead is None:
@@ -251,7 +255,9 @@ async def start_lead_manual_enrollment(
         campaign_enrollment_repository=campaign_enrollment_repository,
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
+        workspace_operational_control_repository=workspace_operational_control_repository,
         temporal_workflow_starter=temporal_workflow_starter,
+        commit=commit,
         now=now,
         event_bus=event_bus,
     )

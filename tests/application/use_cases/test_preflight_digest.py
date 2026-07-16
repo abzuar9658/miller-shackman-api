@@ -45,6 +45,28 @@ class FakePreflightDigestRepository:
         self.records: dict[tuple[WorkspaceId, CampaignId, str], PreflightDigestRecord] = {}
         self.save_count = 0
 
+    async def list_digests_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 50,
+    ) -> tuple[PreflightDigestRecord, ...]:
+        return tuple(
+            record
+            for (record_workspace_id, _, _), record in self.records.items()
+            if record_workspace_id == workspace_id
+        )[:limit]
+
+    async def get_digest_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        digest_id: str,
+    ) -> PreflightDigestRecord | None:
+        for record in self.records.values():
+            if record.workspace_id == workspace_id and record.digest_id == digest_id:
+                return record
+        return None
+
     async def get_digest(
         self,
         workspace_id: WorkspaceId,

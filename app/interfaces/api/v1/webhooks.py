@@ -1,11 +1,18 @@
+import base64
 import json
 from datetime import UTC, datetime
+from email.utils import parseaddr
 from typing import Annotated
+from uuid import UUID
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from pydantic import TypeAdapter, ValidationError
 from sendgrid.helpers.eventwebhook import EventWebhook
+from starlette.datastructures import FormData, UploadFile
 from twilio.request_validator import RequestValidator
 
 from app.application.use_cases.process_contact_suppression_event import (
@@ -29,6 +36,7 @@ from app.application.use_cases.process_provider_delivery_callback import (
 from app.core.config import Settings, get_settings
 from app.core.database import enable_postgres_service_access, set_postgres_workspace_context
 from app.domain.campaigns.outbound_message import ProviderDeliveryStatus
+from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CRMProvider
 from app.interfaces.api.dependencies.inbound import InboundServiceBundle, get_inbound_service_bundle
 from app.interfaces.api.dependencies.provider_delivery import (
@@ -42,6 +50,8 @@ from app.interfaces.api.schemas.inbound import (
     FollowUpBossCRMHumanActivityRequest,
     FollowUpBossInboundMessageRequest,
     InboundWebhookResponse,
+    SendGridInboundParsePayload,
+    TwilioInboundMessagePayload,
 )
 from app.interfaces.api.schemas.provider_delivery import (
     ProviderDeliveryWebhookResponse,
@@ -83,13 +93,184 @@ async def receive_follow_up_boss_inbound_message(
         conversation_summary_repository=bundle.conversation_summary_repository,
         handoff_repository=bundle.handoff_repository,
         crm_client=bundle.crm_client,
+        inbound_message_crm_completion_repository=bundle.inbound_message_crm_completion_repository,
         notification_provider=bundle.notification_provider,
         workspace_handoff_config_repository=bundle.workspace_handoff_config_repository,
+        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
         handoff_completion_repository=bundle.handoff_completion_repository,
         lead_workflow_repository=bundle.lead_workflow_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
         llm_client=bundle.llm_client,
         event_bus=bundle.event_bus,
+        default_openrouter_model=bundle.default_openrouter_model,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    return InboundWebhookResponse(
+        status=result.status.value,
+        external_event_id=result.external_event_id,
+        lead_id=result.lead_id,
+        conversation_id=result.conversation_id,
+        inbound_message_id=result.inbound_message_id,
+        handoff_id=result.handoff_id,
+        intent=result.intent.value if result.intent is not None else None,
+        handoff_required=result.handoff_required,
+        opt_out_detected=result.opt_out_detected,
+        reasons=[reason.value for reason in result.reasons],
+        classification_reasons=[reason.value for reason in result.classification_reasons],
+    )
+
+
+@router.post(
+    "/twilio/inbound-messages/{workspace_id}",
+    response_model=InboundWebhookResponse,
+)
+async def receive_twilio_inbound_message(
+    workspace_id: UUID,
+    request: Request,
+    bundle: Annotated[InboundServiceBundle, Depends(get_inbound_service_bundle)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> InboundWebhookResponse:
+    await set_postgres_workspace_context(bundle.session, str(workspace_id))
+    form = await request.form()
+    form_values = {key: str(value) for key, value in form.multi_items()}
+    _verify_twilio_signature_if_configured(
+        request=request,
+        settings=settings,
+        form_values=form_values,
+    )
+    payload = _validate_twilio_inbound_payload(form_values)
+    if not payload.body.strip():
+        return InboundWebhookResponse(status="rejected", reasons=["empty_body"])
+    if not _twilio_inbound_destination_allowed(payload=payload, settings=settings):
+        return InboundWebhookResponse(status="rejected", reasons=["destination_phone_mismatch"])
+    lead = await bundle.lead_repository.get_by_primary_phone(workspace_id, payload.from_phone)
+    if lead is None:
+        return InboundWebhookResponse(status="rejected", reasons=["lead_not_found"])
+    result = await process_inbound_message_event(
+        event=InboundMessageEvent(
+            workspace_id=workspace_id,
+            provider="twilio",
+            provider_event_id=payload.provider_message_id,
+            provider_message_id=payload.provider_message_id,
+            crm_lead_id=lead.crm_lead_id,
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+            channel=ContactChannel.SMS,
+            body=payload.body,
+            received_at=datetime.now(UTC),
+            from_address_redacted=_redact_phone_number(payload.from_phone),
+            to_address_redacted=_redact_phone_number(payload.to_phone),
+            payload_redacted=_twilio_inbound_payload_redacted(payload),
+        ),
+        lead_repository=bundle.lead_repository,
+        external_event_repository=bundle.external_event_repository,
+        conversation_repository=bundle.conversation_repository,
+        inbound_message_repository=bundle.inbound_message_repository,
+        conversation_summary_repository=bundle.conversation_summary_repository,
+        handoff_repository=bundle.handoff_repository,
+        crm_client=bundle.crm_client,
+        inbound_message_crm_completion_repository=bundle.inbound_message_crm_completion_repository,
+        notification_provider=bundle.notification_provider,
+        workspace_handoff_config_repository=bundle.workspace_handoff_config_repository,
+        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
+        handoff_completion_repository=bundle.handoff_completion_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        llm_client=bundle.llm_client,
+        event_bus=bundle.event_bus,
+        default_openrouter_model=bundle.default_openrouter_model,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    return InboundWebhookResponse(
+        status=result.status.value,
+        external_event_id=result.external_event_id,
+        lead_id=result.lead_id,
+        conversation_id=result.conversation_id,
+        inbound_message_id=result.inbound_message_id,
+        handoff_id=result.handoff_id,
+        intent=result.intent.value if result.intent is not None else None,
+        handoff_required=result.handoff_required,
+        opt_out_detected=result.opt_out_detected,
+        reasons=[reason.value for reason in result.reasons],
+        classification_reasons=[reason.value for reason in result.classification_reasons],
+    )
+
+
+@router.post(
+    "/sendgrid/inbound-messages/{workspace_id}",
+    response_model=InboundWebhookResponse,
+)
+async def receive_sendgrid_inbound_message(
+    workspace_id: UUID,
+    request: Request,
+    bundle: Annotated[InboundServiceBundle, Depends(get_inbound_service_bundle)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> InboundWebhookResponse:
+    await set_postgres_workspace_context(bundle.session, str(workspace_id))
+    body = await request.body()
+    _verify_sendgrid_signature_if_configured(
+        request=request,
+        settings=settings,
+        body=body,
+    )
+    form = await request.form()
+    payload = _validate_sendgrid_inbound_payload(_string_form_values(form))
+    if not payload.body.strip():
+        return InboundWebhookResponse(status="rejected", reasons=["empty_body"])
+    to_email_address = payload.to_email_address
+    if to_email_address is None:
+        return InboundWebhookResponse(status="rejected", reasons=["invalid_to_address"])
+    contact_policy = await bundle.workspace_contact_policy_repository.get_by_workspace_id(
+        workspace_id,
+    )
+    if contact_policy is not None and contact_policy.inbound_email_address is not None:
+        if to_email_address != contact_policy.inbound_email_address.strip().lower():
+            return InboundWebhookResponse(
+                status="rejected",
+                reasons=["inbound_email_address_mismatch"],
+            )
+    from_email_address = payload.from_email_address
+    if from_email_address is None:
+        return InboundWebhookResponse(status="rejected", reasons=["invalid_from_address"])
+    lead = await bundle.lead_repository.get_by_primary_email(
+        workspace_id,
+        from_email_address,
+    )
+    if lead is None:
+        return InboundWebhookResponse(status="rejected", reasons=["lead_not_found"])
+    result = await process_inbound_message_event(
+        event=InboundMessageEvent(
+            workspace_id=workspace_id,
+            provider="sendgrid",
+            provider_event_id=payload.provider_message_id or "",
+            provider_message_id=payload.provider_message_id or "",
+            crm_lead_id=lead.crm_lead_id,
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+            channel=ContactChannel.EMAIL,
+            body=payload.body,
+            received_at=datetime.now(UTC),
+            from_address_redacted=_redact_email_address(payload.from_email_address),
+            to_address_redacted=_redact_email_address(payload.to_email_address),
+            payload_redacted=_sendgrid_inbound_payload_redacted(payload),
+        ),
+        lead_repository=bundle.lead_repository,
+        external_event_repository=bundle.external_event_repository,
+        conversation_repository=bundle.conversation_repository,
+        inbound_message_repository=bundle.inbound_message_repository,
+        conversation_summary_repository=bundle.conversation_summary_repository,
+        handoff_repository=bundle.handoff_repository,
+        crm_client=bundle.crm_client,
+        inbound_message_crm_completion_repository=bundle.inbound_message_crm_completion_repository,
+        notification_provider=bundle.notification_provider,
+        workspace_handoff_config_repository=bundle.workspace_handoff_config_repository,
+        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
+        handoff_completion_repository=bundle.handoff_completion_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        llm_client=bundle.llm_client,
+        event_bus=bundle.event_bus,
+        default_openrouter_model=bundle.default_openrouter_model,
         now=datetime.now(UTC),
     )
     await bundle.session.commit()
@@ -138,6 +319,7 @@ async def receive_follow_up_boss_human_activity_event(
         lead_workflow_repository=bundle.lead_workflow_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
         lead_nurture_workflow_signaler=bundle.lead_nurture_workflow_signaler,
+        commit=bundle.session.commit,
         now=datetime.now(UTC),
     )
     await bundle.session.commit()
@@ -184,6 +366,7 @@ async def receive_follow_up_boss_contact_suppression_event(
         workflow_transition_repository=bundle.workflow_transition_repository,
         workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
         lead_nurture_workflow_signaler=bundle.lead_nurture_workflow_signaler,
+        commit=bundle.session.commit,
         now=datetime.now(UTC),
     )
     await bundle.session.commit()
@@ -316,6 +499,20 @@ def _validate_twilio_payload(form_values: dict[str, str]) -> TwilioMessageStatus
         raise RequestValidationError(exc.errors()) from exc
 
 
+def _validate_twilio_inbound_payload(form_values: dict[str, str]) -> TwilioInboundMessagePayload:
+    try:
+        return TwilioInboundMessagePayload.model_validate(form_values)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+
+def _validate_sendgrid_inbound_payload(form_values: dict[str, str]) -> SendGridInboundParsePayload:
+    try:
+        return SendGridInboundParsePayload.model_validate(form_values)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+
 def _validate_sendgrid_payload(body: bytes) -> tuple[SendGridEventWebhookPayload, ...]:
     try:
         raw_payload = json.loads(body)
@@ -366,15 +563,16 @@ def _verify_sendgrid_signature_if_configured(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="missing_sendgrid_signature"
         )
     event_webhook = EventWebhook()
-    if not event_webhook.verify_signature(
-        public_key=event_webhook.convert_public_key_to_ecdsa(public_key.get_secret_value()),
-        payload=body.decode("utf-8"),
-        signature=signature,
-        timestamp=timestamp,
-    ):
+    try:
+        event_webhook.convert_public_key_to_ecdsa(public_key.get_secret_value()).verify(
+            base64.b64decode(signature),
+            timestamp.encode("utf-8") + body,
+            ec.ECDSA(hashes.SHA256()),
+        )
+    except (InvalidSignature, ValueError, TypeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_sendgrid_signature"
-        )
+        ) from exc
 
 
 def _twilio_provider_event_id(payload: TwilioMessageStatusCallbackPayload) -> str:
@@ -435,6 +633,72 @@ def _twilio_payload_redacted(
         "error_code": payload.error_code,
         "error_message": payload.error_message,
     }
+
+
+def _twilio_inbound_payload_redacted(payload: TwilioInboundMessagePayload) -> dict[str, object]:
+    return {
+        "provider_message_id": payload.provider_message_id,
+        "num_media": payload.num_media,
+        "account_sid_present": payload.account_sid is not None,
+    }
+
+
+def _sendgrid_inbound_payload_redacted(payload: SendGridInboundParsePayload) -> dict[str, object]:
+    return {
+        "provider_message_id": payload.provider_message_id,
+        "subject_present": payload.subject is not None,
+        "attachments": payload.attachments,
+        "attachment_info_present": payload.attachment_info is not None,
+        "charsets_present": payload.charsets is not None,
+        "sender_ip_present": payload.sender_ip is not None,
+        "spam_score": payload.spam_score,
+    }
+
+
+def _twilio_inbound_destination_allowed(
+    *,
+    payload: TwilioInboundMessagePayload,
+    settings: Settings,
+) -> bool:
+    configured_from_phone = settings.twilio_from_phone.strip()
+    if not configured_from_phone:
+        return True
+    return _normalized_phone_digits(payload.to_phone) == _normalized_phone_digits(
+        configured_from_phone
+    )
+
+
+def _redact_phone_number(phone_number: str | None) -> str | None:
+    if phone_number is None:
+        return None
+    digits_only = _normalized_phone_digits(phone_number)
+    if not digits_only:
+        return "***"
+    return f"***{digits_only[-4:]}" if len(digits_only) >= 4 else "***"
+
+
+def _normalized_phone_digits(phone_number: str) -> str:
+    return "".join(character for character in phone_number if character.isdigit())
+
+
+def _redact_email_address(email_address: str | None) -> str | None:
+    if email_address is None:
+        return None
+    _, parsed_address = parseaddr(email_address)
+    normalized = parsed_address.strip().lower()
+    if not normalized or "@" not in normalized:
+        return "***"
+    _, domain = normalized.split("@", 1)
+    return f"***@{domain}"
+
+
+def _string_form_values(form: FormData) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for key, value in form.multi_items():
+        if isinstance(value, UploadFile):
+            continue
+        values[str(key)] = str(value)
+    return values
 
 
 def _sendgrid_payload_redacted(

@@ -3,7 +3,12 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from uuid import UUID
 
+from app.application.ports.crm import CanonicalLead, CRMActivity
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
+from app.application.services.llm.reply_classification import InboundReplyIntent
+from app.application.use_cases.complete_inbound_message_crm_sync import (
+    CompleteInboundMessageCRMSyncStatus,
+)
 from app.application.use_cases.process_inbound_message_event import (
     InboundMessageEvent,
     ProcessInboundMessageEventReasonCode,
@@ -12,10 +17,16 @@ from app.application.use_cases.process_inbound_message_event import (
 )
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
-from app.domain.conversations import Conversation, ConversationSummary, Handoff, InboundMessage
+from app.domain.conversations import (
+    Conversation,
+    ConversationSummary,
+    Handoff,
+    InboundMessage,
+)
 from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
 from app.domain.events import DomainEvent, DomainEventType
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.llm import WorkspaceLLMConfig
 
 NOW = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -55,6 +66,49 @@ class FakeLeadRepository:
             and self.lead.crm_provider == crm_provider
             and self.lead.crm_lead_id == crm_lead_id
         ):
+            return self.lead
+        return None
+
+    async def get_by_primary_phone(
+        self,
+        workspace_id: WorkspaceId,
+        phone_number: str,
+    ) -> CanonicalLeadRecord | None:
+        if (
+            self.lead is None
+            or self.lead.workspace_id != workspace_id
+            or self.lead.primary_phone is None
+        ):
+            return None
+        requested = _normalized_phone(phone_number)
+        stored = _normalized_phone(self.lead.primary_phone)
+        if requested is None or stored is None:
+            return None
+        candidates = {requested}
+        if len(requested) == 11 and requested.startswith("1"):
+            candidates.add(requested[1:])
+        elif len(requested) == 10:
+            candidates.add(f"1{requested}")
+        if stored in candidates:
+            return self.lead
+        return None
+
+    async def get_by_primary_email(
+        self,
+        workspace_id: WorkspaceId,
+        email_address: str,
+    ) -> CanonicalLeadRecord | None:
+        if (
+            self.lead is None
+            or self.lead.workspace_id != workspace_id
+            or self.lead.primary_email is None
+        ):
+            return None
+        requested = email_address.strip().lower()
+        stored = self.lead.primary_email.strip().lower()
+        if not requested or not stored:
+            return None
+        if requested == stored:
             return self.lead
         return None
 
@@ -125,9 +179,43 @@ class FakeConversationSummaryRepository:
         return summary
 
 
+class FakeInboundMessageCRMCompletionRepository:
+    def __init__(self, record: object | None = None) -> None:
+        self.record = record
+
+    async def get_by_inbound_message_id(
+        self,
+        workspace_id: WorkspaceId,
+        inbound_message_id: UUID,
+    ) -> object | None:
+        if self.record is None:
+            return None
+        if (
+            getattr(self.record, "workspace_id", None) == workspace_id
+            and getattr(self.record, "inbound_message_id", None) == inbound_message_id
+        ):
+            return self.record
+        return None
+
+    async def save(self, record: object) -> object:
+        self.record = record
+        return record
+
+
 class FakeHandoffRepository:
     def __init__(self) -> None:
         self.saved: list[Handoff] = []
+
+    async def list_handoffs(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[Handoff, ...]:
+        handoffs = tuple(
+            handoff for handoff in self.saved if handoff.workspace_id == workspace_id
+        )
+        return handoffs[:limit]
 
     async def get_by_id(self, workspace_id: WorkspaceId, handoff_id: UUID) -> Handoff | None:
         for handoff in self.saved:
@@ -164,6 +252,109 @@ class FakeLLMClient:
         )
 
 
+class FakeWorkspaceLLMConfigRepository:
+    def __init__(self, config: WorkspaceLLMConfig | None) -> None:
+        self.config = config
+
+    async def get_by_workspace_id(self, workspace_id: WorkspaceId) -> WorkspaceLLMConfig | None:
+        if self.config is not None and self.config.workspace_id == workspace_id:
+            return self.config
+        return None
+
+    async def save(self, config: WorkspaceLLMConfig) -> WorkspaceLLMConfig:
+        self.config = config
+        return config
+
+
+class FakeCRMClient:
+    supports_custom_fields = True
+    supports_tags = True
+    supports_notes = True
+    supports_webhooks = False
+
+    def __init__(
+        self,
+        *,
+        lead_updated_at: datetime | None = None,
+        activity_timestamps: tuple[datetime, ...] = (),
+    ) -> None:
+        self.calls: list[str] = []
+        self.notes: list[str] = []
+        self._lead_updated_at = lead_updated_at
+        self._activity_timestamps = activity_timestamps
+
+    async def validate_connection(self, workspace_id: WorkspaceId) -> bool:
+        return True
+
+    async def get_lead(self, workspace_id: WorkspaceId, crm_lead_id: str) -> CanonicalLead | None:
+        self.calls.append("get_lead")
+        return CanonicalLead(
+            workspace_id=workspace_id,
+            crm_lead_id=crm_lead_id,
+            first_name="Jamie",
+            last_name="Lead",
+            email="lead@example.com",
+            phone="+15555550123",
+            updated_at=self._lead_updated_at,
+        )
+
+    async def search_leads(
+        self,
+        workspace_id: WorkspaceId,
+        tag: str | None = None,
+        limit: int = 100,
+    ) -> list[CanonicalLead]:
+        return []
+
+    async def get_recent_activity(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+        limit: int = 50,
+    ) -> list[CRMActivity]:
+        self.calls.append("get_recent_activity")
+        return [
+            CRMActivity(
+                crm_activity_id=f"activity-{index}",
+                activity_type="Note",
+                timestamp=timestamp,
+                content="recent activity",
+            )
+            for index, timestamp in enumerate(self._activity_timestamps, start=1)
+        ]
+
+    async def get_assigned_agent(self, workspace_id: WorkspaceId, crm_lead_id: str) -> None:
+        return None
+
+    async def add_note(self, workspace_id: WorkspaceId, crm_lead_id: str, content: str) -> None:
+        self.calls.append("add_note")
+        self.notes.append(content)
+
+    async def add_tag(self, workspace_id: WorkspaceId, crm_lead_id: str, tag: str) -> None:
+        return None
+
+    async def remove_tag(self, workspace_id: WorkspaceId, crm_lead_id: str, tag: str) -> None:
+        return None
+
+    async def update_custom_fields(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+        fields: dict[str, str],
+    ) -> None:
+        return None
+
+    async def subscribe_to_events(self, workspace_id: WorkspaceId, webhook_url: str) -> None:
+        return None
+
+
+def _normalized_phone(phone_number: str | None) -> str | None:
+    if phone_number is None:
+        return None
+    digits_only = "".join(character for character in phone_number if character.isdigit())
+    return digits_only or None
+
+
 def _lead() -> CanonicalLeadRecord:
     return CanonicalLeadRecord(
         workspace_id=WORKSPACE_ID,
@@ -176,6 +367,10 @@ def _lead() -> CanonicalLeadRecord:
         lead_stage="long_term_nurture",
         assigned_agent_crm_id="agent-99",
         has_accountable_owner=True,
+        primary_phone="+15555550123",
+        has_phone=True,
+        has_sms_capable_phone=True,
+        phone_count=1,
     )
 
 
@@ -305,6 +500,37 @@ async def test_creates_handoff_for_human_request() -> None:
     assert event_bus.events[1].payload["handoff_id"] == str(HANDOFF_ID)
 
 
+async def test_uses_workspace_llm_model_for_classification() -> None:
+    llm = FakeLLMClient(
+        _classification_json(
+            intent="human_requested",
+            handoff_required=True,
+            handoff_reason="human_requested",
+        )
+    )
+
+    await process_inbound_message_event(
+        event=_event(),
+        lead_repository=FakeLeadRepository(_lead()),
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=FakeConversationRepository(),
+        inbound_message_repository=FakeInboundMessageRepository(),
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        llm_client=llm,
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(
+            WorkspaceLLMConfig(
+                workspace_id=WORKSPACE_ID,
+                openrouter_model="openai/gpt-4.1-mini",
+            )
+        ),
+        default_openrouter_model="openai/gpt-4o-mini",
+        now=NOW,
+    )
+
+    assert llm.requests[0].model == "openai/gpt-4.1-mini"
+
+
 async def test_processes_opt_out_without_handoff() -> None:
     conversations = FakeConversationRepository()
     handoffs = FakeHandoffRepository()
@@ -361,3 +587,157 @@ async def test_returns_processed_with_classification_rejection_reason() -> None:
 
     assert result.status == ProcessInboundMessageEventStatus.PROCESSED
     assert result.reasons == (ProcessInboundMessageEventReasonCode.CLASSIFICATION_REJECTED,)
+
+
+async def test_provider_owned_inbound_reply_syncs_back_to_crm_after_refresh() -> None:
+    crm_client = FakeCRMClient(activity_timestamps=(datetime(2026, 7, 8, 12, 5, tzinfo=UTC),))
+    crm_sync_repo = FakeInboundMessageCRMCompletionRepository()
+
+    result = await process_inbound_message_event(
+        event=InboundMessageEvent(
+            workspace_id=WORKSPACE_ID,
+            provider="twilio",
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+            provider_event_id="evt-twilio-1",
+            provider_message_id="SM123",
+            crm_lead_id="crm-123",
+            channel=ContactChannel.SMS,
+            body="Please stop texting me and have an agent call.",
+            received_at=NOW,
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=FakeConversationRepository(),
+        inbound_message_repository=FakeInboundMessageRepository(),
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        llm_client=FakeLLMClient(
+            _classification_json(
+                intent="human_requested",
+                handoff_required=True,
+                handoff_reason="human_requested",
+                summary_text="Lead asked for a human callback.",
+            ),
+        ),
+        crm_client=crm_client,
+        inbound_message_crm_completion_repository=crm_sync_repo,
+        now=NOW,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.crm_sync_status == CompleteInboundMessageCRMSyncStatus.COMPLETED
+    assert crm_client.calls == ["get_lead", "get_recent_activity", "add_note"]
+    assert crm_client.notes
+    assert "CRM updates detected before sync: yes" in crm_client.notes[0]
+    assert getattr(crm_sync_repo.record, "completed_at", None) == NOW
+
+
+async def test_follow_up_boss_sourced_inbound_reply_does_not_write_back_to_crm() -> None:
+    crm_client = FakeCRMClient()
+
+    result = await process_inbound_message_event(
+        event=_event(),
+        lead_repository=FakeLeadRepository(_lead()),
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=FakeConversationRepository(),
+        inbound_message_repository=FakeInboundMessageRepository(),
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        llm_client=FakeLLMClient(
+            _classification_json(
+                intent="human_requested",
+                handoff_required=True,
+                handoff_reason="human_requested",
+            ),
+        ),
+        crm_client=crm_client,
+        inbound_message_crm_completion_repository=FakeInboundMessageCRMCompletionRepository(),
+        now=NOW,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.crm_sync_status is None
+    assert crm_client.calls == []
+
+
+async def test_explicit_sms_opt_out_is_applied_even_when_llm_rejects() -> None:
+    lead_repository = FakeLeadRepository(_lead())
+
+    result = await process_inbound_message_event(
+        event=InboundMessageEvent(
+            workspace_id=WORKSPACE_ID,
+            provider="twilio",
+            provider_event_id="SMSTOP1",
+            provider_message_id="SMSTOP1",
+            crm_lead_id="crm-123",
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+            channel=ContactChannel.SMS,
+            body="STOP",
+            received_at=NOW,
+        ),
+        lead_repository=lead_repository,
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=FakeConversationRepository(),
+        inbound_message_repository=FakeInboundMessageRepository(),
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        llm_client=FakeLLMClient(
+            _classification_json(
+                intent="general_reply",
+                handoff_required=False,
+                handoff_reason=None,
+                confidence=0.10,
+                summary_text="Lead replied.",
+            )
+        ),
+        now=NOW,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.intent == InboundReplyIntent.OPT_OUT
+    assert result.opt_out_detected is True
+    assert result.reasons == ()
+    assert lead_repository.lead is not None
+    assert lead_repository.lead.sms_opted_out is True
+
+
+async def test_explicit_email_unsubscribe_is_applied_even_when_llm_rejects() -> None:
+    lead_repository = FakeLeadRepository(_lead())
+
+    result = await process_inbound_message_event(
+        event=InboundMessageEvent(
+            workspace_id=WORKSPACE_ID,
+            provider="sendgrid",
+            provider_event_id="email-1",
+            provider_message_id="email-1",
+            crm_lead_id="crm-123",
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+            channel=ContactChannel.EMAIL,
+            body="unsubscribe",
+            received_at=NOW,
+        ),
+        lead_repository=lead_repository,
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=FakeConversationRepository(),
+        inbound_message_repository=FakeInboundMessageRepository(),
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        llm_client=FakeLLMClient(
+            _classification_json(
+                intent="general_reply",
+                handoff_required=False,
+                handoff_reason=None,
+                confidence=0.10,
+                summary_text="Lead replied.",
+            )
+        ),
+        now=NOW,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.intent == InboundReplyIntent.OPT_OUT
+    assert result.opt_out_detected is True
+    assert result.reasons == ()
+    assert lead_repository.lead is not None
+    assert lead_repository.lead.email_unsubscribed is True

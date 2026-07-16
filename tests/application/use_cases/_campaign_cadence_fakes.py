@@ -11,7 +11,9 @@ from app.domain.compliance.contactability import WorkspaceContactPolicy
 from app.domain.conversations import CrmConversationEvent
 from app.domain.identity import Workspace
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.llm import WorkspaceLLMConfig
 from app.domain.workflows import LeadWorkflow, WorkflowTransition
+from app.domain.workspace_automation import WorkspaceOperationalControl
 
 
 class FakeCampaignExecutionRepository:
@@ -80,6 +82,51 @@ class FakeWorkspaceContactPolicyRepository:
         return policy
 
 
+class FakeWorkspaceLLMConfigRepository:
+    def __init__(self, config: WorkspaceLLMConfig | None = None) -> None:
+        self.config = config
+        self.saved: list[WorkspaceLLMConfig] = []
+
+    async def get_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceLLMConfig | None:
+        if self.config is None:
+            return None
+        if self.config.workspace_id != workspace_id:
+            return None
+        return self.config
+
+    async def save(self, config: WorkspaceLLMConfig) -> WorkspaceLLMConfig:
+        self.saved.append(config)
+        self.config = config
+        return config
+
+
+class FakeWorkspaceOperationalControlRepository:
+    def __init__(self, control: WorkspaceOperationalControl | None = None) -> None:
+        self.control = control
+        self.saved: list[WorkspaceOperationalControl] = []
+
+    async def get_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceOperationalControl | None:
+        if self.control is None:
+            return None
+        if self.control.workspace_id != workspace_id:
+            return None
+        return self.control
+
+    async def save(
+        self,
+        control: WorkspaceOperationalControl,
+    ) -> WorkspaceOperationalControl:
+        self.saved.append(control)
+        self.control = control
+        return control
+
+
 class FakeLeadRepository:
     def __init__(self, lead: CanonicalLeadRecord | None) -> None:
         self.lead = lead
@@ -116,10 +163,80 @@ class FakeLeadRepository:
     ) -> CanonicalLeadRecord | None:
         return self.by_crm_id.get((workspace_id, crm_provider, crm_lead_id))
 
+    async def get_by_primary_phone(
+        self,
+        workspace_id: WorkspaceId,
+        phone_number: str,
+    ) -> CanonicalLeadRecord | None:
+        normalized = _normalized_phone(phone_number)
+        if normalized is None:
+            return None
+        candidates = {normalized}
+        if len(normalized) == 11 and normalized.startswith("1"):
+            candidates.add(normalized[1:])
+        elif len(normalized) == 10:
+            candidates.add(f"1{normalized}")
+        matches = [
+            lead
+            for (lead_workspace_id, _), lead in self.by_id.items()
+            if lead_workspace_id == workspace_id
+            and lead.primary_phone is not None
+            and _normalized_phone(lead.primary_phone) in candidates
+        ]
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
+    async def get_by_primary_email(
+        self,
+        workspace_id: WorkspaceId,
+        email_address: str,
+    ) -> CanonicalLeadRecord | None:
+        normalized = _normalized_email(email_address)
+        if normalized is None:
+            return None
+        matches = [
+            lead
+            for (lead_workspace_id, _), lead in self.by_id.items()
+            if lead_workspace_id == workspace_id
+            and lead.primary_email is not None
+            and _normalized_email(lead.primary_email) == normalized
+        ]
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         self.saved.append(record)
         self._store(record)
         return record
+
+    async def list_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        matches = tuple(
+            lead
+            for (lead_workspace_id, _), lead in self.by_id.items()
+            if lead_workspace_id == workspace_id
+        )
+        return matches[:limit]
+
+
+def _normalized_phone(phone_number: str | None) -> str | None:
+    if phone_number is None:
+        return None
+    digits_only = "".join(character for character in phone_number if character.isdigit())
+    return digits_only or None
+
+
+def _normalized_email(email_address: str | None) -> str | None:
+    if email_address is None:
+        return None
+    normalized = email_address.strip().lower()
+    return normalized or None
 
 
 class FakeLeadWorkflowRepository:
@@ -145,6 +262,19 @@ class FakeLeadWorkflowRepository:
         self.workflows[workflow.workflow_id] = workflow
         self.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow
         return workflow
+
+    async def list_latest_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadWorkflow, ...]:
+        matches = tuple(
+            workflow
+            for workflow in self.latest_by_lead.values()
+            if workflow.workspace_id == workspace_id
+        )
+        return matches[:limit]
 
 
 class FakeWorkflowTransitionRepository:
@@ -236,6 +366,37 @@ class FakeCrmConversationEventRepository:
 class FakeRejectedDraftReviewRepository:
     def __init__(self) -> None:
         self.saved: list[RejectedDraftReview] = []
+
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        review_id: UUID,
+    ) -> RejectedDraftReview | None:
+        for review in self.saved:
+            if review.workspace_id == workspace_id and review.review_id == review_id:
+                return review
+        return None
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        review_id: UUID,
+    ) -> RejectedDraftReview | None:
+        return await self.get_by_id(workspace_id, review_id)
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 20,
+    ) -> tuple[RejectedDraftReview, ...]:
+        matches = tuple(
+            review
+            for review in self.saved
+            if review.workspace_id == workspace_id and review.lead_id == lead_id
+        )
+        return matches[:limit]
 
     async def save(self, review: RejectedDraftReview) -> RejectedDraftReview:
         self.saved.append(review)

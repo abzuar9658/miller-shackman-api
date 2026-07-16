@@ -4,7 +4,10 @@ from uuid import uuid4
 
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
 from app.application.services.llm.outbound_message_drafting import (
+    ApprovedOutboundConversationItem,
     ApprovedOutboundLeadContext,
+    ApprovedOutboundListingContext,
+    ApprovedOutboundListingMatch,
     OutboundMessageDraftReasonCode,
     OutboundMessageDraftStatus,
     draft_outbound_message,
@@ -73,8 +76,24 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
         assigned_agent_name="Alex Agent",
         lead_context=ApprovedOutboundLeadContext(
             conversation_summary="Lead was previously browsing buyer resources.",
+            conversation_memory_summary=(
+                "Conversation memory: Lead previously discussed Riverdale and a 2 bed budget."
+            ),
             latest_lead_request="Asked about homes near Austin.",
             extracted_preferences={"location": "Austin"},
+            recent_conversation_items=(
+                ApprovedOutboundConversationItem(
+                    occurred_at=NOW.isoformat(),
+                    title="Inbound message",
+                    content="We are still looking in Riverdale and want 2 beds.",
+                    direction="inbound",
+                    channel="sms",
+                    actor_name="lead",
+                ),
+            ),
+            recent_outbound_messages=(
+                "Just checking whether Riverdale is still the right area for you.",
+            ),
         ),
         llm_client=llm,
     )
@@ -83,9 +102,50 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
     assert result.body == "Hi — are you still thinking about making a move this year?"
     assert result.model == "openai/gpt-4o-mini"
     assert result.usage_tokens == 42
-    assert llm.requests[0].prompt_version == "outbound_message_draft:v1"
+    assert llm.requests[0].prompt_version == "outbound_message_draft:v2"
     assert "Austin" in llm.requests[0].prompt
     assert "Do not invent listings" in llm.requests[0].prompt
+    assert "conversation_memory_summary" in llm.requests[0].prompt
+    assert "recent_conversation_items" in llm.requests[0].prompt
+    assert "recent_outbound_messages" in llm.requests[0].prompt
+    assert "Avoid repeating the same greeting" in llm.requests[0].prompt
+
+
+async def test_includes_approved_listing_context_in_prompt_when_present() -> None:
+    llm = FakeLLMClient(_draft_json())
+
+    await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name="Alex Agent",
+        lead_context=ApprovedOutboundLeadContext(
+            extracted_preferences={"location": "Bronx"},
+            listing_context=ApprovedOutboundListingContext(
+                source_name="StreetEasy",
+                search_summary="sale in Bronx up to $750,000",
+                result_count=1,
+                matches=(
+                    ApprovedOutboundListingMatch(
+                        title="Single-family house in Throgs Neck",
+                        address_text="2738 Miles Avenue, Bronx, NY 10465",
+                        neighborhood="Throgs Neck",
+                        price_text="$650,000",
+                        beds_text="4 bd",
+                        baths_text="1 ba",
+                        source_url="https://streeteasy.com/building/2738-miles-avenue-bronx/1",
+                        scraped_at=NOW.isoformat(),
+                    ),
+                ),
+            ),
+        ),
+        llm_client=llm,
+    )
+
+    assert "approved_listing_context" in llm.requests[0].prompt
+    assert "2738 Miles Avenue" in llm.requests[0].prompt
+    assert "StreetEasy" in llm.requests[0].prompt
 
 
 async def test_rejects_invalid_json_response() -> None:

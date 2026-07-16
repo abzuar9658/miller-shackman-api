@@ -1,9 +1,11 @@
+from pytest import MonkeyPatch
+
 from app.core.config import Settings
 from app.interfaces.workers.temporal_worker import main
 
 
 async def test_temporal_worker_main_configures_logging_and_runs(
-    monkeypatch,
+    monkeypatch: MonkeyPatch,
 ) -> None:
     settings = Settings(log_level="DEBUG")
     captured: dict[str, object] = {}

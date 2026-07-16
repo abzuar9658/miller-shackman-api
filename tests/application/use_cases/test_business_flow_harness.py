@@ -3,7 +3,7 @@ from datetime import UTC, datetime, time
 from typing import cast
 from uuid import UUID
 
-from app.application.ports.crm import CRMAgent, CRMClient
+from app.application.ports.crm import CanonicalLead, CRMActivity, CRMAgent, CRMClient
 from app.application.ports.crm_sync import CanonicalLeadSnapshotPage
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
 from app.application.ports.notifications import (
@@ -40,7 +40,13 @@ from app.domain.conversations import (
     InboundMessage,
     WorkspaceHandoffConfig,
 )
-from app.domain.crm_sync import CRMSyncJob, CRMSyncJobStatus, CRMSyncType, ExternalEvent
+from app.domain.crm_sync import (
+    CRMSyncJob,
+    CRMSyncJobStatus,
+    CRMSyncLeadSort,
+    CRMSyncType,
+    ExternalEvent,
+)
 from app.domain.identity import Workspace, WorkspaceStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
@@ -79,6 +85,9 @@ ACTOR_ID = UUID("00000000-0000-0000-0000-000000000012")
 class FakeCRMSyncJobRepository:
     def __init__(self) -> None:
         self.saved: list[CRMSyncJob] = []
+        self.active_job: CRMSyncJob | None = None
+        self.latest_job: CRMSyncJob | None = None
+        self.latest_completed_job: CRMSyncJob | None = None
 
     async def get_by_id(self, workspace_id: WorkspaceId, sync_job_id: UUID) -> CRMSyncJob | None:
         return next((job for job in self.saved if job.sync_job_id == sync_job_id), None)
@@ -90,8 +99,65 @@ class FakeCRMSyncJobRepository:
     ) -> tuple[CRMSyncJob, ...]:
         return tuple(self.saved[-limit:])
 
+    async def get_latest_for_workspace_provider(
+        self,
+        workspace_id: WorkspaceId,
+        crm_provider: str,
+    ) -> CRMSyncJob | None:
+        _ = (workspace_id, crm_provider)
+        return self.latest_job
+
+    async def get_latest_completed_for_workspace_provider(
+        self,
+        workspace_id: WorkspaceId,
+        crm_provider: str,
+    ) -> CRMSyncJob | None:
+        _ = (workspace_id, crm_provider)
+        return self.latest_completed_job
+
+    async def get_active_for_workspace_provider(
+        self,
+        workspace_id: WorkspaceId,
+        crm_provider: str,
+    ) -> CRMSyncJob | None:
+        _ = (workspace_id, crm_provider)
+        return self.active_job
+
+    async def insert_pending_if_no_active(self, job: CRMSyncJob) -> CRMSyncJob | None:
+        if self.active_job is not None:
+            return None
+        self.active_job = job
+        self.latest_job = job
+        self.saved.append(job)
+        return job
+
+    async def claim_pending_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        sync_job_id: UUID,
+        *,
+        now: datetime,
+    ) -> CRMSyncJob | None:
+        _ = now
+        pending = next(
+            (
+                job
+                for job in self.saved
+                if job.workspace_id == workspace_id and job.sync_job_id == sync_job_id
+            ),
+            None,
+        )
+        self.active_job = pending
+        return pending
+
     async def save(self, job: CRMSyncJob) -> CRMSyncJob:
         self.saved.append(job)
+        self.latest_job = job
+        self.active_job = (
+            job if job.status in {CRMSyncJobStatus.PENDING, CRMSyncJobStatus.RUNNING} else None
+        )
+        if job.status == CRMSyncJobStatus.COMPLETED:
+            self.latest_completed_job = job
         return job
 
 
@@ -107,8 +173,18 @@ class FakeLeadSnapshotSource:
         cursor: str | None = None,
         updated_after: datetime | None = None,
         updated_before: datetime | None = None,
+        sort_by: CRMSyncLeadSort | None = None,
         mapped_custom_field_keys: tuple[str, ...] = (),
     ) -> CanonicalLeadSnapshotPage:
+        _ = (
+            workspace_id,
+            page_size,
+            cursor,
+            updated_after,
+            updated_before,
+            sort_by,
+            mapped_custom_field_keys,
+        )
         return self.pages.pop(0)
 
 
@@ -175,6 +251,17 @@ class FakeHandoffRepository:
         self.saved: list[Handoff] = []
         self.by_id: dict[UUID, Handoff] = {}
 
+    async def list_handoffs(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[Handoff, ...]:
+        handoffs = tuple(
+            handoff for handoff in self.saved if handoff.workspace_id == workspace_id
+        )
+        return handoffs[:limit]
+
     async def get_by_id(self, workspace_id: WorkspaceId, handoff_id: UUID) -> Handoff | None:
         handoff = self.by_id.get(handoff_id)
         if handoff is None or handoff.workspace_id != workspace_id:
@@ -224,10 +311,45 @@ class FakeWorkspaceHandoffConfigRepository:
 
 
 class FakeCRMClient:
+    supports_custom_fields = True
+    supports_tags = True
+    supports_notes = True
+    supports_webhooks = False
+
     def __init__(self) -> None:
         self.notes: list[tuple[WorkspaceId, str, str]] = []
         self.tags: list[tuple[WorkspaceId, str, str]] = []
         self.updated_fields: list[tuple[WorkspaceId, str, dict[str, str]]] = []
+
+    async def validate_connection(self, workspace_id: WorkspaceId) -> bool:
+        _ = workspace_id
+        return True
+
+    async def get_lead(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+    ) -> CanonicalLead | None:
+        _ = (workspace_id, crm_lead_id)
+        return None
+
+    async def search_leads(
+        self,
+        workspace_id: WorkspaceId,
+        tag: str | None = None,
+        limit: int = 100,
+    ) -> list[CanonicalLead]:
+        _ = (workspace_id, tag, limit)
+        return []
+
+    async def get_recent_activity(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+        limit: int = 50,
+    ) -> list[CRMActivity]:
+        _ = (workspace_id, crm_lead_id, limit)
+        return []
 
     async def get_assigned_agent(
         self, workspace_id: WorkspaceId, crm_lead_id: str
@@ -240,6 +362,9 @@ class FakeCRMClient:
     async def add_tag(self, workspace_id: WorkspaceId, crm_lead_id: str, tag: str) -> None:
         self.tags.append((workspace_id, crm_lead_id, tag))
 
+    async def remove_tag(self, workspace_id: WorkspaceId, crm_lead_id: str, tag: str) -> None:
+        _ = (workspace_id, crm_lead_id, tag)
+
     async def update_custom_fields(
         self,
         workspace_id: WorkspaceId,
@@ -247,6 +372,9 @@ class FakeCRMClient:
         fields: dict[str, str],
     ) -> None:
         self.updated_fields.append((workspace_id, crm_lead_id, fields))
+
+    async def subscribe_to_events(self, workspace_id: WorkspaceId, webhook_url: str) -> None:
+        _ = (workspace_id, webhook_url)
 
 
 class FakeNotificationProvider:
@@ -481,6 +609,7 @@ def _config() -> CampaignExecutionConfig:
         timezone="America/Chicago",
         sms_compliance_required=True,
         preflight_digest_enabled=False,
+        crm_enrollment_tag=None,
         prompt_version="v1",
         approved_model="openai/gpt-4o-mini",
         cadence_steps=(_step(),),

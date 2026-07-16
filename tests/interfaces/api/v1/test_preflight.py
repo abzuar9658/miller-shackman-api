@@ -39,15 +39,30 @@ class FakePreflightDigestRepository(PreflightDigestRepository):
     def __init__(self) -> None:
         self.digest = _digest()
 
-    async def list_digests_for_workspace(self, workspace_id: UUID, *, limit: int = 50):
+    async def list_digests_for_workspace(
+        self,
+        workspace_id: UUID,
+        *,
+        limit: int = 50,
+    ) -> tuple[PreflightDigestRecord, ...]:
         return (self.digest,) if workspace_id == WORKSPACE_ID else ()
 
-    async def get_digest_by_id(self, workspace_id: UUID, digest_id: str):
+    async def get_digest_by_id(
+        self,
+        workspace_id: UUID,
+        digest_id: str,
+    ) -> PreflightDigestRecord | None:
         if workspace_id == WORKSPACE_ID and digest_id == self.digest.digest_id:
             return self.digest
         return None
 
-    async def get_digest(self, workspace_id: UUID, campaign_id: UUID, batch_id: str):
+    async def get_digest(
+        self,
+        workspace_id: UUID,
+        campaign_id: UUID,
+        batch_id: str,
+    ) -> PreflightDigestRecord | None:
+        _ = (workspace_id, campaign_id, batch_id)
         return None
 
     async def save_digest(self, record: PreflightDigestRecord) -> None:
@@ -63,8 +78,10 @@ def test_preflight_routes_return_list_and_detail_for_brokerage_admin() -> None:
     )
 
     assert list_response.status_code == 200
+    assert list_response.json()["digests"][0]["status"] == "pending"
     assert list_response.json()["digests"][0]["lead_count"] == 1
     assert detail_response.status_code == 200
+    assert detail_response.json()["digest"]["status"] == "pending"
     assert detail_response.json()["entries"][0]["vetoed"] is True
 
 

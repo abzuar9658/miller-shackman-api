@@ -1,4 +1,5 @@
 from datetime import datetime, time
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -8,7 +9,9 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
+    Text,
     Time,
     UniqueConstraint,
 )
@@ -30,7 +33,9 @@ class LeadModel(Base):
             "crm_lead_id",
             name="uq_leads_workspace_crm_identity",
         ),
+        Index("ix_leads_workspace_primary_email", "workspace_id", "primary_email"),
         Index("ix_leads_workspace_lead_type", "workspace_id", "lead_type"),
+        Index("ix_leads_workspace_primary_phone", "workspace_id", "primary_phone"),
         Index(
             "ix_leads_workspace_last_meaningful",
             "workspace_id",
@@ -96,6 +101,157 @@ class LeadModel(Base):
         nullable=False,
         default=False,
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ListingSourceModel(Base):
+    __tablename__ = "listing_sources"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "name", name="uq_listing_sources_workspace_name"),
+        Index("ix_listing_sources_workspace_enabled", "workspace_id", "enabled"),
+    )
+
+    source_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    allowed_url_patterns: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    disallowed_url_patterns: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    crawl_frequency_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=1440)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    requires_auth: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    terms_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    terms_reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+    )
+    data_use_policy: Mapped[str | None] = mapped_column(String())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ListingCrawlRunModel(Base):
+    __tablename__ = "listing_crawl_runs"
+    __table_args__ = (
+        Index(
+            "ix_listing_crawl_runs_workspace_source_started",
+            "workspace_id",
+            "source_id",
+            "started_at",
+        ),
+        Index(
+            "ix_listing_crawl_runs_workspace_status_started",
+            "workspace_id",
+            "status",
+            "started_at",
+        ),
+    )
+
+    crawl_run_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    source_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("listing_sources.source_id"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    discovered_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fetched_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    parsed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    inserted_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unchanged_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_summary: Mapped[str | None] = mapped_column(String())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ListingSnapshotModel(Base):
+    __tablename__ = "listing_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "source_id",
+            "external_listing_id",
+            "source_payload_hash",
+            name="uq_listing_snapshots_workspace_source_external_payload",
+        ),
+        Index(
+            "ix_listing_snapshots_workspace_source_external_current",
+            "workspace_id",
+            "source_id",
+            "external_listing_id",
+            "is_current",
+        ),
+        Index(
+            "ix_listing_snapshots_workspace_source_status_current",
+            "workspace_id",
+            "source_id",
+            "status",
+            "is_current",
+        ),
+        Index(
+            "ix_listing_snapshots_workspace_source_scraped",
+            "workspace_id",
+            "source_id",
+            "scraped_at",
+        ),
+    )
+
+    snapshot_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    source_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("listing_sources.source_id"),
+        nullable=False,
+    )
+    crawl_run_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("listing_crawl_runs.crawl_run_id"),
+    )
+    external_listing_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    title: Mapped[str | None] = mapped_column(String(500))
+    address_text: Mapped[str | None] = mapped_column(String(500))
+    city: Mapped[str | None] = mapped_column(String(255))
+    state: Mapped[str | None] = mapped_column(String(255))
+    postal_code: Mapped[str | None] = mapped_column(String(50))
+    neighborhood: Mapped[str | None] = mapped_column(String(255))
+    price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    beds: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    baths: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    property_type: Mapped[str | None] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    description: Mapped[str | None] = mapped_column(String())
+    image_urls: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    listed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    scraped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_payload_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_payload: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -723,6 +879,37 @@ class HandoffCompletionModel(Base):
     failure_reason: Mapped[str | None] = mapped_column(String(500))
 
 
+class InboundMessageCRMCompletionModel(Base):
+    __tablename__ = "inbound_message_crm_completions"
+    __table_args__ = (
+        Index(
+            "ix_inbound_message_crm_completions_workspace_completed",
+            "workspace_id",
+            "completed_at",
+        ),
+    )
+
+    inbound_message_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("inbound_messages.inbound_message_id"),
+        primary_key=True,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    crm_note_idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    crm_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    crm_lead_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    crm_latest_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    crm_updates_detected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    crm_note_written_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(500))
+
+
 class UserModel(Base):
     __tablename__ = "users"
     __table_args__ = (
@@ -760,8 +947,13 @@ class WorkspaceContactPolicyModel(Base):
         PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), primary_key=True
     )
     sms_compliance_state: Mapped[str] = mapped_column(String(50), nullable=False)
+    quiet_hours_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     quiet_hours_start: Mapped[time] = mapped_column(Time, nullable=False)
     quiet_hours_end: Mapped[time] = mapped_column(Time, nullable=False)
+    inbound_email_address: Mapped[str | None] = mapped_column(
+        String(320),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -775,6 +967,41 @@ class WorkspaceHandoffConfigModel(Base):
     fallback_recipient_email: Mapped[str | None] = mapped_column(String(320))
     crm_handoff_tag: Mapped[str | None] = mapped_column(String(255))
     crm_custom_fields: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceCRMSyncConfigModel(Base):
+    __tablename__ = "workspace_crm_sync_configs"
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), primary_key=True
+    )
+    crm_sync_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    crm_sync_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceLLMConfigModel(Base):
+    __tablename__ = "workspace_llm_configs"
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), primary_key=True
+    )
+    openrouter_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceOperationalControlModel(Base):
+    __tablename__ = "workspace_operational_controls"
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), primary_key=True
+    )
+    automation_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    pause_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
+import time_machine
 from fastapi.testclient import TestClient
 
 from app.application.ports.lead_activity import LeadActivityItem, LeadActivityKind
@@ -29,6 +30,7 @@ from app.domain.conversations import (
     InboundMessage,
     InboundMessageClassificationStatus,
 )
+from app.domain.crm_sync import ExternalEvent
 from app.domain.identity import (
     AuthenticatedActor,
     User,
@@ -63,6 +65,7 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeEmailProvider,
     FakeSMSProvider,
     FakeWorkspaceContactPolicyRepository,
+    FakeWorkspaceOperationalControlRepository,
     FakeWorkspaceRepository,
 )
 from tests.application.use_cases._campaign_cadence_fakes import (
@@ -71,7 +74,11 @@ from tests.application.use_cases._campaign_cadence_fakes import (
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeOutboundMessageRepository as FakeCadenceOutboundMessageRepository,
 )
-from tests.application.use_cases._campaign_enrollment_fakes import FakeLeadNurtureWorkflowSignaler
+from tests.application.use_cases._campaign_enrollment_fakes import (
+    FakeCampaignEnrollmentRepository,
+    FakeLeadNurtureWorkflowSignaler,
+    FakeTemporalWorkflowStarter,
+)
 from tests.application.use_cases._lead_read_fakes import (
     FakeCrmConversationEventRepository,
     FakeHandoffRepository,
@@ -116,9 +123,9 @@ def test_lead_routes_return_list_and_detail() -> None:
     assert list_payload["latest_activity_preview"] is not None
     assert detail_response.status_code == 200
     assert len(detail_response.json()["workflow_transitions"]) == 1
-    assert detail_response.json()["workflow_transitions"][0]["metadata"][
-        "draft_reasons"
-    ] == ["safety_flags_present"]
+    assert detail_response.json()["workflow_transitions"][0]["metadata"]["draft_reasons"] == [
+        "safety_flags_present"
+    ]
     assert len(detail_response.json()["rejected_draft_reviews"]) == 1
     assert len(detail_response.json()["activity_log"]) == 3
     assert len(detail_response.json()["inbound_messages"]) == 1
@@ -127,10 +134,11 @@ def test_lead_routes_return_list_and_detail() -> None:
 def test_admin_can_approve_rejected_draft_review() -> None:
     client = _client_for_role(WorkspaceMembershipRole.BROKERAGE_ADMIN)
 
-    response = client.client.post(
-        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/rejected-draft-reviews/{REVIEW_ID}/approve-send",
-        json={"reason": "Admin reviewed and approved this draft for delivery."},
-    )
+    with time_machine.travel("2030-01-01T18:00:00Z"):
+        response = client.client.post(
+            f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/rejected-draft-reviews/{REVIEW_ID}/approve-send",
+            json={"reason": "Admin reviewed and approved this draft for delivery."},
+        )
 
     assert response.status_code == 200
     assert response.json()["status"] == "sent"
@@ -368,10 +376,19 @@ def _client_for_role(
         workspace_contact_policy_repository=policy_repository,
     )
     resume_action_bundle = LeadResumeActionBundle(
+        session=_FakeSession(),
         lead_repository=bundle.lead_repository,
         workflow_repository=bundle.workflow_repository,
         workspace_contact_policy_repository=policy_repository,
+        inbound_message_repository=bundle.inbound_message_repository,
+        handoff_repository=bundle.handoff_repository,
+        campaign_enrollment_repository=FakeCampaignEnrollmentRepository(),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(()),
+        temporal_workflow_starter=FakeTemporalWorkflowStarter(),
         lead_nurture_workflow_signaler=signaler,
+        external_event_repository=_FakeExternalEventRepository(),
+        event_bus=None,
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
     )
     draft_review_action_bundle = LeadDraftReviewActionBundle(
         session=_FakeSession(),
@@ -382,7 +399,9 @@ def _client_for_role(
         campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
         workspace_repository=FakeWorkspaceRepository(_workspace()),
         workspace_contact_policy_repository=policy_repository,
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
         message_repository=FakeCadenceOutboundMessageRepository(),
+        external_event_repository=_FakeExternalEventRepository(),
         sms_provider=FakeSMSProvider("msg-1"),
         email_provider=FakeEmailProvider("email-1"),
         lead_nurture_workflow_signaler=signaler,
@@ -391,8 +410,8 @@ def _client_for_role(
     app.dependency_overrides[get_lead_read_bundle] = lambda: bundle
     app.dependency_overrides[get_lead_resume_read_bundle] = lambda: resume_read_bundle
     app.dependency_overrides[get_lead_resume_action_bundle] = lambda: resume_action_bundle
-    app.dependency_overrides[get_lead_draft_review_action_bundle] = (
-        lambda: draft_review_action_bundle
+    app.dependency_overrides[get_lead_draft_review_action_bundle] = lambda: (
+        draft_review_action_bundle
     )
     return LeadsTestClient(client=TestClient(app), signaler=signaler)
 
@@ -514,6 +533,30 @@ def _config() -> CampaignExecutionConfig:
 
 class _FakeSession:
     async def commit(self) -> None:
+        return None
+
+
+class _FakeExternalEventRepository:
+    def __init__(self) -> None:
+        self.events: dict[UUID, ExternalEvent] = {}
+
+    async def save(self, event: ExternalEvent) -> ExternalEvent:
+        self.events[event.external_event_id] = event
+        return event
+
+    async def get_by_provider_event_id(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        provider_event_id: str,
+    ) -> ExternalEvent | None:
+        for event in self.events.values():
+            if (
+                event.workspace_id == workspace_id
+                and event.provider == provider
+                and event.provider_event_id == provider_event_id
+            ):
+                return event
         return None
 
 

@@ -27,6 +27,9 @@ from tests.application.use_cases._campaign_admin_fakes import (
     FakeCampaignAdminRepository,
     FakeEventBus,
 )
+from tests.application.use_cases._campaign_cadence_fakes import (
+    FakeWorkspaceOperationalControlRepository,
+)
 from tests.application.use_cases._campaign_enrollment_fakes import (
     FakeCampaignEnrollmentRepository,
     FakeLeadWorkflowRepository,
@@ -66,7 +69,7 @@ def test_brokerage_admin_can_list_and_start_manual_enrollment() -> None:
     assert start_response.status_code == 200
     assert start_response.json()["status"] == "started"
     assert client.starter.calls[0]["campaign_version_id"] == VERSION_ID
-    assert cast(_FakeSession, client.session).commits == 1
+    assert cast(_FakeSession, client.session).commits == 2
 
 
 def test_assigned_agent_can_start_own_lead_when_campaign_allows() -> None:
@@ -247,6 +250,7 @@ def _client_for_role(
         campaign_enrollment_repository=enrollment_repository,
         lead_workflow_repository=FakeLeadWorkflowRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
         temporal_workflow_starter=starter,
         event_bus=FakeEventBus(),
     )

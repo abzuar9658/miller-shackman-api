@@ -1,8 +1,10 @@
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from app.application.ports.lead_activity import LeadActivityItem, LeadActivityKind
+from app.application.ports.listing_search import ListingSearchQuery
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
 from app.application.use_cases.plan_next_outbound_message import (
     PlanNextOutboundMessageContext,
@@ -24,6 +26,13 @@ from app.domain.compliance.contactability import (
 )
 from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
 from app.domain.leads import CanonicalLeadRecord, CRMProvider, PropertyEventType
+from app.domain.listing_sources import (
+    CanonicalListingSnapshot,
+    ListingSnapshotStatus,
+    ListingSource,
+    ListingSourceType,
+)
+from app.domain.llm import WorkspaceLLMConfig
 from tests.application.use_cases._campaign_cadence_fakes import FakeCrmConversationEventRepository
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
@@ -60,6 +69,28 @@ class FakeLeadRepository:
         lead_id: LeadId,
     ) -> CanonicalLeadRecord | None:
         return await self.get_by_id(workspace_id, lead_id)
+
+    async def get_by_primary_phone(
+        self,
+        workspace_id: WorkspaceId,
+        phone_number: str,
+    ) -> CanonicalLeadRecord | None:
+        if self.lead is None or self.lead.workspace_id != workspace_id:
+            return None
+        if self.lead.primary_phone == phone_number:
+            return self.lead
+        return None
+
+    async def get_by_primary_email(
+        self,
+        workspace_id: WorkspaceId,
+        email_address: str,
+    ) -> CanonicalLeadRecord | None:
+        if self.lead is None or self.lead.workspace_id != workspace_id:
+            return None
+        if self.lead.primary_email == email_address:
+            return self.lead
+        return None
 
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         self.lead = record
@@ -117,6 +148,111 @@ class FakeLLMClient:
         )
 
 
+class FakeWorkspaceLLMConfigRepository:
+    def __init__(self, config: WorkspaceLLMConfig | None) -> None:
+        self.config = config
+
+    async def get_by_workspace_id(self, workspace_id: WorkspaceId) -> WorkspaceLLMConfig | None:
+        if self.config is not None and self.config.workspace_id == workspace_id:
+            return self.config
+        return None
+
+    async def save(self, config: WorkspaceLLMConfig) -> WorkspaceLLMConfig:
+        self.config = config
+        return config
+
+
+class FakeListingSourceRepository:
+    def __init__(self, source: ListingSource) -> None:
+        self.source = source
+
+    async def get_by_id(self, workspace_id: object, source_id: object) -> ListingSource | None:
+        if self.source.workspace_id == workspace_id and self.source.source_id == source_id:
+            return self.source
+        return None
+
+    async def get_by_name(self, workspace_id: object, name: str) -> ListingSource | None:
+        if self.source.workspace_id == workspace_id and self.source.name == name:
+            return self.source
+        return None
+
+    async def list_for_workspace(self, workspace_id: object) -> tuple[ListingSource, ...]:
+        if self.source.workspace_id != workspace_id:
+            return ()
+        return (self.source,)
+
+    async def save(self, source: ListingSource) -> ListingSource:
+        self.source = source
+        return source
+
+
+class FakeListingSnapshotRepository:
+    def __init__(self, snapshots: tuple[CanonicalListingSnapshot, ...] = ()) -> None:
+        self.snapshots = list(snapshots)
+
+    async def get_by_id(
+        self,
+        workspace_id: object,
+        snapshot_id: object,
+    ) -> CanonicalListingSnapshot | None:
+        for snapshot in self.snapshots:
+            if snapshot.workspace_id == workspace_id and snapshot.snapshot_id == snapshot_id:
+                return snapshot
+        return None
+
+    async def get_current_by_external_id(
+        self,
+        workspace_id: object,
+        source_id: object,
+        external_listing_id: str,
+    ) -> CanonicalListingSnapshot | None:
+        for snapshot in self.snapshots:
+            if (
+                snapshot.workspace_id == workspace_id
+                and snapshot.source_id == source_id
+                and snapshot.external_listing_id == external_listing_id
+                and snapshot.is_current
+            ):
+                return snapshot
+        return None
+
+    async def list_current_for_source(
+        self, workspace_id: object, source_id: object, *, limit: int = 100
+    ) -> tuple[CanonicalListingSnapshot, ...]:
+        filtered = [
+            snapshot
+            for snapshot in self.snapshots
+            if snapshot.workspace_id == workspace_id and snapshot.source_id == source_id
+        ]
+        return tuple(filtered[:limit])
+
+    async def save(self, snapshot: CanonicalListingSnapshot) -> CanonicalListingSnapshot:
+        self.snapshots.append(snapshot)
+        return snapshot
+
+    async def mark_other_versions_not_current(
+        self,
+        workspace_id: object,
+        source_id: object,
+        external_listing_id: str,
+        except_snapshot_id: object,
+    ) -> None:
+        _ = (workspace_id, source_id, external_listing_id, except_snapshot_id)
+
+
+class FakeListingSearchClient:
+    def __init__(self, snapshots: tuple[CanonicalListingSnapshot, ...]) -> None:
+        self.snapshots = snapshots
+        self.queries: list[ListingSearchQuery] = []
+
+    async def search(
+        self, *, source: ListingSource, query: ListingSearchQuery
+    ) -> tuple[CanonicalListingSnapshot, ...]:
+        _ = source
+        self.queries.append(query)
+        return self.snapshots
+
+
 def _lead(
     *,
     has_sms_capable_phone: bool = True,
@@ -153,6 +289,7 @@ def _planning_context(
     enabled_channels: tuple[ContactChannel, ...] = (ContactChannel.SMS,),
     workflow_state: WorkflowState = WorkflowState.ACTIVE_NURTURE,
     activity_items: tuple[LeadActivityItem, ...] = (),
+    extracted_preferences: dict[str, str] | None = None,
 ) -> PlanNextOutboundMessageContext:
     return PlanNextOutboundMessageContext(
         campaign_status=CampaignStatus.ACTIVE,
@@ -166,6 +303,7 @@ def _planning_context(
         brokerage_name="Miller Schackman",
         cadence_step_id="step-1",
         assigned_agent_name="Alex Agent",
+        extracted_preferences=extracted_preferences or {},
         allowed_mapped_custom_field_keys=("preferred_location",),
         activity_items=activity_items,
     )
@@ -208,6 +346,43 @@ def _draft_json(
     )
 
 
+def _listing_source() -> ListingSource:
+    return ListingSource(
+        source_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        name="StreetEasy",
+        source_type=ListingSourceType.WEBSITE,
+        base_url="https://streeteasy.com",
+        enabled=True,
+        terms_reviewed_at=NOW,
+        data_use_policy="Reviewed for optional enrichment.",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _listing_snapshot(source_id: UUID) -> CanonicalListingSnapshot:
+    return CanonicalListingSnapshot(
+        snapshot_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        source_id=source_id,
+        external_listing_id="listing-1",
+        source_url="https://streeteasy.com/building/2738-miles-avenue-bronx/1",
+        source_payload_hash="hash-1",
+        scraped_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+        title="Single-family house in Throgs Neck",
+        address_text="2738 Miles Avenue, Bronx, NY 10465",
+        neighborhood="Bronx",
+        price=Decimal("650000"),
+        beds=Decimal("4"),
+        baths=Decimal("1"),
+        property_type="house",
+        status=ListingSnapshotStatus.ACTIVE,
+    )
+
+
 async def test_plans_message_using_safe_context_assembled_from_canonical_lead() -> None:
     llm = FakeLLMClient(_draft_json())
 
@@ -215,7 +390,7 @@ async def test_plans_message_using_safe_context_assembled_from_canonical_lead() 
         workspace_id=WORKSPACE_ID,
         lead_id=LEAD_ID,
         campaign_id=CAMPAIGN_ID,
-        context=_planning_context(),
+        context=_planning_context(extracted_preferences={"location": "Bronx"}),
         lead_repository=FakeLeadRepository(_lead()),
         message_repository=FakeOutboundMessageRepository(),
         crm_conversation_event_repository=FakeCrmConversationEventRepository(),
@@ -232,7 +407,34 @@ async def test_plans_message_using_safe_context_assembled_from_canonical_lead() 
     assert len(llm.requests) == 1
     assert "No meaningful communication recorded for 90 days." in llm.requests[0].prompt
     assert "the lead inquired about a property" in llm.requests[0].prompt
-    assert "Austin" in llm.requests[0].prompt
+    assert "Bronx" in llm.requests[0].prompt
+    assert "Austin" not in llm.requests[0].prompt
+
+
+async def test_uses_workspace_llm_model_for_outbound_planning() -> None:
+    llm = FakeLLMClient(_draft_json())
+
+    await plan_next_outbound_message_for_lead(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        context=_planning_context(extracted_preferences={"location": "Bronx"}),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=FakeOutboundMessageRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        llm_client=llm,
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(
+            WorkspaceLLMConfig(
+                workspace_id=WORKSPACE_ID,
+                openrouter_model="openai/gpt-4.1-mini",
+            )
+        ),
+        default_openrouter_model="openai/gpt-4o-mini",
+        now=NOW,
+        message_id_factory=lambda: MESSAGE_ID,
+    )
+
+    assert llm.requests[0].model == "openai/gpt-4.1-mini"
 
 
 async def test_prefers_recent_crm_conversation_history_when_available() -> None:
@@ -242,7 +444,7 @@ async def test_prefers_recent_crm_conversation_history_when_available() -> None:
         workspace_id=WORKSPACE_ID,
         lead_id=LEAD_ID,
         campaign_id=CAMPAIGN_ID,
-        context=_planning_context(),
+        context=_planning_context(extracted_preferences={"location": "Bronx"}),
         lead_repository=FakeLeadRepository(_lead()),
         message_repository=FakeOutboundMessageRepository(),
         crm_conversation_event_repository=FakeCrmConversationEventRepository(
@@ -288,6 +490,10 @@ async def test_prefers_unified_activity_context_when_available() -> None:
                     occurred_at=NOW - timedelta(days=2),
                     title="Outbound outreach logged",
                     preview="Sent a safe check-in email two days ago.",
+                    content=(
+                        "Sent a safe check-in email two days ago asking whether Riverdale "
+                        "is still the preferred area."
+                    ),
                     channel="email",
                     direction="outbound",
                     status="sent",
@@ -299,6 +505,10 @@ async def test_prefers_unified_activity_context_when_available() -> None:
                     occurred_at=NOW,
                     title="CRM reply logged",
                     preview="We are hoping to move before school starts.",
+                    content=(
+                        "We are hoping to move before school starts and still need at least "
+                        "2 bedrooms."
+                    ),
                     direction="inbound",
                     status="Note",
                     actor_name="Avery Agent",
@@ -316,9 +526,93 @@ async def test_prefers_unified_activity_context_when_available() -> None:
     assert result.status == PlanOutboundMessageStatus.PLANNED
     assert len(llm.requests) == 1
     assert "Recent meaningful activity:" in llm.requests[0].prompt
-    assert "Sent a safe check-in email two days ago." in llm.requests[0].prompt
-    assert "We are hoping to move before school starts." in llm.requests[0].prompt
+    assert "conversation_memory_summary" in llm.requests[0].prompt
+    assert "recent_conversation_items" in llm.requests[0].prompt
+    assert "recent_outbound_messages" in llm.requests[0].prompt
+    assert (
+        "Sent a safe check-in email two days ago asking whether Riverdale"
+        in llm.requests[0].prompt
+    )
+    assert "We are hoping to move before school starts and still need at least 2 bedrooms." in (
+        llm.requests[0].prompt
+    )
     assert "No meaningful communication recorded for 90 days." not in llm.requests[0].prompt
+
+
+async def test_enriches_prompt_with_streeteasy_listing_context_when_enabled() -> None:
+    llm = FakeLLMClient(_draft_json())
+    source = _listing_source()
+    search_client = FakeListingSearchClient((_listing_snapshot(source.source_id),))
+
+    result = await plan_next_outbound_message_for_lead(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        context=_planning_context(extracted_preferences={"location": "Bronx"}),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=FakeOutboundMessageRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        llm_client=llm,
+        now=NOW,
+        listing_source_repository=FakeListingSourceRepository(source),
+        listing_snapshot_repository=FakeListingSnapshotRepository(),
+        listing_search_client=search_client,
+        listing_enrichment_enabled=True,
+        message_id_factory=lambda: MESSAGE_ID,
+    )
+
+    assert result.status == PlanOutboundMessageStatus.PLANNED
+    assert len(search_client.queries) == 1
+    assert "approved_listing_context" in llm.requests[0].prompt
+    assert "2738 Miles Avenue" in llm.requests[0].prompt
+
+
+async def test_listing_enrichment_uses_preferences_extracted_from_activity_history() -> None:
+    llm = FakeLLMClient(_draft_json())
+    source = _listing_source()
+    search_client = FakeListingSearchClient((_listing_snapshot(source.source_id),))
+
+    result = await plan_next_outbound_message_for_lead(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        context=_planning_context(
+            activity_items=(
+                LeadActivityItem(
+                    activity_id=uuid4(),
+                    lead_id=LEAD_ID,
+                    kind=LeadActivityKind.INBOUND_MESSAGE,
+                    occurred_at=NOW,
+                    title="Lead replied",
+                    preview="Riverdale or Spuyten Duyvil still works.",
+                    content=(
+                        "We still want Riverdale or Spuyten Duyvil and need at least 2 "
+                        "bedrooms under 600k. A co-op is okay."
+                    ),
+                    channel="sms",
+                    direction="inbound",
+                    actor_name="lead",
+                ),
+            ),
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=FakeOutboundMessageRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        llm_client=llm,
+        now=NOW,
+        listing_source_repository=FakeListingSourceRepository(source),
+        listing_snapshot_repository=FakeListingSnapshotRepository(),
+        listing_search_client=search_client,
+        listing_enrichment_enabled=True,
+        message_id_factory=lambda: MESSAGE_ID,
+    )
+
+    assert result.status == PlanOutboundMessageStatus.PLANNED
+    assert len(search_client.queries) == 1
+    assert search_client.queries[0].locations == ("Riverdale", "Spuyten Duyvil")
+    assert search_client.queries[0].min_beds == Decimal("2")
+    assert search_client.queries[0].max_price == Decimal("600000")
+    assert search_client.queries[0].keywords == ("co-op",)
 
 
 async def test_rejects_without_calling_llm_when_pre_send_blocks_high_level_plan() -> None:

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from app.application.ports.temporal import (
@@ -32,14 +33,21 @@ class FakeCampaignEnrollmentRepository:
         self,
         workspace_id: WorkspaceId,
         campaign_id: UUID,
-        now: object,
+        started_since: object,
     ) -> int:
+        today_start = (
+            started_since.replace(hour=0, minute=0, second=0, microsecond=0)
+            if isinstance(started_since, datetime)
+            else datetime.min.replace(tzinfo=UTC)
+        )
+        tomorrow_start = today_start + timedelta(days=1)
         return sum(
             1
             for enrollment in self.enrollments.values()
             if enrollment.workspace_id == workspace_id
             and enrollment.campaign_id == campaign_id
             and enrollment.started_at is not None
+            and today_start <= enrollment.started_at < tomorrow_start
         )
 
 

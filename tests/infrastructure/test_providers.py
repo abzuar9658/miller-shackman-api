@@ -2,12 +2,14 @@ import pytest
 from pydantic import SecretStr
 
 from app.core.config import Settings
+from app.infrastructure.listing_sources.streeteasy import StreetEasyListingSearchClient
 from app.infrastructure.messaging.mailpit import MailpitEmailProvider
 from app.infrastructure.messaging.sink import SinkEmailProvider, SinkSMSProvider
 from app.infrastructure.providers import (
     build_cache_provider,
     build_crm_client,
     build_email_provider,
+    build_listing_search_client,
     build_llm_client,
     build_sms_provider,
     build_storage_provider,
@@ -87,3 +89,9 @@ def test_build_cache_provider_returns_redis_adapter() -> None:
     settings = Settings(redis_url="redis://localhost:6379/0")
     provider = build_cache_provider(settings)
     assert provider is not None
+
+
+def test_build_listing_search_client_returns_streeteasy_adapter() -> None:
+    settings = Settings(streeteasy_timeout_seconds=5.0)
+    provider = build_listing_search_client(settings)
+    assert isinstance(provider, StreetEasyListingSearchClient)

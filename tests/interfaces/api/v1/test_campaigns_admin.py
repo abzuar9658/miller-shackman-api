@@ -175,6 +175,7 @@ def _client_for_role(role: WorkspaceMembershipRole) -> CampaignAdminTestClient:
         campaign_admin_audit_log_repository=audit_repository,
         campaign_execution_repository=unused,
         campaign_enrollment_repository=unused,
+        workspace_operational_control_repository=unused,
         workspace_contact_policy_repository=unused,
         dormant_candidate_selector=unused,
         preflight_digest_repository=unused,

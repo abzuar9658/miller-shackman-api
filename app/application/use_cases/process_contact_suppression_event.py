@@ -1,4 +1,4 @@
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
@@ -94,6 +94,7 @@ async def process_contact_suppression_event(
     lead_nurture_workflow_signaler: LeadNurtureWorkflowSignaler,
     now: datetime,
     external_event_id_factory: Callable[[], UUID] | None = None,
+    commit: Callable[[], Awaitable[None]] | None = None,
 ) -> ProcessContactSuppressionEventResult:
     existing = await external_event_repository.get_by_provider_event_id(
         event.workspace_id,
@@ -192,6 +193,8 @@ async def process_contact_suppression_event(
         transition_skip_reason = transition.skip_reason
     elif transition.workflow is not None:
         try:
+            if commit is not None:
+                await commit()
             await lead_nurture_workflow_signaler.signal_pause_lead_nurture_workflow(
                 temporal_workflow_id=transition.workflow.temporal_workflow_id,
                 signal=PauseLeadNurtureWorkflowSignal(

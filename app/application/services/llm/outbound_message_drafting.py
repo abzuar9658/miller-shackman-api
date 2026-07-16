@@ -14,7 +14,7 @@ from app.application.services.llm.structured_json import (
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord
 
-OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION = "outbound_message_draft:v1"
+OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION = "outbound_message_draft:v2"
 MIN_DRAFT_CONFIDENCE = 0.7
 MAX_SMS_BODY_LENGTH = 320
 MAX_EMAIL_BODY_LENGTH = 4000
@@ -46,11 +46,62 @@ def _empty_preferences() -> Mapping[str, str]:
     return {}
 
 
+def _empty_conversation_items() -> tuple["ApprovedOutboundConversationItem", ...]:
+    return ()
+
+
+def _empty_recent_outbounds() -> tuple[str, ...]:
+    return ()
+
+
+def _empty_listing_matches() -> tuple["ApprovedOutboundListingMatch", ...]:
+    return ()
+
+
+@dataclass(frozen=True)
+class ApprovedOutboundConversationItem:
+    occurred_at: str
+    title: str
+    content: str
+    direction: str | None = None
+    channel: str | None = None
+    actor_name: str | None = None
+
+
+@dataclass(frozen=True)
+class ApprovedOutboundListingMatch:
+    title: str | None = None
+    address_text: str | None = None
+    neighborhood: str | None = None
+    price_text: str | None = None
+    beds_text: str | None = None
+    baths_text: str | None = None
+    property_type: str | None = None
+    source_url: str | None = None
+    scraped_at: str | None = None
+
+
+@dataclass(frozen=True)
+class ApprovedOutboundListingContext:
+    source_name: str
+    search_summary: str
+    result_count: int
+    matches: tuple[ApprovedOutboundListingMatch, ...] = field(
+        default_factory=_empty_listing_matches
+    )
+
+
 @dataclass(frozen=True)
 class ApprovedOutboundLeadContext:
     conversation_summary: str | None = None
+    conversation_memory_summary: str | None = None
     latest_lead_request: str | None = None
     extracted_preferences: Mapping[str, str] = field(default_factory=_empty_preferences)
+    recent_conversation_items: tuple[ApprovedOutboundConversationItem, ...] = field(
+        default_factory=_empty_conversation_items
+    )
+    recent_outbound_messages: tuple[str, ...] = field(default_factory=_empty_recent_outbounds)
+    listing_context: ApprovedOutboundListingContext | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +148,7 @@ async def draft_outbound_message(
     assigned_agent_name: str | None,
     lead_context: ApprovedOutboundLeadContext,
     llm_client: LLMClient,
+    model: str | None = None,
     min_confidence: float = MIN_DRAFT_CONFIDENCE,
 ) -> OutboundMessageDraftResult:
     llm_result = await llm_client.complete(
@@ -110,6 +162,7 @@ async def draft_outbound_message(
                 lead_context=lead_context,
             ),
             prompt_version=OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION,
+            model=model,
             temperature=0.4,
             max_tokens=700,
         ),
@@ -205,15 +258,36 @@ def _build_prompt(
         },
         "approved_lead_context": {
             "conversation_summary": lead_context.conversation_summary,
+            "conversation_memory_summary": lead_context.conversation_memory_summary,
             "latest_lead_request": lead_context.latest_lead_request,
             "extracted_preferences": dict(lead_context.extracted_preferences),
+            "recent_conversation_items": [
+                {
+                    "occurred_at": item.occurred_at,
+                    "title": item.title,
+                    "content": item.content,
+                    "direction": item.direction,
+                    "channel": item.channel,
+                    "actor_name": item.actor_name,
+                }
+                for item in lead_context.recent_conversation_items
+            ],
+            "recent_outbound_messages": list(lead_context.recent_outbound_messages),
         },
+        "approved_listing_context": _listing_context_payload(lead_context.listing_context),
     }
     return (
         "You are an administrative follow-up assistant for a real estate brokerage.\n"
         "Draft one compliant outbound message using only the approved JSON context below.\n"
         "Do not invent listings, prices, offers, agent actions, appointments, or "
         "past conversations.\n"
+        "Use the approved conversation memory summary and recent conversation items to "
+        "continue the thread naturally. Avoid repeating the same greeting, ask, or "
+        "call-to-action if recent outbound messages already covered it, unless the lead's "
+        "context clearly changed.\n"
+        "If approved listing context is present, you may reference at most two matching "
+        "listings using only the provided fields. Do not claim any listing is guaranteed "
+        "to still be available, and do not add facts beyond the approved listing context.\n"
         "Do not provide legal, tax, financing, investment, or market prediction "
         "advice.\n"
         "If the lead request requires a human agent, set a safety flag instead of answering it.\n"
@@ -223,3 +297,29 @@ def _build_prompt(
         "safety_flags.\n"
         f"Approved context: {json.dumps(payload, sort_keys=True)}"
     )
+
+
+def _listing_context_payload(
+    listing_context: ApprovedOutboundListingContext | None,
+) -> dict[str, object] | None:
+    if listing_context is None:
+        return None
+    return {
+        "source_name": listing_context.source_name,
+        "search_summary": listing_context.search_summary,
+        "result_count": listing_context.result_count,
+        "matches": [
+            {
+                "title": match.title,
+                "address_text": match.address_text,
+                "neighborhood": match.neighborhood,
+                "price_text": match.price_text,
+                "beds_text": match.beds_text,
+                "baths_text": match.baths_text,
+                "property_type": match.property_type,
+                "source_url": match.source_url,
+                "scraped_at": match.scraped_at,
+            }
+            for match in listing_context.matches
+        ],
+    }

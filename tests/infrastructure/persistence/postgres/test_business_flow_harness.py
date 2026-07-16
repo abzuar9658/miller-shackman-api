@@ -6,7 +6,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.ports.crm import CRMAgent, CRMClient
+from app.application.ports.crm import CanonicalLead, CRMActivity, CRMAgent, CRMClient
 from app.application.ports.crm_sync import CanonicalLeadSnapshotPage
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
 from app.application.ports.notifications import (
@@ -47,7 +47,12 @@ from app.domain.compliance.contactability import (
     WorkspaceContactPolicy,
 )
 from app.domain.conversations import WorkspaceHandoffConfig
-from app.domain.crm_sync import CRMSyncJobStatus, CRMSyncType, ExternalEventStatus
+from app.domain.crm_sync import (
+    CRMSyncJobStatus,
+    CRMSyncLeadSort,
+    CRMSyncType,
+    ExternalEventStatus,
+)
 from app.domain.identity import Workspace, WorkspaceStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
@@ -141,8 +146,18 @@ class FakeLeadSnapshotSource:
         cursor: str | None = None,
         updated_after: datetime | None = None,
         updated_before: datetime | None = None,
+        sort_by: CRMSyncLeadSort | None = None,
         mapped_custom_field_keys: tuple[str, ...] = (),
     ) -> CanonicalLeadSnapshotPage:
+        _ = (
+            workspace_id,
+            page_size,
+            cursor,
+            updated_after,
+            updated_before,
+            sort_by,
+            mapped_custom_field_keys,
+        )
         return self.pages.pop(0)
 
 
@@ -163,10 +178,45 @@ class FakeInboundReplyLLMClient:
 
 
 class FakeCRMClient:
+    supports_custom_fields = True
+    supports_tags = True
+    supports_notes = True
+    supports_webhooks = False
+
     def __init__(self) -> None:
         self.notes: list[tuple[WorkspaceId, str, str]] = []
         self.tags: list[tuple[WorkspaceId, str, str]] = []
         self.updated_fields: list[tuple[WorkspaceId, str, dict[str, str]]] = []
+
+    async def validate_connection(self, workspace_id: WorkspaceId) -> bool:
+        _ = workspace_id
+        return True
+
+    async def get_lead(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+    ) -> CanonicalLead | None:
+        _ = (workspace_id, crm_lead_id)
+        return None
+
+    async def search_leads(
+        self,
+        workspace_id: WorkspaceId,
+        tag: str | None = None,
+        limit: int = 100,
+    ) -> list[CanonicalLead]:
+        _ = (workspace_id, tag, limit)
+        return []
+
+    async def get_recent_activity(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+        limit: int = 50,
+    ) -> list[CRMActivity]:
+        _ = (workspace_id, crm_lead_id, limit)
+        return []
 
     async def get_assigned_agent(
         self,
@@ -181,6 +231,9 @@ class FakeCRMClient:
     async def add_tag(self, workspace_id: WorkspaceId, crm_lead_id: str, tag: str) -> None:
         self.tags.append((workspace_id, crm_lead_id, tag))
 
+    async def remove_tag(self, workspace_id: WorkspaceId, crm_lead_id: str, tag: str) -> None:
+        _ = (workspace_id, crm_lead_id, tag)
+
     async def update_custom_fields(
         self,
         workspace_id: WorkspaceId,
@@ -188,6 +241,9 @@ class FakeCRMClient:
         fields: dict[str, str],
     ) -> None:
         self.updated_fields.append((workspace_id, crm_lead_id, fields))
+
+    async def subscribe_to_events(self, workspace_id: WorkspaceId, webhook_url: str) -> None:
+        _ = (workspace_id, webhook_url)
 
 
 class FakeNotificationProvider:

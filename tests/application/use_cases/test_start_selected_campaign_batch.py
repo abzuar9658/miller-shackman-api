@@ -167,3 +167,48 @@ async def test_records_failed_start_when_temporal_raises(
         WORKSPACE_ID, workflow.workflow_id
     )
     assert len(transitions) == 1
+
+
+async def test_commits_before_starting_temporal_workflow(
+    base_dependencies: _Dependencies,
+) -> None:
+    call_order: list[str] = []
+
+    class RecordingTemporalWorkflowStarter(FakeTemporalWorkflowStarter):
+        async def start_lead_nurture_workflow(
+            self,
+            *,
+            workspace_id: UUID,
+            lead_id: UUID,
+            campaign_version_id: UUID,
+            temporal_workflow_id: str,
+        ) -> None:
+            call_order.append("start")
+            await super().start_lead_nurture_workflow(
+                workspace_id=workspace_id,
+                lead_id=lead_id,
+                campaign_version_id=campaign_version_id,
+                temporal_workflow_id=temporal_workflow_id,
+            )
+
+    async def commit() -> None:
+        call_order.append("commit")
+
+    result = await start_selected_campaign_batch(
+        workspace_id=WORKSPACE_ID,
+        campaign_id=CAMPAIGN_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        lead_ids=[LEAD_ID_1],
+        source=CampaignEnrollmentSource.MANUAL_ADMIN,
+        reason_codes=[],
+        actor_user_id=ACTOR_ID,
+        now=NOW,
+        campaign_enrollment_repository=base_dependencies.campaign_enrollment_repository,
+        lead_workflow_repository=base_dependencies.lead_workflow_repository,
+        workflow_transition_repository=base_dependencies.workflow_transition_repository,
+        temporal_workflow_starter=RecordingTemporalWorkflowStarter(),
+        commit=commit,
+    )
+
+    assert result.started_count == 1
+    assert call_order == ["commit", "start"]

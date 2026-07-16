@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
+from app.application.ports.temporal import PauseLeadNurtureWorkflowSignal
 from app.application.use_cases.process_crm_human_activity_event import (
     CRMHumanActivityEvent,
     CRMHumanActivityKind,
@@ -124,6 +125,43 @@ async def test_records_processed_event_when_no_workflow_exists() -> None:
     assert result.pause_requested is False
     assert result.signal_sent is False
     assert result.reasons == (ProcessCRMHumanActivityEventReasonCode.NO_WORKFLOW,)
+
+
+async def test_commits_before_signaling_temporal_pause() -> None:
+    call_order: list[str] = []
+
+    class RecordingLeadNurtureWorkflowSignaler(FakeLeadNurtureWorkflowSignaler):
+        async def signal_pause_lead_nurture_workflow(
+            self,
+            *,
+            temporal_workflow_id: str,
+            signal: PauseLeadNurtureWorkflowSignal,
+        ) -> None:
+            call_order.append("signal")
+            await super().signal_pause_lead_nurture_workflow(
+                temporal_workflow_id=temporal_workflow_id,
+                signal=signal,
+            )
+
+    async def commit() -> None:
+        call_order.append("commit")
+
+    workflows = FakeLeadWorkflowRepository()
+    await workflows.save(_workflow())
+
+    result = await process_crm_human_activity_event(
+        event=_event(event_type="activity_created", activity_type="note"),
+        lead_repository=FakeLeadRepository(_lead()),
+        external_event_repository=FakeExternalEventRepository(),
+        lead_workflow_repository=workflows,
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        lead_nurture_workflow_signaler=RecordingLeadNurtureWorkflowSignaler(),
+        commit=commit,
+        now=NOW,
+    )
+
+    assert result.signal_sent is True
+    assert call_order == ["commit", "signal"]
 
 
 def _lead() -> CanonicalLeadRecord:

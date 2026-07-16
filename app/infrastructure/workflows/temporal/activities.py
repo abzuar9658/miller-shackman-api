@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from datetime import datetime, timedelta
 
 from temporalio import activity
 
@@ -17,6 +18,7 @@ from app.application.use_cases.campaign_cadence_execution import (
     execute_campaign_cadence_step,
     schedule_next_campaign_cadence_step,
 )
+from app.core.config import get_settings
 from app.core.database import async_session_factory, enable_postgres_service_access
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
 from app.infrastructure.persistence.postgres.campaign_execution_repository import (
@@ -30,6 +32,10 @@ from app.infrastructure.persistence.postgres.lead_activity_repository import (
     PostgresLeadActivityRepository,
 )
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
+from app.infrastructure.persistence.postgres.listing_source_repository import (
+    PostgresListingSnapshotRepository,
+    PostgresListingSourceRepository,
+)
 from app.infrastructure.persistence.postgres.outbound_message_repository import (
     PostgresOutboundMessageRepository,
 )
@@ -43,7 +49,18 @@ from app.infrastructure.persistence.postgres.workflow_repository import (
 from app.infrastructure.persistence.postgres.workspace_contact_policy_repository import (
     PostgresWorkspaceContactPolicyRepository,
 )
-from app.infrastructure.providers import build_email_provider, build_llm_client, build_sms_provider
+from app.infrastructure.persistence.postgres.workspace_llm_config_repository import (
+    PostgresWorkspaceLLMConfigRepository,
+)
+from app.infrastructure.persistence.postgres.workspace_operational_control_repository import (
+    PostgresWorkspaceOperationalControlRepository,
+)
+from app.infrastructure.providers import (
+    build_email_provider,
+    build_listing_search_client,
+    build_llm_client,
+    build_sms_provider,
+)
 from app.infrastructure.workflows.temporal.lead_nurture import (
     ExecuteCadenceStepInput,
     ExecuteCadenceStepResult,
@@ -77,7 +94,7 @@ async def apply_inbound_workflow_transition_activity(
             classification_rejected=signal.classification_rejected,
             lead_workflow_repository=PostgresLeadWorkflowRepository(session),
             workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
-            now=signal.occurred_at,
+            now=_signal_occurred_at(signal.occurred_at),
             external_event_id=signal.external_event_id,
             conversation_id=signal.conversation_id,
             inbound_message_id=signal.inbound_message_id,
@@ -102,7 +119,7 @@ async def record_pause_workflow_signal_activity(
             reason_code=WorkflowTransitionReasonCode.MANUAL_PAUSE,
             lead_workflow_repository=PostgresLeadWorkflowRepository(session),
             workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
-            now=signal.occurred_at,
+            now=_signal_occurred_at(signal.occurred_at),
             actor_user_id=signal.actor_user_id,
             external_event_id=signal.external_event_id,
             metadata=_reason_metadata(signal.reason),
@@ -131,7 +148,7 @@ async def record_resume_workflow_signal_activity(
             reason_code=WorkflowTransitionReasonCode.MANUAL_RESUME,
             lead_workflow_repository=PostgresLeadWorkflowRepository(session),
             workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
-            now=signal.occurred_at,
+            now=_signal_occurred_at(signal.occurred_at),
             actor_user_id=signal.actor_user_id,
             external_event_id=signal.external_event_id,
             metadata=_reason_metadata(signal.reason),
@@ -163,6 +180,7 @@ async def schedule_next_campaign_cadence_step_activity(
 async def execute_campaign_cadence_step_activity(
     input_: ExecuteCadenceStepInput,
 ) -> ExecuteCadenceStepResult:
+    settings = get_settings()
     async with async_session_factory() as session:
         await enable_postgres_service_access(session)
         outcome = await execute_campaign_cadence_step(
@@ -174,6 +192,10 @@ async def execute_campaign_cadence_step_activity(
             campaign_execution_repository=PostgresCampaignExecutionRepository(session),
             workspace_repository=PostgresWorkspaceRepository(session),
             workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
+            workspace_llm_config_repository=PostgresWorkspaceLLMConfigRepository(session),
+            workspace_operational_control_repository=PostgresWorkspaceOperationalControlRepository(
+                session
+            ),
             lead_repository=PostgresLeadRepository(session),
             lead_workflow_repository=PostgresLeadWorkflowRepository(session),
             workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
@@ -181,10 +203,19 @@ async def execute_campaign_cadence_step_activity(
             rejected_draft_review_repository=PostgresRejectedDraftReviewRepository(session),
             lead_activity_repository=PostgresLeadActivityRepository(session),
             crm_conversation_event_repository=PostgresCrmConversationEventRepository(session),
+            listing_source_repository=PostgresListingSourceRepository(session),
+            listing_snapshot_repository=PostgresListingSnapshotRepository(session),
+            listing_search_client=build_listing_search_client(),
+            listing_enrichment_enabled=settings.listing_context_enrichment_enabled,
+            listing_cache_ttl=timedelta(
+                minutes=settings.listing_context_enrichment_cache_ttl_minutes
+            ),
+            listing_max_results=settings.listing_context_enrichment_max_results,
             llm_client=build_llm_client(),
             sms_provider=build_sms_provider(),
             email_provider=build_email_provider(),
             now=input_.occurred_at,
+            default_openrouter_model=settings.openrouter_model,
         )
         await session.commit()
     return _execution_outcome_to_result(outcome)
@@ -201,6 +232,10 @@ def _intent_or_none(raw_intent: str | None) -> InboundReplyIntent | None:
 
 def _reason_metadata(reason: str) -> Mapping[str, object]:
     return {"reason": reason}
+
+
+def _signal_occurred_at(value: str) -> datetime:
+    return datetime.fromisoformat(value)
 
 
 def _inbound_outcome_to_result(

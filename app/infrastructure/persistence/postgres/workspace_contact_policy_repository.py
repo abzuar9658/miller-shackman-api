@@ -47,8 +47,10 @@ def _policy_from_model(model: WorkspaceContactPolicyModel) -> WorkspaceContactPo
     return WorkspaceContactPolicy(
         workspace_id=model.workspace_id,
         sms_compliance_state=SmsComplianceState(model.sms_compliance_state),
+        quiet_hours_enabled=model.quiet_hours_enabled,
         quiet_hours_start=model.quiet_hours_start,
         quiet_hours_end=model.quiet_hours_end,
+        inbound_email_address=model.inbound_email_address,
     )
 
 
@@ -59,8 +61,10 @@ def _policy_to_values(
     return {
         "workspace_id": policy.workspace_id,
         "sms_compliance_state": policy.sms_compliance_state.value,
+        "quiet_hours_enabled": policy.quiet_hours_enabled,
         "quiet_hours_start": policy.quiet_hours_start,
         "quiet_hours_end": policy.quiet_hours_end,
+        "inbound_email_address": policy.inbound_email_address,
         "created_at": now,
         "updated_at": now,
     }
@@ -72,7 +76,9 @@ def _policy_update_values(
 ) -> dict[str, object]:
     return {
         "sms_compliance_state": policy.sms_compliance_state.value,
+        "quiet_hours_enabled": policy.quiet_hours_enabled,
         "quiet_hours_start": policy.quiet_hours_start,
         "quiet_hours_end": policy.quiet_hours_end,
+        "inbound_email_address": policy.inbound_email_address,
         "updated_at": now,
     }

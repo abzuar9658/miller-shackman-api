@@ -35,6 +35,36 @@ class FakeLeadRepository:
             lead for (wid, _), lead in self._leads.items() if wid == workspace_id
         )[:limit]
 
+    async def get_by_primary_phone(
+        self,
+        workspace_id: UUID,
+        phone_number: str,
+    ) -> CanonicalLeadRecord | None:
+        normalized = _normalized_phone(phone_number)
+        if normalized is None:
+            return None
+        for (wid, _), lead in self._leads.items():
+            if wid != workspace_id or lead.primary_phone is None:
+                continue
+            if _normalized_phone(lead.primary_phone) == normalized:
+                return lead
+        return None
+
+    async def get_by_primary_email(
+        self,
+        workspace_id: UUID,
+        email_address: str,
+    ) -> CanonicalLeadRecord | None:
+        normalized = _normalized_email(email_address)
+        if normalized is None:
+            return None
+        for (wid, _), lead in self._leads.items():
+            if wid != workspace_id or lead.primary_email is None:
+                continue
+            if _normalized_email(lead.primary_email) == normalized:
+                return lead
+        return None
+
 
 class FakeLeadWorkflowRepository:
     def __init__(self, workflows: tuple[LeadWorkflow, ...]) -> None:
@@ -321,6 +351,20 @@ def _count_kind(
     kind: LeadActivityKind,
 ) -> int:
     return sum(1 for item in items if item.kind == kind)
+
+
+def _normalized_phone(phone_number: str | None) -> str | None:
+    if phone_number is None:
+        return None
+    digits_only = "".join(character for character in phone_number if character.isdigit())
+    return digits_only or None
+
+
+def _normalized_email(email_address: str | None) -> str | None:
+    if email_address is None:
+        return None
+    normalized = email_address.strip().lower()
+    return normalized or None
 
 
 def _workspace_matches(item: LeadActivityItem, workspace_id: UUID) -> bool:

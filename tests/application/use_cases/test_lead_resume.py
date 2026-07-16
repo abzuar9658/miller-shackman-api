@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
+from app.application.ports.temporal import ResumeLeadNurtureWorkflowSignal
 from app.application.use_cases.lead_resume import (
     LeadResumeActionStatus,
     LeadResumeEligibilityReasonCode,
@@ -21,14 +22,21 @@ from app.domain.identity import (
     WorkspaceMembershipStatus,
     WorkspaceStatus,
 )
+from app.domain.crm_sync import ExternalEvent
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workflows import LeadWorkflow, WorkflowState
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeLeadRepository,
     FakeLeadWorkflowRepository,
     FakeWorkspaceContactPolicyRepository,
+    FakeWorkspaceOperationalControlRepository,
 )
-from tests.application.use_cases._campaign_enrollment_fakes import FakeLeadNurtureWorkflowSignaler
+from tests.application.use_cases._campaign_enrollment_fakes import (
+    FakeCampaignEnrollmentRepository,
+    FakeLeadNurtureWorkflowSignaler,
+    FakeTemporalWorkflowStarter,
+    FakeWorkflowTransitionRepository,
+)
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -101,8 +109,17 @@ async def test_resume_lead_workflow_sends_resume_signal() -> None:
         lead_repository=FakeLeadRepository(_lead()),
         workflow_repository=workflow_repository,
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(_policy()),
+        inbound_message_repository=FakeLeadReadInboundMessageRepository(),
+        handoff_repository=FakeLeadReadHandoffRepository(),
+        campaign_enrollment_repository=FakeCampaignEnrollmentRepository(),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        temporal_workflow_starter=FakeTemporalWorkflowStarter(),
         lead_nurture_workflow_signaler=signaler,
+        external_event_repository=FakeExternalEventRepository(),
+        commit=_noop_commit,
+        event_bus=None,
         now=NOW,
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
     )
 
     assert result.status == LeadResumeActionStatus.REQUESTED
@@ -122,11 +139,67 @@ async def test_resume_lead_workflow_rejects_assigned_agent_for_unowned_lead() ->
         lead_repository=FakeLeadRepository(_lead(assigned_agent_user_id=UUID(int=999))),
         workflow_repository=workflow_repository,
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(_policy()),
+        inbound_message_repository=FakeLeadReadInboundMessageRepository(),
+        handoff_repository=FakeLeadReadHandoffRepository(),
+        campaign_enrollment_repository=FakeCampaignEnrollmentRepository(),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        temporal_workflow_starter=FakeTemporalWorkflowStarter(),
         lead_nurture_workflow_signaler=FakeLeadNurtureWorkflowSignaler(),
+        external_event_repository=FakeExternalEventRepository(),
+        commit=_noop_commit,
+        event_bus=None,
         now=NOW,
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
     )
 
     assert result.status == LeadResumeActionStatus.REJECTED
+
+
+async def test_resume_lead_workflow_commits_before_signaling_temporal() -> None:
+    call_order: list[str] = []
+    workflow_repository = FakeLeadWorkflowRepository()
+    workflow = _workflow(WorkflowState.PAUSED)
+    workflow_repository.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow
+
+    class RecordingLeadNurtureWorkflowSignaler(FakeLeadNurtureWorkflowSignaler):
+        async def signal_resume_lead_nurture_workflow(
+            self,
+            *,
+            temporal_workflow_id: str,
+            signal: ResumeLeadNurtureWorkflowSignal,
+        ) -> None:
+            call_order.append("signal")
+            await super().signal_resume_lead_nurture_workflow(
+                temporal_workflow_id=temporal_workflow_id,
+                signal=signal,
+            )
+
+    async def commit() -> None:
+        call_order.append("commit")
+
+    result = await resume_lead_workflow(
+        actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        reason="resume after review",
+        lead_repository=FakeLeadRepository(_lead()),
+        workflow_repository=workflow_repository,
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(_policy()),
+        inbound_message_repository=FakeLeadReadInboundMessageRepository(),
+        handoff_repository=FakeLeadReadHandoffRepository(),
+        campaign_enrollment_repository=FakeCampaignEnrollmentRepository(),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        temporal_workflow_starter=FakeTemporalWorkflowStarter(),
+        lead_nurture_workflow_signaler=RecordingLeadNurtureWorkflowSignaler(),
+        external_event_repository=FakeExternalEventRepository(),
+        commit=commit,
+        event_bus=None,
+        now=NOW,
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
+    )
+
+    assert result.status == LeadResumeActionStatus.REQUESTED
+    assert call_order == ["commit", "signal"]
 
 
 def _lead(
@@ -190,3 +263,42 @@ def _actor(role: WorkspaceMembershipRole) -> AuthenticatedActor:
         active_membership_id=UUID("00000000-0000-0000-0000-000000000007"),
         active_membership_status=WorkspaceMembershipStatus.ACTIVE,
     )
+
+
+async def _noop_commit() -> None:
+    return None
+
+
+class FakeLeadReadInboundMessageRepository:
+    async def list_for_lead(
+        self,
+        workspace_id: UUID,
+        lead_id: UUID,
+        *,
+        limit: int | None = None,
+    ) -> list[object]:
+        return []
+
+
+class FakeLeadReadHandoffRepository:
+    async def list_for_lead(
+        self,
+        workspace_id: UUID,
+        lead_id: UUID,
+        *,
+        limit: int | None = None,
+    ) -> list[object]:
+        return []
+
+
+class FakeExternalEventRepository:
+    async def save(self, event: ExternalEvent) -> ExternalEvent:
+        return event
+
+    async def get_by_provider_event_id(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        provider_event_id: str,
+    ) -> ExternalEvent | None:
+        return None

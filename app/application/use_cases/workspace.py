@@ -10,8 +10,11 @@ from app.application.ports.repositories import (
     InvitationRepository,
     UserRepository,
     WorkspaceContactPolicyRepository,
+    WorkspaceCRMSyncConfigRepository,
     WorkspaceHandoffConfigRepository,
+    WorkspaceLLMConfigRepository,
     WorkspaceMembershipRepository,
+    WorkspaceOperationalControlRepository,
     WorkspaceRepository,
 )
 from app.application.services.authentication import render_invitation_email_body
@@ -22,6 +25,7 @@ from app.domain.compliance import (
     default_workspace_contact_policy,
 )
 from app.domain.conversations import WorkspaceHandoffConfig, default_workspace_handoff_config
+from app.domain.crm_sync import WorkspaceCRMSyncConfig, default_workspace_crm_sync_config
 from app.domain.identity import (
     AuthAuditEventType,
     AuthAuditLog,
@@ -36,6 +40,12 @@ from app.domain.identity import (
     WorkspaceMembershipStatus,
     WorkspaceStatus,
     evaluate_permission,
+)
+from app.domain.llm import WorkspaceLLMConfig, default_workspace_llm_config
+from app.domain.workspace_automation import (
+    WorkspaceAutomationStatus,
+    WorkspaceOperationalControl,
+    default_workspace_operational_control,
 )
 
 
@@ -75,6 +85,21 @@ class UpdateWorkspaceContactPolicyStatus(StrEnum):
 
 
 class UpdateWorkspaceHandoffConfigStatus(StrEnum):
+    UPDATED = "updated"
+    REJECTED = "rejected"
+
+
+class UpdateWorkspaceCRMSyncConfigStatus(StrEnum):
+    UPDATED = "updated"
+    REJECTED = "rejected"
+
+
+class UpdateWorkspaceLLMConfigStatus(StrEnum):
+    UPDATED = "updated"
+    REJECTED = "rejected"
+
+
+class UpdateWorkspaceOperationalControlStatus(StrEnum):
     UPDATED = "updated"
     REJECTED = "rejected"
 
@@ -132,6 +157,9 @@ class WorkspaceSettingsView:
     workspace: Workspace
     contact_policy: WorkspaceContactPolicy
     handoff_config: WorkspaceHandoffConfig
+    crm_sync_config: WorkspaceCRMSyncConfig
+    llm_config: WorkspaceLLMConfig
+    operational_control: WorkspaceOperationalControl
 
 
 @dataclass(frozen=True)
@@ -152,6 +180,27 @@ class UpdateWorkspaceContactPolicyResult:
 class UpdateWorkspaceHandoffConfigResult:
     status: UpdateWorkspaceHandoffConfigStatus
     handoff_config: WorkspaceHandoffConfig | None = None
+    reasons: tuple[AuthReasonCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class UpdateWorkspaceCRMSyncConfigResult:
+    status: UpdateWorkspaceCRMSyncConfigStatus
+    crm_sync_config: WorkspaceCRMSyncConfig | None = None
+    reasons: tuple[AuthReasonCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class UpdateWorkspaceLLMConfigResult:
+    status: UpdateWorkspaceLLMConfigStatus
+    llm_config: WorkspaceLLMConfig | None = None
+    reasons: tuple[AuthReasonCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class UpdateWorkspaceOperationalControlResult:
+    status: UpdateWorkspaceOperationalControlStatus
+    operational_control: WorkspaceOperationalControl | None = None
     reasons: tuple[AuthReasonCode, ...] = ()
 
 
@@ -597,6 +646,11 @@ async def get_workspace_settings(
     membership_repository: WorkspaceMembershipRepository,
     contact_policy_repository: WorkspaceContactPolicyRepository,
     handoff_config_repository: WorkspaceHandoffConfigRepository,
+    crm_sync_config_repository: WorkspaceCRMSyncConfigRepository,
+    workspace_llm_config_repository: WorkspaceLLMConfigRepository,
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository,
+    default_crm_sync_interval_seconds: int = 300,
+    default_openrouter_model: str = "openai/gpt-4o-mini",
 ) -> WorkspaceSettingsReadResult:
     effective_actor = await _actor_for_workspace(
         actor=actor,
@@ -629,12 +683,34 @@ async def get_workspace_settings(
 
     contact_policy = await contact_policy_repository.get_by_workspace_id(workspace_id)
     handoff_config = await handoff_config_repository.get_by_workspace_id(workspace_id)
+    crm_sync_config = await crm_sync_config_repository.get_by_workspace_id(workspace_id)
+    llm_config = await workspace_llm_config_repository.get_by_workspace_id(workspace_id)
+    operational_control = await workspace_operational_control_repository.get_by_workspace_id(
+        workspace_id
+    )
     return WorkspaceSettingsReadResult(
         status=WorkspaceSettingsReadStatus.FOUND,
         view=WorkspaceSettingsView(
             workspace=workspace,
             contact_policy=contact_policy or default_workspace_contact_policy(workspace_id),
             handoff_config=handoff_config or default_workspace_handoff_config(workspace_id),
+            crm_sync_config=(
+                crm_sync_config
+                or default_workspace_crm_sync_config(
+                    workspace_id,
+                    default_interval_seconds=default_crm_sync_interval_seconds,
+                )
+            ),
+            llm_config=(
+                llm_config
+                or default_workspace_llm_config(
+                    workspace_id,
+                    default_openrouter_model=default_openrouter_model,
+                )
+            ),
+            operational_control=(
+                operational_control or default_workspace_operational_control(workspace_id)
+            ),
         ),
     )
 
@@ -644,8 +720,10 @@ async def update_workspace_contact_policy(
     actor: AuthenticatedActor,
     workspace_id: UUID,
     sms_compliance_state: SmsComplianceState,
+    quiet_hours_enabled: bool,
     quiet_hours_start: time,
     quiet_hours_end: time,
+    inbound_email_address: str | None = None,
     workspace_repository: WorkspaceRepository,
     membership_repository: WorkspaceMembershipRepository,
     contact_policy_repository: WorkspaceContactPolicyRepository,
@@ -684,10 +762,17 @@ async def update_workspace_contact_policy(
     current_policy = await contact_policy_repository.get_by_workspace_id(
         workspace_id
     ) or default_workspace_contact_policy(workspace_id)
+    normalized_inbound_email = (
+        current_policy.inbound_email_address
+        if inbound_email_address is None
+        else _normalize_optional_text(inbound_email_address)
+    )
     if (
         current_policy.sms_compliance_state == sms_compliance_state
+        and current_policy.quiet_hours_enabled == quiet_hours_enabled
         and current_policy.quiet_hours_start == quiet_hours_start
         and current_policy.quiet_hours_end == quiet_hours_end
+        and current_policy.inbound_email_address == normalized_inbound_email
     ):
         return UpdateWorkspaceContactPolicyResult(
             status=UpdateWorkspaceContactPolicyStatus.UPDATED,
@@ -697,8 +782,10 @@ async def update_workspace_contact_policy(
     updated_policy = replace(
         current_policy,
         sms_compliance_state=sms_compliance_state,
+        quiet_hours_enabled=quiet_hours_enabled,
         quiet_hours_start=quiet_hours_start,
         quiet_hours_end=quiet_hours_end,
+        inbound_email_address=normalized_inbound_email,
     )
     saved_policy = await contact_policy_repository.save(updated_policy)
     await audit_log_repository.append(
@@ -709,6 +796,9 @@ async def update_workspace_contact_policy(
             actor_user_id=actor.user_id,
             event_details={
                 "sms_compliance_state": saved_policy.sms_compliance_state.value,
+                "quiet_hours_enabled": (
+                    "true" if saved_policy.quiet_hours_enabled else "false"
+                ),
                 "quiet_hours_start": (
                     saved_policy.quiet_hours_start.isoformat()
                     if saved_policy.quiet_hours_start is not None
@@ -719,6 +809,7 @@ async def update_workspace_contact_policy(
                     if saved_policy.quiet_hours_end is not None
                     else ""
                 ),
+                "inbound_email_address": saved_policy.inbound_email_address or "",
             },
         ),
     )
@@ -809,6 +900,253 @@ async def update_workspace_handoff_config(
     return UpdateWorkspaceHandoffConfigResult(
         status=UpdateWorkspaceHandoffConfigStatus.UPDATED,
         handoff_config=saved_config,
+    )
+
+
+async def update_workspace_crm_sync_config(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: UUID,
+    crm_sync_enabled: bool,
+    crm_sync_interval_seconds: int,
+    workspace_repository: WorkspaceRepository,
+    membership_repository: WorkspaceMembershipRepository,
+    crm_sync_config_repository: WorkspaceCRMSyncConfigRepository,
+    audit_log_repository: AuthAuditLogRepository,
+    now: datetime,
+    default_crm_sync_interval_seconds: int = 300,
+) -> UpdateWorkspaceCRMSyncConfigResult:
+    effective_actor = await _actor_for_workspace(
+        actor=actor,
+        workspace_id=workspace_id,
+        workspace_repository=workspace_repository,
+        membership_repository=membership_repository,
+    )
+    if effective_actor is None:
+        return UpdateWorkspaceCRMSyncConfigResult(
+            status=UpdateWorkspaceCRMSyncConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
+        )
+
+    permission = evaluate_permission(
+        effective_actor,
+        PermissionCapability.CHANGE_CONSENT_SUPPRESSION_POLICY,
+    )
+    if not permission.allowed:
+        return UpdateWorkspaceCRMSyncConfigResult(
+            status=UpdateWorkspaceCRMSyncConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.PERMISSION_DENIED,),
+        )
+
+    workspace = await workspace_repository.get_by_id(workspace_id)
+    if workspace is None:
+        return UpdateWorkspaceCRMSyncConfigResult(
+            status=UpdateWorkspaceCRMSyncConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_NOT_FOUND,),
+        )
+
+    current_config = await crm_sync_config_repository.get_by_workspace_id(
+        workspace_id,
+    ) or default_workspace_crm_sync_config(
+        workspace_id,
+        default_interval_seconds=default_crm_sync_interval_seconds,
+    )
+    if (
+        current_config.crm_sync_enabled == crm_sync_enabled
+        and current_config.crm_sync_interval_seconds == crm_sync_interval_seconds
+    ):
+        return UpdateWorkspaceCRMSyncConfigResult(
+            status=UpdateWorkspaceCRMSyncConfigStatus.UPDATED,
+            crm_sync_config=current_config,
+        )
+
+    saved_config = await crm_sync_config_repository.save(
+        WorkspaceCRMSyncConfig(
+            workspace_id=workspace_id,
+            crm_sync_enabled=crm_sync_enabled,
+            crm_sync_interval_seconds=crm_sync_interval_seconds,
+        )
+    )
+    await audit_log_repository.append(
+        _auth_audit_log(
+            event_type=AuthAuditEventType.WORKSPACE_CRM_SYNC_CONFIG_UPDATED,
+            now=now,
+            workspace_id=workspace_id,
+            actor_user_id=actor.user_id,
+            event_details={
+                "crm_sync_enabled": str(saved_config.crm_sync_enabled).lower(),
+                "crm_sync_interval_seconds": str(saved_config.crm_sync_interval_seconds),
+            },
+        ),
+    )
+    return UpdateWorkspaceCRMSyncConfigResult(
+        status=UpdateWorkspaceCRMSyncConfigStatus.UPDATED,
+        crm_sync_config=saved_config,
+    )
+
+
+async def update_workspace_llm_config(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: UUID,
+    openrouter_model: str,
+    workspace_repository: WorkspaceRepository,
+    membership_repository: WorkspaceMembershipRepository,
+    workspace_llm_config_repository: WorkspaceLLMConfigRepository,
+    audit_log_repository: AuthAuditLogRepository,
+    now: datetime,
+    default_openrouter_model: str = "openai/gpt-4o-mini",
+    allowed_openrouter_models: tuple[str, ...] = ("openai/gpt-4o-mini",),
+) -> UpdateWorkspaceLLMConfigResult:
+    effective_actor = await _actor_for_workspace(
+        actor=actor,
+        workspace_id=workspace_id,
+        workspace_repository=workspace_repository,
+        membership_repository=membership_repository,
+    )
+    if effective_actor is None:
+        return UpdateWorkspaceLLMConfigResult(
+            status=UpdateWorkspaceLLMConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
+        )
+
+    permission = evaluate_permission(
+        effective_actor,
+        PermissionCapability.CHANGE_CONSENT_SUPPRESSION_POLICY,
+    )
+    if not permission.allowed:
+        return UpdateWorkspaceLLMConfigResult(
+            status=UpdateWorkspaceLLMConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.PERMISSION_DENIED,),
+        )
+
+    workspace = await workspace_repository.get_by_id(workspace_id)
+    if workspace is None:
+        return UpdateWorkspaceLLMConfigResult(
+            status=UpdateWorkspaceLLMConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_NOT_FOUND,),
+        )
+
+    normalized_model = openrouter_model.strip()
+    if normalized_model not in allowed_openrouter_models:
+        return UpdateWorkspaceLLMConfigResult(
+            status=UpdateWorkspaceLLMConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.VALIDATION_ERROR,),
+        )
+
+    current_config = await workspace_llm_config_repository.get_by_workspace_id(
+        workspace_id,
+    ) or default_workspace_llm_config(
+        workspace_id,
+        default_openrouter_model=default_openrouter_model,
+    )
+    if current_config.openrouter_model == normalized_model:
+        return UpdateWorkspaceLLMConfigResult(
+            status=UpdateWorkspaceLLMConfigStatus.UPDATED,
+            llm_config=current_config,
+        )
+
+    saved_config = await workspace_llm_config_repository.save(
+        WorkspaceLLMConfig(
+            workspace_id=workspace_id,
+            openrouter_model=normalized_model,
+        )
+    )
+    await audit_log_repository.append(
+        _auth_audit_log(
+            event_type=AuthAuditEventType.WORKSPACE_LLM_CONFIG_UPDATED,
+            now=now,
+            workspace_id=workspace_id,
+            actor_user_id=actor.user_id,
+            event_details={"openrouter_model": saved_config.openrouter_model},
+        ),
+    )
+    return UpdateWorkspaceLLMConfigResult(
+        status=UpdateWorkspaceLLMConfigStatus.UPDATED,
+        llm_config=saved_config,
+    )
+
+
+async def update_workspace_operational_control(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: UUID,
+    automation_status: WorkspaceAutomationStatus,
+    pause_reason: str | None,
+    workspace_repository: WorkspaceRepository,
+    membership_repository: WorkspaceMembershipRepository,
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository,
+    audit_log_repository: AuthAuditLogRepository,
+    now: datetime,
+) -> UpdateWorkspaceOperationalControlResult:
+    effective_actor = await _actor_for_workspace(
+        actor=actor,
+        workspace_id=workspace_id,
+        workspace_repository=workspace_repository,
+        membership_repository=membership_repository,
+    )
+    if effective_actor is None:
+        return UpdateWorkspaceOperationalControlResult(
+            status=UpdateWorkspaceOperationalControlStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
+        )
+
+    permission = evaluate_permission(
+        effective_actor,
+        PermissionCapability.CHANGE_CONSENT_SUPPRESSION_POLICY,
+    )
+    if not permission.allowed:
+        return UpdateWorkspaceOperationalControlResult(
+            status=UpdateWorkspaceOperationalControlStatus.REJECTED,
+            reasons=(AuthReasonCode.PERMISSION_DENIED,),
+        )
+
+    workspace = await workspace_repository.get_by_id(workspace_id)
+    if workspace is None:
+        return UpdateWorkspaceOperationalControlResult(
+            status=UpdateWorkspaceOperationalControlStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_NOT_FOUND,),
+        )
+
+    normalized_reason = (pause_reason or "").strip() or None
+    if automation_status == WorkspaceAutomationStatus.ACTIVE:
+        normalized_reason = None
+
+    current_control = await workspace_operational_control_repository.get_by_workspace_id(
+        workspace_id,
+    ) or default_workspace_operational_control(workspace_id)
+    if (
+        current_control.automation_status == automation_status
+        and current_control.pause_reason == normalized_reason
+    ):
+        return UpdateWorkspaceOperationalControlResult(
+            status=UpdateWorkspaceOperationalControlStatus.UPDATED,
+            operational_control=current_control,
+        )
+
+    saved_control = await workspace_operational_control_repository.save(
+        WorkspaceOperationalControl(
+            workspace_id=workspace_id,
+            automation_status=automation_status,
+            pause_reason=normalized_reason,
+        )
+    )
+    event_details = {"automation_status": saved_control.automation_status.value}
+    if saved_control.pause_reason is not None:
+        event_details["pause_reason"] = saved_control.pause_reason
+
+    await audit_log_repository.append(
+        _auth_audit_log(
+            event_type=AuthAuditEventType.WORKSPACE_OPERATIONAL_CONTROL_UPDATED,
+            now=now,
+            workspace_id=workspace_id,
+            actor_user_id=actor.user_id,
+            event_details=event_details,
+        ),
+    )
+    return UpdateWorkspaceOperationalControlResult(
+        status=UpdateWorkspaceOperationalControlStatus.UPDATED,
+        operational_control=saved_control,
     )
 
 

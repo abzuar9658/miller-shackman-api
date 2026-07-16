@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -37,6 +38,7 @@ async def list_preflight_digests_route(
         actor=actor,
         workspace_id=workspace_id,
         repository=bundle.repository,
+        now=datetime.now(UTC),
     )
     if result.status == PreflightReadStatus.REJECTED:
         raise HTTPException(
@@ -64,6 +66,7 @@ async def get_preflight_digest_route(
         workspace_id=workspace_id,
         digest_id=str(digest_id),
         repository=bundle.repository,
+        now=datetime.now(UTC),
     )
     if result.status == PreflightReadStatus.REJECTED:
         raise HTTPException(
@@ -119,7 +122,7 @@ def _summary_response(view: PreflightDigestSummaryView) -> PreflightDigestSummar
         digest_id=view.digest.digest_id,
         campaign_id=view.digest.campaign_id,
         batch_id=view.digest.batch_id,
-        status=view.digest.status.value,
+        status=view.status.value,
         lead_count=view.lead_count,
         veto_count=view.veto_count,
         recipient_count=view.recipient_count,

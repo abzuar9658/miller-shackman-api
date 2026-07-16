@@ -51,6 +51,24 @@ class FakeLeadRepository:
             else None
         )
 
+    async def get_by_primary_phone(
+        self,
+        workspace_id: WorkspaceId,
+        phone_number: str,
+    ) -> CanonicalLeadRecord | None:
+        if self.lead.workspace_id != workspace_id or self.lead.primary_phone != phone_number:
+            return None
+        return self.lead
+
+    async def get_by_primary_email(
+        self,
+        workspace_id: WorkspaceId,
+        email_address: str,
+    ) -> CanonicalLeadRecord | None:
+        if self.lead.workspace_id != workspace_id or self.lead.primary_email != email_address:
+            return None
+        return self.lead
+
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         self.lead = record
         return record
@@ -59,6 +77,14 @@ class FakeLeadRepository:
 class FakeHandoffRepository:
     def __init__(self, handoff: Handoff) -> None:
         self.handoff = handoff
+
+    async def list_handoffs(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[Handoff, ...]:
+        return ((self.handoff,) if self.handoff.workspace_id == workspace_id else ())[:limit]
 
     async def get_by_id(self, workspace_id: WorkspaceId, handoff_id: UUID) -> Handoff | None:
         return (
@@ -105,6 +131,11 @@ class FakeWorkspaceHandoffConfigRepository:
 
 
 class FakeCRMClient:
+    supports_custom_fields = True
+    supports_tags = True
+    supports_notes = True
+    supports_webhooks = False
+
     async def validate_connection(self, workspace_id: WorkspaceId) -> bool:
         return True
 

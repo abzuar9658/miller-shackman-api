@@ -71,8 +71,10 @@ def _default_quiet_hours_end() -> time:
 class WorkspaceContactPolicy:
     workspace_id: WorkspaceId
     sms_compliance_state: SmsComplianceState = SmsComplianceState.NOT_APPROVED
+    quiet_hours_enabled: bool = True
     quiet_hours_start: time | None = field(default_factory=_default_quiet_hours_start)
     quiet_hours_end: time | None = field(default_factory=_default_quiet_hours_end)
+    inbound_email_address: str | None = None
 
 
 def default_workspace_contact_policy(workspace_id: WorkspaceId) -> WorkspaceContactPolicy:

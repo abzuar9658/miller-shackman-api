@@ -15,6 +15,10 @@ from app.interfaces.api.dependencies.auth import (
     get_auth_service_bundle,
     get_current_actor,
 )
+from app.interfaces.api.dependencies.workspace_settings import (
+    WorkspaceSettingsBundle,
+    get_workspace_settings_bundle,
+)
 from app.main import create_app
 from tests.application.use_cases.test_authentication import (
     ADMIN_ID,
@@ -35,6 +39,11 @@ class WorkspaceTestClient:
     def __init__(self, client: TestClient, deps: _Dependencies) -> None:
         self.client = client
         self.deps = deps
+
+
+class _NoopSession:
+    async def commit(self) -> None:
+        return None
 
 
 @pytest.fixture
@@ -75,6 +84,26 @@ def workspace_client() -> WorkspaceTestClient:
 
     app.dependency_overrides[get_auth_service_bundle] = override_get_auth_service_bundle
     app.dependency_overrides[get_current_actor] = override_get_current_actor
+
+    def override_get_workspace_settings_bundle() -> WorkspaceSettingsBundle:
+        return WorkspaceSettingsBundle(
+            session=_NoopSession(),
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            audit_log_repository=deps.audit_log_repository,
+            workspace_contact_policy_repository=deps.workspace_contact_policy_repository,
+            workspace_crm_sync_config_repository=deps.workspace_crm_sync_config_repository,
+            workspace_llm_config_repository=deps.workspace_llm_config_repository,
+            workspace_handoff_config_repository=deps.workspace_handoff_config_repository,
+            workspace_operational_control_repository=deps.workspace_operational_control_repository,
+            default_crm_sync_interval_seconds=300,
+            default_openrouter_model="openai/gpt-4o-mini",
+            allowed_openrouter_models=("openai/gpt-4o-mini", "openai/gpt-4.1-mini"),
+        )
+
+    app.dependency_overrides[get_workspace_settings_bundle] = (
+        override_get_workspace_settings_bundle
+    )
 
     return WorkspaceTestClient(TestClient(app), deps)
 
@@ -185,3 +214,119 @@ def test_update_user_status_returns_200(workspace_client: WorkspaceTestClient) -
     body = response.json()
     assert body["status"] == "updated"
     assert body["user"]["status"] == "disabled"
+
+
+def test_get_workspace_settings_returns_crm_sync_defaults(
+    workspace_client: WorkspaceTestClient,
+) -> None:
+    response = workspace_client.client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/settings")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "found"
+    assert body["contact_policy"] == {
+        "workspace_id": str(WORKSPACE_ID),
+        "sms_compliance_state": "not_approved",
+        "quiet_hours_enabled": True,
+        "quiet_hours_start": "10:00:00",
+        "quiet_hours_end": "17:00:00",
+        "inbound_email_address": None,
+    }
+    assert body["crm_sync_config"] == {
+        "workspace_id": str(WORKSPACE_ID),
+        "crm_sync_enabled": True,
+        "crm_sync_interval_seconds": 300,
+    }
+    assert body["llm_config"] == {
+        "workspace_id": str(WORKSPACE_ID),
+        "openrouter_model": "openai/gpt-4o-mini",
+        "allowed_openrouter_models": ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"],
+    }
+    assert body["operational_control"] == {
+        "workspace_id": str(WORKSPACE_ID),
+        "automation_status": "active",
+        "pause_reason": None,
+    }
+
+
+def test_update_workspace_crm_sync_config_returns_200(
+    workspace_client: WorkspaceTestClient,
+) -> None:
+    response = workspace_client.client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/settings/crm-sync",
+        json={"crm_sync_enabled": False, "crm_sync_interval_seconds": 900},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "updated"
+    assert body["crm_sync_config"] == {
+        "workspace_id": str(WORKSPACE_ID),
+        "crm_sync_enabled": False,
+        "crm_sync_interval_seconds": 900,
+    }
+
+
+def test_update_workspace_llm_config_returns_200(
+    workspace_client: WorkspaceTestClient,
+) -> None:
+    response = workspace_client.client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/settings/llm",
+        json={"openrouter_model": "openai/gpt-4.1-mini"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "updated"
+    assert body["llm_config"] == {
+        "workspace_id": str(WORKSPACE_ID),
+        "openrouter_model": "openai/gpt-4.1-mini",
+        "allowed_openrouter_models": ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"],
+    }
+
+
+def test_update_workspace_operational_control_returns_200(
+    workspace_client: WorkspaceTestClient,
+) -> None:
+    response = workspace_client.client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/settings/automation",
+        json={
+            "automation_status": "paused",
+            "pause_reason": "Brokerage requested a temporary pause.",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "updated"
+    assert body["operational_control"] == {
+        "workspace_id": str(WORKSPACE_ID),
+        "automation_status": "paused",
+        "pause_reason": "Brokerage requested a temporary pause.",
+    }
+
+
+def test_update_workspace_contact_policy_returns_200(
+    workspace_client: WorkspaceTestClient,
+) -> None:
+    response = workspace_client.client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/settings/contact-policy",
+        json={
+            "sms_compliance_state": "approved",
+            "quiet_hours_enabled": False,
+            "quiet_hours_start": "10:00:00",
+            "quiet_hours_end": "17:00:00",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "updated"
+    assert body["contact_policy"] == {
+        "workspace_id": str(WORKSPACE_ID),
+        "sms_compliance_state": "approved",
+        "quiet_hours_enabled": False,
+        "quiet_hours_start": "10:00:00",
+        "quiet_hours_end": "17:00:00",
+        "inbound_email_address": None,
+    }

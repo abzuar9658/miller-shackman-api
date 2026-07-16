@@ -17,6 +17,7 @@ from app.application.ports.repositories import (
     LeadWorkflowRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
+    WorkspaceOperationalControlRepository,
 )
 from app.application.ports.temporal import TemporalWorkflowStarter
 from app.core.config import Settings, get_settings
@@ -48,6 +49,9 @@ from app.infrastructure.persistence.postgres.workflow_repository import (
 from app.infrastructure.persistence.postgres.workspace_contact_policy_repository import (
     PostgresWorkspaceContactPolicyRepository,
 )
+from app.infrastructure.persistence.postgres.workspace_operational_control_repository import (
+    PostgresWorkspaceOperationalControlRepository,
+)
 from app.infrastructure.providers import (
     build_crm_client,
     build_notification_provider,
@@ -68,6 +72,7 @@ class CampaignServiceBundle:
     campaign_execution_repository: CampaignExecutionRepository
     campaign_enrollment_repository: CampaignEnrollmentRepository
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository
     dormant_candidate_selector: DormantCandidateSelector
     preflight_digest_repository: PreflightDigestRepository
     lead_workflow_repository: LeadWorkflowRepository
@@ -102,6 +107,9 @@ async def get_campaign_service_bundle(
         campaign_execution_repository=PostgresCampaignExecutionRepository(session),
         campaign_enrollment_repository=PostgresCampaignEnrollmentRepository(session),
         workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
+        workspace_operational_control_repository=PostgresWorkspaceOperationalControlRepository(
+            session
+        ),
         dormant_candidate_selector=PostgresDormantCandidateSelector(session),
         preflight_digest_repository=PostgresPreflightDigestRepository(session),
         lead_workflow_repository=PostgresLeadWorkflowRepository(session),

@@ -14,12 +14,14 @@ from app.application.ports.repositories import (
     ExternalEventRepository,
     HandoffCompletionRepository,
     HandoffRepository,
+    InboundMessageCRMCompletionRepository,
     InboundMessageRepository,
     LeadRepository,
     LeadWorkflowRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
     WorkspaceHandoffConfigRepository,
+    WorkspaceLLMConfigRepository,
 )
 from app.application.ports.temporal import LeadNurtureWorkflowSignaler
 from app.core.config import Settings, get_settings
@@ -29,6 +31,7 @@ from app.infrastructure.persistence.postgres.conversation_repository import (
     PostgresConversationSummaryRepository,
     PostgresHandoffCompletionRepository,
     PostgresHandoffRepository,
+    PostgresInboundMessageCRMCompletionRepository,
     PostgresInboundMessageRepository,
 )
 from app.infrastructure.persistence.postgres.crm_sync_repository import (
@@ -48,6 +51,9 @@ from app.infrastructure.persistence.postgres.workspace_contact_policy_repository
 )
 from app.infrastructure.persistence.postgres.workspace_handoff_config_repository import (
     PostgresWorkspaceHandoffConfigRepository,
+)
+from app.infrastructure.persistence.postgres.workspace_llm_config_repository import (
+    PostgresWorkspaceLLMConfigRepository,
 )
 from app.infrastructure.providers import (
     build_crm_client,
@@ -72,15 +78,18 @@ class InboundServiceBundle:
     conversation_summary_repository: ConversationSummaryRepository
     handoff_repository: HandoffRepository
     handoff_completion_repository: HandoffCompletionRepository
+    inbound_message_crm_completion_repository: InboundMessageCRMCompletionRepository
     lead_workflow_repository: LeadWorkflowRepository
     workflow_transition_repository: WorkflowTransitionRepository
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository
     workspace_handoff_config_repository: WorkspaceHandoffConfigRepository
+    workspace_llm_config_repository: WorkspaceLLMConfigRepository
     crm_client: CRMClient
     notification_provider: NotificationProvider
     llm_client: LLMClient
     lead_nurture_workflow_signaler: LeadNurtureWorkflowSignaler
     event_bus: EventBus
+    default_openrouter_model: str
 
 
 async def get_inbound_service_bundle(
@@ -96,13 +105,18 @@ async def get_inbound_service_bundle(
         conversation_summary_repository=PostgresConversationSummaryRepository(session),
         handoff_repository=PostgresHandoffRepository(session),
         handoff_completion_repository=PostgresHandoffCompletionRepository(session),
+        inbound_message_crm_completion_repository=PostgresInboundMessageCRMCompletionRepository(
+            session
+        ),
         lead_workflow_repository=PostgresLeadWorkflowRepository(session),
         workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
         workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
         workspace_handoff_config_repository=PostgresWorkspaceHandoffConfigRepository(session),
+        workspace_llm_config_repository=PostgresWorkspaceLLMConfigRepository(session),
         crm_client=build_crm_client(settings),
         notification_provider=build_notification_provider(settings),
         llm_client=build_llm_client(settings),
         lead_nurture_workflow_signaler=await build_temporal_workflow_signaler(settings),
         event_bus=PostgresTransactionalEventBus(PostgresOutboxEventRepository(session)),
+        default_openrouter_model=settings.openrouter_model,
     )

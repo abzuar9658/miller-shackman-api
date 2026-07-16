@@ -94,7 +94,7 @@ async def test_resume_signal_activity_requires_actor_and_reason() -> None:
         ResumeWorkflowSignal(
             workspace_id=UUID("00000000-0000-0000-0000-000000000001"),
             lead_id=UUID("00000000-0000-0000-0000-000000000002"),
-            occurred_at=datetime(2026, 7, 8, 12, 0, tzinfo=UTC),
+            occurred_at=datetime(2026, 7, 8, 12, 0, tzinfo=UTC).isoformat(),
             reason="",
             actor_user_id=None,
         ),

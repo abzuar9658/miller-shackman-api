@@ -45,7 +45,7 @@ def _lead() -> CanonicalLeadRecord:
 def _classification_json(
     *,
     intent: str = "human_requested",
-    confidence: float = 0.91,
+    confidence: float | str = 0.91,
     handoff_required: bool = True,
     handoff_reason: str | None = "human_requested",
     opt_out_detected: bool = False,

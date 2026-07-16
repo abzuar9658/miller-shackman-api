@@ -5,7 +5,11 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from app.application.ports.llm import LLMClient
-from app.application.ports.repositories import LeadRepository, OutboundMessageRepository
+from app.application.ports.repositories import (
+    LeadRepository,
+    OutboundMessageRepository,
+    WorkspaceLLMConfigRepository,
+)
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
 from app.application.services.llm.outbound_message_drafting import (
     ApprovedOutboundLeadContext,
@@ -13,6 +17,9 @@ from app.application.services.llm.outbound_message_drafting import (
     OutboundMessageDraftResult,
     OutboundMessageDraftStatus,
     draft_outbound_message,
+)
+from app.application.services.llm.workspace_model_resolution import (
+    resolve_workspace_openrouter_model,
 )
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
 from app.domain.campaigns.pre_send import (
@@ -116,6 +123,8 @@ async def plan_outbound_message(
     message_repository: OutboundMessageRepository,
     llm_client: LLMClient,
     now: datetime,
+    workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
+    default_openrouter_model: str = "openai/gpt-4o-mini",
     message_id_factory: Callable[[], UUID] | None = None,
 ) -> PlanOutboundMessageResult:
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
@@ -132,6 +141,8 @@ async def plan_outbound_message(
         message_repository=message_repository,
         llm_client=llm_client,
         now=now,
+        workspace_llm_config_repository=workspace_llm_config_repository,
+        default_openrouter_model=default_openrouter_model,
         message_id_factory=message_id_factory,
     )
 
@@ -144,6 +155,8 @@ async def plan_outbound_message_for_lead_record(
     message_repository: OutboundMessageRepository,
     llm_client: LLMClient,
     now: datetime,
+    workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
+    default_openrouter_model: str = "openai/gpt-4o-mini",
     message_id_factory: Callable[[], UUID] | None = None,
 ) -> PlanOutboundMessageResult:
     workspace_id = lead.workspace_id
@@ -179,6 +192,12 @@ async def plan_outbound_message_for_lead_record(
             channel_evaluations=selected.evaluations,
         )
 
+    openrouter_model = await resolve_workspace_openrouter_model(
+        workspace_id=workspace_id,
+        workspace_llm_config_repository=workspace_llm_config_repository,
+        default_openrouter_model=default_openrouter_model,
+    )
+
     draft_result = await draft_outbound_message(
         lead=lead,
         channel=selected.channel,
@@ -187,6 +206,7 @@ async def plan_outbound_message_for_lead_record(
         assigned_agent_name=context.assigned_agent_name,
         lead_context=context.lead_context,
         llm_client=llm_client,
+        model=openrouter_model,
     )
     if draft_result.status != OutboundMessageDraftStatus.DRAFTED or draft_result.body is None:
         return PlanOutboundMessageResult(

@@ -50,6 +50,7 @@ async def test_temporal_workflow_starter_sends_pause_signal() -> None:
     signal_arg = captured["signal_arg"]
     assert isinstance(signal_arg, PauseWorkflowSignal)
     assert signal_arg.reason == "crm_note_added"
+    assert signal_arg.occurred_at == "2026-07-12T12:00:00+00:00"
 
 
 async def test_temporal_workflow_starter_sends_resume_signal() -> None:
@@ -86,3 +87,4 @@ async def test_temporal_workflow_starter_sends_resume_signal() -> None:
     signal_arg = captured["signal_arg"]
     assert isinstance(signal_arg, ResumeWorkflowSignal)
     assert signal_arg.reason == "agent approved follow-up"
+    assert signal_arg.occurred_at == "2026-07-12T12:05:00+00:00"

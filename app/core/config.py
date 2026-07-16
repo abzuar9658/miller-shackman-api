@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     openrouter_api_key: SecretStr | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "openai/gpt-4o-mini"
+    openrouter_allowed_models: list[str] = ["openai/gpt-4o-mini"]
 
     # Valid values: "twilio" or "sink" (dev-only, no external calls).
     sms_provider: str = "twilio"
@@ -67,6 +68,13 @@ class Settings(BaseSettings):
     cache_provider: str = "redis"
     redis_url: str = "redis://localhost:56379/0"
 
+    listing_context_enrichment_enabled: bool = False
+    listing_context_enrichment_max_results: int = 3
+    listing_context_enrichment_cache_ttl_minutes: int = 360
+    streeteasy_base_url: str = "https://streeteasy.com"
+    streeteasy_timeout_seconds: float = 10.0
+    streeteasy_user_agent: str = "Mozilla/5.0 (compatible; MillerSchackmanBot/0.1)"
+
     auth_jwt_secret: SecretStr | None = None
     auth_jwt_algorithm: str = "HS256"
     auth_access_token_ttl_minutes: int = 15
@@ -81,6 +89,20 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @field_validator("openrouter_allowed_models")
+    @classmethod
+    def openrouter_allowed_models_must_be_non_empty(cls, value: list[str]) -> list[str]:
+        normalized = tuple(dict.fromkeys(item.strip() for item in value if item.strip()))
+        if not normalized:
+            raise ValueError("openrouter_allowed_models must contain at least one model")
+        return list(normalized)
+
+    @model_validator(mode="after")
+    def openrouter_model_must_be_allowed(self) -> "Settings":
+        if self.openrouter_model not in self.openrouter_allowed_models:
+            raise ValueError("openrouter_model must be included in openrouter_allowed_models")
+        return self
 
 
 @lru_cache

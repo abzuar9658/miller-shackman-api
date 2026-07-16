@@ -1,17 +1,23 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from app.application.ports.lead_activity import LeadActivityItem, LeadActivityRepository
+from app.application.ports.listing_search import ListingSearchClient
+from app.application.ports.listing_sources import ListingSnapshotRepository, ListingSourceRepository
 from app.application.ports.llm import LLMClient
 from app.application.ports.repositories import (
     CrmConversationEventRepository,
     LeadRepository,
     OutboundMessageRepository,
+    WorkspaceLLMConfigRepository,
 )
 from app.application.services.canonical_lead_inputs import (
     approved_outbound_context_from_canonical_lead,
+)
+from app.application.services.listing_context_enrichment import (
+    maybe_enrich_outbound_lead_context,
 )
 from app.application.use_cases.plan_outbound_message import (
     OutboundPlanningContext,
@@ -25,6 +31,8 @@ from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import CampaignId, LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel, WorkspaceContactPolicy
 from app.domain.conversations import CrmConversationEvent
+
+OUTBOUND_CONTEXT_ACTIVITY_HISTORY_LIMIT = 24
 
 
 def _empty_preferences() -> Mapping[str, str]:
@@ -69,10 +77,18 @@ async def plan_next_outbound_message_for_lead(
     context: PlanNextOutboundMessageContext,
     lead_repository: LeadRepository,
     message_repository: OutboundMessageRepository,
-    lead_activity_repository: LeadActivityRepository | None = None,
-    crm_conversation_event_repository: CrmConversationEventRepository | None = None,
     llm_client: LLMClient,
     now: datetime,
+    workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
+    default_openrouter_model: str = "openai/gpt-4o-mini",
+    lead_activity_repository: LeadActivityRepository | None = None,
+    crm_conversation_event_repository: CrmConversationEventRepository | None = None,
+    listing_source_repository: ListingSourceRepository | None = None,
+    listing_snapshot_repository: ListingSnapshotRepository | None = None,
+    listing_search_client: ListingSearchClient | None = None,
+    listing_enrichment_enabled: bool = False,
+    listing_cache_ttl: timedelta = timedelta(hours=6),
+    listing_max_results: int = 3,
     message_id_factory: Callable[[], UUID] | None = None,
 ) -> PlanOutboundMessageResult:
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
@@ -87,7 +103,7 @@ async def plan_next_outbound_message_for_lead(
         activity_items = await lead_activity_repository.list_for_lead(
             workspace_id,
             lead_id,
-            limit=8,
+            limit=OUTBOUND_CONTEXT_ACTIVITY_HISTORY_LIMIT,
         )
 
     crm_conversation_events: tuple[CrmConversationEvent, ...] = ()
@@ -95,8 +111,30 @@ async def plan_next_outbound_message_for_lead(
         crm_conversation_events = await crm_conversation_event_repository.list_for_lead(
             workspace_id,
             lead_id,
-            limit=8,
+            limit=OUTBOUND_CONTEXT_ACTIVITY_HISTORY_LIMIT,
         )
+
+    lead_context = approved_outbound_context_from_canonical_lead(
+        lead,
+        now=now,
+        conversation_summary=context.conversation_summary,
+        latest_lead_request=context.latest_lead_request,
+        extracted_preferences=context.extracted_preferences,
+        allowed_mapped_custom_field_keys=context.allowed_mapped_custom_field_keys,
+        activity_items=activity_items,
+        crm_conversation_events=crm_conversation_events,
+    )
+    lead_context = await maybe_enrich_outbound_lead_context(
+        lead=lead,
+        lead_context=lead_context,
+        now=now,
+        enrichment_enabled=listing_enrichment_enabled,
+        cache_ttl=listing_cache_ttl,
+        max_results=listing_max_results,
+        source_repository=listing_source_repository,
+        snapshot_repository=listing_snapshot_repository,
+        listing_search_client=listing_search_client,
+    )
 
     planning_context = OutboundPlanningContext(
         campaign_status=context.campaign_status,
@@ -110,16 +148,7 @@ async def plan_next_outbound_message_for_lead(
         scheduled_for=context.scheduled_for,
         message_version=context.message_version,
         pre_send_policy=context.pre_send_policy,
-        lead_context=approved_outbound_context_from_canonical_lead(
-            lead,
-            now=now,
-            conversation_summary=context.conversation_summary,
-            latest_lead_request=context.latest_lead_request,
-            extracted_preferences=context.extracted_preferences,
-            allowed_mapped_custom_field_keys=context.allowed_mapped_custom_field_keys,
-            activity_items=activity_items,
-            crm_conversation_events=crm_conversation_events,
-        ),
+        lead_context=lead_context,
         preflight_vetoed=context.preflight_vetoed,
         handoff_active=context.handoff_active,
         human_owned=context.human_owned,
@@ -139,5 +168,7 @@ async def plan_next_outbound_message_for_lead(
         message_repository=message_repository,
         llm_client=llm_client,
         now=now,
+        workspace_llm_config_repository=workspace_llm_config_repository,
+        default_openrouter_model=default_openrouter_model,
         message_id_factory=message_id_factory,
     )

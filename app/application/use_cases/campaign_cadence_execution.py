@@ -5,6 +5,8 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from app.application.ports.lead_activity import LeadActivityRepository
+from app.application.ports.listing_search import ListingSearchClient
+from app.application.ports.listing_sources import ListingSnapshotRepository, ListingSourceRepository
 from app.application.ports.llm import LLMClient
 from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
@@ -16,7 +18,14 @@ from app.application.ports.repositories import (
     OutboundMessageRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
+    WorkspaceLLMConfigRepository,
+    WorkspaceOperationalControlRepository,
     WorkspaceRepository,
+)
+from app.application.services.workspace_automation_control import (
+    resolve_workspace_operational_control,
+    workspace_automation_block_reason,
+    workspace_automation_is_active,
 )
 from app.application.use_cases.apply_workflow_state_transition import (
     WorkflowStateTransitionStatus,
@@ -43,9 +52,9 @@ from app.domain.campaigns.rejected_draft_review import (
     RejectedDraftReview,
     RejectedDraftReviewStatus,
 )
-from app.domain.compliance.contactability import ContactChannel
 from app.domain.common.ids import CampaignVersionId, LeadId, WorkspaceId
 from app.domain.compliance.contactability import (
+    ContactChannel,
     WorkspaceContactPolicy,
     default_workspace_contact_policy,
 )
@@ -63,6 +72,7 @@ class CadenceStepExecutionStatus(StrEnum):
     SENT = "sent"
     ALREADY_SENT = "already_sent"
     ALREADY_WAITING_FOR_RESPONSE = "already_waiting_for_response"
+    DEFERRED = "deferred"
     REJECTED = "rejected"
     FAILED = "failed"
     UNCERTAIN = "uncertain"
@@ -149,6 +159,8 @@ async def execute_campaign_cadence_step(
     campaign_execution_repository: CampaignExecutionRepository,
     workspace_repository: WorkspaceRepository,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository,
+    workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     lead_repository: LeadRepository,
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
@@ -156,10 +168,18 @@ async def execute_campaign_cadence_step(
     rejected_draft_review_repository: RejectedDraftReviewRepository | None = None,
     lead_activity_repository: LeadActivityRepository | None = None,
     crm_conversation_event_repository: CrmConversationEventRepository | None = None,
+    listing_source_repository: ListingSourceRepository | None = None,
+    listing_snapshot_repository: ListingSnapshotRepository | None = None,
+    listing_search_client: ListingSearchClient | None = None,
+    listing_enrichment_enabled: bool = False,
+    listing_cache_ttl: timedelta = timedelta(hours=6),
+    listing_max_results: int = 3,
     llm_client: LLMClient,
     sms_provider: SMSProvider,
     email_provider: EmailProvider,
     now: datetime,
+    default_openrouter_model: str = "openai/gpt-4o-mini",
+    workspace_automation_defer_interval: timedelta = timedelta(minutes=15),
 ) -> CadenceStepExecutionResult:
     config = await campaign_execution_repository.get_by_version_id(
         workspace_id, campaign_version_id
@@ -217,6 +237,28 @@ async def execute_campaign_cadence_step(
             status=CadenceStepExecutionStatus.MISSING_WORKSPACE,
             workflow=workflow,
             cadence_step_id=step.cadence_step_id,
+        )
+
+    operational_control = await resolve_workspace_operational_control(
+        workspace_id=workspace_id,
+        workspace_operational_control_repository=workspace_operational_control_repository,
+    )
+    if not workspace_automation_is_active(operational_control):
+        deferred_until = now + workspace_automation_defer_interval
+        workflow = await lead_workflow_repository.save(
+            replace(
+                workflow,
+                current_step_id=step.cadence_step_id,
+                next_action_at=deferred_until,
+                updated_at=now,
+            )
+        )
+        return CadenceStepExecutionResult(
+            status=CadenceStepExecutionStatus.DEFERRED,
+            workflow=workflow,
+            cadence_step_id=step.cadence_step_id,
+            skip_reason=workspace_automation_block_reason(operational_control),
+            has_more_steps=True,
         )
 
     workspace_contact_policy = await workspace_contact_policy_repository.get_by_workspace_id(
@@ -284,6 +326,14 @@ async def execute_campaign_cadence_step(
         crm_conversation_event_repository=crm_conversation_event_repository,
         llm_client=llm_client,
         now=now,
+        workspace_llm_config_repository=workspace_llm_config_repository,
+        default_openrouter_model=default_openrouter_model,
+        listing_source_repository=listing_source_repository,
+        listing_snapshot_repository=listing_snapshot_repository,
+        listing_search_client=listing_search_client,
+        listing_enrichment_enabled=listing_enrichment_enabled,
+        listing_cache_ttl=listing_cache_ttl,
+        listing_max_results=listing_max_results,
     )
     if plan_result.status == PlanOutboundMessageStatus.REJECTED or plan_result.message is None:
         block_metadata = _planning_block_metadata(
@@ -340,6 +390,7 @@ async def execute_campaign_cadence_step(
         message_repository=message_repository,
         sms_provider=sms_provider,
         email_provider=email_provider,
+        workspace_operational_control_repository=workspace_operational_control_repository,
         now=now,
     )
     if send_result.status in {
@@ -529,6 +580,13 @@ def _pre_send_policy(
     workspace_contact_policy: WorkspaceContactPolicy,
     timezone: str,
 ) -> PreSendPolicy:
+    if not workspace_contact_policy.quiet_hours_enabled:
+        return PreSendPolicy(
+            allowed_send_start_hour=0,
+            allowed_send_end_hour=24,
+            timezone=timezone,
+        )
+
     quiet_hours_start = workspace_contact_policy.quiet_hours_start
     quiet_hours_end = workspace_contact_policy.quiet_hours_end
     return PreSendPolicy(

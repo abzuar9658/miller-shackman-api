@@ -4,22 +4,27 @@ from typing import Annotated, Protocol
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
     CampaignExecutionRepository,
+    ExternalEventRepository,
     LeadRepository,
     LeadWorkflowRepository,
     OutboundMessageRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
+    WorkspaceOperationalControlRepository,
     WorkspaceRepository,
 )
-from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.temporal import LeadNurtureWorkflowSignaler
 from app.core.config import Settings, get_settings
 from app.core.database import get_session
 from app.infrastructure.persistence.postgres.campaign_execution_repository import (
     PostgresCampaignExecutionRepository,
+)
+from app.infrastructure.persistence.postgres.crm_sync_repository import (
+    PostgresExternalEventRepository,
 )
 from app.infrastructure.persistence.postgres.identity_repository import PostgresWorkspaceRepository
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
@@ -35,6 +40,9 @@ from app.infrastructure.persistence.postgres.workflow_repository import (
 )
 from app.infrastructure.persistence.postgres.workspace_contact_policy_repository import (
     PostgresWorkspaceContactPolicyRepository,
+)
+from app.infrastructure.persistence.postgres.workspace_operational_control_repository import (
+    PostgresWorkspaceOperationalControlRepository,
 )
 from app.infrastructure.providers import (
     build_email_provider,
@@ -58,7 +66,9 @@ class LeadDraftReviewActionBundle:
     campaign_execution_repository: CampaignExecutionRepository
     workspace_repository: WorkspaceRepository
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository
     message_repository: OutboundMessageRepository
+    external_event_repository: ExternalEventRepository
     sms_provider: SMSProvider
     email_provider: EmailProvider
     lead_nurture_workflow_signaler: LeadNurtureWorkflowSignaler
@@ -77,7 +87,11 @@ async def get_lead_draft_review_action_bundle(
         campaign_execution_repository=PostgresCampaignExecutionRepository(session),
         workspace_repository=PostgresWorkspaceRepository(session),
         workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
+        workspace_operational_control_repository=PostgresWorkspaceOperationalControlRepository(
+            session
+        ),
         message_repository=PostgresOutboundMessageRepository(session),
+        external_event_repository=PostgresExternalEventRepository(session),
         sms_provider=build_sms_provider(settings),
         email_provider=build_email_provider(settings),
         lead_nurture_workflow_signaler=await build_temporal_workflow_signaler(settings),

@@ -14,17 +14,23 @@ from app.application.ports.repositories import (
     ExternalEventRepository,
     HandoffCompletionRepository,
     HandoffRepository,
+    InboundMessageCRMCompletionRepository,
     InboundMessageRepository,
     LeadRepository,
     LeadWorkflowRepository,
     WorkflowTransitionRepository,
     WorkspaceHandoffConfigRepository,
+    WorkspaceLLMConfigRepository,
 )
 from app.application.services.llm.reply_classification import (
     InboundReplyIntent,
     ReplyClassificationReasonCode,
+    ReplyClassificationResult,
     ReplyClassificationStatus,
     classify_inbound_reply,
+)
+from app.application.services.llm.workspace_model_resolution import (
+    resolve_workspace_openrouter_model,
 )
 from app.application.use_cases.apply_inbound_workflow_transition import (
     InboundWorkflowTransitionOutcome,
@@ -32,6 +38,11 @@ from app.application.use_cases.apply_inbound_workflow_transition import (
     apply_inbound_workflow_transition,
 )
 from app.application.use_cases.complete_handoff import HandoffCompletionStatus, complete_handoff
+from app.application.use_cases.complete_inbound_message_crm_sync import (
+    CompleteInboundMessageCRMSyncResult,
+    CompleteInboundMessageCRMSyncStatus,
+    complete_inbound_message_crm_sync,
+)
 from app.application.use_cases.process_contact_suppression_event import (
     apply_contact_suppression_to_lead,
 )
@@ -47,7 +58,7 @@ from app.domain.conversations import (
 )
 from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
-from app.domain.leads import CRMProvider
+from app.domain.leads import CanonicalLeadRecord, CRMProvider
 
 
 class ProcessInboundMessageEventStatus(StrEnum):
@@ -61,6 +72,10 @@ class ProcessInboundMessageEventReasonCode(StrEnum):
     LEAD_NOT_FOUND = "lead_not_found"
     UNSUPPORTED_PROVIDER = "unsupported_provider"
     CLASSIFICATION_REJECTED = "classification_rejected"
+
+
+_SMS_OPT_OUT_KEYWORDS = frozenset({"stop", "stopall", "unsubscribe", "cancel", "end", "quit"})
+_EMAIL_OPT_OUT_KEYWORDS = frozenset({"unsubscribe"})
 
 
 def _empty_payload() -> Mapping[str, object]:
@@ -77,6 +92,7 @@ class InboundMessageEvent:
     channel: ContactChannel
     body: str
     received_at: datetime
+    crm_provider: CRMProvider | None = None
     event_type: str = "inbound_message.received"
     from_address_redacted: str | None = None
     to_address_redacted: str | None = None
@@ -97,6 +113,8 @@ class ProcessInboundMessageEventResult:
     handoff_required: bool = False
     handoff_completion_status: HandoffCompletionStatus | None = None
     handoff_completion_failure_reason: str | None = None
+    crm_sync_status: CompleteInboundMessageCRMSyncStatus | None = None
+    crm_sync_failure_reason: str | None = None
     opt_out_detected: bool = False
     reasons: tuple[ProcessInboundMessageEventReasonCode, ...] = ()
     classification_reasons: tuple[ReplyClassificationReasonCode, ...] = ()
@@ -113,10 +131,13 @@ async def process_inbound_message_event(
     handoff_repository: HandoffRepository,
     llm_client: LLMClient,
     crm_client: CRMClient | None = None,
+    inbound_message_crm_completion_repository: InboundMessageCRMCompletionRepository | None = None,
     notification_provider: NotificationProvider | None = None,
     workspace_handoff_config_repository: WorkspaceHandoffConfigRepository | None = None,
+    workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
     handoff_completion_repository: HandoffCompletionRepository | None = None,
     now: datetime,
+    default_openrouter_model: str = "openai/gpt-4o-mini",
     lead_workflow_repository: LeadWorkflowRepository | None = None,
     workflow_transition_repository: WorkflowTransitionRepository | None = None,
     event_bus: EventBus | None = None,
@@ -140,7 +161,7 @@ async def process_inbound_message_event(
             reasons=(ProcessInboundMessageEventReasonCode.DUPLICATE_EVENT,),
         )
 
-    provider = _crm_provider(event.provider)
+    crm_provider = event.crm_provider or _crm_provider(event.provider)
     external_event = ExternalEvent(
         external_event_id=(external_event_id_factory or uuid4)(),
         workspace_id=event.workspace_id,
@@ -158,7 +179,7 @@ async def process_inbound_message_event(
         updated_at=now,
     )
 
-    if provider is None:
+    if crm_provider is None:
         saved_event = await external_event_repository.save(
             replace(
                 external_event,
@@ -174,7 +195,7 @@ async def process_inbound_message_event(
             reasons=(ProcessInboundMessageEventReasonCode.UNSUPPORTED_PROVIDER,),
         )
 
-    lead = await lead_repository.get_by_crm_id(event.workspace_id, provider, event.crm_lead_id)
+    lead = await lead_repository.get_by_crm_id(event.workspace_id, crm_provider, event.crm_lead_id)
     if lead is None:
         saved_event = await external_event_repository.save(
             replace(
@@ -233,10 +254,21 @@ async def process_inbound_message_event(
         ),
     )
 
+    openrouter_model = await resolve_workspace_openrouter_model(
+        workspace_id=event.workspace_id,
+        workspace_llm_config_repository=workspace_llm_config_repository,
+        default_openrouter_model=default_openrouter_model,
+    )
+
     classification = await classify_inbound_reply(
         lead=lead,
         inbound_text=event.body,
         llm_client=llm_client,
+        model=openrouter_model,
+    )
+    classification = _apply_explicit_opt_out_override(
+        event=event,
+        classification=classification,
     )
     if classification.status == ReplyClassificationStatus.REJECTED:
         await conversation_repository.save(
@@ -282,6 +314,20 @@ async def process_inbound_message_event(
             opt_out_detected=False,
             now=now,
         )
+        crm_sync_result = await _sync_inbound_message_to_crm_if_configured(
+            event=event,
+            crm_provider=crm_provider,
+            lead=lead,
+            inbound_message=inbound_message,
+            summary_text=None,
+            intent=None,
+            handoff_required=False,
+            opt_out_detected=False,
+            classification_rejected=True,
+            crm_client=crm_client,
+            inbound_message_crm_completion_repository=inbound_message_crm_completion_repository,
+            now=now,
+        )
         return ProcessInboundMessageEventResult(
             status=ProcessInboundMessageEventStatus.PROCESSED,
             external_event_id=saved_event.external_event_id,
@@ -294,6 +340,10 @@ async def process_inbound_message_event(
             workflow_transition_id=workflow_transition.transition_id,
             reasons=(ProcessInboundMessageEventReasonCode.CLASSIFICATION_REJECTED,),
             classification_reasons=classification.reasons,
+            crm_sync_status=crm_sync_result.status if crm_sync_result is not None else None,
+            crm_sync_failure_reason=(
+                crm_sync_result.failure_reason if crm_sync_result is not None else None
+            ),
         )
 
     conversation_status = ConversationStatus.PAUSED
@@ -405,6 +455,21 @@ async def process_inbound_message_event(
     else:
         handoff_completion_result = None
 
+    crm_sync_result = await _sync_inbound_message_to_crm_if_configured(
+        event=event,
+        crm_provider=crm_provider,
+        lead=lead,
+        inbound_message=inbound_message,
+        summary_text=classification.summary_text or event.body,
+        intent=classification.intent,
+        handoff_required=classification.handoff_required,
+        opt_out_detected=classification.opt_out_detected,
+        classification_rejected=False,
+        crm_client=crm_client,
+        inbound_message_crm_completion_repository=inbound_message_crm_completion_repository,
+        now=now,
+    )
+
     await external_event_repository.save(
         replace(
             saved_event,
@@ -441,6 +506,10 @@ async def process_inbound_message_event(
         handoff_completion_failure_reason=handoff_completion_result.failure_reason
         if handoff_completion_result is not None
         else None,
+        crm_sync_status=crm_sync_result.status if crm_sync_result is not None else None,
+        crm_sync_failure_reason=(
+            crm_sync_result.failure_reason if crm_sync_result is not None else None
+        ),
         opt_out_detected=classification.opt_out_detected,
     )
 
@@ -456,6 +525,85 @@ def _contact_suppression_kind(channel: ContactChannel) -> ContactSuppressionKind
     if channel == ContactChannel.SMS:
         return ContactSuppressionKind.SMS_OPT_OUT
     return ContactSuppressionKind.EMAIL_UNSUBSCRIBED
+
+
+def _apply_explicit_opt_out_override(
+    *,
+    event: InboundMessageEvent,
+    classification: ReplyClassificationResult,
+) -> ReplyClassificationResult:
+    if not _is_explicit_opt_out(event.channel, event.body):
+        return classification
+    if classification.status == ReplyClassificationStatus.REJECTED:
+        return ReplyClassificationResult(
+            status=ReplyClassificationStatus.CLASSIFIED,
+            prompt_version=classification.prompt_version,
+            model=classification.model,
+            latency_ms=classification.latency_ms,
+            usage_tokens=classification.usage_tokens,
+            intent=InboundReplyIntent.OPT_OUT,
+            confidence=classification.confidence,
+            handoff_required=False,
+            handoff_reason=None,
+            opt_out_detected=True,
+            summary_text=event.body.strip() or event.body,
+            preferences={},
+        )
+    if classification.opt_out_detected:
+        return classification
+    return replace(
+        classification,
+        intent=InboundReplyIntent.OPT_OUT,
+        opt_out_detected=True,
+    )
+
+
+def _is_explicit_opt_out(channel: ContactChannel, body: str) -> bool:
+    normalized = "".join(character.lower() for character in body if character.isalnum())
+    if channel == ContactChannel.SMS:
+        return normalized in _SMS_OPT_OUT_KEYWORDS
+    if channel == ContactChannel.EMAIL:
+        return normalized in _EMAIL_OPT_OUT_KEYWORDS
+    return False
+
+
+def _is_explicit_sms_opt_out(body: str) -> bool:
+    return _is_explicit_opt_out(ContactChannel.SMS, body)
+
+
+async def _sync_inbound_message_to_crm_if_configured(
+    *,
+    event: InboundMessageEvent,
+    crm_provider: CRMProvider,
+    lead: CanonicalLeadRecord,
+    inbound_message: InboundMessage,
+    summary_text: str | None,
+    intent: InboundReplyIntent | None,
+    handoff_required: bool,
+    opt_out_detected: bool,
+    classification_rejected: bool,
+    crm_client: CRMClient | None,
+    inbound_message_crm_completion_repository: InboundMessageCRMCompletionRepository | None,
+    now: datetime,
+) -> CompleteInboundMessageCRMSyncResult | None:
+    if (
+        crm_client is None
+        or inbound_message_crm_completion_repository is None
+        or event.provider == crm_provider.value
+    ):
+        return None
+    return await complete_inbound_message_crm_sync(
+        lead=lead,
+        inbound_message=inbound_message,
+        summary_text=summary_text,
+        intent=intent,
+        handoff_required=handoff_required,
+        opt_out_detected=opt_out_detected,
+        classification_rejected=classification_rejected,
+        crm_client=crm_client,
+        crm_sync_completion_repository=inbound_message_crm_completion_repository,
+        now=now,
+    )
 
 
 async def _apply_workflow_transition_if_configured(

@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from app.application.ports.lead_activity import LeadActivityItem, LeadActivityKind
 from app.application.services.canonical_lead_inputs import (
     approved_outbound_context_from_canonical_lead,
     contactability_facts_from_canonical_lead,
@@ -60,6 +61,32 @@ def _crm_event(
         content=content,
         created_at=NOW,
         updated_at=NOW,
+    )
+
+
+def _activity_item(
+    *,
+    title: str,
+    preview: str,
+    kind: LeadActivityKind,
+    occurred_at: datetime,
+    content: str | None = None,
+    direction: str | None = None,
+    channel: str | None = None,
+    actor_name: str | None = None,
+) -> LeadActivityItem:
+    lead = _canonical_lead()
+    return LeadActivityItem(
+        activity_id=uuid4(),
+        lead_id=lead.lead_id,
+        kind=kind,
+        occurred_at=occurred_at,
+        title=title,
+        preview=preview,
+        content=content,
+        direction=direction,
+        channel=channel,
+        actor_name=actor_name,
     )
 
 
@@ -165,8 +192,115 @@ def test_explicit_outbound_context_values_override_canonical_defaults() -> None:
     )
 
     assert context.conversation_summary == "Lead replied last month asking for a call."
+    assert context.conversation_memory_summary == "Lead replied last month asking for a call."
     assert context.latest_lead_request == "Asked to speak with an agent."
     assert context.extracted_preferences == {"timeline": "within_3_months"}
+
+
+def test_activity_history_builds_bounded_memory_recent_transcript_and_outbound_history() -> None:
+    lead = _canonical_lead()
+    activity_items = (
+        _activity_item(
+            title="Outbound message",
+            preview="Checking in about your home search.",
+            content=(
+                "Checking in about your home search in Riverdale and whether a 2 bed still works."
+            ),
+            kind=LeadActivityKind.OUTBOUND_MESSAGE,
+            occurred_at=NOW,
+            direction="outbound",
+            channel="email",
+            actor_name="ai_assistant",
+        ),
+        _activity_item(
+            title="Inbound message",
+            preview="We still want Riverdale and need 2 beds under 600k.",
+            content="We still want Riverdale and need at least 2 beds under 600k.",
+            kind=LeadActivityKind.INBOUND_MESSAGE,
+            occurred_at=NOW - timedelta(hours=1),
+            direction="inbound",
+            channel="sms",
+            actor_name="lead",
+        ),
+        _activity_item(
+            title="CRM note",
+            preview="Agent note: co-op is okay.",
+            content="Agent note: co-op is okay and the lead wants to move before school starts.",
+            kind=LeadActivityKind.CRM_CONVERSATION_EVENT,
+            occurred_at=NOW - timedelta(hours=2),
+            direction="internal",
+            actor_name="Alex Agent",
+        ),
+    )
+
+    context = approved_outbound_context_from_canonical_lead(
+        lead,
+        now=NOW,
+        activity_items=activity_items,
+    )
+
+    assert context.conversation_summary is not None
+    assert context.conversation_memory_summary is not None
+    assert "Riverdale" in context.conversation_memory_summary
+    assert "co-op is okay" in context.conversation_memory_summary
+    assert context.latest_lead_request == (
+        "We still want Riverdale and need at least 2 beds under 600k."
+    )
+    assert len(context.recent_conversation_items) == 3
+    assert context.recent_conversation_items[0].title == "CRM note"
+    assert context.recent_conversation_items[-1].title == "Outbound message"
+    assert context.recent_outbound_messages == (
+        "Checking in about your home search in Riverdale and whether a 2 bed still works.",
+    )
+
+
+def test_history_preferences_are_extracted_from_activity_items() -> None:
+    context = approved_outbound_context_from_canonical_lead(
+        _canonical_lead(),
+        now=NOW,
+        activity_items=(
+            _activity_item(
+                title="Inbound message",
+                preview="We still want Riverdale or Spuyten Duyvil.",
+                content=(
+                    "We still want Riverdale or Spuyten Duyvil and need at least 2 bedrooms "
+                    "under 600k. A co-op is okay."
+                ),
+                kind=LeadActivityKind.INBOUND_MESSAGE,
+                occurred_at=NOW,
+                direction="inbound",
+                channel="sms",
+                actor_name="lead",
+            ),
+        ),
+    )
+
+    assert context.extracted_preferences["location"] == "Riverdale, Spuyten Duyvil"
+    assert context.extracted_preferences["beds"] == "2"
+    assert context.extracted_preferences["max_price"] == "600000"
+    assert context.extracted_preferences["keywords"] == "co-op"
+
+
+def test_history_preferences_fall_back_to_crm_events_when_activity_items_missing() -> None:
+    context = approved_outbound_context_from_canonical_lead(
+        _canonical_lead(),
+        now=NOW,
+        crm_conversation_events=(
+            _crm_event(
+                crm_activity_id="act-1",
+                content=(
+                    "We want to rent near 225 East 134th Street and need 1 bedroom with "
+                    "doorman."
+                ),
+                direction=CrmConversationEventDirection.INBOUND,
+            ),
+        ),
+    )
+
+    assert context.extracted_preferences["address"] == "225 East 134th Street"
+    assert context.extracted_preferences["search_type"] == "rent"
+    assert context.extracted_preferences["beds"] == "1"
+    assert context.extracted_preferences["keywords"] == "doorman"
 
 
 def test_crm_conversation_history_precedes_synthetic_summary_and_request() -> None:

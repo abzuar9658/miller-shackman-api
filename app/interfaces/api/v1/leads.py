@@ -228,7 +228,9 @@ async def start_lead_manual_enrollment_route(
         campaign_enrollment_repository=bundle.campaign_enrollment_repository,
         lead_workflow_repository=bundle.lead_workflow_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
+        workspace_operational_control_repository=bundle.workspace_operational_control_repository,
         temporal_workflow_starter=bundle.temporal_workflow_starter,
+        commit=bundle.session.commit,
         event_bus=bundle.event_bus,
         now=datetime.now(UTC),
     )
@@ -312,8 +314,17 @@ async def resume_lead_route(
         lead_repository=bundle.lead_repository,
         workflow_repository=bundle.workflow_repository,
         workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
+        inbound_message_repository=bundle.inbound_message_repository,
+        handoff_repository=bundle.handoff_repository,
+        campaign_enrollment_repository=bundle.campaign_enrollment_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        temporal_workflow_starter=bundle.temporal_workflow_starter,
         lead_nurture_workflow_signaler=bundle.lead_nurture_workflow_signaler,
+        external_event_repository=bundle.external_event_repository,
+        commit=bundle.session.commit,
+        event_bus=bundle.event_bus,
         now=datetime.now(UTC),
+        workspace_operational_control_repository=bundle.workspace_operational_control_repository,
     )
     if result.status == LeadResumeActionStatus.REJECTED:
         raise HTTPException(
@@ -325,6 +336,7 @@ async def resume_lead_route(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=[reason.value for reason in result.reasons],
         )
+    await bundle.session.commit()
     return ResumeLeadWorkflowResponse(
         status=result.status.value,
         workflow_id=result.workflow_id,
@@ -362,7 +374,10 @@ async def approve_rejected_draft_review_route(
         campaign_execution_repository=bundle.campaign_execution_repository,
         workspace_repository=bundle.workspace_repository,
         workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
+        workspace_operational_control_repository=bundle.workspace_operational_control_repository,
         message_repository=bundle.message_repository,
+        external_event_repository=bundle.external_event_repository,
+        commit=bundle.session.commit,
         sms_provider=bundle.sms_provider,
         email_provider=bundle.email_provider,
         lead_nurture_workflow_signaler=bundle.lead_nurture_workflow_signaler,

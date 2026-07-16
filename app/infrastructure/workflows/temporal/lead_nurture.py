@@ -56,7 +56,7 @@ class ExecuteCadenceStepResult:
 class InboundReplySignal:
     workspace_id: UUID
     lead_id: UUID
-    occurred_at: datetime
+    occurred_at: str
     handoff_required: bool = False
     opt_out_detected: bool = False
     classification_rejected: bool = False
@@ -72,7 +72,7 @@ class InboundReplySignal:
 class PauseWorkflowSignal:
     workspace_id: UUID
     lead_id: UUID
-    occurred_at: datetime
+    occurred_at: str
     reason: str
     actor_user_id: UUID | None = None
     external_event_id: UUID | None = None
@@ -82,7 +82,7 @@ class PauseWorkflowSignal:
 class ResumeWorkflowSignal:
     workspace_id: UUID
     lead_id: UUID
-    occurred_at: datetime
+    occurred_at: str
     reason: str
     actor_user_id: UUID | None = None
     external_event_id: UUID | None = None
@@ -92,7 +92,7 @@ class ResumeWorkflowSignal:
 class UnblockWorkflowSignal:
     workspace_id: UUID
     lead_id: UUID
-    occurred_at: datetime
+    occurred_at: str
     reason: str
     actor_user_id: UUID | None = None
     external_event_id: UUID | None = None
@@ -176,6 +176,9 @@ class LeadNurtureWorkflow:
                 await workflow.wait_condition(lambda: self._closed or not self._send_blocked)
                 if self._closed:
                     return self._snapshot
+                continue
+
+            if execute_result.status == "deferred":
                 continue
 
             if execute_result.status not in {"sent", "already_sent"}:

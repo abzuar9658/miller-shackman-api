@@ -194,3 +194,56 @@ async def test_returns_duplicate_when_suppression_event_replays() -> None:
     assert first.status == ProcessContactSuppressionEventStatus.PROCESSED
     assert second.status == ProcessContactSuppressionEventStatus.DUPLICATE
     assert second.reasons == (ProcessContactSuppressionEventReasonCode.DUPLICATE_EVENT,)
+
+
+async def test_commits_before_signaling_temporal_pause() -> None:
+    call_order: list[str] = []
+
+    class RecordingLeadNurtureWorkflowSignaler(FakeLeadNurtureWorkflowSignaler):
+        async def signal_pause_lead_nurture_workflow(
+            self,
+            *,
+            temporal_workflow_id: str,
+            signal: PauseLeadNurtureWorkflowSignal,
+        ) -> None:
+            call_order.append("signal")
+            await super().signal_pause_lead_nurture_workflow(
+                temporal_workflow_id=temporal_workflow_id,
+                signal=signal,
+            )
+
+    async def commit() -> None:
+        call_order.append("commit")
+
+    workflow_repository = FakeLeadWorkflowRepository()
+    workflow = _workflow()
+    workflow_repository.workflows[workflow.workflow_id] = workflow
+    workflow_repository.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow
+
+    result = await process_contact_suppression_event(
+        event=ContactSuppressionEvent(
+            workspace_id=WORKSPACE_ID,
+            source_provider="twilio",
+            provider_event_id="evt-order",
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+            crm_lead_id="crm-123",
+            suppression_kind=ContactSuppressionKind.SMS_OPT_OUT,
+            occurred_at=NOW,
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        external_event_repository=FakeExternalEventRepository(),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            WorkspaceContactPolicy(
+                workspace_id=WORKSPACE_ID,
+                sms_compliance_state=SmsComplianceState.APPROVED,
+            )
+        ),
+        lead_nurture_workflow_signaler=RecordingLeadNurtureWorkflowSignaler(),
+        commit=commit,
+        now=NOW,
+    )
+
+    assert result.signal_sent is True
+    assert call_order == ["commit", "signal"]

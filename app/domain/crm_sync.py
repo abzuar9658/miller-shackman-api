@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from app.domain.common.ids import LeadId, WorkspaceId
+from app.domain.workspace_automation import WorkspaceAutomationStatus
 
 
 class CRMSyncJobStatus(StrEnum):
@@ -29,6 +30,36 @@ class ExternalEventStatus(StrEnum):
     PROCESSED = "processed"
     FAILED = "failed"
     IGNORED = "ignored"
+
+
+DEFAULT_WORKSPACE_CRM_SYNC_INTERVAL_SECONDS = 300
+
+
+@dataclass(frozen=True)
+class WorkspaceCRMSyncConfig:
+    workspace_id: WorkspaceId
+    crm_sync_enabled: bool = True
+    crm_sync_interval_seconds: int = DEFAULT_WORKSPACE_CRM_SYNC_INTERVAL_SECONDS
+
+
+def default_workspace_crm_sync_config(
+    workspace_id: WorkspaceId,
+    *,
+    default_interval_seconds: int = DEFAULT_WORKSPACE_CRM_SYNC_INTERVAL_SECONDS,
+) -> WorkspaceCRMSyncConfig:
+    return WorkspaceCRMSyncConfig(
+        workspace_id=workspace_id,
+        crm_sync_enabled=True,
+        crm_sync_interval_seconds=default_interval_seconds,
+    )
+
+
+@dataclass(frozen=True)
+class WorkspaceCRMSyncScheduleTarget:
+    workspace_id: WorkspaceId
+    crm_sync_enabled: bool
+    crm_sync_interval_seconds: int
+    automation_status: WorkspaceAutomationStatus = WorkspaceAutomationStatus.ACTIVE
 
 
 @dataclass(frozen=True)

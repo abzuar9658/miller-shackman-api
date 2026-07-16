@@ -4,8 +4,16 @@ from enum import StrEnum
 
 from app.application.ports.event_bus import EventBus
 from app.application.ports.messaging import EmailMessage, EmailProvider, SMSMessage, SMSProvider
-from app.application.ports.repositories import LeadRepository, OutboundMessageRepository
+from app.application.ports.repositories import (
+    LeadRepository,
+    OutboundMessageRepository,
+    WorkspaceOperationalControlRepository,
+)
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
+from app.application.services.workspace_automation_control import (
+    resolve_workspace_operational_control,
+    workspace_automation_is_active,
+)
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
 from app.domain.campaigns.pre_send import (
     PreSendDecision,
@@ -37,6 +45,7 @@ class SendOutboundMessageStatus(StrEnum):
 class SendOutboundMessageReasonCode(StrEnum):
     MESSAGE_NOT_FOUND = "message_not_found"
     LEAD_NOT_FOUND = "lead_not_found"
+    WORKSPACE_AUTOMATION_BLOCKED = "workspace_automation_blocked"
     PRE_SEND_BLOCKED = "pre_send_blocked"
     CHANNEL_DESTINATION_MISSING = "channel_destination_missing"
     EMAIL_SUBJECT_MISSING = "email_subject_missing"
@@ -81,6 +90,7 @@ async def send_outbound_message(
     email_provider: EmailProvider,
     now: datetime,
     event_bus: EventBus | None = None,
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
 ) -> SendOutboundMessageResult:
     message = await message_repository.get_by_idempotency_key_for_update(
         workspace_id,
@@ -108,6 +118,17 @@ async def send_outbound_message(
         return SendOutboundMessageResult(
             status=SendOutboundMessageStatus.UNCERTAIN,
             message=message,
+        )
+
+    operational_control = await resolve_workspace_operational_control(
+        workspace_id=workspace_id,
+        workspace_operational_control_repository=workspace_operational_control_repository,
+    )
+    if not workspace_automation_is_active(operational_control):
+        return SendOutboundMessageResult(
+            status=SendOutboundMessageStatus.REJECTED,
+            message=message,
+            reasons=(SendOutboundMessageReasonCode.WORKSPACE_AUTOMATION_BLOCKED,),
         )
 
     lead = await lead_repository.get_by_id_for_update(workspace_id, message.lead_id)

@@ -11,6 +11,7 @@ from app.application.ports.repositories import (
     CampaignEnrollmentRepository,
     LeadWorkflowRepository,
     WorkflowTransitionRepository,
+    WorkspaceOperationalControlRepository,
 )
 from app.application.ports.temporal import TemporalWorkflowStarter
 from app.core.config import Settings, get_settings
@@ -30,6 +31,9 @@ from app.infrastructure.persistence.postgres.workflow_repository import (
     PostgresLeadWorkflowRepository,
     PostgresWorkflowTransitionRepository,
 )
+from app.infrastructure.persistence.postgres.workspace_operational_control_repository import (
+    PostgresWorkspaceOperationalControlRepository,
+)
 from app.infrastructure.providers import build_temporal_workflow_starter
 
 
@@ -46,6 +50,7 @@ class LeadManualEnrollmentBundle:
     campaign_enrollment_repository: CampaignEnrollmentRepository
     lead_workflow_repository: LeadWorkflowRepository
     workflow_transition_repository: WorkflowTransitionRepository
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository
     temporal_workflow_starter: TemporalWorkflowStarter
     event_bus: EventBus
 
@@ -61,6 +66,9 @@ async def get_lead_manual_enrollment_bundle(
         campaign_enrollment_repository=PostgresCampaignEnrollmentRepository(session),
         lead_workflow_repository=PostgresLeadWorkflowRepository(session),
         workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
+        workspace_operational_control_repository=PostgresWorkspaceOperationalControlRepository(
+            session
+        ),
         temporal_workflow_starter=await build_temporal_workflow_starter(settings),
         event_bus=PostgresTransactionalEventBus(PostgresOutboxEventRepository(session)),
     )
