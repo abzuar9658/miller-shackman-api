@@ -37,6 +37,7 @@ def map_follow_up_boss_person_to_canonical_lead(
         payload.get("assignedUserId"),
         payload.get("assignedTo"),
     )
+    assigned_agent_name = _text(payload.get("assignedTo"))
 
     return CanonicalLeadRecord(
         workspace_id=workspace_id,
@@ -59,6 +60,8 @@ def map_follow_up_boss_person_to_canonical_lead(
         mapped_custom_fields=_mapped_custom_fields(
             payload.get("customFields"),
             mapped_custom_field_keys,
+            assigned_agent_user_id=assigned_agent_crm_id,
+            assigned_agent_name=assigned_agent_name,
         ),
         primary_email=_primary_email(emails),
         primary_phone=_primary_phone(phones),
@@ -168,15 +171,27 @@ def _tags(raw: object) -> tuple[str, ...]:
     return tuple(sorted(tags))
 
 
-def _mapped_custom_fields(raw: object, allowed_keys: Iterable[str]) -> dict[str, str]:
+def _mapped_custom_fields(
+    raw: object,
+    allowed_keys: Iterable[str],
+    *,
+    assigned_agent_user_id: str | None,
+    assigned_agent_name: str | None,
+) -> dict[str, str]:
     if not isinstance(raw, Mapping):
-        return {}
-    allowed = set(allowed_keys)
-    return {
-        str(key): str(value)
-        for key, value in raw.items()
-        if str(key) in allowed and isinstance(value, str | int | float | bool)
-    }
+        fields: dict[str, str] = {}
+    else:
+        allowed = set(allowed_keys)
+        fields = {
+            str(key): str(value)
+            for key, value in raw.items()
+            if str(key) in allowed and isinstance(value, str | int | float | bool)
+        }
+    if assigned_agent_user_id:
+        fields.setdefault("assigned_agent_user_id", assigned_agent_user_id)
+    if assigned_agent_name:
+        fields.setdefault("assigned_agent_name", assigned_agent_name)
+    return fields
 
 
 def _meaningful_activity(payload: Mapping[str, Any]) -> tuple[datetime | None, ActivityReliability]:

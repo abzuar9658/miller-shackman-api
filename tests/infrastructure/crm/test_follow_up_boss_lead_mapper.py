@@ -55,7 +55,11 @@ def test_maps_buyer_payload_to_canonical_lead_facts() -> None:
     assert lead.lead_stage == "Lead"
     assert lead.created_via == "Email Parsing"
     assert lead.tags == ("buyer", "nurture")
-    assert lead.mapped_custom_fields == {"budget": "750000"}
+    assert lead.mapped_custom_fields == {
+        "budget": "750000",
+        "assigned_agent_user_id": "42",
+        "assigned_agent_name": "Agent Name",
+    }
     assert lead.primary_email == "lead@example.com"
     assert lead.primary_phone == "+15551234567"
     assert lead.has_email is True

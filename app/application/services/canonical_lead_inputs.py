@@ -189,6 +189,7 @@ def approved_outbound_context_from_canonical_lead(
     conversation_summary: str | None = None,
     latest_lead_request: str | None = None,
     extracted_preferences: Mapping[str, str] | None = None,
+    enabled_query_extraction_fields: tuple[str, ...] | None = None,
     allowed_mapped_custom_field_keys: tuple[str, ...] = (),
     activity_items: tuple[LeadActivityItem, ...] = (),
     crm_conversation_events: tuple[CrmConversationEvent, ...] = (),
@@ -201,14 +202,21 @@ def approved_outbound_context_from_canonical_lead(
         activity_items=activity_items,
         crm_conversation_events=crm_conversation_events,
     )
+    history_preferences = _filter_query_preferences(
+        history_preferences,
+        enabled_fields=enabled_query_extraction_fields,
+    )
     _clear_superseded_preferences(preferences, history_preferences)
     preferences.update(history_preferences)
     if extracted_preferences:
-        explicit_preferences = {
-            key: value
-            for key, value in extracted_preferences.items()
-            if key.strip() and value.strip()
-        }
+        explicit_preferences = _filter_query_preferences(
+            {
+                key: value
+                for key, value in extracted_preferences.items()
+                if key.strip() and value.strip()
+            },
+            enabled_fields=enabled_query_extraction_fields,
+        )
         _clear_superseded_preferences(preferences, explicit_preferences)
         preferences.update(explicit_preferences)
 
@@ -235,6 +243,17 @@ def approved_outbound_context_from_canonical_lead(
         recent_outbound_messages=_recent_outbound_messages_from_activity_items(activity_items)
         or _recent_outbound_messages_from_crm_events(crm_conversation_events),
     )
+
+
+def _filter_query_preferences(
+    preferences: dict[str, str],
+    *,
+    enabled_fields: tuple[str, ...] | None,
+) -> dict[str, str]:
+    if enabled_fields is None:
+        return preferences
+    allowed = {field.strip().lower() for field in enabled_fields if field.strip()}
+    return {key: value for key, value in preferences.items() if key.strip().lower() in allowed}
 
 
 def start_candidate_from_canonical_lead(
@@ -346,9 +365,7 @@ def _conversation_memory_summary_from_activity_items(
         content = _activity_text(item)
         if content is None:
             continue
-        details.append(
-            f"{item.title}: {_truncate_text(content, MAX_ACTIVITY_MEMORY_CHARS)}"
-        )
+        details.append(f"{item.title}: {_truncate_text(content, MAX_ACTIVITY_MEMORY_CHARS)}")
 
     if not details:
         return None
