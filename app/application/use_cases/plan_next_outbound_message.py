@@ -12,6 +12,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     OutboundMessageRepository,
     WorkspaceLLMConfigRepository,
+    WorkspaceOutboundDraftingConfigRepository,
 )
 from app.application.services.canonical_lead_inputs import (
     approved_outbound_context_from_canonical_lead,
@@ -31,12 +32,21 @@ from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import CampaignId, LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel, WorkspaceContactPolicy
 from app.domain.conversations import CrmConversationEvent
+from app.domain.leads import CanonicalLeadRecord
 
 OUTBOUND_CONTEXT_ACTIVITY_HISTORY_LIMIT = 24
 
 
 def _empty_preferences() -> Mapping[str, str]:
     return {}
+
+
+def _assigned_agent_name_from_lead(lead: CanonicalLeadRecord) -> str | None:
+    value = lead.mapped_custom_fields.get("assigned_agent_name")
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
 
 
 @dataclass(frozen=True)
@@ -80,6 +90,8 @@ async def plan_next_outbound_message_for_lead(
     llm_client: LLMClient,
     now: datetime,
     workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
+    workspace_outbound_drafting_config_repository: WorkspaceOutboundDraftingConfigRepository
+    | None = None,
     default_openrouter_model: str = "openai/gpt-4o-mini",
     lead_activity_repository: LeadActivityRepository | None = None,
     crm_conversation_event_repository: CrmConversationEventRepository | None = None,
@@ -114,12 +126,21 @@ async def plan_next_outbound_message_for_lead(
             limit=OUTBOUND_CONTEXT_ACTIVITY_HISTORY_LIMIT,
         )
 
+    enabled_query_extraction_fields: tuple[str, ...] | None = None
+    if workspace_outbound_drafting_config_repository is not None:
+        drafting_config = await workspace_outbound_drafting_config_repository.get_by_workspace_id(
+            workspace_id,
+        )
+        if drafting_config is not None:
+            enabled_query_extraction_fields = drafting_config.enabled_extraction_fields
+
     lead_context = approved_outbound_context_from_canonical_lead(
         lead,
         now=now,
         conversation_summary=context.conversation_summary,
         latest_lead_request=context.latest_lead_request,
         extracted_preferences=context.extracted_preferences,
+        enabled_query_extraction_fields=enabled_query_extraction_fields,
         allowed_mapped_custom_field_keys=context.allowed_mapped_custom_field_keys,
         activity_items=activity_items,
         crm_conversation_events=crm_conversation_events,
@@ -144,7 +165,7 @@ async def plan_next_outbound_message_for_lead(
         campaign_goal=context.campaign_goal,
         brokerage_name=context.brokerage_name,
         cadence_step_id=context.cadence_step_id,
-        assigned_agent_name=context.assigned_agent_name,
+        assigned_agent_name=context.assigned_agent_name or _assigned_agent_name_from_lead(lead),
         scheduled_for=context.scheduled_for,
         message_version=context.message_version,
         pre_send_policy=context.pre_send_policy,
@@ -169,6 +190,7 @@ async def plan_next_outbound_message_for_lead(
         llm_client=llm_client,
         now=now,
         workspace_llm_config_repository=workspace_llm_config_repository,
+        workspace_outbound_drafting_config_repository=workspace_outbound_drafting_config_repository,
         default_openrouter_model=default_openrouter_model,
         message_id_factory=message_id_factory,
     )

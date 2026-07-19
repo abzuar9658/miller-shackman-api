@@ -407,7 +407,7 @@ class FakeLLMClient:
     def __init__(
         self,
         *,
-        body: str = "Hi — just checking in.",
+        body: str = "just checking in.",
         subject: str | None = "Quick check-in",
         confidence: float = 0.91,
         safety_flags: tuple[str, ...] = (),

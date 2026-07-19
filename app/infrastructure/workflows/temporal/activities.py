@@ -55,6 +55,9 @@ from app.infrastructure.persistence.postgres.workspace_llm_config_repository imp
 from app.infrastructure.persistence.postgres.workspace_operational_control_repository import (
     PostgresWorkspaceOperationalControlRepository,
 )
+from app.infrastructure.persistence.postgres.workspace_outbound_drafting_config_repository import (
+    PostgresWorkspaceOutboundDraftingConfigRepository,
+)
 from app.infrastructure.providers import (
     build_email_provider,
     build_listing_search_client,
@@ -193,6 +196,9 @@ async def execute_campaign_cadence_step_activity(
             workspace_repository=PostgresWorkspaceRepository(session),
             workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
             workspace_llm_config_repository=PostgresWorkspaceLLMConfigRepository(session),
+            workspace_outbound_drafting_config_repository=(
+                PostgresWorkspaceOutboundDraftingConfigRepository(session)
+            ),
             workspace_operational_control_repository=PostgresWorkspaceOperationalControlRepository(
                 session
             ),

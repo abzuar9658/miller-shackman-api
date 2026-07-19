@@ -274,9 +274,7 @@ async def test_execute_campaign_cadence_step_pauses_when_planning_is_blocked() -
     assert result.workflow.next_action_at is None
     assert email_provider.messages == []
     last_transition = list(transition_repository.transitions.values())[-1]
-    assert last_transition.reason_code == (
-        WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED
-    )
+    assert last_transition.reason_code == (WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED)
     assert last_transition.metadata["block_stage"] == "planning"
     assert last_transition.metadata["reason_codes"] == ["channel_destination_missing"]
     assert last_transition.metadata["evaluated_channels"] == ["email"]
@@ -327,9 +325,7 @@ async def test_execute_campaign_cadence_step_persists_rich_draft_rejection_detai
     assert result.workflow is not None
     assert result.workflow.state == WorkflowState.PAUSED
     last_transition = list(transition_repository.transitions.values())[-1]
-    assert last_transition.reason_code == (
-        WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED
-    )
+    assert last_transition.reason_code == (WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED)
     assert last_transition.metadata["block_stage"] == "planning"
     assert last_transition.metadata["reason_codes"] == ["draft_rejected"]
     assert last_transition.metadata["draft_reasons"] == ["safety_flags_present"]
@@ -339,13 +335,13 @@ async def test_execute_campaign_cadence_step_persists_rich_draft_rejection_detai
     ]
     assert last_transition.metadata["draft_confidence"] == 0.91
     assert last_transition.metadata["draft_model"] == "openai/gpt-4o-mini"
-    assert last_transition.metadata["draft_prompt_version"] == "outbound_message_draft:v2"
+    assert last_transition.metadata["draft_prompt_version"] == "outbound_message_draft:v8:r1"
     assert last_transition.metadata["selected_channel"] == "email"
     explanation = cast(str, last_transition.metadata["explanation"])
     assert "Draft validation failed: safety flags present." in explanation
     assert "Safety flags: property advice requested, tour request detected." in explanation
     assert len(review_repository.saved) == 1
-    assert review_repository.saved[0].draft_body == "Hi — just checking in."
+    assert review_repository.saved[0].draft_body == "just checking in."
     assert review_repository.saved[0].review_blockers == ("safety_flags_present",)
     assert review_repository.saved[0].can_approve_send is False
 
@@ -577,6 +573,7 @@ def _lead(*, has_email: bool = True, has_phone: bool = False) -> CanonicalLeadRe
         source_payload_version="test:v1",
         lead_source="website",
         lead_stage="long_term_nurture",
+        mapped_custom_fields={"assigned_agent_name": "Alex Agent"},
         primary_email="lead@example.com" if has_email else None,
         has_email=has_email,
         email_count=1 if has_email else 0,

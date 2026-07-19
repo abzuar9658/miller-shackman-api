@@ -20,6 +20,7 @@ from app.application.ports.repositories import (
     WorkspaceContactPolicyRepository,
     WorkspaceLLMConfigRepository,
     WorkspaceOperationalControlRepository,
+    WorkspaceOutboundDraftingConfigRepository,
     WorkspaceRepository,
 )
 from app.application.services.workspace_automation_control import (
@@ -160,6 +161,8 @@ async def execute_campaign_cadence_step(
     workspace_repository: WorkspaceRepository,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository,
     workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
+    workspace_outbound_drafting_config_repository: WorkspaceOutboundDraftingConfigRepository
+    | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     lead_repository: LeadRepository,
     lead_workflow_repository: LeadWorkflowRepository,
@@ -327,6 +330,7 @@ async def execute_campaign_cadence_step(
         llm_client=llm_client,
         now=now,
         workspace_llm_config_repository=workspace_llm_config_repository,
+        workspace_outbound_drafting_config_repository=workspace_outbound_drafting_config_repository,
         default_openrouter_model=default_openrouter_model,
         listing_source_repository=listing_source_repository,
         listing_snapshot_repository=listing_snapshot_repository,
@@ -681,19 +685,13 @@ def _planning_block_explanation(plan_result: PlanOutboundMessageResult) -> str:
         considered_channels = _humanized_strings(
             evaluation.channel.value for evaluation in plan_result.channel_evaluations
         )
-        parts.append(
-            "Channels considered: "
-            f"{considered_channels}."
-        )
+        parts.append(f"Channels considered: {considered_channels}.")
     if plan_result.draft_reasons:
         parts.append(
             f"Draft validation failed: {_humanized_reason_values(plan_result.draft_reasons)}."
         )
     if plan_result.draft_result is not None and plan_result.draft_result.safety_flags:
-        parts.append(
-            "Safety flags: "
-            f"{_humanized_strings(plan_result.draft_result.safety_flags)}."
-        )
+        parts.append(f"Safety flags: {_humanized_strings(plan_result.draft_result.safety_flags)}.")
     planning_pre_send_reasons = (
         _reason_value_list(plan_result.pre_send_decision.reasons)
         if plan_result.pre_send_decision is not None
@@ -701,8 +699,7 @@ def _planning_block_explanation(plan_result: PlanOutboundMessageResult) -> str:
     )
     if planning_pre_send_reasons:
         parts.append(
-            "Pre-send checks blocked the message: "
-            f"{_humanized_strings(planning_pre_send_reasons)}."
+            f"Pre-send checks blocked the message: {_humanized_strings(planning_pre_send_reasons)}."
         )
     next_allowed_at = (
         plan_result.pre_send_decision.next_allowed_at
@@ -710,10 +707,7 @@ def _planning_block_explanation(plan_result: PlanOutboundMessageResult) -> str:
         else _planning_next_allowed_at(plan_result.channel_evaluations)
     )
     if next_allowed_at is not None:
-        parts.append(
-            "Next eligible send time: "
-            f"{next_allowed_at.isoformat()}."
-        )
+        parts.append(f"Next eligible send time: {next_allowed_at.isoformat()}.")
     return " ".join(parts)
 
 
@@ -726,8 +720,7 @@ def _send_block_explanation(send_result: SendOutboundMessageResult) -> str:
         )
     if send_result.pre_send_decision is not None and send_result.pre_send_decision.next_allowed_at:
         parts.append(
-            "Next eligible send time: "
-            f"{send_result.pre_send_decision.next_allowed_at.isoformat()}."
+            f"Next eligible send time: {send_result.pre_send_decision.next_allowed_at.isoformat()}."
         )
     return " ".join(parts)
 
@@ -819,9 +812,7 @@ def _review_blockers(plan_result: PlanOutboundMessageResult) -> tuple[str, ...]:
             blockers.append("missing_draft_body")
         if draft_result.reasons:
             blockers.extend(
-                reason.value
-                for reason in draft_result.reasons
-                if reason.value != "low_confidence"
+                reason.value for reason in draft_result.reasons if reason.value != "low_confidence"
             )
         if draft_result.safety_flags:
             blockers.append("safety_flags_present")

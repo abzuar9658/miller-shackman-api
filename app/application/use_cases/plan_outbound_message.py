@@ -9,6 +9,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     OutboundMessageRepository,
     WorkspaceLLMConfigRepository,
+    WorkspaceOutboundDraftingConfigRepository,
 )
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
 from app.application.services.llm.outbound_message_drafting import (
@@ -40,6 +41,7 @@ from app.domain.compliance.contactability import (
     evaluate_contactability,
 )
 from app.domain.leads import CanonicalLeadRecord
+from app.domain.outbound_drafting import default_workspace_outbound_drafting_config
 
 
 class PlanOutboundMessageStatus(StrEnum):
@@ -124,6 +126,8 @@ async def plan_outbound_message(
     llm_client: LLMClient,
     now: datetime,
     workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
+    workspace_outbound_drafting_config_repository: WorkspaceOutboundDraftingConfigRepository
+    | None = None,
     default_openrouter_model: str = "openai/gpt-4o-mini",
     message_id_factory: Callable[[], UUID] | None = None,
 ) -> PlanOutboundMessageResult:
@@ -142,6 +146,7 @@ async def plan_outbound_message(
         llm_client=llm_client,
         now=now,
         workspace_llm_config_repository=workspace_llm_config_repository,
+        workspace_outbound_drafting_config_repository=workspace_outbound_drafting_config_repository,
         default_openrouter_model=default_openrouter_model,
         message_id_factory=message_id_factory,
     )
@@ -156,6 +161,8 @@ async def plan_outbound_message_for_lead_record(
     llm_client: LLMClient,
     now: datetime,
     workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
+    workspace_outbound_drafting_config_repository: WorkspaceOutboundDraftingConfigRepository
+    | None = None,
     default_openrouter_model: str = "openai/gpt-4o-mini",
     message_id_factory: Callable[[], UUID] | None = None,
 ) -> PlanOutboundMessageResult:
@@ -197,6 +204,11 @@ async def plan_outbound_message_for_lead_record(
         workspace_llm_config_repository=workspace_llm_config_repository,
         default_openrouter_model=default_openrouter_model,
     )
+    drafting_config = default_workspace_outbound_drafting_config(workspace_id)
+    if workspace_outbound_drafting_config_repository is not None:
+        drafting_config = (
+            await workspace_outbound_drafting_config_repository.get_by_workspace_id(workspace_id)
+        ) or drafting_config
 
     draft_result = await draft_outbound_message(
         lead=lead,
@@ -206,6 +218,7 @@ async def plan_outbound_message_for_lead_record(
         assigned_agent_name=context.assigned_agent_name,
         lead_context=context.lead_context,
         llm_client=llm_client,
+        drafting_config=drafting_config,
         model=openrouter_model,
     )
     if draft_result.status != OutboundMessageDraftStatus.DRAFTED or draft_result.body is None:

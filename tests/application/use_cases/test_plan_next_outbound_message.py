@@ -564,7 +564,10 @@ async def test_enriches_prompt_with_streeteasy_listing_context_when_enabled() ->
     assert result.status == PlanOutboundMessageStatus.PLANNED
     assert len(search_client.queries) == 1
     assert "approved_listing_context" in llm.requests[0].prompt
-    assert "2738 Miles Avenue" in llm.requests[0].prompt
+    assert "listing_relevance_brief" in llm.requests[0].prompt
+    assert "StreetEasy" in llm.requests[0].prompt
+    assert "2738 Miles Avenue" not in llm.requests[0].prompt
+    assert "$650,000" not in llm.requests[0].prompt
 
 
 async def test_listing_enrichment_uses_preferences_extracted_from_activity_history() -> None:

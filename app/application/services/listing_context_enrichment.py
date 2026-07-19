@@ -43,6 +43,7 @@ async def maybe_enrich_outbound_lead_context(
     source_repository: ListingSourceRepository | None,
     snapshot_repository: ListingSnapshotRepository | None,
     listing_search_client: ListingSearchClient | None,
+    bypass_cache: bool = False,
 ) -> ApprovedOutboundLeadContext:
     if (
         not enrichment_enabled
@@ -64,27 +65,28 @@ async def maybe_enrich_outbound_lead_context(
     if query is None:
         return lead_context
 
-    candidates = await snapshot_repository.list_current_for_source(
-        lead.workspace_id,
-        source.source_id,
-        limit=MAX_CACHE_CANDIDATES,
-    )
-    cached_matches = select_matching_snapshots(
-        candidates,
-        query=query,
-        now=now,
-        cache_ttl=cache_ttl,
-        max_results=max_results,
-    )
-    if cached_matches:
-        return replace(
-            lead_context,
-            listing_context=_listing_context_from_snapshots(
-                source=source,
-                query=query,
-                snapshots=cached_matches,
-            ),
+    if not bypass_cache:
+        candidates = await snapshot_repository.list_current_for_source(
+            lead.workspace_id,
+            source.source_id,
+            limit=MAX_CACHE_CANDIDATES,
         )
+        cached_matches = select_matching_snapshots(
+            candidates,
+            query=query,
+            now=now,
+            cache_ttl=cache_ttl,
+            max_results=max_results,
+        )
+        if cached_matches:
+            return replace(
+                lead_context,
+                listing_context=_listing_context_from_snapshots(
+                    source=source,
+                    query=query,
+                    snapshots=cached_matches,
+                ),
+            )
 
     if listing_search_client is None:
         return lead_context
@@ -329,8 +331,7 @@ def _listing_context_from_snapshots(
         search_summary=_search_summary(query),
         result_count=len(snapshots),
         matches=tuple(
-            _listing_match_from_snapshot(snapshot)
-            for snapshot in snapshots[: query.limit]
+            _listing_match_from_snapshot(snapshot) for snapshot in snapshots[: query.limit]
         ),
     )
 
