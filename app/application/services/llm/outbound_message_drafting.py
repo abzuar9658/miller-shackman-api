@@ -1,5 +1,6 @@
 import json
-from collections.abc import Mapping
+import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -13,11 +14,19 @@ from app.application.services.llm.structured_json import (
 )
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord
+from app.domain.outbound_drafting import (
+    SUPPORTED_TEMPLATE_PLACEHOLDERS,
+    WorkspaceOutboundDraftingConfig,
+    default_workspace_outbound_drafting_config,
+    render_outbound_subject_template,
+    render_outbound_template,
+)
 
-OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION = "outbound_message_draft:v2"
+OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v8"
 MIN_DRAFT_CONFIDENCE = 0.7
 MAX_SMS_BODY_LENGTH = 320
 MAX_EMAIL_BODY_LENGTH = 4000
+DEFAULT_LISTING_SEARCH_BASIS = "the lead's stated preferences"
 PROHIBITED_MESSAGE_TERMS = (
     "guarantee",
     "legal advice",
@@ -58,6 +67,10 @@ def _empty_listing_matches() -> tuple["ApprovedOutboundListingMatch", ...]:
     return ()
 
 
+def _empty_string_tuple() -> tuple[str, ...]:
+    return ()
+
+
 @dataclass(frozen=True)
 class ApprovedOutboundConversationItem:
     occurred_at: str
@@ -89,6 +102,17 @@ class ApprovedOutboundListingContext:
     matches: tuple[ApprovedOutboundListingMatch, ...] = field(
         default_factory=_empty_listing_matches
     )
+
+
+@dataclass(frozen=True)
+class ApprovedListingRelevanceBrief:
+    search_basis: str
+    match_count: int
+    matching_areas: tuple[str, ...] = field(default_factory=_empty_string_tuple)
+    matching_property_types: tuple[str, ...] = field(default_factory=_empty_string_tuple)
+    budget_alignment_note: str | None = None
+    safe_talking_point: str | None = None
+    safe_cta: str = "Ask whether they want their assigned agent to send a few current options."
 
 
 @dataclass(frozen=True)
@@ -148,9 +172,15 @@ async def draft_outbound_message(
     assigned_agent_name: str | None,
     lead_context: ApprovedOutboundLeadContext,
     llm_client: LLMClient,
+    drafting_config: WorkspaceOutboundDraftingConfig | None = None,
     model: str | None = None,
     min_confidence: float = MIN_DRAFT_CONFIDENCE,
 ) -> OutboundMessageDraftResult:
+    resolved_config = drafting_config or default_workspace_outbound_drafting_config(
+        lead.workspace_id,
+    )
+    resolved_agent_name = _resolved_assigned_agent_name(assigned_agent_name)
+    prompt_version = _prompt_version_for_config(resolved_config)
     llm_result = await llm_client.complete(
         LLMCompletionRequest(
             prompt=_build_prompt(
@@ -158,10 +188,11 @@ async def draft_outbound_message(
                 channel=channel,
                 campaign_goal=campaign_goal,
                 brokerage_name=brokerage_name,
-                assigned_agent_name=assigned_agent_name,
+                assigned_agent_name=resolved_agent_name,
                 lead_context=lead_context,
+                drafting_config=resolved_config,
             ),
-            prompt_version=OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION,
+            prompt_version=prompt_version,
             model=model,
             temperature=0.4,
             max_tokens=700,
@@ -188,6 +219,32 @@ async def draft_outbound_message(
     status = OutboundMessageDraftStatus.DRAFTED
     if reasons:
         status = OutboundMessageDraftStatus.REJECTED
+    rendered_body = render_outbound_template(
+        _channel_template_for_config(resolved_config, channel=channel),
+        {
+            "agent_name": resolved_agent_name or "",
+            "brokerage_name": brokerage_name,
+            "message_body": _normalized_message_body_fragment(draft.body),
+        },
+    )
+    rendered_subject = draft.subject
+    if channel == ContactChannel.EMAIL:
+        rendered_subject = render_outbound_subject_template(
+            resolved_config.email_subject_template,
+            {
+                "agent_name": resolved_agent_name or "",
+                "brokerage_name": brokerage_name,
+                "message_subject": _normalized_message_subject_fragment(draft.subject),
+            },
+        )
+    rendered_reasons = _rendered_message_validation_reasons(
+        body=rendered_body,
+        subject=rendered_subject,
+        channel=channel,
+    )
+    if rendered_reasons:
+        reasons.extend(rendered_reasons)
+        status = OutboundMessageDraftStatus.REJECTED
 
     return OutboundMessageDraftResult(
         status=status,
@@ -195,8 +252,8 @@ async def draft_outbound_message(
         model=llm_result.model,
         latency_ms=llm_result.latency_ms,
         usage_tokens=llm_result.usage_tokens,
-        body=draft.body,
-        subject=draft.subject,
+        body=rendered_body,
+        subject=rendered_subject,
         confidence=draft.confidence,
         personalization_notes=draft.personalization_notes,
         safety_flags=draft.safety_flags,
@@ -216,13 +273,25 @@ def _validation_reasons(
         reasons.append(OutboundMessageDraftReasonCode.LOW_CONFIDENCE)
     if draft.safety_flags:
         reasons.append(OutboundMessageDraftReasonCode.SAFETY_FLAGS_PRESENT)
-    if channel == ContactChannel.EMAIL and not draft.subject:
+    if channel == ContactChannel.EMAIL and not _normalized_message_subject_fragment(draft.subject):
         reasons.append(OutboundMessageDraftReasonCode.MISSING_EMAIL_SUBJECT)
-    if channel == ContactChannel.SMS and len(draft.body) > MAX_SMS_BODY_LENGTH:
-        reasons.append(OutboundMessageDraftReasonCode.BODY_TOO_LONG)
-    if _contains_prohibited_content(draft.body):
-        reasons.append(OutboundMessageDraftReasonCode.PROHIBITED_CONTENT)
 
+    return reasons
+
+
+def _rendered_message_validation_reasons(
+    *,
+    body: str,
+    subject: str | None,
+    channel: ContactChannel,
+) -> list[OutboundMessageDraftReasonCode]:
+    reasons: list[OutboundMessageDraftReasonCode] = []
+    if channel == ContactChannel.SMS and len(body) > MAX_SMS_BODY_LENGTH:
+        reasons.append(OutboundMessageDraftReasonCode.BODY_TOO_LONG)
+    if channel == ContactChannel.EMAIL and not _normalized_message_subject_fragment(subject):
+        reasons.append(OutboundMessageDraftReasonCode.MISSING_EMAIL_SUBJECT)
+    if _contains_prohibited_content(body):
+        reasons.append(OutboundMessageDraftReasonCode.PROHIBITED_CONTENT)
     return reasons
 
 
@@ -239,13 +308,29 @@ def _build_prompt(
     brokerage_name: str,
     assigned_agent_name: str | None,
     lead_context: ApprovedOutboundLeadContext,
+    drafting_config: WorkspaceOutboundDraftingConfig,
 ) -> str:
+    channel_template = _channel_template_for_config(drafting_config, channel=channel)
+    channel_prompt_text = _channel_prompt_text_for_config(
+        drafting_config,
+        channel=channel,
+    )
     payload = {
         "task": "draft_outbound_real_estate_lead_follow_up",
         "channel": channel.value,
         "campaign_goal": campaign_goal,
         "brokerage_name": brokerage_name,
         "assigned_agent_name": assigned_agent_name,
+        "admin_drafting_config": {
+            "config_revision": drafting_config.revision,
+            "channel_prompt_text": channel_prompt_text,
+            "channel_template": channel_template,
+            "email_subject_template": drafting_config.email_subject_template,
+            "supported_template_placeholders": list(SUPPORTED_TEMPLATE_PLACEHOLDERS),
+            "message_body_placeholder": "{{message_body}}",
+            "message_subject_placeholder": "{{message_subject}}",
+            "enabled_extraction_fields": list(drafting_config.enabled_extraction_fields),
+        },
         "known_lead_facts": {
             "lead_type": lead.lead_type.value,
             "lead_source": lead.lead_source,
@@ -277,21 +362,52 @@ def _build_prompt(
         "approved_listing_context": _listing_context_payload(lead_context.listing_context),
     }
     return (
-        "You are an administrative follow-up assistant for a real estate brokerage.\n"
-        "Draft one compliant outbound message using only the approved JSON context below.\n"
+        f"{drafting_config.prompt_text}\n"
+        "Follow the admin-configured prompt_text as the top-level role and behavior brief "
+        "for all channels.\n"
+        "The admin-configured prompt_text and channel_prompt_text are instruction-only. "
+        "The admin-configured channel template is final layout-only. Do not copy either "
+        "instruction text or template "
+        "scaffolding into your output.\n"
+        "Follow the admin-configured channel_prompt_text as the tone/style brief for this "
+        "channel.\n"
+        "Your job is to generate ONLY the natural-language message content that should be "
+        "inserted into or appended to the final template as the message body. The "
+        "application will deterministically render the final message afterward.\n"
+        "If the channel template contains {{message_body}}, your generated body will replace "
+        "that placeholder. Otherwise, the application will append your generated body after "
+        "the template.\n"
+        "If the channel template already contains a greeting, sign-off, hardcoded name, or "
+        "other fixed text, do not repeat that text in your generated body unless the context "
+        "truly requires it.\n"
+        "For email, the application may also apply an admin-configured subject template after "
+        "you respond. Provide a concise, natural subject that works well when inserted into "
+        "that subject template.\n"
+        "Follow the admin-configured prompt text and channel template as closely as possible, "
+        "unless they conflict with the safety rules below.\n"
         "Do not invent listings, prices, offers, agent actions, appointments, or "
         "past conversations.\n"
         "Use the approved conversation memory summary and recent conversation items to "
         "continue the thread naturally. Avoid repeating the same greeting, ask, or "
         "call-to-action if recent outbound messages already covered it, unless the lead's "
         "context clearly changed.\n"
-        "If approved listing context is present, you may reference at most two matching "
-        "listings using only the provided fields. Do not claim any listing is guaranteed "
-        "to still be available, and do not add facts beyond the approved listing context.\n"
+        "If approved listing context is present, use only the listing_relevance_brief to "
+        "make the outreach feel timely and specific. Focus on the lead's general criteria "
+        "and the existence of current matches, then offer to have the assigned agent share "
+        "current options. If the brief includes matching areas, property types, or a budget "
+        "alignment note, you may mention them in general terms. Do not mention exact "
+        "addresses, exact listing prices, or claim any listing is guaranteed to still be "
+        "available.\n"
+        "If approved listing context is NOT present (i.e., listing_relevance_brief is null), "
+        "you MUST NOT imply that listings, properties, or options are currently available. "
+        "In that case, acknowledge the lead's request and offer to have the assigned agent "
+        "look into current options and follow up. Do not use phrases like 'great options "
+        "available right now,' 'we have matches,' or 'there are options.'\n"
         "Do not provide legal, tax, financing, investment, or market prediction "
         "advice.\n"
         "If the lead request requires a human agent, set a safety flag instead of answering it.\n"
-        "For SMS, keep the body short, conversational, and under 320 characters.\n"
+        "For SMS, keep the generated body short enough that the final rendered SMS remains "
+        "under 320 characters.\n"
         "For email, include a concise subject.\n"
         "Return only JSON with keys: body, subject, confidence, personalization_notes, "
         "safety_flags.\n"
@@ -299,27 +415,155 @@ def _build_prompt(
     )
 
 
+def _resolved_assigned_agent_name(assigned_agent_name: str | None) -> str | None:
+    if assigned_agent_name is None:
+        return None
+    normalized = assigned_agent_name.strip()
+    return normalized or None
+
+
+def _normalized_message_body_fragment(body: str) -> str:
+    return body.replace("\r\n", "\n").strip()
+
+
+def _normalized_message_subject_fragment(subject: str | None) -> str:
+    if subject is None:
+        return ""
+    return subject.strip()
+
+
+def _channel_template_for_config(
+    drafting_config: WorkspaceOutboundDraftingConfig,
+    *,
+    channel: ContactChannel,
+) -> str:
+    return (
+        drafting_config.sms_template
+        if channel == ContactChannel.SMS
+        else drafting_config.email_template
+    )
+
+
+def _channel_prompt_text_for_config(
+    drafting_config: WorkspaceOutboundDraftingConfig,
+    *,
+    channel: ContactChannel,
+) -> str:
+    return (
+        drafting_config.sms_prompt_text
+        if channel == ContactChannel.SMS
+        else drafting_config.email_prompt_text
+    )
+
+
+def _prompt_version_for_config(config: WorkspaceOutboundDraftingConfig) -> str:
+    return f"{OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX}:r{config.revision}"
+
+
 def _listing_context_payload(
     listing_context: ApprovedOutboundListingContext | None,
 ) -> dict[str, object] | None:
     if listing_context is None:
         return None
+    relevance_brief = build_listing_relevance_brief(listing_context)
     return {
         "source_name": listing_context.source_name,
-        "search_summary": listing_context.search_summary,
         "result_count": listing_context.result_count,
-        "matches": [
-            {
-                "title": match.title,
-                "address_text": match.address_text,
-                "neighborhood": match.neighborhood,
-                "price_text": match.price_text,
-                "beds_text": match.beds_text,
-                "baths_text": match.baths_text,
-                "property_type": match.property_type,
-                "source_url": match.source_url,
-                "scraped_at": match.scraped_at,
-            }
-            for match in listing_context.matches
-        ],
+        "listing_relevance_brief": {
+            "search_basis": relevance_brief.search_basis,
+            "match_count": relevance_brief.match_count,
+            "matching_areas": list(relevance_brief.matching_areas),
+            "matching_property_types": list(relevance_brief.matching_property_types),
+            "budget_alignment_note": relevance_brief.budget_alignment_note,
+            "safe_talking_point": relevance_brief.safe_talking_point,
+            "safe_cta": relevance_brief.safe_cta,
+        },
     }
+
+
+def build_listing_relevance_brief(
+    listing_context: ApprovedOutboundListingContext,
+) -> ApprovedListingRelevanceBrief:
+    search_basis = _listing_search_basis(listing_context.search_summary)
+    budget_alignment_note = _budget_alignment_note(listing_context.search_summary)
+    matching_areas = _top_unique_values(
+        match.neighborhood for match in listing_context.matches if match.neighborhood
+    )
+    matching_property_types = _top_unique_values(
+        _normalize_property_type(match.property_type)
+        for match in listing_context.matches
+        if match.property_type
+    )
+    match_noun = "match" if listing_context.result_count == 1 else "matches"
+    match_verb = "lines up" if listing_context.result_count == 1 else "line up"
+    return ApprovedListingRelevanceBrief(
+        search_basis=search_basis,
+        match_count=listing_context.result_count,
+        matching_areas=matching_areas,
+        matching_property_types=matching_property_types,
+        budget_alignment_note=budget_alignment_note,
+        safe_talking_point=_safe_listing_talking_point(
+            source_name=listing_context.source_name,
+            result_count=listing_context.result_count,
+            match_noun=match_noun,
+            match_verb=match_verb,
+            search_basis=search_basis,
+            budget_alignment_note=budget_alignment_note,
+        ),
+    )
+
+
+def _listing_search_basis(search_summary: str) -> str:
+    value = search_summary.strip()
+    for prefix in ("sale in ", "rent in ", "sale near ", "rent near "):
+        if value.startswith(prefix):
+            value = value[len(prefix) :]
+            break
+    else:
+        for prefix in ("sale ", "rent "):
+            if value.startswith(prefix):
+                value = value[len(prefix) :]
+                break
+    value = re.sub(r"\s+up to \$[0-9,]+", "", value).strip(" ,")
+    return value or DEFAULT_LISTING_SEARCH_BASIS
+
+
+def _budget_alignment_note(search_summary: str) -> str | None:
+    if re.search(r"\bup to \$[0-9,]+", search_summary):
+        return "the lead's stated budget"
+    return None
+
+
+def _safe_listing_talking_point(
+    *,
+    source_name: str,
+    result_count: int,
+    match_noun: str,
+    match_verb: str,
+    search_basis: str,
+    budget_alignment_note: str | None,
+) -> str:
+    alignment_basis = search_basis
+    if budget_alignment_note:
+        alignment_basis = f"{alignment_basis} and {budget_alignment_note}"
+    return f"{result_count} current {source_name} {match_noun} {match_verb} with {alignment_basis}."
+
+
+def _top_unique_values(values: Iterable[str]) -> tuple[str, ...]:
+    deduped: list[str] = []
+    for raw in values:
+        normalized = str(raw).strip()
+        if normalized and normalized not in deduped:
+            deduped.append(normalized)
+        if len(deduped) == 2:
+            break
+    return tuple(deduped)
+
+
+def _normalize_property_type(value: str | None) -> str:
+    if value is None:
+        return ""
+    normalized = value.replace("_", " ").replace("-", " ").strip()
+    if not normalized:
+        return ""
+    return normalized.lower()
