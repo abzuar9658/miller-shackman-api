@@ -1,4 +1,5 @@
 from datetime import time
+from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -6,6 +7,17 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.domain.compliance import SmsComplianceState
 from app.domain.identity import UserStatus, WorkspaceMembershipRole, WorkspaceMembershipStatus
+from app.domain.outbound_drafting import (
+    DEFAULT_EMAIL_PROMPT_TEXT,
+    DEFAULT_EMAIL_SUBJECT_TEMPLATE,
+    DEFAULT_SMS_PROMPT_TEXT,
+    SUPPORTED_QUERY_EXTRACTION_FIELDS,
+    normalize_config_prompt_text,
+    normalize_email_subject_template,
+    normalize_email_template,
+    normalize_outbound_prompt_text,
+    normalize_sms_template,
+)
 from app.domain.workspace_automation import WorkspaceAutomationStatus
 from app.interfaces.api.schemas.auth import (
     MembershipResponse,
@@ -106,6 +118,20 @@ class WorkspaceOperationalControlResponse(BaseModel):
     pause_reason: str | None = None
 
 
+class WorkspaceOutboundDraftingConfigResponse(BaseModel):
+    workspace_id: UUID
+    revision: int
+    prompt_text: str
+    sms_prompt_text: str
+    sms_template: str
+    email_prompt_text: str
+    email_template: str
+    email_subject_template: str
+    enabled_extraction_fields: list[str]
+    supported_extraction_fields: list[str]
+    supported_template_placeholders: list[str]
+
+
 class WorkspaceSettingsResponse(BaseModel):
     status: str
     workspace: WorkspaceResponse | None = None
@@ -113,6 +139,7 @@ class WorkspaceSettingsResponse(BaseModel):
     crm_sync_config: WorkspaceCRMSyncConfigResponse | None = None
     llm_config: WorkspaceLLMConfigResponse | None = None
     handoff_config: WorkspaceHandoffConfigResponse | None = None
+    outbound_drafting_config: WorkspaceOutboundDraftingConfigResponse | None = None
     operational_control: WorkspaceOperationalControlResponse | None = None
 
 
@@ -183,6 +210,105 @@ class UpdateWorkspaceOperationalControlRequest(BaseModel):
 class UpdateWorkspaceOperationalControlResponse(BaseModel):
     status: str
     operational_control: WorkspaceOperationalControlResponse | None = None
+
+
+class UpdateWorkspaceOutboundDraftingConfigRequest(BaseModel):
+    prompt_text: str = Field(min_length=1, max_length=12000)
+    sms_prompt_text: str = Field(min_length=1, max_length=12000)
+    sms_template: str = Field(min_length=1, max_length=4000)
+    email_prompt_text: str = Field(min_length=1, max_length=12000)
+    email_template: str = Field(min_length=1, max_length=8000)
+    email_subject_template: str = Field(
+        default=DEFAULT_EMAIL_SUBJECT_TEMPLATE,
+        max_length=255,
+    )
+    enabled_extraction_fields: list[str] = Field(
+        default_factory=lambda: list(SUPPORTED_QUERY_EXTRACTION_FIELDS)
+    )
+
+    @field_validator("enabled_extraction_fields")
+    @classmethod
+    def enabled_extraction_fields_must_be_supported(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw in value:
+            field_name = raw.strip().lower()
+            if field_name not in SUPPORTED_QUERY_EXTRACTION_FIELDS:
+                raise ValueError("enabled_extraction_fields contains an unsupported field")
+            if field_name not in normalized:
+                normalized.append(field_name)
+        return normalized
+
+    @field_validator("sms_template")
+    @classmethod
+    def normalize_sms_template_value(cls, value: str) -> str:
+        return normalize_sms_template(value)
+
+    @field_validator("email_template")
+    @classmethod
+    def normalize_email_template_value(cls, value: str) -> str:
+        return normalize_email_template(value)
+
+    @field_validator("email_subject_template")
+    @classmethod
+    def normalize_email_subject_template_value(cls, value: str) -> str:
+        return normalize_email_subject_template(value)
+
+    @field_validator("sms_prompt_text")
+    @classmethod
+    def normalize_sms_prompt_text_value(cls, value: str) -> str:
+        return normalize_outbound_prompt_text(
+            value,
+            default_text=DEFAULT_SMS_PROMPT_TEXT,
+        )
+
+    @field_validator("email_prompt_text")
+    @classmethod
+    def normalize_email_prompt_text_value(cls, value: str) -> str:
+        return normalize_outbound_prompt_text(
+            value,
+            default_text=DEFAULT_EMAIL_PROMPT_TEXT,
+        )
+
+    @field_validator("prompt_text")
+    @classmethod
+    def normalize_prompt_text_value(cls, value: str) -> str:
+        return normalize_config_prompt_text(value)
+
+
+class UpdateWorkspaceOutboundDraftingConfigResponse(BaseModel):
+    status: str
+    outbound_drafting_config: WorkspaceOutboundDraftingConfigResponse | None = None
+
+
+class OutboundDraftPreviewResponse(BaseModel):
+    status: str
+    body: str | None = None
+    subject: str | None = None
+    prompt_version: str | None = None
+    model: str | None = None
+
+
+class WorkspaceOutboundDraftingPreviewRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=1000)
+    agent_name: str | None = Field(default=None, max_length=255)
+    brokerage_name: str | None = Field(default=None, max_length=255)
+
+    @field_validator("agent_name", "brokerage_name")
+    @classmethod
+    def normalize_preview_placeholder_value(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class WorkspaceOutboundDraftingPreviewResponse(BaseModel):
+    status: str
+    parsed_preferences: dict[str, str] = Field(default_factory=dict)
+    listing_context_found: bool = False
+    listing_relevance_brief: dict[str, Any] | None = None
+    sms_preview: OutboundDraftPreviewResponse | None = None
+    email_preview: OutboundDraftPreviewResponse | None = None
 
 
 class UpdateWorkspaceTimezoneRequest(BaseModel):

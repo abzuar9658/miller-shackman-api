@@ -20,6 +20,7 @@ from app.application.use_cases.workspace import (
     UpdateWorkspaceLLMConfigStatus,
     UpdateWorkspaceMembershipStatus,
     UpdateWorkspaceOperationalControlStatus,
+    UpdateWorkspaceOutboundDraftingConfigStatus,
     UpdateWorkspaceTimezoneStatus,
     WorkspaceSettingsReadStatus,
     create_workspace,
@@ -34,12 +35,22 @@ from app.application.use_cases.workspace import (
     update_workspace_llm_config,
     update_workspace_membership,
     update_workspace_operational_control,
+    update_workspace_outbound_drafting_config,
+)
+from app.application.use_cases.workspace_outbound_drafting import (
+    OutboundDraftingPreviewStatus,
+    preview_workspace_outbound_drafting,
 )
 from app.domain.compliance import WorkspaceContactPolicy
 from app.domain.conversations import WorkspaceHandoffConfig
 from app.domain.crm_sync import WorkspaceCRMSyncConfig
 from app.domain.identity import AuthenticatedActor, User, Workspace, WorkspaceMembership
 from app.domain.llm import WorkspaceLLMConfig
+from app.domain.outbound_drafting import (
+    SUPPORTED_QUERY_EXTRACTION_FIELDS,
+    SUPPORTED_TEMPLATE_PLACEHOLDERS,
+    WorkspaceOutboundDraftingConfig,
+)
 from app.domain.workspace_automation import WorkspaceOperationalControl
 from app.interfaces.api.dependencies.auth import (
     AuthServiceBundle,
@@ -48,7 +59,9 @@ from app.interfaces.api.dependencies.auth import (
 )
 from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.interfaces.api.dependencies.workspace_settings import (
+    WorkspaceOutboundDraftingPreviewBundle,
     WorkspaceSettingsBundle,
+    get_workspace_outbound_drafting_preview_bundle,
     get_workspace_settings_bundle,
 )
 from app.interfaces.api.schemas.auth import (
@@ -77,6 +90,8 @@ from app.interfaces.api.schemas.workspace import (
     UpdateWorkspaceMembershipResponse,
     UpdateWorkspaceOperationalControlRequest,
     UpdateWorkspaceOperationalControlResponse,
+    UpdateWorkspaceOutboundDraftingConfigRequest,
+    UpdateWorkspaceOutboundDraftingConfigResponse,
     UpdateWorkspaceTimezoneRequest,
     UpdateWorkspaceTimezoneResponse,
     WorkspaceContactPolicyResponse,
@@ -84,6 +99,9 @@ from app.interfaces.api.schemas.workspace import (
     WorkspaceHandoffConfigResponse,
     WorkspaceLLMConfigResponse,
     WorkspaceOperationalControlResponse,
+    WorkspaceOutboundDraftingConfigResponse,
+    WorkspaceOutboundDraftingPreviewRequest,
+    WorkspaceOutboundDraftingPreviewResponse,
     WorkspaceSettingsResponse,
     WorkspaceUserResponse,
 )
@@ -197,6 +215,24 @@ def _operational_control_response(
     )
 
 
+def _outbound_drafting_config_response(
+    config: WorkspaceOutboundDraftingConfig,
+) -> WorkspaceOutboundDraftingConfigResponse:
+    return WorkspaceOutboundDraftingConfigResponse(
+        workspace_id=config.workspace_id,
+        revision=config.revision,
+        prompt_text=config.prompt_text,
+        sms_prompt_text=config.sms_prompt_text,
+        sms_template=config.sms_template,
+        email_prompt_text=config.email_prompt_text,
+        email_template=config.email_template,
+        email_subject_template=config.email_subject_template,
+        enabled_extraction_fields=list(config.enabled_extraction_fields),
+        supported_extraction_fields=list(SUPPORTED_QUERY_EXTRACTION_FIELDS),
+        supported_template_placeholders=list(SUPPORTED_TEMPLATE_PLACEHOLDERS),
+    )
+
+
 @router.post(
     "",
     response_model=CreateWorkspaceResponse,
@@ -246,6 +282,7 @@ async def get_workspace_settings_route(
         crm_sync_config_repository=bundle.workspace_crm_sync_config_repository,
         workspace_llm_config_repository=bundle.workspace_llm_config_repository,
         handoff_config_repository=bundle.workspace_handoff_config_repository,
+        workspace_outbound_drafting_config_repository=bundle.workspace_outbound_drafting_config_repository,
         workspace_operational_control_repository=bundle.workspace_operational_control_repository,
         default_crm_sync_interval_seconds=bundle.default_crm_sync_interval_seconds,
         default_openrouter_model=bundle.default_openrouter_model,
@@ -272,10 +309,13 @@ async def get_workspace_settings_route(
         handoff_config=(
             _handoff_config_response(result.view.handoff_config) if result.view else None
         ),
-        operational_control=(
-            _operational_control_response(result.view.operational_control)
+        outbound_drafting_config=(
+            _outbound_drafting_config_response(result.view.outbound_drafting_config)
             if result.view
             else None
+        ),
+        operational_control=(
+            _operational_control_response(result.view.operational_control) if result.view else None
         ),
     )
 
@@ -385,6 +425,107 @@ async def update_workspace_llm_config_route(
                 allowed_openrouter_models=bundle.allowed_openrouter_models,
             )
             if result.llm_config is not None
+            else None
+        ),
+    )
+
+
+@router.patch(
+    "/{workspace_id}/settings/outbound-drafting",
+    response_model=UpdateWorkspaceOutboundDraftingConfigResponse,
+)
+async def update_workspace_outbound_drafting_config_route(
+    workspace_id: UUID,
+    request: UpdateWorkspaceOutboundDraftingConfigRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[WorkspaceSettingsBundle, Depends(get_workspace_settings_bundle)],
+) -> UpdateWorkspaceOutboundDraftingConfigResponse:
+    result = await update_workspace_outbound_drafting_config(
+        actor=actor,
+        workspace_id=workspace_id,
+        prompt_text=request.prompt_text,
+        sms_prompt_text=request.sms_prompt_text,
+        sms_template=request.sms_template,
+        email_prompt_text=request.email_prompt_text,
+        email_template=request.email_template,
+        email_subject_template=request.email_subject_template,
+        enabled_extraction_fields=tuple(request.enabled_extraction_fields),
+        workspace_repository=bundle.workspace_repository,
+        membership_repository=bundle.membership_repository,
+        workspace_outbound_drafting_config_repository=bundle.workspace_outbound_drafting_config_repository,
+        audit_log_repository=bundle.audit_log_repository,
+        now=datetime.now(UTC),
+    )
+    await bundle.session.commit()
+    if result.status == UpdateWorkspaceOutboundDraftingConfigStatus.REJECTED:
+        _raise_for_reasons(result.reasons)
+    return UpdateWorkspaceOutboundDraftingConfigResponse(
+        status=result.status.value,
+        outbound_drafting_config=(
+            _outbound_drafting_config_response(result.outbound_drafting_config)
+            if result.outbound_drafting_config is not None
+            else None
+        ),
+    )
+
+
+@router.post(
+    "/{workspace_id}/settings/outbound-drafting/preview",
+    response_model=WorkspaceOutboundDraftingPreviewResponse,
+)
+async def preview_workspace_outbound_drafting_route(
+    workspace_id: UUID,
+    request: WorkspaceOutboundDraftingPreviewRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[
+        WorkspaceOutboundDraftingPreviewBundle,
+        Depends(get_workspace_outbound_drafting_preview_bundle),
+    ],
+) -> WorkspaceOutboundDraftingPreviewResponse:
+    result = await preview_workspace_outbound_drafting(
+        actor=actor,
+        workspace_id=workspace_id,
+        query=request.query,
+        agent_name=request.agent_name,
+        brokerage_name=request.brokerage_name,
+        workspace_repository=bundle.workspace_repository,
+        membership_repository=bundle.membership_repository,
+        workspace_outbound_drafting_config_repository=bundle.workspace_outbound_drafting_config_repository,
+        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
+        llm_client=bundle.llm_client,
+        listing_source_repository=bundle.listing_source_repository,
+        listing_snapshot_repository=bundle.listing_snapshot_repository,
+        listing_search_client=bundle.listing_search_client,
+        now=datetime.now(UTC),
+        default_openrouter_model=bundle.default_openrouter_model,
+    )
+    if result.status == OutboundDraftingPreviewStatus.REJECTED:
+        _raise_for_reasons(result.reasons)
+    return WorkspaceOutboundDraftingPreviewResponse(
+        status=result.status.value,
+        parsed_preferences=result.parsed_preferences or {},
+        listing_context_found=result.listing_relevance_brief is not None,
+        listing_relevance_brief=result.listing_relevance_brief,
+        sms_preview=(
+            {
+                "status": result.sms_preview.status,
+                "body": result.sms_preview.body,
+                "subject": result.sms_preview.subject,
+                "prompt_version": result.sms_preview.prompt_version,
+                "model": result.sms_preview.model,
+            }
+            if result.sms_preview is not None
+            else None
+        ),
+        email_preview=(
+            {
+                "status": result.email_preview.status,
+                "body": result.email_preview.body,
+                "subject": result.email_preview.subject,
+                "prompt_version": result.email_preview.prompt_version,
+                "model": result.email_preview.model,
+            }
+            if result.email_preview is not None
             else None
         ),
     )
