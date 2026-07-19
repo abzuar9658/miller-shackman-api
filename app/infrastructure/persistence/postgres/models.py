@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     Time,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -136,9 +137,51 @@ class ListingSourceModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ListingSearchScopeModel(Base):
+    __tablename__ = "listing_source_search_scopes"
+    __table_args__ = (
+        Index(
+            "ix_listing_source_search_scopes_workspace_source_enabled",
+            "workspace_id",
+            "source_id",
+            "enabled",
+        ),
+    )
+
+    scope_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    source_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("listing_sources.source_id"),
+        nullable=False,
+    )
+    search_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    locations: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    addresses: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    keywords: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    min_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    max_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    min_beds: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    limit: Mapped[int] = mapped_column(Integer, nullable=False, default=25)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ListingCrawlRunModel(Base):
     __tablename__ = "listing_crawl_runs"
     __table_args__ = (
+        Index(
+            "uq_listing_crawl_runs_one_active_source",
+            "workspace_id",
+            "source_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running')"),
+        ),
         Index(
             "ix_listing_crawl_runs_workspace_source_started",
             "workspace_id",
@@ -990,6 +1033,28 @@ class WorkspaceLLMConfigModel(Base):
         PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), primary_key=True
     )
     openrouter_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceOutboundDraftingConfigModel(Base):
+    __tablename__ = "workspace_outbound_drafting_configs"
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), primary_key=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    sms_template: Mapped[str] = mapped_column(Text, nullable=False)
+    email_template: Mapped[str] = mapped_column(Text, nullable=False)
+    email_subject_template: Mapped[str] = mapped_column(Text, nullable=False)
+    sms_prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
+    email_prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled_extraction_fields: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

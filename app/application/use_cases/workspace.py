@@ -15,6 +15,7 @@ from app.application.ports.repositories import (
     WorkspaceLLMConfigRepository,
     WorkspaceMembershipRepository,
     WorkspaceOperationalControlRepository,
+    WorkspaceOutboundDraftingConfigRepository,
     WorkspaceRepository,
 )
 from app.application.services.authentication import render_invitation_email_body
@@ -42,6 +43,18 @@ from app.domain.identity import (
     evaluate_permission,
 )
 from app.domain.llm import WorkspaceLLMConfig, default_workspace_llm_config
+from app.domain.outbound_drafting import (
+    DEFAULT_EMAIL_PROMPT_TEXT,
+    DEFAULT_SMS_PROMPT_TEXT,
+    WorkspaceOutboundDraftingConfig,
+    default_workspace_outbound_drafting_config,
+    normalize_config_prompt_text,
+    normalize_email_subject_template,
+    normalize_email_template,
+    normalize_enabled_extraction_fields,
+    normalize_outbound_prompt_text,
+    normalize_sms_template,
+)
 from app.domain.workspace_automation import (
     WorkspaceAutomationStatus,
     WorkspaceOperationalControl,
@@ -104,6 +117,11 @@ class UpdateWorkspaceOperationalControlStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class UpdateWorkspaceOutboundDraftingConfigStatus(StrEnum):
+    UPDATED = "updated"
+    REJECTED = "rejected"
+
+
 class UpdateWorkspaceTimezoneStatus(StrEnum):
     UPDATED = "updated"
     REJECTED = "rejected"
@@ -159,6 +177,7 @@ class WorkspaceSettingsView:
     handoff_config: WorkspaceHandoffConfig
     crm_sync_config: WorkspaceCRMSyncConfig
     llm_config: WorkspaceLLMConfig
+    outbound_drafting_config: WorkspaceOutboundDraftingConfig
     operational_control: WorkspaceOperationalControl
 
 
@@ -201,6 +220,13 @@ class UpdateWorkspaceLLMConfigResult:
 class UpdateWorkspaceOperationalControlResult:
     status: UpdateWorkspaceOperationalControlStatus
     operational_control: WorkspaceOperationalControl | None = None
+    reasons: tuple[AuthReasonCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class UpdateWorkspaceOutboundDraftingConfigResult:
+    status: UpdateWorkspaceOutboundDraftingConfigStatus
+    outbound_drafting_config: WorkspaceOutboundDraftingConfig | None = None
     reasons: tuple[AuthReasonCode, ...] = ()
 
 
@@ -648,6 +674,7 @@ async def get_workspace_settings(
     handoff_config_repository: WorkspaceHandoffConfigRepository,
     crm_sync_config_repository: WorkspaceCRMSyncConfigRepository,
     workspace_llm_config_repository: WorkspaceLLMConfigRepository,
+    workspace_outbound_drafting_config_repository: WorkspaceOutboundDraftingConfigRepository,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository,
     default_crm_sync_interval_seconds: int = 300,
     default_openrouter_model: str = "openai/gpt-4o-mini",
@@ -685,6 +712,9 @@ async def get_workspace_settings(
     handoff_config = await handoff_config_repository.get_by_workspace_id(workspace_id)
     crm_sync_config = await crm_sync_config_repository.get_by_workspace_id(workspace_id)
     llm_config = await workspace_llm_config_repository.get_by_workspace_id(workspace_id)
+    outbound_drafting_config = (
+        await workspace_outbound_drafting_config_repository.get_by_workspace_id(workspace_id)
+    )
     operational_control = await workspace_operational_control_repository.get_by_workspace_id(
         workspace_id
     )
@@ -707,6 +737,9 @@ async def get_workspace_settings(
                     workspace_id,
                     default_openrouter_model=default_openrouter_model,
                 )
+            ),
+            outbound_drafting_config=(
+                outbound_drafting_config or default_workspace_outbound_drafting_config(workspace_id)
             ),
             operational_control=(
                 operational_control or default_workspace_operational_control(workspace_id)
@@ -796,9 +829,7 @@ async def update_workspace_contact_policy(
             actor_user_id=actor.user_id,
             event_details={
                 "sms_compliance_state": saved_policy.sms_compliance_state.value,
-                "quiet_hours_enabled": (
-                    "true" if saved_policy.quiet_hours_enabled else "false"
-                ),
+                "quiet_hours_enabled": ("true" if saved_policy.quiet_hours_enabled else "false"),
                 "quiet_hours_start": (
                     saved_policy.quiet_hours_start.isoformat()
                     if saved_policy.quiet_hours_start is not None
@@ -1147,6 +1178,115 @@ async def update_workspace_operational_control(
     return UpdateWorkspaceOperationalControlResult(
         status=UpdateWorkspaceOperationalControlStatus.UPDATED,
         operational_control=saved_control,
+    )
+
+
+async def update_workspace_outbound_drafting_config(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: UUID,
+    prompt_text: str,
+    sms_prompt_text: str,
+    sms_template: str,
+    email_prompt_text: str,
+    email_template: str,
+    email_subject_template: str,
+    enabled_extraction_fields: tuple[str, ...],
+    workspace_repository: WorkspaceRepository,
+    membership_repository: WorkspaceMembershipRepository,
+    workspace_outbound_drafting_config_repository: WorkspaceOutboundDraftingConfigRepository,
+    audit_log_repository: AuthAuditLogRepository,
+    now: datetime,
+) -> UpdateWorkspaceOutboundDraftingConfigResult:
+    effective_actor = await _actor_for_workspace(
+        actor=actor,
+        workspace_id=workspace_id,
+        workspace_repository=workspace_repository,
+        membership_repository=membership_repository,
+    )
+    if effective_actor is None:
+        return UpdateWorkspaceOutboundDraftingConfigResult(
+            status=UpdateWorkspaceOutboundDraftingConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
+        )
+
+    permission = evaluate_permission(
+        effective_actor,
+        PermissionCapability.CHANGE_CONSENT_SUPPRESSION_POLICY,
+    )
+    if not permission.allowed:
+        return UpdateWorkspaceOutboundDraftingConfigResult(
+            status=UpdateWorkspaceOutboundDraftingConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.PERMISSION_DENIED,),
+        )
+
+    workspace = await workspace_repository.get_by_id(workspace_id)
+    if workspace is None:
+        return UpdateWorkspaceOutboundDraftingConfigResult(
+            status=UpdateWorkspaceOutboundDraftingConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_NOT_FOUND,),
+        )
+
+    current_config = (
+        await workspace_outbound_drafting_config_repository.get_by_workspace_id(workspace_id)
+    ) or default_workspace_outbound_drafting_config(workspace_id)
+    normalized_fields = normalize_enabled_extraction_fields(enabled_extraction_fields)
+    normalized_prompt_text = normalize_config_prompt_text(prompt_text)
+    normalized_sms_prompt_text = normalize_outbound_prompt_text(
+        sms_prompt_text,
+        default_text=DEFAULT_SMS_PROMPT_TEXT,
+    )
+    normalized_sms_template = normalize_sms_template(sms_template)
+    normalized_email_prompt_text = normalize_outbound_prompt_text(
+        email_prompt_text,
+        default_text=DEFAULT_EMAIL_PROMPT_TEXT,
+    )
+    normalized_email_template = normalize_email_template(email_template)
+    normalized_email_subject_template = normalize_email_subject_template(
+        email_subject_template,
+    )
+    if (
+        current_config.prompt_text == normalized_prompt_text
+        and current_config.sms_prompt_text == normalized_sms_prompt_text
+        and current_config.sms_template == normalized_sms_template
+        and current_config.email_prompt_text == normalized_email_prompt_text
+        and current_config.email_template == normalized_email_template
+        and current_config.email_subject_template == normalized_email_subject_template
+        and current_config.enabled_extraction_fields == normalized_fields
+    ):
+        return UpdateWorkspaceOutboundDraftingConfigResult(
+            status=UpdateWorkspaceOutboundDraftingConfigStatus.UPDATED,
+            outbound_drafting_config=current_config,
+        )
+
+    saved_config = await workspace_outbound_drafting_config_repository.save(
+        WorkspaceOutboundDraftingConfig(
+            workspace_id=workspace_id,
+            revision=current_config.revision,
+            prompt_text=normalized_prompt_text,
+            sms_prompt_text=normalized_sms_prompt_text,
+            sms_template=normalized_sms_template,
+            email_prompt_text=normalized_email_prompt_text,
+            email_template=normalized_email_template,
+            email_subject_template=normalized_email_subject_template,
+            enabled_extraction_fields=normalized_fields,
+        )
+    )
+    await audit_log_repository.append(
+        _auth_audit_log(
+            event_type=AuthAuditEventType.WORKSPACE_OUTBOUND_DRAFTING_CONFIG_UPDATED,
+            now=now,
+            workspace_id=workspace_id,
+            actor_user_id=actor.user_id,
+            event_details={
+                "revision": str(saved_config.revision),
+                "enabled_extraction_fields": ",".join(saved_config.enabled_extraction_fields),
+            },
+        ),
+    )
+    return UpdateWorkspaceOutboundDraftingConfigResult(
+        status=UpdateWorkspaceOutboundDraftingConfigStatus.UPDATED,
+        outbound_drafting_config=saved_config,
     )
 
 

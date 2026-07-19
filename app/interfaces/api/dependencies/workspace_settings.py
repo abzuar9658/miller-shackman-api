@@ -4,6 +4,9 @@ from typing import Annotated, Protocol
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.ports.listing_search import ListingSearchClient
+from app.application.ports.listing_sources import ListingSnapshotRepository, ListingSourceRepository
+from app.application.ports.llm import LLMClient
 from app.application.ports.repositories import (
     AuthAuditLogRepository,
     WorkspaceContactPolicyRepository,
@@ -12,6 +15,7 @@ from app.application.ports.repositories import (
     WorkspaceLLMConfigRepository,
     WorkspaceMembershipRepository,
     WorkspaceOperationalControlRepository,
+    WorkspaceOutboundDraftingConfigRepository,
     WorkspaceRepository,
 )
 from app.core.config import Settings, get_settings
@@ -20,6 +24,10 @@ from app.infrastructure.persistence.postgres.identity_repository import (
     PostgresAuthAuditLogRepository,
     PostgresWorkspaceMembershipRepository,
     PostgresWorkspaceRepository,
+)
+from app.infrastructure.persistence.postgres.listing_source_repository import (
+    PostgresListingSnapshotRepository,
+    PostgresListingSourceRepository,
 )
 from app.infrastructure.persistence.postgres.workspace_contact_policy_repository import (
     PostgresWorkspaceContactPolicyRepository,
@@ -36,6 +44,10 @@ from app.infrastructure.persistence.postgres.workspace_llm_config_repository imp
 from app.infrastructure.persistence.postgres.workspace_operational_control_repository import (
     PostgresWorkspaceOperationalControlRepository,
 )
+from app.infrastructure.persistence.postgres.workspace_outbound_drafting_config_repository import (
+    PostgresWorkspaceOutboundDraftingConfigRepository,
+)
+from app.infrastructure.providers import build_listing_search_client, build_llm_client
 
 
 class SessionCommitter(Protocol):
@@ -53,10 +65,24 @@ class WorkspaceSettingsBundle:
     workspace_crm_sync_config_repository: WorkspaceCRMSyncConfigRepository
     workspace_llm_config_repository: WorkspaceLLMConfigRepository
     workspace_handoff_config_repository: WorkspaceHandoffConfigRepository
+    workspace_outbound_drafting_config_repository: WorkspaceOutboundDraftingConfigRepository
     workspace_operational_control_repository: WorkspaceOperationalControlRepository
     default_crm_sync_interval_seconds: int
     default_openrouter_model: str
     allowed_openrouter_models: tuple[str, ...]
+
+
+@dataclass
+class WorkspaceOutboundDraftingPreviewBundle:
+    workspace_repository: WorkspaceRepository
+    membership_repository: WorkspaceMembershipRepository
+    workspace_llm_config_repository: WorkspaceLLMConfigRepository
+    workspace_outbound_drafting_config_repository: WorkspaceOutboundDraftingConfigRepository
+    listing_source_repository: ListingSourceRepository
+    listing_snapshot_repository: ListingSnapshotRepository
+    llm_client: LLMClient
+    listing_search_client: ListingSearchClient
+    default_openrouter_model: str
 
 
 async def get_workspace_settings_bundle(
@@ -72,10 +98,32 @@ async def get_workspace_settings_bundle(
         workspace_crm_sync_config_repository=PostgresWorkspaceCRMSyncConfigRepository(session),
         workspace_llm_config_repository=PostgresWorkspaceLLMConfigRepository(session),
         workspace_handoff_config_repository=PostgresWorkspaceHandoffConfigRepository(session),
+        workspace_outbound_drafting_config_repository=PostgresWorkspaceOutboundDraftingConfigRepository(
+            session
+        ),
         workspace_operational_control_repository=PostgresWorkspaceOperationalControlRepository(
             session
         ),
         default_crm_sync_interval_seconds=settings.crm_sync_incremental_interval_seconds,
         default_openrouter_model=settings.openrouter_model,
         allowed_openrouter_models=tuple(settings.openrouter_allowed_models),
+    )
+
+
+async def get_workspace_outbound_drafting_preview_bundle(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> WorkspaceOutboundDraftingPreviewBundle:
+    return WorkspaceOutboundDraftingPreviewBundle(
+        workspace_repository=PostgresWorkspaceRepository(session),
+        membership_repository=PostgresWorkspaceMembershipRepository(session),
+        workspace_llm_config_repository=PostgresWorkspaceLLMConfigRepository(session),
+        workspace_outbound_drafting_config_repository=PostgresWorkspaceOutboundDraftingConfigRepository(
+            session
+        ),
+        listing_source_repository=PostgresListingSourceRepository(session),
+        listing_snapshot_repository=PostgresListingSnapshotRepository(session),
+        llm_client=build_llm_client(settings),
+        listing_search_client=build_listing_search_client(settings),
+        default_openrouter_model=settings.openrouter_model,
     )
