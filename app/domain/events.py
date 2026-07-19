@@ -12,6 +12,7 @@ class AggregateType(StrEnum):
     CRM_SYNC = "crm_sync"
     HANDOFF = "handoff"
     LEAD = "lead"
+    LISTING_SOURCE = "listing_source"
     MESSAGE = "message"
     WORKFLOW = "workflow"
 
@@ -27,6 +28,8 @@ class DomainEventType(StrEnum):
     CRM_SYNC_REQUESTED = "crm_sync.requested"
     HANDOFF_CREATED = "handoff.created"
     LEAD_OPTED_OUT = "lead.opted_out"
+    LISTING_SNAPSHOT_CREATED = "listing.snapshot_created"
+    LISTING_SOURCE_CRAWL_REQUESTED = "listing_source_crawl.requested"
     MESSAGE_DELIVERED = "message.delivered"
     MESSAGE_DELIVERY_FAILED = "message.delivery_failed"
     MESSAGE_FAILED = "message.failed"

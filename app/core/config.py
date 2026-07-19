@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     crm_sync_incremental_interval_seconds: int = 300
     crm_sync_scheduler_poll_seconds: int = 60
     crm_sync_scheduler_workspace_limit: int = 100
+    listing_source_crawl_queue_name: str = "miller_schackman.listing_source_crawl"
+    listing_source_crawl_worker_prefetch_count: int = 1
+    listing_source_crawl_scheduler_poll_seconds: int = 60
+    listing_source_crawl_scheduler_source_limit: int = 100
     temporal_address: str = "localhost:57233"
     temporal_task_queue: str = "miller-schackman-task-queue"
 

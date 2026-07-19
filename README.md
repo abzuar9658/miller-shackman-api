@@ -24,10 +24,21 @@ Production-ready FastAPI backend scaffold for the AI-assisted real estate lead n
 6. Start the API with `make run`.
 7. Start the Temporal worker in a separate terminal with `make worker`.
 
+For outbox-driven features, start the shared outbox publisher in a separate terminal:
+
+- `make outbox-publisher`
+
+For listing-source crawls:
+
+- `make listing-crawl-worker` for manual **Run now** requests and retry execution
+- `make listing-crawl-scheduler` if you also want automatic scheduled due crawls
+
+Manual listing-source crawls are not processed by the Temporal worker. They flow through the shared outbox publisher and RabbitMQ-backed listing crawl worker, so `make worker` alone is not enough.
+
 For the CRM sync loop, start these in separate terminals as needed:
 
 - `make crm-sync-scheduler`
-- `make crm-sync-publisher`
+- `make outbox-publisher` (or the backward-compatible alias `make crm-sync-publisher`)
 - `make crm-sync-worker`
 
 For local frontend development, the default API CORS configuration now allows these dev origins:
@@ -60,6 +71,11 @@ the corresponding live integration paths.
 For local outbound email testing, the default `.env.example` uses `EMAIL_PROVIDER=mailpit`.
 Mailpit accepts SMTP mail locally and exposes a browser inbox at `http://localhost:58025`.
 If you prefer the old in-memory capture behavior, set `EMAIL_PROVIDER=sink` instead.
+
+The default `.env.example` also enables `LISTING_CONTEXT_ENRICHMENT_ENABLED=true`.
+When a lead has usable preferences and an approved StreetEasy source is available,
+outbound drafting can reference a safe listing-relevance brief so follow-ups feel
+more specific without naming exact properties or prices.
 
 The local infrastructure services can start before `.env` exists because Compose
 marks the API env file as optional. The API itself should still be run with a local

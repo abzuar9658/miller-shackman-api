@@ -48,6 +48,7 @@ class AuthAuditEventType(StrEnum):
     WORKSPACE_HANDOFF_CONFIG_UPDATED = "workspace_handoff_config_updated"
     WORKSPACE_CRM_SYNC_CONFIG_UPDATED = "workspace_crm_sync_config_updated"
     WORKSPACE_LLM_CONFIG_UPDATED = "workspace_llm_config_updated"
+    WORKSPACE_OUTBOUND_DRAFTING_CONFIG_UPDATED = "workspace_outbound_drafting_config_updated"
     WORKSPACE_OPERATIONAL_CONTROL_UPDATED = "workspace_operational_control_updated"
     USER_INVITED = "user_invited"
     INVITATION_RESENT = "invitation_resent"

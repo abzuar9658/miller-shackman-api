@@ -52,6 +52,7 @@ from app.domain.identity import (
     WorkspaceStatus,
 )
 from app.domain.llm import WorkspaceLLMConfig
+from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
 from app.domain.workspace_automation import (
     WorkspaceAutomationStatus,
     WorkspaceOperationalControl,
@@ -509,6 +510,7 @@ class _Dependencies:
         self.workspace_contact_policies: dict[UUID, WorkspaceContactPolicy] = {}
         self.workspace_crm_sync_configs: dict[UUID, WorkspaceCRMSyncConfig] = {}
         self.workspace_llm_configs: dict[UUID, WorkspaceLLMConfig] = {}
+        self.workspace_outbound_drafting_configs: dict[UUID, WorkspaceOutboundDraftingConfig] = {}
         self.workspace_operational_controls: dict[UUID, WorkspaceOperationalControl] = {}
         self.workspace_handoff_configs: dict[UUID, WorkspaceHandoffConfig] = {}
         self.credentials: dict[UUID, PasswordCredential] = {}
@@ -527,10 +529,13 @@ class _Dependencies:
         self.workspace_llm_config_repository = _FakeWorkspaceLLMConfigRepository(
             self.workspace_llm_configs,
         )
-        self.workspace_operational_control_repository = (
-            _FakeWorkspaceOperationalControlRepository(
-                self.workspace_operational_controls,
+        self.workspace_outbound_drafting_config_repository = (
+            _FakeWorkspaceOutboundDraftingConfigRepository(
+                self.workspace_outbound_drafting_configs,
             )
+        )
+        self.workspace_operational_control_repository = _FakeWorkspaceOperationalControlRepository(
+            self.workspace_operational_controls,
         )
         self.workspace_handoff_config_repository = _FakeWorkspaceHandoffConfigRepository(
             self.workspace_handoff_configs,
@@ -680,6 +685,24 @@ class _FakeWorkspaceLLMConfigRepository:
         return self._configs.get(workspace_id)
 
     async def save(self, config: WorkspaceLLMConfig) -> WorkspaceLLMConfig:
+        self._configs[config.workspace_id] = config
+        return config
+
+
+class _FakeWorkspaceOutboundDraftingConfigRepository:
+    def __init__(self, configs: dict[UUID, WorkspaceOutboundDraftingConfig]) -> None:
+        self._configs = configs
+
+    async def get_by_workspace_id(
+        self,
+        workspace_id: UUID,
+    ) -> WorkspaceOutboundDraftingConfig | None:
+        return self._configs.get(workspace_id)
+
+    async def save(
+        self,
+        config: WorkspaceOutboundDraftingConfig,
+    ) -> WorkspaceOutboundDraftingConfig:
         self._configs[config.workspace_id] = config
         return config
 

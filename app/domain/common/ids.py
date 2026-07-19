@@ -9,6 +9,7 @@ UserInvitationId = UUID
 AuthAuditLogId = UUID
 LeadId = UUID
 ListingSourceId = UUID
+ListingSearchScopeId = UUID
 ListingCrawlRunId = UUID
 ListingSnapshotId = UUID
 CampaignId = UUID
