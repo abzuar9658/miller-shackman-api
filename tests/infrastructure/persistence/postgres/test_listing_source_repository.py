@@ -7,11 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.listing_sources import (
     CanonicalListingSnapshot,
+    ListingCrawlRun,
+    ListingCrawlStatus,
+    ListingSearchScope,
+    ListingSearchScopeType,
     ListingSnapshotStatus,
     ListingSource,
     ListingSourceType,
 )
 from app.infrastructure.persistence.postgres.listing_source_repository import (
+    PostgresListingCrawlRunRepository,
+    PostgresListingSearchScopeRepository,
     PostgresListingSnapshotRepository,
     PostgresListingSourceRepository,
 )
@@ -96,6 +102,49 @@ async def test_listing_snapshot_repository_marks_previous_versions_not_current(
     assert first_reloaded.is_current is False
 
 
+@pytest.mark.asyncio
+async def test_listing_search_scope_repository_saves_and_lists_scopes(
+    postgres_session: AsyncSession,
+) -> None:
+    await _seed_workspace(postgres_session)
+    source_repository = PostgresListingSourceRepository(postgres_session)
+    source = await source_repository.save(_source(name="StreetEasy"))
+    repository = PostgresListingSearchScopeRepository(postgres_session)
+
+    saved = await repository.save(_scope(source_id=source.source_id))
+    fetched = await repository.get_by_id(WORKSPACE_ID, saved.scope_id)
+    listed = await repository.list_for_source(WORKSPACE_ID, source.source_id)
+
+    assert fetched == saved
+    assert listed == (saved,)
+
+
+@pytest.mark.asyncio
+async def test_listing_crawl_run_repository_claims_pending_and_enforces_single_active_run(
+    postgres_session: AsyncSession,
+) -> None:
+    await _seed_workspace(postgres_session)
+    source_repository = PostgresListingSourceRepository(postgres_session)
+    source = await source_repository.save(_source(name="StreetEasy"))
+    repository = PostgresListingCrawlRunRepository(postgres_session)
+
+    pending = await repository.insert_pending_if_no_active(_crawl_run(source_id=source.source_id))
+    duplicate = await repository.insert_pending_if_no_active(
+        _crawl_run(source_id=source.source_id, crawl_run_id=uuid4())
+    )
+    claimed = await repository.claim_pending_by_id(
+        WORKSPACE_ID,
+        pending.crawl_run_id if pending is not None else uuid4(),
+        now=NOW,
+    )
+
+    assert pending is not None
+    assert duplicate is None
+    assert claimed is not None
+    assert claimed.status == ListingCrawlStatus.RUNNING
+    assert await repository.get_active_for_source(WORKSPACE_ID, source.source_id) == claimed
+
+
 async def _seed_workspace(session: AsyncSession) -> None:
     session.add(
         WorkspaceModel(
@@ -159,4 +208,32 @@ def _snapshot(*, source_id: UUID, payload_hash: str) -> CanonicalListingSnapshot
         property_type="condo",
         status=ListingSnapshotStatus.ACTIVE,
         source_payload={"id": "listing-123", "hash": payload_hash},
+    )
+
+
+def _scope(*, source_id: UUID) -> ListingSearchScope:
+    return ListingSearchScope(
+        scope_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        source_id=source_id,
+        search_type=ListingSearchScopeType.SALE,
+        locations=("Bronx",),
+        min_price=Decimal("500000.00"),
+        min_beds=Decimal("2.00"),
+        limit=10,
+        enabled=True,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _crawl_run(*, source_id: UUID, crawl_run_id: UUID | None = None) -> ListingCrawlRun:
+    return ListingCrawlRun(
+        crawl_run_id=crawl_run_id or uuid4(),
+        workspace_id=WORKSPACE_ID,
+        source_id=source_id,
+        status=ListingCrawlStatus.PENDING,
+        started_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
     )
