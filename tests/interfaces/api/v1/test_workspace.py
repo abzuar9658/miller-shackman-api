@@ -95,15 +95,16 @@ def workspace_client() -> WorkspaceTestClient:
             workspace_crm_sync_config_repository=deps.workspace_crm_sync_config_repository,
             workspace_llm_config_repository=deps.workspace_llm_config_repository,
             workspace_handoff_config_repository=deps.workspace_handoff_config_repository,
+            workspace_outbound_drafting_config_repository=(
+                deps.workspace_outbound_drafting_config_repository
+            ),
             workspace_operational_control_repository=deps.workspace_operational_control_repository,
             default_crm_sync_interval_seconds=300,
             default_openrouter_model="openai/gpt-4o-mini",
             allowed_openrouter_models=("openai/gpt-4o-mini", "openai/gpt-4.1-mini"),
         )
 
-    app.dependency_overrides[get_workspace_settings_bundle] = (
-        override_get_workspace_settings_bundle
-    )
+    app.dependency_overrides[get_workspace_settings_bundle] = override_get_workspace_settings_bundle
 
     return WorkspaceTestClient(TestClient(app), deps)
 
@@ -283,6 +284,82 @@ def test_update_workspace_llm_config_returns_200(
         "openrouter_model": "openai/gpt-4.1-mini",
         "allowed_openrouter_models": ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"],
     }
+
+
+def test_update_workspace_outbound_drafting_config_returns_200(
+    workspace_client: WorkspaceTestClient,
+) -> None:
+    response = workspace_client.client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/settings/outbound-drafting",
+        json={
+            "prompt_text": (
+                "You are the brokerage's outreach assistant. Re-engage leads safely "
+                "and tee up the assigned agent."
+            ),
+            "sms_prompt_text": "Use a short conversational SMS tone.",
+            "sms_template": "Hi {{agent_name}}",
+            "email_prompt_text": "Use a concise professional email tone.",
+            "email_template": "Regards,\nMiller Schackman",
+            "email_subject_template": "{{message_subject}} | Miller Schackman",
+            "enabled_extraction_fields": ["location", "max_price"],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "updated"
+    assert body["outbound_drafting_config"] == {
+        "workspace_id": str(WORKSPACE_ID),
+        "revision": 1,
+        "prompt_text": (
+            "You are the brokerage's outreach assistant. Re-engage leads safely "
+            "and tee up the assigned agent."
+        ),
+        "sms_prompt_text": "Use a short conversational SMS tone.",
+        "sms_template": "Hi {{agent_name}}",
+        "email_prompt_text": "Use a concise professional email tone.",
+        "email_template": "Regards,\nMiller Schackman",
+        "email_subject_template": "{{message_subject}} | Miller Schackman",
+        "enabled_extraction_fields": ["location", "max_price"],
+        "supported_extraction_fields": [
+            "address",
+            "location",
+            "keywords",
+            "search_type",
+            "beds",
+            "min_price",
+            "max_price",
+            "price_band",
+        ],
+        "supported_template_placeholders": [
+            "agent_name",
+            "brokerage_name",
+            "message_body",
+            "message_subject",
+        ],
+    }
+
+
+def test_update_workspace_outbound_drafting_config_allows_templates_without_placeholders(
+    workspace_client: WorkspaceTestClient,
+) -> None:
+    response = workspace_client.client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/settings/outbound-drafting",
+        json={
+            "prompt_text": (
+                "You are the brokerage's outreach assistant. Keep the message focused "
+                "on a safe follow-up."
+            ),
+            "sms_prompt_text": "Use a short conversational SMS tone.",
+            "sms_template": "Hi there",
+            "email_prompt_text": "Use a concise professional email tone.",
+            "email_template": "Regards,\nMiller Schackman",
+            "email_subject_template": "Follow-up from the brokerage",
+            "enabled_extraction_fields": ["location", "max_price"],
+        },
+    )
+
+    assert response.status_code == 200
 
 
 def test_update_workspace_operational_control_returns_200(

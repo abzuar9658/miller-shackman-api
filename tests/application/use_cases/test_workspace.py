@@ -15,6 +15,7 @@ from app.application.use_cases.workspace import (
     UpdateWorkspaceLLMConfigStatus,
     UpdateWorkspaceMembershipStatus,
     UpdateWorkspaceOperationalControlStatus,
+    UpdateWorkspaceOutboundDraftingConfigStatus,
     UpdateWorkspaceTimezoneStatus,
     WorkspaceSettingsReadStatus,
     create_workspace,
@@ -29,6 +30,7 @@ from app.application.use_cases.workspace import (
     update_workspace_llm_config,
     update_workspace_membership,
     update_workspace_operational_control,
+    update_workspace_outbound_drafting_config,
 )
 from app.domain.compliance import SmsComplianceState, WorkspaceContactPolicy
 from app.domain.crm_sync import default_workspace_crm_sync_config
@@ -40,6 +42,7 @@ from app.domain.identity import (
     WorkspaceStatus,
 )
 from app.domain.llm import default_workspace_llm_config
+from app.domain.outbound_drafting import default_workspace_outbound_drafting_config
 from app.domain.workspace_automation import (
     WorkspaceAutomationStatus,
     default_workspace_operational_control,
@@ -367,6 +370,9 @@ def test_get_workspace_settings_returns_defaults_when_missing() -> None:
             crm_sync_config_repository=deps.workspace_crm_sync_config_repository,
             workspace_llm_config_repository=deps.workspace_llm_config_repository,
             handoff_config_repository=deps.workspace_handoff_config_repository,
+            workspace_outbound_drafting_config_repository=(
+                deps.workspace_outbound_drafting_config_repository
+            ),
             workspace_operational_control_repository=deps.workspace_operational_control_repository,
         ),
     )
@@ -377,8 +383,28 @@ def test_get_workspace_settings_returns_defaults_when_missing() -> None:
     assert result.view.contact_policy.sms_compliance_state == SmsComplianceState.NOT_APPROVED
     assert result.view.crm_sync_config == default_workspace_crm_sync_config(WORKSPACE_ID)
     assert result.view.llm_config == default_workspace_llm_config(WORKSPACE_ID)
+    assert result.view.outbound_drafting_config == default_workspace_outbound_drafting_config(
+        WORKSPACE_ID
+    )
     assert result.view.operational_control == default_workspace_operational_control(WORKSPACE_ID)
     assert result.view.handoff_config.crm_custom_fields == {}
+
+
+def test_default_workspace_outbound_drafting_config_uses_polished_starter_values() -> None:
+    config = default_workspace_outbound_drafting_config(WORKSPACE_ID)
+
+    assert (
+        config.prompt_text
+        == "You are an administrative follow-up assistant for a real estate brokerage.\n"
+        "Draft one compliant outbound message using only the approved JSON context below."
+    )
+    assert config.sms_template == "Hi there,\n\n{{message_body}}"
+    assert config.email_template == "Hi there,\n\n{{message_body}}\n\nBest,\n{{brokerage_name}}"
+    assert config.email_subject_template == "{{message_subject}} | {{brokerage_name}}"
+    assert "Do not add a greeting or sign-off" in config.sms_prompt_text
+    assert "Do not add a greeting, sign-off, sender name, or brokerage name" in (
+        config.email_prompt_text
+    )
 
 
 def test_update_workspace_contact_policy_persists_values() -> None:
@@ -619,6 +645,104 @@ def test_update_workspace_llm_config_rejects_unapproved_model() -> None:
 
     assert result.status == UpdateWorkspaceLLMConfigStatus.REJECTED
     assert result.reasons == (AuthReasonCode.VALIDATION_ERROR,)
+
+
+def test_update_workspace_outbound_drafting_config_persists_values() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_outbound_drafting_config(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            prompt_text=(
+                "You are the brokerage's outreach assistant. Re-engage leads safely "
+                "and tee up an agent follow-up."
+            ),
+            sms_prompt_text="Use a short conversational SMS tone.",
+            sms_template="Hi {{agent_name}}",
+            email_prompt_text="Use a concise professional email tone.",
+            email_template="Regards,\nMiller Schackman",
+            email_subject_template="{{message_subject}} | Miller Schackman",
+            enabled_extraction_fields=("location", "max_price", "beds"),
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            workspace_outbound_drafting_config_repository=(
+                deps.workspace_outbound_drafting_config_repository
+            ),
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceOutboundDraftingConfigStatus.UPDATED
+    assert result.outbound_drafting_config is not None
+    assert (
+        result.outbound_drafting_config.prompt_text
+        == "You are the brokerage's outreach assistant. Re-engage leads safely "
+        "and tee up an agent follow-up."
+    )
+    assert result.outbound_drafting_config.sms_prompt_text == "Use a short conversational SMS tone."
+    assert result.outbound_drafting_config.sms_template == "Hi {{agent_name}}"
+    assert (
+        result.outbound_drafting_config.email_prompt_text
+        == "Use a concise professional email tone."
+    )
+    assert (
+        result.outbound_drafting_config.email_subject_template
+        == "{{message_subject}} | Miller Schackman"
+    )
+    assert result.outbound_drafting_config.enabled_extraction_fields == (
+        "location",
+        "max_price",
+        "beds",
+    )
+    assert deps.audit_log_repository.logs[-1].event_type == (
+        AuthAuditEventType.WORKSPACE_OUTBOUND_DRAFTING_CONFIG_UPDATED
+    )
+
+
+def test_update_workspace_outbound_drafting_config_allows_templates_without_placeholders() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_outbound_drafting_config(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            prompt_text=(
+                "You are the brokerage's outreach assistant. Keep the message body "
+                "focused on a safe follow-up."
+            ),
+            sms_prompt_text="Use a short conversational SMS tone.",
+            sms_template="Hi there",
+            email_prompt_text="Use a concise professional email tone.",
+            email_template="Regards,\nMiller Schackman",
+            email_subject_template="Follow-up from the brokerage",
+            enabled_extraction_fields=("location", "max_price"),
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            workspace_outbound_drafting_config_repository=(
+                deps.workspace_outbound_drafting_config_repository
+            ),
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceOutboundDraftingConfigStatus.UPDATED
+    assert result.outbound_drafting_config is not None
+    assert result.outbound_drafting_config.sms_prompt_text == "Use a short conversational SMS tone."
+    assert result.outbound_drafting_config.email_template == "Regards,\nMiller Schackman"
+    assert (
+        result.outbound_drafting_config.email_prompt_text
+        == "Use a concise professional email tone."
+    )
+    assert result.outbound_drafting_config.email_subject_template == "Follow-up from the brokerage"
 
 
 def test_update_workspace_operational_control_persists_values() -> None:
