@@ -1,20 +1,36 @@
+from datetime import datetime
+
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.common.ids import ListingCrawlRunId, ListingSnapshotId, ListingSourceId, WorkspaceId
+from app.domain.common.ids import (
+    ListingCrawlRunId,
+    ListingSearchScopeId,
+    ListingSnapshotId,
+    ListingSourceId,
+    WorkspaceId,
+)
 from app.domain.listing_sources import (
     CanonicalListingSnapshot,
     ListingCrawlRun,
     ListingCrawlStatus,
+    ListingSearchScope,
+    ListingSearchScopeType,
     ListingSnapshotStatus,
     ListingSource,
     ListingSourceType,
 )
 from app.infrastructure.persistence.postgres.models import (
     ListingCrawlRunModel,
+    ListingSearchScopeModel,
     ListingSnapshotModel,
     ListingSourceModel,
+)
+
+_ACTIVE_CRAWL_RUN_STATUSES = (
+    ListingCrawlStatus.PENDING.value,
+    ListingCrawlStatus.RUNNING.value,
 )
 
 
@@ -52,6 +68,15 @@ class PostgresListingSourceRepository:
         )
         return tuple(_source_from_model(model) for model in result.scalars().all())
 
+    async def list_enabled(self, *, limit: int = 100) -> tuple[ListingSource, ...]:
+        result = await self._session.execute(
+            select(ListingSourceModel)
+            .where(ListingSourceModel.enabled.is_(True))
+            .order_by(ListingSourceModel.updated_at.asc(), ListingSourceModel.source_id.asc())
+            .limit(limit)
+        )
+        return tuple(_source_from_model(model) for model in result.scalars().all())
+
     async def save(self, source: ListingSource) -> ListingSource:
         values = _source_to_values(source)
         update_values = {key: value for key, value in values.items() if key != "source_id"}
@@ -62,6 +87,48 @@ class PostgresListingSourceRepository:
             .returning(ListingSourceModel)
         )
         return _source_from_model(result.scalar_one())
+
+
+class PostgresListingSearchScopeRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        scope_id: ListingSearchScopeId,
+    ) -> ListingSearchScope | None:
+        result = await self._session.execute(
+            select(ListingSearchScopeModel)
+            .where(ListingSearchScopeModel.workspace_id == workspace_id)
+            .where(ListingSearchScopeModel.scope_id == scope_id)
+        )
+        model = result.scalar_one_or_none()
+        return _scope_from_model(model) if model is not None else None
+
+    async def list_for_source(
+        self,
+        workspace_id: WorkspaceId,
+        source_id: ListingSourceId,
+    ) -> tuple[ListingSearchScope, ...]:
+        result = await self._session.execute(
+            select(ListingSearchScopeModel)
+            .where(ListingSearchScopeModel.workspace_id == workspace_id)
+            .where(ListingSearchScopeModel.source_id == source_id)
+            .order_by(ListingSearchScopeModel.created_at.asc(), ListingSearchScopeModel.scope_id.asc())
+        )
+        return tuple(_scope_from_model(model) for model in result.scalars().all())
+
+    async def save(self, scope: ListingSearchScope) -> ListingSearchScope:
+        values = _scope_to_values(scope)
+        update_values = {key: value for key, value in values.items() if key != "scope_id"}
+        result = await self._session.execute(
+            insert(ListingSearchScopeModel)
+            .values(**values)
+            .on_conflict_do_update(index_elements=["scope_id"], set_=update_values)
+            .returning(ListingSearchScopeModel)
+        )
+        return _scope_from_model(result.scalar_one())
 
 
 class PostgresListingCrawlRunRepository:
@@ -96,6 +163,73 @@ class PostgresListingCrawlRunRepository:
             .limit(limit)
         )
         return tuple(_crawl_run_from_model(model) for model in result.scalars().all())
+
+    async def get_latest_for_source(
+        self,
+        workspace_id: WorkspaceId,
+        source_id: ListingSourceId,
+    ) -> ListingCrawlRun | None:
+        result = await self._session.execute(
+            select(ListingCrawlRunModel)
+            .where(ListingCrawlRunModel.workspace_id == workspace_id)
+            .where(ListingCrawlRunModel.source_id == source_id)
+            .order_by(ListingCrawlRunModel.started_at.desc(), ListingCrawlRunModel.crawl_run_id.desc())
+            .limit(1)
+        )
+        model = result.scalar_one_or_none()
+        return _crawl_run_from_model(model) if model is not None else None
+
+    async def get_active_for_source(
+        self,
+        workspace_id: WorkspaceId,
+        source_id: ListingSourceId,
+    ) -> ListingCrawlRun | None:
+        result = await self._session.execute(
+            select(ListingCrawlRunModel)
+            .where(ListingCrawlRunModel.workspace_id == workspace_id)
+            .where(ListingCrawlRunModel.source_id == source_id)
+            .where(ListingCrawlRunModel.status.in_(_ACTIVE_CRAWL_RUN_STATUSES))
+            .order_by(ListingCrawlRunModel.started_at.desc(), ListingCrawlRunModel.crawl_run_id.desc())
+            .limit(1)
+        )
+        model = result.scalar_one_or_none()
+        return _crawl_run_from_model(model) if model is not None else None
+
+    async def insert_pending_if_no_active(self, crawl_run: ListingCrawlRun) -> ListingCrawlRun | None:
+        result = await self._session.execute(
+            insert(ListingCrawlRunModel)
+            .values(**_crawl_run_to_values(crawl_run))
+            .on_conflict_do_nothing(
+                index_elements=["workspace_id", "source_id"],
+                index_where=ListingCrawlRunModel.status.in_(_ACTIVE_CRAWL_RUN_STATUSES),
+            )
+            .returning(ListingCrawlRunModel)
+        )
+        model = result.scalar_one_or_none()
+        return _crawl_run_from_model(model) if model is not None else None
+
+    async def claim_pending_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        crawl_run_id: ListingCrawlRunId,
+        *,
+        now: datetime,
+    ) -> ListingCrawlRun | None:
+        result = await self._session.execute(
+            update(ListingCrawlRunModel)
+            .where(ListingCrawlRunModel.workspace_id == workspace_id)
+            .where(ListingCrawlRunModel.crawl_run_id == crawl_run_id)
+            .where(ListingCrawlRunModel.status == ListingCrawlStatus.PENDING.value)
+            .values(
+                status=ListingCrawlStatus.RUNNING.value,
+                started_at=now,
+                updated_at=now,
+                error_summary=None,
+            )
+            .returning(ListingCrawlRunModel)
+        )
+        model = result.scalar_one_or_none()
+        return _crawl_run_from_model(model) if model is not None else None
 
     async def save(self, crawl_run: ListingCrawlRun) -> ListingCrawlRun:
         values = _crawl_run_to_values(crawl_run)
@@ -232,6 +366,44 @@ def _source_to_values(source: ListingSource) -> dict[str, object]:
         "data_use_policy": source.data_use_policy,
         "created_at": source.created_at,
         "updated_at": source.updated_at,
+    }
+
+
+def _scope_from_model(model: ListingSearchScopeModel) -> ListingSearchScope:
+    return ListingSearchScope(
+        scope_id=model.scope_id,
+        workspace_id=model.workspace_id,
+        source_id=model.source_id,
+        search_type=ListingSearchScopeType(model.search_type),
+        locations=tuple(model.locations),
+        addresses=tuple(model.addresses),
+        keywords=tuple(model.keywords),
+        min_price=model.min_price,
+        max_price=model.max_price,
+        min_beds=model.min_beds,
+        limit=model.limit,
+        enabled=model.enabled,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def _scope_to_values(scope: ListingSearchScope) -> dict[str, object]:
+    return {
+        "scope_id": scope.scope_id,
+        "workspace_id": scope.workspace_id,
+        "source_id": scope.source_id,
+        "search_type": scope.search_type.value,
+        "locations": list(scope.locations),
+        "addresses": list(scope.addresses),
+        "keywords": list(scope.keywords),
+        "min_price": scope.min_price,
+        "max_price": scope.max_price,
+        "min_beds": scope.min_beds,
+        "limit": scope.limit,
+        "enabled": scope.enabled,
+        "created_at": scope.created_at,
+        "updated_at": scope.updated_at,
     }
 
 

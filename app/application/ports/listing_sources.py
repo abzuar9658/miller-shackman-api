@@ -1,7 +1,20 @@
 from typing import Protocol
 
-from app.domain.common.ids import ListingCrawlRunId, ListingSnapshotId, ListingSourceId, WorkspaceId
-from app.domain.listing_sources import CanonicalListingSnapshot, ListingCrawlRun, ListingSource
+from datetime import datetime
+
+from app.domain.common.ids import (
+    ListingCrawlRunId,
+    ListingSearchScopeId,
+    ListingSnapshotId,
+    ListingSourceId,
+    WorkspaceId,
+)
+from app.domain.listing_sources import (
+    CanonicalListingSnapshot,
+    ListingCrawlRun,
+    ListingSearchScope,
+    ListingSource,
+)
 
 
 class ListingSourceRepository(Protocol):
@@ -18,7 +31,29 @@ class ListingSourceRepository(Protocol):
     async def list_for_workspace(self, workspace_id: WorkspaceId) -> tuple[ListingSource, ...]:
         raise NotImplementedError
 
+    async def list_enabled(self, *, limit: int = 100) -> tuple[ListingSource, ...]:
+        raise NotImplementedError
+
     async def save(self, source: ListingSource) -> ListingSource:
+        raise NotImplementedError
+
+
+class ListingSearchScopeRepository(Protocol):
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        scope_id: ListingSearchScopeId,
+    ) -> ListingSearchScope | None:
+        raise NotImplementedError
+
+    async def list_for_source(
+        self,
+        workspace_id: WorkspaceId,
+        source_id: ListingSourceId,
+    ) -> tuple[ListingSearchScope, ...]:
+        raise NotImplementedError
+
+    async def save(self, scope: ListingSearchScope) -> ListingSearchScope:
         raise NotImplementedError
 
 
@@ -37,6 +72,32 @@ class ListingCrawlRunRepository(Protocol):
         *,
         limit: int = 100,
     ) -> tuple[ListingCrawlRun, ...]:
+        raise NotImplementedError
+
+    async def get_latest_for_source(
+        self,
+        workspace_id: WorkspaceId,
+        source_id: ListingSourceId,
+    ) -> ListingCrawlRun | None:
+        raise NotImplementedError
+
+    async def get_active_for_source(
+        self,
+        workspace_id: WorkspaceId,
+        source_id: ListingSourceId,
+    ) -> ListingCrawlRun | None:
+        raise NotImplementedError
+
+    async def insert_pending_if_no_active(self, crawl_run: ListingCrawlRun) -> ListingCrawlRun | None:
+        raise NotImplementedError
+
+    async def claim_pending_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        crawl_run_id: ListingCrawlRunId,
+        *,
+        now: datetime,
+    ) -> ListingCrawlRun | None:
         raise NotImplementedError
 
     async def save(self, crawl_run: ListingCrawlRun) -> ListingCrawlRun:

@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from app.domain.common.ids import (
     ListingCrawlRunId,
+    ListingSearchScopeId,
     ListingSnapshotId,
     ListingSourceId,
     UserId,
@@ -25,6 +26,11 @@ class ListingCrawlStatus(StrEnum):
     COMPLETED = "completed"
     COMPLETED_WITH_ERRORS = "completed_with_errors"
     FAILED = "failed"
+
+
+class ListingSearchScopeType(StrEnum):
+    SALE = "sale"
+    RENT = "rent"
 
 
 class ListingSnapshotStatus(StrEnum):
@@ -72,6 +78,24 @@ class ListingCrawlRun:
     unchanged_count: int = 0
     failed_count: int = 0
     error_summary: str | None = None
+
+
+@dataclass(frozen=True)
+class ListingSearchScope:
+    scope_id: ListingSearchScopeId
+    workspace_id: WorkspaceId
+    source_id: ListingSourceId
+    search_type: ListingSearchScopeType
+    created_at: datetime
+    updated_at: datetime
+    locations: tuple[str, ...] = ()
+    addresses: tuple[str, ...] = ()
+    keywords: tuple[str, ...] = ()
+    min_price: Decimal | None = None
+    max_price: Decimal | None = None
+    min_beds: Decimal | None = None
+    limit: int = 25
+    enabled: bool = True
 
 
 @dataclass(frozen=True)

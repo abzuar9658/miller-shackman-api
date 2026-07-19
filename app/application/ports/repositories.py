@@ -26,6 +26,7 @@ from app.domain.identity import (
 )
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.llm import WorkspaceLLMConfig
+from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
 from app.domain.workspace_automation import WorkspaceOperationalControl
 
 
@@ -326,6 +327,20 @@ class WorkspaceLLMConfigRepository(Protocol):
         raise NotImplementedError
 
     async def save(self, config: WorkspaceLLMConfig) -> WorkspaceLLMConfig:
+        raise NotImplementedError
+
+
+class WorkspaceOutboundDraftingConfigRepository(Protocol):
+    async def get_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceOutboundDraftingConfig | None:
+        raise NotImplementedError
+
+    async def save(
+        self,
+        config: WorkspaceOutboundDraftingConfig,
+    ) -> WorkspaceOutboundDraftingConfig:
         raise NotImplementedError
 
 
