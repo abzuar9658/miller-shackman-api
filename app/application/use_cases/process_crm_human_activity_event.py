@@ -1,4 +1,4 @@
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
@@ -8,11 +8,8 @@ from app.application.ports.repositories import (
     ExternalEventRepository,
     LeadRepository,
     LeadWorkflowRepository,
+    TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
-)
-from app.application.ports.temporal import (
-    LeadNurtureWorkflowSignaler,
-    PauseLeadNurtureWorkflowSignal,
 )
 from app.application.use_cases.apply_workflow_state_transition import (
     WorkflowStateTransitionStatus,
@@ -21,7 +18,12 @@ from app.application.use_cases.apply_workflow_state_transition import (
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
 from app.domain.leads import CRMProvider
-from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
+from app.domain.workflows import (
+    TemporalSignalName,
+    TemporalSignalOutboxEntry,
+    WorkflowState,
+    WorkflowTransitionReasonCode,
+)
 
 
 class CRMHumanActivityKind(StrEnum):
@@ -45,7 +47,6 @@ class ProcessCRMHumanActivityEventReasonCode(StrEnum):
     NOT_MEANINGFUL_HUMAN_ACTIVITY = "not_meaningful_human_activity"
     NO_WORKFLOW = "no_workflow"
     TRANSITION_SKIPPED = "transition_skipped"
-    SIGNAL_DISPATCH_FAILED = "signal_dispatch_failed"
 
 
 def _empty_payload() -> Mapping[str, object]:
@@ -79,8 +80,7 @@ class ProcessCRMHumanActivityEventResult:
     activity_kind: CRMHumanActivityKind | None = None
     pause_reason: str | None = None
     pause_requested: bool = False
-    signal_sent: bool = False
-    signal_failure_reason: str | None = None
+    signal_queued: bool = False
     transition_skip_reason: str | None = None
     reasons: tuple[ProcessCRMHumanActivityEventReasonCode, ...] = ()
 
@@ -92,10 +92,9 @@ async def process_crm_human_activity_event(
     external_event_repository: ExternalEventRepository,
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
-    lead_nurture_workflow_signaler: LeadNurtureWorkflowSignaler,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     now: datetime,
     external_event_id_factory: Callable[[], UUID] | None = None,
-    commit: Callable[[], Awaitable[None]] | None = None,
 ) -> ProcessCRMHumanActivityEventResult:
     existing = await external_event_repository.get_by_provider_event_id(
         event.workspace_id,
@@ -199,8 +198,7 @@ async def process_crm_human_activity_event(
     )
 
     reasons: list[ProcessCRMHumanActivityEventReasonCode] = []
-    signal_sent = False
-    signal_failure_reason: str | None = None
+    signal_queued = False
     transition_skip_reason: str | None = None
     pause_requested = transition.status == WorkflowStateTransitionStatus.UPDATED
 
@@ -210,23 +208,26 @@ async def process_crm_human_activity_event(
         reasons.append(ProcessCRMHumanActivityEventReasonCode.TRANSITION_SKIPPED)
         transition_skip_reason = transition.skip_reason
     elif transition.workflow is not None:
-        try:
-            if commit is not None:
-                await commit()
-            await lead_nurture_workflow_signaler.signal_pause_lead_nurture_workflow(
+        await temporal_signal_outbox_repository.append(
+            TemporalSignalOutboxEntry(
+                temporal_signal_id=uuid4(),
+                workspace_id=event.workspace_id,
+                workflow_id=transition.workflow.workflow_id,
                 temporal_workflow_id=transition.workflow.temporal_workflow_id,
-                signal=PauseLeadNurtureWorkflowSignal(
-                    workspace_id=event.workspace_id,
-                    lead_id=lead.lead_id,
-                    occurred_at=event.occurred_at,
-                    reason=activity_kind.value,
-                    external_event_id=saved_event.external_event_id,
-                ),
+                signal_name=TemporalSignalName.PAUSE_REQUESTED,
+                payload={
+                    "lead_id": str(lead.lead_id),
+                    "occurred_at": event.occurred_at.isoformat(),
+                    "reason": activity_kind.value,
+                    "external_event_id": str(saved_event.external_event_id),
+                },
+                idempotency_key=f"pause-requested:{saved_event.external_event_id}",
+                available_at=now,
+                created_at=now,
+                updated_at=now,
             )
-            signal_sent = True
-        except Exception as exc:  # pragma: no cover - behavior asserted via result surface
-            reasons.append(ProcessCRMHumanActivityEventReasonCode.SIGNAL_DISPATCH_FAILED)
-            signal_failure_reason = str(exc) or exc.__class__.__name__
+        )
+        signal_queued = True
 
     processed_event = await external_event_repository.save(
         replace(
@@ -245,8 +246,7 @@ async def process_crm_human_activity_event(
         activity_kind=activity_kind,
         pause_reason=activity_kind.value,
         pause_requested=pause_requested,
-        signal_sent=signal_sent,
-        signal_failure_reason=signal_failure_reason,
+        signal_queued=signal_queued,
         transition_skip_reason=transition_skip_reason,
         reasons=tuple(reasons),
     )

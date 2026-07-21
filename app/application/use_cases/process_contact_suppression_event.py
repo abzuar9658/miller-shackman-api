@@ -1,4 +1,4 @@
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
@@ -8,12 +8,9 @@ from app.application.ports.repositories import (
     ExternalEventRepository,
     LeadRepository,
     LeadWorkflowRepository,
+    TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
-)
-from app.application.ports.temporal import (
-    LeadNurtureWorkflowSignaler,
-    PauseLeadNurtureWorkflowSignal,
 )
 from app.application.services.canonical_lead_inputs import (
     contactability_facts_from_canonical_lead,
@@ -33,7 +30,12 @@ from app.domain.compliance import (
 )
 from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
-from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
+from app.domain.workflows import (
+    TemporalSignalName,
+    TemporalSignalOutboxEntry,
+    WorkflowState,
+    WorkflowTransitionReasonCode,
+)
 
 
 class ProcessContactSuppressionEventStatus(StrEnum):
@@ -47,7 +49,6 @@ class ProcessContactSuppressionEventReasonCode(StrEnum):
     LEAD_NOT_FOUND = "lead_not_found"
     NO_WORKFLOW = "no_workflow"
     TRANSITION_SKIPPED = "transition_skipped"
-    SIGNAL_DISPATCH_FAILED = "signal_dispatch_failed"
 
 
 def _empty_payload() -> Mapping[str, object]:
@@ -77,8 +78,7 @@ class ProcessContactSuppressionEventResult:
     suppression_kind: ContactSuppressionKind | None = None
     workflow_state: WorkflowState | None = None
     suppression_applied: bool = False
-    signal_sent: bool = False
-    signal_failure_reason: str | None = None
+    signal_queued: bool = False
     transition_skip_reason: str | None = None
     reasons: tuple[ProcessContactSuppressionEventReasonCode, ...] = ()
 
@@ -91,10 +91,9 @@ async def process_contact_suppression_event(
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository,
-    lead_nurture_workflow_signaler: LeadNurtureWorkflowSignaler,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     now: datetime,
     external_event_id_factory: Callable[[], UUID] | None = None,
-    commit: Callable[[], Awaitable[None]] | None = None,
 ) -> ProcessContactSuppressionEventResult:
     existing = await external_event_repository.get_by_provider_event_id(
         event.workspace_id,
@@ -182,8 +181,7 @@ async def process_contact_suppression_event(
     )
 
     reasons: list[ProcessContactSuppressionEventReasonCode] = []
-    signal_sent = False
-    signal_failure_reason: str | None = None
+    signal_queued = False
     transition_skip_reason: str | None = None
 
     if transition.status == WorkflowStateTransitionStatus.NO_WORKFLOW:
@@ -192,23 +190,26 @@ async def process_contact_suppression_event(
         reasons.append(ProcessContactSuppressionEventReasonCode.TRANSITION_SKIPPED)
         transition_skip_reason = transition.skip_reason
     elif transition.workflow is not None:
-        try:
-            if commit is not None:
-                await commit()
-            await lead_nurture_workflow_signaler.signal_pause_lead_nurture_workflow(
+        await temporal_signal_outbox_repository.append(
+            TemporalSignalOutboxEntry(
+                temporal_signal_id=uuid4(),
+                workspace_id=event.workspace_id,
+                workflow_id=transition.workflow.workflow_id,
                 temporal_workflow_id=transition.workflow.temporal_workflow_id,
-                signal=PauseLeadNurtureWorkflowSignal(
-                    workspace_id=event.workspace_id,
-                    lead_id=updated_lead.lead_id,
-                    occurred_at=event.occurred_at,
-                    reason=event.suppression_kind.value,
-                    external_event_id=saved_event.external_event_id,
-                ),
+                signal_name=TemporalSignalName.PAUSE_REQUESTED,
+                payload={
+                    "lead_id": str(updated_lead.lead_id),
+                    "occurred_at": event.occurred_at.isoformat(),
+                    "reason": event.suppression_kind.value,
+                    "external_event_id": str(saved_event.external_event_id),
+                },
+                idempotency_key=f"pause-requested:{saved_event.external_event_id}",
+                available_at=now,
+                created_at=now,
+                updated_at=now,
             )
-            signal_sent = True
-        except Exception as exc:  # pragma: no cover - defensive branch
-            reasons.append(ProcessContactSuppressionEventReasonCode.SIGNAL_DISPATCH_FAILED)
-            signal_failure_reason = str(exc)
+        )
+        signal_queued = True
 
     await external_event_repository.save(
         replace(
@@ -227,8 +228,7 @@ async def process_contact_suppression_event(
         suppression_kind=event.suppression_kind,
         workflow_state=transition.workflow.state if transition.workflow is not None else None,
         suppression_applied=suppression_applied,
-        signal_sent=signal_sent,
-        signal_failure_reason=signal_failure_reason,
+        signal_queued=signal_queued,
         transition_skip_reason=transition_skip_reason,
         reasons=tuple(reasons),
     )

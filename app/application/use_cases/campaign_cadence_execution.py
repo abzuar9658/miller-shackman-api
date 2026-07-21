@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from uuid import UUID, uuid4
 
+from app.application.ports.crm import CRMClient
 from app.application.ports.lead_activity import LeadActivityRepository
 from app.application.ports.listing_search import ListingSearchClient
 from app.application.ports.listing_sources import ListingSnapshotRepository, ListingSourceRepository
@@ -15,9 +16,11 @@ from app.application.ports.repositories import (
     CrmConversationEventRepository,
     LeadRepository,
     LeadWorkflowRepository,
+    OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
+    WorkspaceHandoffConfigRepository,
     WorkspaceLLMConfigRepository,
     WorkspaceOperationalControlRepository,
     WorkspaceOutboundDraftingConfigRepository,
@@ -31,6 +34,9 @@ from app.application.services.workspace_automation_control import (
 from app.application.use_cases.apply_workflow_state_transition import (
     WorkflowStateTransitionStatus,
     apply_workflow_state_transition,
+)
+from app.application.use_cases.complete_outbound_message_crm_sync import (
+    complete_outbound_message_crm_sync,
 )
 from app.application.use_cases.plan_next_outbound_message import (
     PlanNextOutboundMessageContext,
@@ -59,6 +65,7 @@ from app.domain.compliance.contactability import (
     WorkspaceContactPolicy,
     default_workspace_contact_policy,
 )
+from app.domain.conversations import CrmConversationEventDirection, WorkspaceHandoffConfig
 from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransitionReasonCode
 
 
@@ -180,6 +187,11 @@ async def execute_campaign_cadence_step(
     llm_client: LLMClient,
     sms_provider: SMSProvider,
     email_provider: EmailProvider,
+    crm_client: CRMClient | None = None,
+    outbound_message_crm_completion_repository: (
+        OutboundMessageCRMCompletionRepository | None
+    ) = None,
+    workspace_handoff_config_repository: WorkspaceHandoffConfigRepository | None = None,
     now: datetime,
     default_openrouter_model: str = "openai/gpt-4o-mini",
     workspace_automation_defer_interval: timedelta = timedelta(minutes=15),
@@ -401,6 +413,32 @@ async def execute_campaign_cadence_step(
         SendOutboundMessageStatus.SENT,
         SendOutboundMessageStatus.ALREADY_SENT,
     }:
+        if (
+            send_result.message is not None
+            and crm_client is not None
+            and outbound_message_crm_completion_repository is not None
+        ):
+            lead = await lead_repository.get_by_id(workspace_id, lead_id)
+            handoff_config = await _load_workspace_handoff_config(
+                workspace_id=workspace_id,
+                workspace_handoff_config_repository=workspace_handoff_config_repository,
+            )
+            if lead is not None:
+                await complete_outbound_message_crm_sync(
+                    lead=lead,
+                    outbound_message=send_result.message,
+                    crm_sync_completion_repository=outbound_message_crm_completion_repository,
+                    crm_client=crm_client,
+                    now=now,
+                    summary_text=_summary_text_for_outbound_conversation(send_result.message),
+                    latest_inbound_text=await _latest_inbound_conversation_text(
+                        workspace_id=workspace_id,
+                        lead_id=lead_id,
+                        crm_conversation_event_repository=crm_conversation_event_repository,
+                    ),
+                    workspace_handoff_config=handoff_config,
+                    snapshot_status="waiting_for_response",
+                )
         return await advance_workflow_after_outbound_send(
             workspace_id=workspace_id,
             lead_id=lead_id,
@@ -557,6 +595,48 @@ def _scheduled_or_initial_step(
     if current_step_id is None:
         return steps[0]
     return _step_by_id(steps, current_step_id)
+
+
+async def _load_workspace_handoff_config(
+    *,
+    workspace_id: WorkspaceId,
+    workspace_handoff_config_repository: WorkspaceHandoffConfigRepository | None,
+) -> WorkspaceHandoffConfig | None:
+    if workspace_handoff_config_repository is None:
+        return None
+    return await workspace_handoff_config_repository.get_by_workspace_id(workspace_id)
+
+
+async def _latest_inbound_conversation_text(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    crm_conversation_event_repository: CrmConversationEventRepository | None,
+) -> str | None:
+    if crm_conversation_event_repository is None:
+        return None
+    events = await crm_conversation_event_repository.list_for_lead(
+        workspace_id,
+        lead_id,
+        limit=24,
+    )
+    for event in events:
+        if event.direction != CrmConversationEventDirection.INBOUND or event.content is None:
+            continue
+        content = event.content.strip()
+        if content:
+            return content
+    return None
+
+
+def _summary_text_for_outbound_conversation(message: object) -> str | None:
+    notes = getattr(message, "draft_personalization_notes", ())
+    if not isinstance(notes, tuple):
+        return None
+    normalized_notes = [note.strip() for note in notes if isinstance(note, str) and note.strip()]
+    if not normalized_notes:
+        return None
+    return "\n".join(normalized_notes)
 
 
 def _step_by_id(

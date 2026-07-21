@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from app.application.ports.repositories import LeadWorkflowRepository, WorkflowTransitionRepository
 from app.application.services.llm.reply_classification import InboundReplyIntent
+from app.application.use_cases.evaluate_inbound_action import InboundAction, InboundActionReasonCode
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.workflows import (
     LeadWorkflow,
@@ -45,6 +46,8 @@ async def apply_inbound_workflow_transition(
     inbound_message_id: UUID | None = None,
     handoff_id: UUID | None = None,
     intent: InboundReplyIntent | None = None,
+    action: InboundAction | None = None,
+    decision_reason: InboundActionReasonCode | None = None,
     classification_reasons: tuple[str, ...] = (),
     transition_id_factory: Callable[[], UUID] | None = None,
 ) -> InboundWorkflowTransitionOutcome:
@@ -63,6 +66,8 @@ async def apply_inbound_workflow_transition(
         inbound_message_id=inbound_message_id,
         handoff_id=handoff_id,
         intent=intent,
+        action=action,
+        decision_reason=decision_reason,
         classification_reasons=classification_reasons,
     )
     try:
@@ -113,6 +118,8 @@ def _metadata(
     inbound_message_id: UUID | None,
     handoff_id: UUID | None,
     intent: InboundReplyIntent | None,
+    action: InboundAction | None,
+    decision_reason: InboundActionReasonCode | None,
     classification_reasons: tuple[str, ...],
 ) -> Mapping[str, object]:
     values: dict[str, object] = {}
@@ -124,6 +131,10 @@ def _metadata(
         values["handoff_id"] = str(handoff_id)
     if intent is not None:
         values["intent"] = intent.value
+    if action is not None:
+        values["inbound_action"] = action.value
+    if decision_reason is not None:
+        values["decision_reason"] = decision_reason.value
     if classification_reasons:
         values["classification_reasons"] = list(classification_reasons)
     return values

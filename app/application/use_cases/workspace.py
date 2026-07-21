@@ -8,7 +8,10 @@ from app.application.ports.messaging import EmailMessage, EmailProvider
 from app.application.ports.repositories import (
     AuthAuditLogRepository,
     InvitationRepository,
+    LeadWorkflowRepository,
+    TemporalSignalOutboxRepository,
     UserRepository,
+    WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
     WorkspaceCRMSyncConfigRepository,
     WorkspaceHandoffConfigRepository,
@@ -20,6 +23,9 @@ from app.application.ports.repositories import (
 )
 from app.application.services.authentication import render_invitation_email_body
 from app.application.use_cases.authentication import AuthReasonCode
+from app.application.use_cases.reactivate_timing_blocked_workflows import (
+    reactivate_timing_blocked_workflows_for_workspace,
+)
 from app.domain.compliance import (
     SmsComplianceState,
     WorkspaceContactPolicy,
@@ -761,6 +767,9 @@ async def update_workspace_contact_policy(
     membership_repository: WorkspaceMembershipRepository,
     contact_policy_repository: WorkspaceContactPolicyRepository,
     audit_log_repository: AuthAuditLogRepository,
+    lead_workflow_repository: LeadWorkflowRepository,
+    workflow_transition_repository: WorkflowTransitionRepository,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     now: datetime,
 ) -> UpdateWorkspaceContactPolicyResult:
     effective_actor = await _actor_for_workspace(
@@ -844,6 +853,15 @@ async def update_workspace_contact_policy(
             },
         ),
     )
+    await reactivate_timing_blocked_workflows_for_workspace(
+        workspace_id=workspace_id,
+        quiet_hours_previously_enabled=current_policy.quiet_hours_enabled,
+        quiet_hours_now_enabled=saved_policy.quiet_hours_enabled,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        temporal_signal_outbox_repository=temporal_signal_outbox_repository,
+        now=now,
+    )
     return UpdateWorkspaceContactPolicyResult(
         status=UpdateWorkspaceContactPolicyStatus.UPDATED,
         contact_policy=saved_policy,
@@ -856,7 +874,13 @@ async def update_workspace_handoff_config(
     workspace_id: UUID,
     fallback_recipient_email: str | None,
     crm_handoff_tag: str | None,
+    crm_review_tag: str | None,
     crm_custom_fields: dict[str, str],
+    crm_snapshot_summary_field: str | None,
+    crm_snapshot_status_field: str | None,
+    crm_snapshot_latest_inbound_field: str | None,
+    crm_snapshot_latest_outbound_field: str | None,
+    crm_snapshot_last_activity_at_field: str | None,
     workspace_repository: WorkspaceRepository,
     membership_repository: WorkspaceMembershipRepository,
     handoff_config_repository: WorkspaceHandoffConfigRepository,
@@ -894,14 +918,35 @@ async def update_workspace_handoff_config(
 
     normalized_email = _normalize_optional_text(fallback_recipient_email)
     normalized_tag = _normalize_optional_text(crm_handoff_tag)
+    normalized_review_tag = _normalize_optional_text(crm_review_tag)
     normalized_custom_fields = _normalize_custom_fields(crm_custom_fields)
+    normalized_snapshot_summary_field = _normalize_optional_text(crm_snapshot_summary_field)
+    normalized_snapshot_status_field = _normalize_optional_text(crm_snapshot_status_field)
+    normalized_snapshot_latest_inbound_field = _normalize_optional_text(
+        crm_snapshot_latest_inbound_field
+    )
+    normalized_snapshot_latest_outbound_field = _normalize_optional_text(
+        crm_snapshot_latest_outbound_field
+    )
+    normalized_snapshot_last_activity_at_field = _normalize_optional_text(
+        crm_snapshot_last_activity_at_field
+    )
     current_config = await handoff_config_repository.get_by_workspace_id(
         workspace_id
     ) or default_workspace_handoff_config(workspace_id)
     if (
         current_config.fallback_recipient_email == normalized_email
         and current_config.crm_handoff_tag == normalized_tag
+        and current_config.crm_review_tag == normalized_review_tag
         and dict(current_config.crm_custom_fields) == normalized_custom_fields
+        and current_config.crm_snapshot_summary_field == normalized_snapshot_summary_field
+        and current_config.crm_snapshot_status_field == normalized_snapshot_status_field
+        and current_config.crm_snapshot_latest_inbound_field
+        == normalized_snapshot_latest_inbound_field
+        and current_config.crm_snapshot_latest_outbound_field
+        == normalized_snapshot_latest_outbound_field
+        and current_config.crm_snapshot_last_activity_at_field
+        == normalized_snapshot_last_activity_at_field
     ):
         return UpdateWorkspaceHandoffConfigResult(
             status=UpdateWorkspaceHandoffConfigStatus.UPDATED,
@@ -912,7 +957,13 @@ async def update_workspace_handoff_config(
         workspace_id=workspace_id,
         fallback_recipient_email=normalized_email,
         crm_handoff_tag=normalized_tag,
+        crm_review_tag=normalized_review_tag,
         crm_custom_fields=normalized_custom_fields,
+        crm_snapshot_summary_field=normalized_snapshot_summary_field,
+        crm_snapshot_status_field=normalized_snapshot_status_field,
+        crm_snapshot_latest_inbound_field=normalized_snapshot_latest_inbound_field,
+        crm_snapshot_latest_outbound_field=normalized_snapshot_latest_outbound_field,
+        crm_snapshot_last_activity_at_field=normalized_snapshot_last_activity_at_field,
     )
     saved_config = await handoff_config_repository.save(updated_config)
     await audit_log_repository.append(
@@ -924,7 +975,19 @@ async def update_workspace_handoff_config(
             event_details={
                 "fallback_recipient_email": saved_config.fallback_recipient_email or "",
                 "crm_handoff_tag": saved_config.crm_handoff_tag or "",
+                "crm_review_tag": saved_config.crm_review_tag or "",
                 "crm_custom_fields": str(dict(saved_config.crm_custom_fields)),
+                "crm_snapshot_summary_field": saved_config.crm_snapshot_summary_field or "",
+                "crm_snapshot_status_field": saved_config.crm_snapshot_status_field or "",
+                "crm_snapshot_latest_inbound_field": (
+                    saved_config.crm_snapshot_latest_inbound_field or ""
+                ),
+                "crm_snapshot_latest_outbound_field": (
+                    saved_config.crm_snapshot_latest_outbound_field or ""
+                ),
+                "crm_snapshot_last_activity_at_field": (
+                    saved_config.crm_snapshot_last_activity_at_field or ""
+                ),
             },
         ),
     )

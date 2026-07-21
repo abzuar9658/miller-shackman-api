@@ -9,6 +9,9 @@ from app.application.ports.listing_sources import ListingSnapshotRepository, Lis
 from app.application.ports.llm import LLMClient
 from app.application.ports.repositories import (
     AuthAuditLogRepository,
+    LeadWorkflowRepository,
+    TemporalSignalOutboxRepository,
+    WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
     WorkspaceCRMSyncConfigRepository,
     WorkspaceHandoffConfigRepository,
@@ -28,6 +31,13 @@ from app.infrastructure.persistence.postgres.identity_repository import (
 from app.infrastructure.persistence.postgres.listing_source_repository import (
     PostgresListingSnapshotRepository,
     PostgresListingSourceRepository,
+)
+from app.infrastructure.persistence.postgres.temporal_signal_outbox_repository import (
+    PostgresTemporalSignalOutboxRepository,
+)
+from app.infrastructure.persistence.postgres.workflow_repository import (
+    PostgresLeadWorkflowRepository,
+    PostgresWorkflowTransitionRepository,
 )
 from app.infrastructure.persistence.postgres.workspace_contact_policy_repository import (
     PostgresWorkspaceContactPolicyRepository,
@@ -67,6 +77,9 @@ class WorkspaceSettingsBundle:
     workspace_handoff_config_repository: WorkspaceHandoffConfigRepository
     workspace_outbound_drafting_config_repository: WorkspaceOutboundDraftingConfigRepository
     workspace_operational_control_repository: WorkspaceOperationalControlRepository
+    lead_workflow_repository: LeadWorkflowRepository
+    workflow_transition_repository: WorkflowTransitionRepository
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository
     default_crm_sync_interval_seconds: int
     default_openrouter_model: str
     allowed_openrouter_models: tuple[str, ...]
@@ -104,6 +117,9 @@ async def get_workspace_settings_bundle(
         workspace_operational_control_repository=PostgresWorkspaceOperationalControlRepository(
             session
         ),
+        lead_workflow_repository=PostgresLeadWorkflowRepository(session),
+        workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
+        temporal_signal_outbox_repository=PostgresTemporalSignalOutboxRepository(session),
         default_crm_sync_interval_seconds=settings.crm_sync_incremental_interval_seconds,
         default_openrouter_model=settings.openrouter_model,
         allowed_openrouter_models=tuple(settings.openrouter_allowed_models),

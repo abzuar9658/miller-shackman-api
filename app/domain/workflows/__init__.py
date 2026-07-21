@@ -7,6 +7,11 @@ from app.domain.workflows.models import (
     WorkflowTransitionResult,
     transition_workflow,
 )
+from app.domain.workflows.temporal_signal_outbox import (
+    TemporalSignalName,
+    TemporalSignalOutboxEntry,
+    TemporalSignalOutboxStatus,
+)
 
 __all__ = [
     "LeadWorkflow",
@@ -15,5 +20,8 @@ __all__ = [
     "WorkflowTransitionError",
     "WorkflowTransitionReasonCode",
     "WorkflowTransitionResult",
+    "TemporalSignalName",
+    "TemporalSignalOutboxEntry",
+    "TemporalSignalOutboxStatus",
     "transition_workflow",
 ]

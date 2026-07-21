@@ -313,18 +313,13 @@ async def resume_lead_route(
         reason=request.reason,
         lead_repository=bundle.lead_repository,
         workflow_repository=bundle.workflow_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
         workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
-        inbound_message_repository=bundle.inbound_message_repository,
-        handoff_repository=bundle.handoff_repository,
-        campaign_enrollment_repository=bundle.campaign_enrollment_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
-        temporal_workflow_starter=bundle.temporal_workflow_starter,
-        lead_nurture_workflow_signaler=bundle.lead_nurture_workflow_signaler,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         external_event_repository=bundle.external_event_repository,
         commit=bundle.session.commit,
-        event_bus=bundle.event_bus,
         now=datetime.now(UTC),
-        workspace_operational_control_repository=bundle.workspace_operational_control_repository,
     )
     if result.status == LeadResumeActionStatus.REJECTED:
         raise HTTPException(
@@ -342,7 +337,7 @@ async def resume_lead_route(
         workflow_id=result.workflow_id,
         workflow_state=result.workflow_state.value if result.workflow_state is not None else None,
         reasons=[reason.value for reason in result.reasons],
-        signal_failure_reason=result.signal_failure_reason,
+        signal_queued=result.signal_queued,
     )
 
 
@@ -377,10 +372,14 @@ async def approve_rejected_draft_review_route(
         workspace_operational_control_repository=bundle.workspace_operational_control_repository,
         message_repository=bundle.message_repository,
         external_event_repository=bundle.external_event_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        crm_conversation_event_repository=bundle.crm_conversation_event_repository,
+        crm_client=bundle.crm_client,
+        outbound_message_crm_completion_repository=bundle.outbound_message_crm_completion_repository,
+        workspace_handoff_config_repository=bundle.workspace_handoff_config_repository,
         commit=bundle.session.commit,
         sms_provider=bundle.sms_provider,
         email_provider=bundle.email_provider,
-        lead_nurture_workflow_signaler=bundle.lead_nurture_workflow_signaler,
         now=datetime.now(UTC),
     )
     if result.status == ApproveRejectedDraftReviewStatus.NOT_FOUND:
@@ -394,7 +393,7 @@ async def approve_rejected_draft_review_route(
         outbound_message_id=result.outbound_message_id,
         workflow_id=result.workflow_id,
         reasons=list(result.reasons),
-        signal_failure_reason=result.signal_failure_reason,
+        signal_queued=result.signal_queued,
     )
 
 

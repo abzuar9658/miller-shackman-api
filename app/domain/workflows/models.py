@@ -35,6 +35,7 @@ class WorkflowTransitionReasonCode(StrEnum):
     OUTBOUND_MESSAGE_FAILED = "outbound_message_failed"
     MANUAL_PAUSE = "manual_pause"
     MANUAL_RESUME = "manual_resume"
+    CONTACT_POLICY_UPDATED = "contact_policy_updated"
 
 
 class WorkflowTransitionError(ValueError):
@@ -151,6 +152,21 @@ def _validate_transition(from_state: WorkflowState, to_state: WorkflowState) -> 
     if (
         from_state == WorkflowState.WAITING_FOR_RESPONSE
         and to_state == WorkflowState.ACTIVE_NURTURE
+    ):
+        return
+    if (
+        from_state == WorkflowState.WAITING_FOR_RESPONSE
+        and to_state == WorkflowState.RESPONSE_PROCESSING
+    ):
+        return
+    if (
+        from_state == WorkflowState.RESPONSE_PROCESSING
+        and to_state == WorkflowState.WAITING_FOR_RESPONSE
+    ):
+        return
+    if (
+        from_state == WorkflowState.RESPONSE_PROCESSING
+        and to_state in {WorkflowState.PAUSED, WorkflowState.HUMAN_HANDOFF}
     ):
         return
     if (

@@ -11,6 +11,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     WorkspaceHandoffConfigRepository,
 )
+from app.application.services.crm_snapshot import build_crm_snapshot_custom_fields
 from app.domain.common.ids import WorkspaceId
 from app.domain.conversations import (
     Handoff,
@@ -158,8 +159,12 @@ async def complete_handoff(
 
     try:
         if record.crm_note_written_at is None:
+            subject, content = _crm_handoff_note(handoff, lead)
             await crm_client.add_note(
-                workspace_id, lead.crm_lead_id, _crm_handoff_note(handoff, lead)
+                workspace_id,
+                lead.crm_lead_id,
+                content,
+                subject=subject,
             )
             record = await handoff_completion_repository.save(
                 replace(
@@ -171,16 +176,38 @@ async def complete_handoff(
             record = await handoff_completion_repository.save(
                 replace(record, crm_tag_applied_at=now, last_attempted_at=now, failure_reason=None),
             )
-        if handoff_config.crm_custom_fields and record.crm_custom_fields_updated_at is None:
+        custom_fields = (
+            dict(handoff_config.crm_custom_fields)
+            if handoff_config.crm_custom_fields and record.crm_custom_fields_updated_at is None
+            else {}
+        )
+        snapshot_fields = (
+            build_crm_snapshot_custom_fields(
+                handoff_config,
+                summary_text=handoff.summary,
+                status="human_handoff_required",
+                latest_inbound_text=handoff.latest_inbound_text,
+                last_activity_at=handoff.created_at,
+            )
+            if record.crm_snapshot_updated_at is None
+            else {}
+        )
+        fields_to_update = {**custom_fields, **snapshot_fields}
+        if fields_to_update:
             await crm_client.update_custom_fields(
                 workspace_id,
                 lead.crm_lead_id,
-                dict(handoff_config.crm_custom_fields),
+                fields_to_update,
             )
             record = await handoff_completion_repository.save(
                 replace(
                     record,
-                    crm_custom_fields_updated_at=now,
+                    crm_custom_fields_updated_at=(
+                        now if custom_fields else record.crm_custom_fields_updated_at
+                    ),
+                    crm_snapshot_updated_at=(
+                        now if snapshot_fields else record.crm_snapshot_updated_at
+                    ),
                     last_attempted_at=now,
                     failure_reason=None,
                 ),
@@ -240,18 +267,21 @@ def _handoff_notification(
     )
 
 
-def _crm_handoff_note(handoff: Handoff, lead: CanonicalLeadRecord) -> str:
+def _crm_handoff_note(handoff: Handoff, lead: CanonicalLeadRecord) -> tuple[str, str]:
+    subject = "AI HANDOFF"
     preference_lines = (
         "\n".join(f"- {key}: {value}" for key, value in sorted(handoff.preferences.items()))
         or "- none extracted"
     )
-    return (
-        f"AI handoff created for {_lead_display_name(lead)}.\n"
+    content = (
+        f"{subject}\n"
+        f"Lead: {_lead_display_name(lead)}\n"
         f"Reason: {handoff.reason_code.value}\n"
         f"Latest inbound: {handoff.latest_inbound_text}\n\n"
         f"Conversation summary:\n{handoff.summary}\n\n"
         f"Extracted preferences:\n{preference_lines}"
     )
+    return subject, content
 
 
 def _lead_display_name(lead: CanonicalLeadRecord) -> str:

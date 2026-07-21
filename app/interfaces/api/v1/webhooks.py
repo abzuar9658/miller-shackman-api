@@ -5,6 +5,7 @@ from email.utils import parseaddr
 from typing import Annotated
 from uuid import UUID
 
+import structlog
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -15,6 +16,7 @@ from sendgrid.helpers.eventwebhook import EventWebhook
 from starlette.datastructures import FormData, UploadFile
 from twilio.request_validator import RequestValidator
 
+from app.application.ports.crm_webhook import FollowUpBossWebhookEventHandler
 from app.application.use_cases.process_contact_suppression_event import (
     ContactSuppressionEvent,
     process_contact_suppression_event,
@@ -38,6 +40,9 @@ from app.core.database import enable_postgres_service_access, set_postgres_works
 from app.domain.campaigns.outbound_message import ProviderDeliveryStatus
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CRMProvider
+from app.interfaces.api.dependencies.follow_up_boss_webhook import (
+    get_follow_up_boss_webhook_event_handler,
+)
 from app.interfaces.api.dependencies.inbound import InboundServiceBundle, get_inbound_service_bundle
 from app.interfaces.api.dependencies.provider_delivery import (
     ProviderDeliveryServiceBundle,
@@ -49,6 +54,7 @@ from app.interfaces.api.schemas.inbound import (
     FollowUpBossContactSuppressionRequest,
     FollowUpBossCRMHumanActivityRequest,
     FollowUpBossInboundMessageRequest,
+    FollowUpBossWebhookResponse,
     InboundWebhookResponse,
     SendGridInboundParsePayload,
     TwilioInboundMessagePayload,
@@ -61,6 +67,69 @@ from app.interfaces.api.schemas.provider_delivery import (
 )
 
 router = APIRouter(tags=["webhooks"])
+logger = structlog.get_logger(__name__)
+
+
+async def _handle_inbound_message_event(
+    event: InboundMessageEvent,
+    bundle: InboundServiceBundle,
+    now: datetime,
+) -> InboundWebhookResponse:
+    result = await process_inbound_message_event(
+        event=event,
+        lead_repository=bundle.lead_repository,
+        external_event_repository=bundle.external_event_repository,
+        conversation_repository=bundle.conversation_repository,
+        inbound_message_repository=bundle.inbound_message_repository,
+        conversation_summary_repository=bundle.conversation_summary_repository,
+        handoff_repository=bundle.handoff_repository,
+        crm_client=bundle.crm_client,
+        inbound_message_crm_completion_repository=bundle.inbound_message_crm_completion_repository,
+        outbound_message_crm_completion_repository=bundle.outbound_message_crm_completion_repository,
+        notification_provider=bundle.notification_provider,
+        workspace_handoff_config_repository=bundle.workspace_handoff_config_repository,
+        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
+        handoff_completion_repository=bundle.handoff_completion_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        llm_client=bundle.llm_client,
+        event_bus=bundle.event_bus,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        default_openrouter_model=bundle.default_openrouter_model,
+        workspace_repository=bundle.workspace_repository,
+        campaign_execution_repository=bundle.campaign_execution_repository,
+        workspace_operational_control_repository=bundle.workspace_operational_control_repository,
+        workspace_outbound_drafting_config_repository=bundle.workspace_outbound_drafting_config_repository,
+        message_repository=bundle.message_repository,
+        sms_provider=bundle.sms_provider,
+        email_provider=bundle.email_provider,
+        now=now,
+    )
+    await bundle.session.commit()
+    return InboundWebhookResponse(
+        status=result.status.value,
+        external_event_id=result.external_event_id,
+        lead_id=result.lead_id,
+        conversation_id=result.conversation_id,
+        inbound_message_id=result.inbound_message_id,
+        handoff_id=result.handoff_id,
+        intent=result.intent.value if result.intent is not None else None,
+        handoff_required=result.handoff_required,
+        opt_out_detected=result.opt_out_detected,
+        signal_queued=result.signal_queued,
+        review_tag_applied=result.review_tag_applied,
+        review_notification_sent=result.review_notification_sent,
+        review_notification_recipient=result.review_notification_recipient,
+        review_notification_failure_reason=result.review_notification_failure_reason,
+        continue_ai_status=(
+            result.continue_ai_status.value if result.continue_ai_status is not None else None
+        ),
+        continue_ai_outbound_message_id=result.continue_ai_outbound_message_id,
+        continue_ai_provider_message_id=result.continue_ai_provider_message_id,
+        continue_ai_pause_reason=result.continue_ai_pause_reason,
+        reasons=[reason.value for reason in result.reasons],
+        classification_reasons=[reason.value for reason in result.classification_reasons],
+    )
 
 
 @router.post(
@@ -72,7 +141,7 @@ async def receive_follow_up_boss_inbound_message(
     bundle: Annotated[InboundServiceBundle, Depends(get_inbound_service_bundle)],
 ) -> InboundWebhookResponse:
     await set_postgres_workspace_context(bundle.session, str(request.workspace_id))
-    result = await process_inbound_message_event(
+    return await _handle_inbound_message_event(
         event=InboundMessageEvent(
             workspace_id=request.workspace_id,
             provider=CRMProvider.FOLLOW_UP_BOSS.value,
@@ -86,38 +155,8 @@ async def receive_follow_up_boss_inbound_message(
             to_address_redacted=request.to_address_redacted,
             payload_redacted=request.payload_redacted,
         ),
-        lead_repository=bundle.lead_repository,
-        external_event_repository=bundle.external_event_repository,
-        conversation_repository=bundle.conversation_repository,
-        inbound_message_repository=bundle.inbound_message_repository,
-        conversation_summary_repository=bundle.conversation_summary_repository,
-        handoff_repository=bundle.handoff_repository,
-        crm_client=bundle.crm_client,
-        inbound_message_crm_completion_repository=bundle.inbound_message_crm_completion_repository,
-        notification_provider=bundle.notification_provider,
-        workspace_handoff_config_repository=bundle.workspace_handoff_config_repository,
-        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
-        handoff_completion_repository=bundle.handoff_completion_repository,
-        lead_workflow_repository=bundle.lead_workflow_repository,
-        workflow_transition_repository=bundle.workflow_transition_repository,
-        llm_client=bundle.llm_client,
-        event_bus=bundle.event_bus,
-        default_openrouter_model=bundle.default_openrouter_model,
+        bundle=bundle,
         now=datetime.now(UTC),
-    )
-    await bundle.session.commit()
-    return InboundWebhookResponse(
-        status=result.status.value,
-        external_event_id=result.external_event_id,
-        lead_id=result.lead_id,
-        conversation_id=result.conversation_id,
-        inbound_message_id=result.inbound_message_id,
-        handoff_id=result.handoff_id,
-        intent=result.intent.value if result.intent is not None else None,
-        handoff_required=result.handoff_required,
-        opt_out_detected=result.opt_out_detected,
-        reasons=[reason.value for reason in result.reasons],
-        classification_reasons=[reason.value for reason in result.classification_reasons],
     )
 
 
@@ -147,7 +186,7 @@ async def receive_twilio_inbound_message(
     lead = await bundle.lead_repository.get_by_primary_phone(workspace_id, payload.from_phone)
     if lead is None:
         return InboundWebhookResponse(status="rejected", reasons=["lead_not_found"])
-    result = await process_inbound_message_event(
+    return await _handle_inbound_message_event(
         event=InboundMessageEvent(
             workspace_id=workspace_id,
             provider="twilio",
@@ -162,38 +201,8 @@ async def receive_twilio_inbound_message(
             to_address_redacted=_redact_phone_number(payload.to_phone),
             payload_redacted=_twilio_inbound_payload_redacted(payload),
         ),
-        lead_repository=bundle.lead_repository,
-        external_event_repository=bundle.external_event_repository,
-        conversation_repository=bundle.conversation_repository,
-        inbound_message_repository=bundle.inbound_message_repository,
-        conversation_summary_repository=bundle.conversation_summary_repository,
-        handoff_repository=bundle.handoff_repository,
-        crm_client=bundle.crm_client,
-        inbound_message_crm_completion_repository=bundle.inbound_message_crm_completion_repository,
-        notification_provider=bundle.notification_provider,
-        workspace_handoff_config_repository=bundle.workspace_handoff_config_repository,
-        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
-        handoff_completion_repository=bundle.handoff_completion_repository,
-        lead_workflow_repository=bundle.lead_workflow_repository,
-        workflow_transition_repository=bundle.workflow_transition_repository,
-        llm_client=bundle.llm_client,
-        event_bus=bundle.event_bus,
-        default_openrouter_model=bundle.default_openrouter_model,
+        bundle=bundle,
         now=datetime.now(UTC),
-    )
-    await bundle.session.commit()
-    return InboundWebhookResponse(
-        status=result.status.value,
-        external_event_id=result.external_event_id,
-        lead_id=result.lead_id,
-        conversation_id=result.conversation_id,
-        inbound_message_id=result.inbound_message_id,
-        handoff_id=result.handoff_id,
-        intent=result.intent.value if result.intent is not None else None,
-        handoff_required=result.handoff_required,
-        opt_out_detected=result.opt_out_detected,
-        reasons=[reason.value for reason in result.reasons],
-        classification_reasons=[reason.value for reason in result.classification_reasons],
     )
 
 
@@ -239,7 +248,7 @@ async def receive_sendgrid_inbound_message(
     )
     if lead is None:
         return InboundWebhookResponse(status="rejected", reasons=["lead_not_found"])
-    result = await process_inbound_message_event(
+    return await _handle_inbound_message_event(
         event=InboundMessageEvent(
             workspace_id=workspace_id,
             provider="sendgrid",
@@ -254,38 +263,8 @@ async def receive_sendgrid_inbound_message(
             to_address_redacted=_redact_email_address(payload.to_email_address),
             payload_redacted=_sendgrid_inbound_payload_redacted(payload),
         ),
-        lead_repository=bundle.lead_repository,
-        external_event_repository=bundle.external_event_repository,
-        conversation_repository=bundle.conversation_repository,
-        inbound_message_repository=bundle.inbound_message_repository,
-        conversation_summary_repository=bundle.conversation_summary_repository,
-        handoff_repository=bundle.handoff_repository,
-        crm_client=bundle.crm_client,
-        inbound_message_crm_completion_repository=bundle.inbound_message_crm_completion_repository,
-        notification_provider=bundle.notification_provider,
-        workspace_handoff_config_repository=bundle.workspace_handoff_config_repository,
-        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
-        handoff_completion_repository=bundle.handoff_completion_repository,
-        lead_workflow_repository=bundle.lead_workflow_repository,
-        workflow_transition_repository=bundle.workflow_transition_repository,
-        llm_client=bundle.llm_client,
-        event_bus=bundle.event_bus,
-        default_openrouter_model=bundle.default_openrouter_model,
+        bundle=bundle,
         now=datetime.now(UTC),
-    )
-    await bundle.session.commit()
-    return InboundWebhookResponse(
-        status=result.status.value,
-        external_event_id=result.external_event_id,
-        lead_id=result.lead_id,
-        conversation_id=result.conversation_id,
-        inbound_message_id=result.inbound_message_id,
-        handoff_id=result.handoff_id,
-        intent=result.intent.value if result.intent is not None else None,
-        handoff_required=result.handoff_required,
-        opt_out_detected=result.opt_out_detected,
-        reasons=[reason.value for reason in result.reasons],
-        classification_reasons=[reason.value for reason in result.classification_reasons],
     )
 
 
@@ -318,8 +297,7 @@ async def receive_follow_up_boss_human_activity_event(
         external_event_repository=bundle.external_event_repository,
         lead_workflow_repository=bundle.lead_workflow_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
-        lead_nurture_workflow_signaler=bundle.lead_nurture_workflow_signaler,
-        commit=bundle.session.commit,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         now=datetime.now(UTC),
     )
     await bundle.session.commit()
@@ -332,8 +310,7 @@ async def receive_follow_up_boss_human_activity_event(
         activity_kind=result.activity_kind.value if result.activity_kind is not None else None,
         pause_reason=result.pause_reason,
         pause_requested=result.pause_requested,
-        signal_sent=result.signal_sent,
-        signal_failure_reason=result.signal_failure_reason,
+        signal_queued=result.signal_queued,
         transition_skip_reason=result.transition_skip_reason,
         reasons=[reason.value for reason in result.reasons],
     )
@@ -365,8 +342,7 @@ async def receive_follow_up_boss_contact_suppression_event(
         lead_workflow_repository=bundle.lead_workflow_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
         workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
-        lead_nurture_workflow_signaler=bundle.lead_nurture_workflow_signaler,
-        commit=bundle.session.commit,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         now=datetime.now(UTC),
     )
     await bundle.session.commit()
@@ -381,10 +357,38 @@ async def receive_follow_up_boss_contact_suppression_event(
         ),
         workflow_state=result.workflow_state.value if result.workflow_state is not None else None,
         suppression_applied=result.suppression_applied,
-        signal_sent=result.signal_sent,
-        signal_failure_reason=result.signal_failure_reason,
+        signal_queued=result.signal_queued,
         transition_skip_reason=result.transition_skip_reason,
         reasons=[reason.value for reason in result.reasons],
+    )
+
+
+@router.post(
+    "/crm/follow-up-boss/{workspace_id}",
+    response_model=FollowUpBossWebhookResponse,
+)
+async def receive_follow_up_boss_crm_webhook(
+    workspace_id: UUID,
+    request: Request,
+    handler: Annotated[
+        FollowUpBossWebhookEventHandler,
+        Depends(get_follow_up_boss_webhook_event_handler),
+    ],
+    bundle: Annotated[InboundServiceBundle, Depends(get_inbound_service_bundle)],
+) -> FollowUpBossWebhookResponse:
+    await set_postgres_workspace_context(bundle.session, str(workspace_id))
+    payload = await request.json()
+    now = datetime.now(UTC)
+    result = await handler.handle(workspace_id, payload, now)
+    await bundle.session.commit()
+    return FollowUpBossWebhookResponse(
+        status=result.status,
+        external_event_id=result.external_event_id,
+        event_type=result.event_type,
+        processed_count=result.processed_count,
+        ignored_count=result.ignored_count,
+        duplicate_count=result.duplicate_count,
+        reasons=result.reasons,
     )
 
 

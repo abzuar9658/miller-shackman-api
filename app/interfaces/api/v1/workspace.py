@@ -181,7 +181,13 @@ def _handoff_config_response(config: WorkspaceHandoffConfig) -> WorkspaceHandoff
         workspace_id=config.workspace_id,
         fallback_recipient_email=config.fallback_recipient_email,
         crm_handoff_tag=config.crm_handoff_tag,
+        crm_review_tag=config.crm_review_tag,
         crm_custom_fields=dict(config.crm_custom_fields),
+        crm_snapshot_summary_field=config.crm_snapshot_summary_field,
+        crm_snapshot_status_field=config.crm_snapshot_status_field,
+        crm_snapshot_latest_inbound_field=config.crm_snapshot_latest_inbound_field,
+        crm_snapshot_latest_outbound_field=config.crm_snapshot_latest_outbound_field,
+        crm_snapshot_last_activity_at_field=config.crm_snapshot_last_activity_at_field,
     )
 
 
@@ -342,6 +348,9 @@ async def update_workspace_contact_policy_route(
         membership_repository=bundle.membership_repository,
         contact_policy_repository=bundle.workspace_contact_policy_repository,
         audit_log_repository=bundle.audit_log_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         now=datetime.now(UTC),
     )
     await bundle.session.commit()
@@ -584,7 +593,13 @@ async def update_workspace_handoff_config_route(
             else None
         ),
         crm_handoff_tag=request.crm_handoff_tag,
+        crm_review_tag=request.crm_review_tag,
         crm_custom_fields=request.crm_custom_fields,
+        crm_snapshot_summary_field=request.crm_snapshot_summary_field,
+        crm_snapshot_status_field=request.crm_snapshot_status_field,
+        crm_snapshot_latest_inbound_field=request.crm_snapshot_latest_inbound_field,
+        crm_snapshot_latest_outbound_field=request.crm_snapshot_latest_outbound_field,
+        crm_snapshot_last_activity_at_field=request.crm_snapshot_last_activity_at_field,
         workspace_repository=bundle.workspace_repository,
         membership_repository=bundle.membership_repository,
         handoff_config_repository=bundle.workspace_handoff_config_repository,

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from app.application.ports.event_bus import OutboxEventPublisher, OutboxEventRepository
+from app.application.services.retry_backoff import exponential_retry_delay
 from app.domain.events import OutboxEvent
 
 
@@ -42,7 +43,11 @@ async def publish_outbox_events(
                 event.outbox_event_id,
                 error=str(exc) or exc.__class__.__name__,
                 available_at=now
-                + _retry_delay(event.attempt_count, retry_base_delay, retry_max_delay),
+                + exponential_retry_delay(
+                    event.attempt_count,
+                    base_delay=retry_base_delay,
+                    max_delay=retry_max_delay,
+                ),
             )
             continue
         published.append(await outbox_repository.mark_published(event.outbox_event_id, now=now))
@@ -53,11 +58,3 @@ async def publish_outbox_events(
         failed_count=failed_count,
         published_events=tuple(published),
     )
-
-
-def _retry_delay(attempt_count: int, base_delay: timedelta, max_delay: timedelta) -> timedelta:
-    multiplier = 2 ** max(attempt_count - 1, 0)
-    delay = timedelta(seconds=base_delay.total_seconds() * multiplier)
-    if delay > max_delay:
-        return max_delay
-    return delay

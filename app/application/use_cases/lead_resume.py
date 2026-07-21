@@ -1,57 +1,47 @@
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from app.application.ports.event_bus import EventBus
-from app.application.ports.lead_read import (
-    LeadReadHandoffRepository,
-    LeadReadInboundMessageRepository,
-    LeadReadLeadRepository,
-    LeadReadWorkflowRepository,
-)
+from app.application.ports.lead_read import LeadReadLeadRepository, LeadReadWorkflowRepository
 from app.application.ports.repositories import (
-    CampaignEnrollmentRepository,
     ExternalEventRepository,
     LeadWorkflowRepository,
+    TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
-    WorkspaceOperationalControlRepository,
 )
-from app.application.ports.temporal import (
-    LeadNurtureWorkflowSignaler,
-    ResumeLeadNurtureWorkflowSignal,
-    TemporalWorkflowStarter,
-)
-from app.application.services.campaign_enrollment_starter import start_single_campaign_enrollment
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
-from app.application.services.internal_external_events import (
-    create_internal_external_event,
-    update_internal_external_event_status,
-)
+from app.application.services.internal_external_events import create_internal_external_event
 from app.application.services.lead_assignment import is_actor_assigned_to_lead
-from app.application.use_cases.campaign_enrollment_types import LeadStartStatus
-from app.domain.campaigns.enrollment import CampaignEnrollmentSource, CampaignEnrollmentStatus
+from app.application.use_cases.apply_workflow_state_transition import (
+    WorkflowStateTransitionStatus,
+    apply_workflow_state_transition,
+)
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance import (
     ContactChannel,
+    ContactSuppressionKind,
     WorkspaceContactPolicy,
     default_workspace_contact_policy,
     evaluate_contactability,
 )
-from app.domain.conversations import Handoff, HandoffStatus, InboundMessage
-from app.domain.crm_sync import ExternalEventStatus
 from app.domain.identity import (
     AuthenticatedActor,
     PermissionCapability,
     PermissionContext,
     PermissionDecision,
-    WorkspaceMembershipRole,
     evaluate_permission,
 )
 from app.domain.leads import CanonicalLeadRecord
-from app.domain.workflows import LeadWorkflow, WorkflowState
+from app.domain.workflows import (
+    LeadWorkflow,
+    TemporalSignalName,
+    TemporalSignalOutboxEntry,
+    WorkflowState,
+    WorkflowTransitionReasonCode,
+)
 
 
 class LeadResumeEligibilityStatus(StrEnum):
@@ -63,6 +53,10 @@ class LeadResumeEligibilityStatus(StrEnum):
 class LeadResumeEligibilityReasonCode(StrEnum):
     NO_WORKFLOW = "no_workflow"
     WORKFLOW_STATE_NOT_RESUMABLE = "workflow_state_not_resumable"
+    WORKFLOW_ALREADY_ACTIVE = "workflow_already_active"
+    HANDOFF_REQUIRES_MANAGER = "handoff_requires_manager"
+    SUPPRESSION_REQUIRES_MANAGER = "suppression_requires_manager"
+    SUPPRESSION_NOT_RESUMABLE = "suppression_not_resumable"
     NO_CONTACTABLE_CHANNELS = "no_contactable_channels"
 
 
@@ -108,7 +102,7 @@ class ResumeLeadWorkflowResult:
     workflow_id: UUID | None = None
     workflow_state: WorkflowState | None = None
     reasons: tuple[LeadResumeActionReasonCode, ...] = ()
-    signal_failure_reason: str | None = None
+    signal_queued: bool = False
 
 
 async def get_lead_resume_eligibility(
@@ -134,11 +128,12 @@ async def get_lead_resume_eligibility(
             reasons=(LeadResumeActionReasonCode.PERMISSION_DENIED,),
         )
 
-    workflow = await workflow_repository.get_latest_for_lead_for_update(workspace_id, lead_id)
+    workflow = await workflow_repository.get_latest_for_lead(workspace_id, lead_id)
     policy = await workspace_contact_policy_repository.get_by_workspace_id(workspace_id)
     return LeadResumeEligibilityResult(
         status=LeadResumeEligibilityStatus.OK,
         eligibility=_build_resume_eligibility(
+            actor,
             lead,
             workflow,
             policy or default_workspace_contact_policy(workspace_id),
@@ -153,19 +148,14 @@ async def resume_lead_workflow(
     lead_id: LeadId,
     reason: str,
     lead_repository: LeadReadLeadRepository,
-    workflow_repository: LeadWorkflowRepository,
+    workflow_repository: LeadReadWorkflowRepository,
+    lead_workflow_repository: LeadWorkflowRepository,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository,
-    inbound_message_repository: LeadReadInboundMessageRepository,
-    handoff_repository: LeadReadHandoffRepository,
-    campaign_enrollment_repository: CampaignEnrollmentRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
-    temporal_workflow_starter: TemporalWorkflowStarter,
-    lead_nurture_workflow_signaler: LeadNurtureWorkflowSignaler,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     external_event_repository: ExternalEventRepository,
     commit: Callable[[], Awaitable[None]],
-    event_bus: EventBus | None,
     now: datetime,
-    workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     id_generator: Callable[[], UUID] = uuid4,
 ) -> ResumeLeadWorkflowResult:
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
@@ -190,6 +180,7 @@ async def resume_lead_workflow(
     workflow = await workflow_repository.get_latest_for_lead(workspace_id, lead_id)
     policy = await workspace_contact_policy_repository.get_by_workspace_id(workspace_id)
     eligibility = _build_resume_eligibility(
+        actor,
         lead,
         workflow,
         policy or default_workspace_contact_policy(workspace_id),
@@ -211,62 +202,61 @@ async def resume_lead_workflow(
         payload_redacted={"actor_user_id": str(actor.user_id)},
         id_generator=id_generator,
     )
-    await commit()
-    try:
-        await lead_nurture_workflow_signaler.signal_resume_lead_nurture_workflow(
-            temporal_workflow_id=workflow.temporal_workflow_id,
-            signal=ResumeLeadNurtureWorkflowSignal(
-                workspace_id=workspace_id,
-                lead_id=lead_id,
-                occurred_at=now,
-                reason=resume_reason,
-                actor_user_id=actor.user_id,
-                external_event_id=external_event.external_event_id,
-            ),
-        )
-    except Exception as exc:
-        await update_internal_external_event_status(
-            external_event_repository=external_event_repository,
-            event=external_event,
-            status=ExternalEventStatus.FAILED,
-            now=now,
-            failure_reason=str(exc),
-        )
-        return await _recover_failed_resume_signal(
-            actor=actor,
-            workspace_id=workspace_id,
-            lead_id=lead_id,
-            workflow=workflow,
+    transition = await apply_workflow_state_transition(
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        to_state=WorkflowState.ACTIVE_NURTURE,
+        reason_code=WorkflowTransitionReasonCode.MANUAL_RESUME,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        now=now,
+        actor_user_id=actor.user_id,
+        external_event_id=external_event.external_event_id,
+        metadata={"reason": resume_reason},
+        resume_reason=resume_reason,
+    )
+    if transition.status != WorkflowStateTransitionStatus.UPDATED or transition.workflow is None:
+        return ResumeLeadWorkflowResult(
+            status=LeadResumeActionStatus.NOT_RESUMABLE,
             eligibility=eligibility,
-            inbound_message_repository=inbound_message_repository,
-            handoff_repository=handoff_repository,
-            campaign_enrollment_repository=campaign_enrollment_repository,
-            lead_workflow_repository=workflow_repository,
-            workflow_transition_repository=workflow_transition_repository,
-            temporal_workflow_starter=temporal_workflow_starter,
-            workspace_operational_control_repository=workspace_operational_control_repository,
-            commit=commit,
-            event_bus=event_bus,
-            now=now,
-            signal_failure_reason=str(exc),
+            workflow_id=eligibility.workflow_id,
+            workflow_state=eligibility.workflow_state,
+            reasons=(LeadResumeActionReasonCode.MANUAL_REVIEW_REQUIRED,),
         )
 
-    await update_internal_external_event_status(
-        external_event_repository=external_event_repository,
-        event=external_event,
-        status=ExternalEventStatus.PROCESSED,
-        now=now,
+    await temporal_signal_outbox_repository.append(
+        TemporalSignalOutboxEntry(
+            temporal_signal_id=uuid4(),
+            workspace_id=workspace_id,
+            workflow_id=transition.workflow.workflow_id,
+            temporal_workflow_id=transition.workflow.temporal_workflow_id,
+            signal_name=TemporalSignalName.RESUME_REQUESTED,
+            payload={
+                "lead_id": str(lead_id),
+                "occurred_at": now.isoformat(),
+                "reason": resume_reason,
+                "actor_user_id": str(actor.user_id),
+                "external_event_id": str(external_event.external_event_id),
+            },
+            idempotency_key=f"resume-requested:{external_event.external_event_id}",
+            available_at=now,
+            created_at=now,
+            updated_at=now,
+        )
     )
+    await commit()
 
     return ResumeLeadWorkflowResult(
         status=LeadResumeActionStatus.REQUESTED,
         eligibility=eligibility,
-        workflow_id=workflow.workflow_id,
-        workflow_state=workflow.state,
+        workflow_id=transition.workflow.workflow_id,
+        workflow_state=transition.workflow.state,
+        signal_queued=True,
     )
 
 
 def _build_resume_eligibility(
+    actor: AuthenticatedActor,
     lead: CanonicalLeadRecord,
     workflow: LeadWorkflow | None,
     policy: WorkspaceContactPolicy,
@@ -275,8 +265,8 @@ def _build_resume_eligibility(
 
     if workflow is None:
         reasons.append(LeadResumeEligibilityReasonCode.NO_WORKFLOW)
-    elif workflow.state not in _resumable_states():
-        reasons.append(LeadResumeEligibilityReasonCode.WORKFLOW_STATE_NOT_RESUMABLE)
+    else:
+        reasons.extend(_workflow_resume_reasons(actor, lead, workflow))
 
     contactable_channels, blocked_reasons = _contactable_channels(lead, policy)
     if not contactable_channels:
@@ -289,127 +279,6 @@ def _build_resume_eligibility(
         contactable_channels=contactable_channels,
         reasons=tuple(reasons),
         blocked_contactability_reasons=blocked_reasons,
-    )
-
-
-async def _recover_failed_resume_signal(
-    *,
-    actor: AuthenticatedActor,
-    workspace_id: WorkspaceId,
-    lead_id: LeadId,
-    workflow: LeadWorkflow,
-    eligibility: LeadResumeEligibility,
-    inbound_message_repository: LeadReadInboundMessageRepository,
-    handoff_repository: LeadReadHandoffRepository,
-    campaign_enrollment_repository: CampaignEnrollmentRepository,
-    lead_workflow_repository: LeadWorkflowRepository,
-    workflow_transition_repository: WorkflowTransitionRepository,
-    temporal_workflow_starter: TemporalWorkflowStarter,
-    workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
-    commit: Callable[[], Awaitable[None]],
-    event_bus: EventBus | None,
-    now: datetime,
-    signal_failure_reason: str,
-) -> ResumeLeadWorkflowResult:
-    latest_handoff = await _latest_handoff(handoff_repository, workspace_id, lead_id)
-    if latest_handoff is not None and latest_handoff.status not in _resolved_handoff_states():
-        return ResumeLeadWorkflowResult(
-            status=LeadResumeActionStatus.NOT_RESUMABLE,
-            eligibility=eligibility,
-            workflow_id=workflow.workflow_id,
-            workflow_state=workflow.state,
-            reasons=(LeadResumeActionReasonCode.HANDOFF_REQUIRED,),
-            signal_failure_reason=signal_failure_reason,
-        )
-
-    latest_inbound = await _latest_inbound_message(
-        inbound_message_repository,
-        workspace_id,
-        lead_id,
-    )
-    if latest_inbound is not None:
-        return ResumeLeadWorkflowResult(
-            status=LeadResumeActionStatus.NOT_RESUMABLE,
-            eligibility=eligibility,
-            workflow_id=workflow.workflow_id,
-            workflow_state=workflow.state,
-            reasons=(LeadResumeActionReasonCode.MANUAL_REVIEW_REQUIRED,),
-            signal_failure_reason=signal_failure_reason,
-        )
-
-    enrollment = await campaign_enrollment_repository.get_by_lead_and_campaign(
-        workspace_id=workspace_id,
-        lead_id=lead_id,
-        campaign_id=workflow.campaign_id,
-    )
-    if enrollment is None:
-        return ResumeLeadWorkflowResult(
-            status=LeadResumeActionStatus.SIGNAL_FAILED,
-            eligibility=eligibility,
-            workflow_id=workflow.workflow_id,
-            workflow_state=workflow.state,
-            reasons=(
-                LeadResumeActionReasonCode.SIGNAL_FAILED,
-                LeadResumeActionReasonCode.RESTART_FAILED,
-            ),
-            signal_failure_reason=(
-                f"{signal_failure_reason} Recovery could not restart the lead because the "
-                "campaign enrollment context was missing."
-            ),
-        )
-
-    if enrollment.status not in {
-        CampaignEnrollmentStatus.COMPLETED,
-        CampaignEnrollmentStatus.SUPPRESSED,
-        CampaignEnrollmentStatus.CLOSED,
-    }:
-        await campaign_enrollment_repository.save(
-            replace(
-                enrollment,
-                status=CampaignEnrollmentStatus.CLOSED,
-                ended_at=now,
-                updated_at=now,
-            )
-        )
-
-    restart_result = await start_single_campaign_enrollment(
-        workspace_id=workspace_id,
-        campaign_id=workflow.campaign_id,
-        campaign_version_id=enrollment.campaign_version_id,
-        lead_id=lead_id,
-        source=_recovery_enrollment_source(actor),
-        reason_codes=("resume_recovery_restart",),
-        actor_user_id=actor.user_id,
-        campaign_enrollment_repository=campaign_enrollment_repository,
-        lead_workflow_repository=lead_workflow_repository,
-        workflow_transition_repository=workflow_transition_repository,
-        temporal_workflow_starter=temporal_workflow_starter,
-        commit=commit,
-        now=now,
-        event_bus=event_bus,
-        workspace_operational_control_repository=workspace_operational_control_repository,
-    )
-    if restart_result.status != LeadStartStatus.STARTED:
-        restart_failure = restart_result.error or "Step-1 recovery restart failed."
-        return ResumeLeadWorkflowResult(
-            status=LeadResumeActionStatus.SIGNAL_FAILED,
-            eligibility=eligibility,
-            workflow_id=workflow.workflow_id,
-            workflow_state=workflow.state,
-            reasons=(
-                LeadResumeActionReasonCode.SIGNAL_FAILED,
-                LeadResumeActionReasonCode.RESTART_FAILED,
-            ),
-            signal_failure_reason=(
-                f"{signal_failure_reason} Recovery restart failed: {restart_failure}"
-            ),
-        )
-
-    return ResumeLeadWorkflowResult(
-        status=LeadResumeActionStatus.RESTARTED,
-        eligibility=eligibility,
-        workflow_id=restart_result.workflow_id,
-        workflow_state=WorkflowState.QUEUED,
     )
 
 
@@ -441,22 +310,65 @@ def _acts_on_assigned_lead(actor: AuthenticatedActor, lead: CanonicalLeadRecord)
     return is_actor_assigned_to_lead(actor, lead)
 
 
-async def _latest_handoff(
-    handoff_repository: LeadReadHandoffRepository,
-    workspace_id: WorkspaceId,
-    lead_id: LeadId,
-) -> Handoff | None:
-    handoffs = await handoff_repository.list_for_lead(workspace_id, lead_id, limit=1)
-    return handoffs[0] if handoffs else None
+def _workflow_resume_reasons(
+    actor: AuthenticatedActor,
+    lead: CanonicalLeadRecord,
+    workflow: LeadWorkflow,
+) -> tuple[LeadResumeEligibilityReasonCode, ...]:
+    if workflow.state == WorkflowState.SUPPRESSED:
+        return (LeadResumeEligibilityReasonCode.SUPPRESSION_NOT_RESUMABLE,)
+    if workflow.state in _active_or_recovering_states():
+        return (LeadResumeEligibilityReasonCode.WORKFLOW_ALREADY_ACTIVE,)
+    if workflow.state in {WorkflowState.HUMAN_HANDOFF, WorkflowState.HUMAN_OWNED}:
+        if _has_global_resume_permission(actor, lead):
+            return ()
+        return (LeadResumeEligibilityReasonCode.HANDOFF_REQUIRES_MANAGER,)
+    if workflow.state == WorkflowState.PAUSED:
+        restriction = _paused_resume_restriction_reason(workflow.pause_reason)
+        if restriction is None:
+            return ()
+        if restriction == LeadResumeEligibilityReasonCode.SUPPRESSION_NOT_RESUMABLE:
+            return (restriction,)
+        if _has_global_resume_permission(actor, lead):
+            return ()
+        return (restriction,)
+    if workflow.state not in _resumable_states():
+        return (LeadResumeEligibilityReasonCode.WORKFLOW_STATE_NOT_RESUMABLE,)
+    return ()
 
 
-async def _latest_inbound_message(
-    inbound_message_repository: LeadReadInboundMessageRepository,
-    workspace_id: WorkspaceId,
-    lead_id: LeadId,
-) -> InboundMessage | None:
-    messages = await inbound_message_repository.list_for_lead(workspace_id, lead_id, limit=1)
-    return messages[0] if messages else None
+def _paused_resume_restriction_reason(
+    pause_reason: str | None,
+) -> LeadResumeEligibilityReasonCode | None:
+    if pause_reason is None:
+        return None
+    if pause_reason == WorkflowTransitionReasonCode.HUMAN_HANDOFF_REQUIRED.value:
+        return LeadResumeEligibilityReasonCode.HANDOFF_REQUIRES_MANAGER
+    if pause_reason == WorkflowTransitionReasonCode.OPT_OUT_DETECTED.value:
+        return LeadResumeEligibilityReasonCode.SUPPRESSION_REQUIRES_MANAGER
+    if pause_reason in {
+        ContactSuppressionKind.SMS_OPT_OUT.value,
+        ContactSuppressionKind.EMAIL_UNSUBSCRIBED.value,
+    }:
+        return LeadResumeEligibilityReasonCode.SUPPRESSION_REQUIRES_MANAGER
+    if pause_reason == ContactSuppressionKind.DO_NOT_CONTACT.value:
+        return LeadResumeEligibilityReasonCode.SUPPRESSION_NOT_RESUMABLE
+    return None
+
+
+def _has_global_resume_permission(
+    actor: AuthenticatedActor,
+    lead: CanonicalLeadRecord,
+) -> bool:
+    decision = evaluate_permission(
+        actor,
+        PermissionCapability.RESUME_OR_REASSIGN_ANY_LEAD,
+        PermissionContext(
+            acts_on_assigned_lead=_acts_on_assigned_lead(actor, lead),
+            handoff_resume_reason_provided=True,
+        ),
+    )
+    return decision.allowed
 
 
 def _contactable_channels(
@@ -489,13 +401,11 @@ def _resumable_states() -> frozenset[WorkflowState]:
     return frozenset({WorkflowState.PAUSED, WorkflowState.HUMAN_HANDOFF, WorkflowState.HUMAN_OWNED})
 
 
-def _resolved_handoff_states() -> frozenset[HandoffStatus]:
-    return frozenset({HandoffStatus.RESOLVED, HandoffStatus.CANCELLED})
-
-
-def _recovery_enrollment_source(actor: AuthenticatedActor) -> CampaignEnrollmentSource:
-    return (
-        CampaignEnrollmentSource.MANUAL_AGENT
-        if actor.active_role == WorkspaceMembershipRole.ASSIGNED_AGENT
-        else CampaignEnrollmentSource.MANUAL_ADMIN
+def _active_or_recovering_states() -> frozenset[WorkflowState]:
+    return frozenset(
+        {
+            WorkflowState.ACTIVE_NURTURE,
+            WorkflowState.WAITING_FOR_RESPONSE,
+            WorkflowState.RESPONSE_PROCESSING,
+        }
     )

@@ -53,22 +53,6 @@ class ExecuteCadenceStepResult:
 
 
 @dataclass(frozen=True)
-class InboundReplySignal:
-    workspace_id: UUID
-    lead_id: UUID
-    occurred_at: str
-    handoff_required: bool = False
-    opt_out_detected: bool = False
-    classification_rejected: bool = False
-    external_event_id: UUID | None = None
-    conversation_id: UUID | None = None
-    inbound_message_id: UUID | None = None
-    handoff_id: UUID | None = None
-    intent: str | None = None
-    classification_reasons: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class PauseWorkflowSignal:
     workspace_id: UUID
     lead_id: UUID
@@ -99,11 +83,16 @@ class UnblockWorkflowSignal:
 
 
 @dataclass(frozen=True)
-class WorkflowSignalActivityResult:
-    status: str
-    workflow_id: UUID | None = None
-    transition_id: UUID | None = None
-    skip_reason: str | None = None
+class InboundProcessedWorkflowSignal:
+    workspace_id: UUID
+    lead_id: UUID
+    occurred_at: str
+    external_event_id: UUID | None = None
+    conversation_id: UUID | None = None
+    inbound_message_id: UUID | None = None
+    workflow_transition_id: UUID | None = None
+    inbound_action: str | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -190,46 +179,29 @@ class LeadNurtureWorkflow:
 
         return self._snapshot
 
-    @workflow.signal(name="inbound-reply-received")
-    async def inbound_reply_received(self, signal: InboundReplySignal) -> None:
-        result = await self._execute_signal_activity(
-            signal_name="inbound_reply_received",
-            activity_name="apply-inbound-workflow-transition",
-            arg=signal,
-        )
-        self._send_blocked = True
-        self._record_signal_result("inbound_reply_received", result)
-
-    @workflow.signal(name="handoff-created")
-    async def handoff_created(self, signal: InboundReplySignal) -> None:
-        result = await self._execute_signal_activity(
-            signal_name="handoff_created",
-            activity_name="apply-inbound-workflow-transition",
-            arg=signal,
-        )
-        self._send_blocked = True
-        self._record_signal_result("handoff_created", result)
-
     @workflow.signal(name="pause-requested")
-    async def pause_requested(self, signal: PauseWorkflowSignal) -> None:
-        result = await self._execute_signal_activity(
-            signal_name="pause_requested",
-            activity_name="record-pause-workflow-signal",
-            arg=signal,
-        )
+    def pause_requested(self, signal: PauseWorkflowSignal) -> None:
         self._send_blocked = True
-        self._record_signal_result("pause_requested", result)
+        assert self._snapshot is not None
+        self._snapshot = replace(
+            self._snapshot,
+            last_signal="pause_requested",
+            last_activity="pause_requested",
+            last_activity_status="blocked",
+            skip_reason=signal.reason,
+        )
 
     @workflow.signal(name="resume-requested")
-    async def resume_requested(self, signal: ResumeWorkflowSignal) -> None:
-        result = await self._execute_signal_activity(
-            signal_name="resume_requested",
-            activity_name="record-resume-workflow-signal",
-            arg=signal,
+    def resume_requested(self, signal: ResumeWorkflowSignal) -> None:
+        self._send_blocked = False
+        assert self._snapshot is not None
+        self._snapshot = replace(
+            self._snapshot,
+            last_signal="resume_requested",
+            last_activity="resume_requested",
+            last_activity_status="unblocked",
+            skip_reason=signal.reason,
         )
-        if result.status == "updated":
-            self._send_blocked = False
-        self._record_signal_result("resume_requested", result)
 
     @workflow.signal(name="blocked-review-completed")
     def blocked_review_completed(self, signal: UnblockWorkflowSignal) -> None:
@@ -243,6 +215,18 @@ class LeadNurtureWorkflow:
             skip_reason=signal.reason,
         )
 
+    @workflow.signal(name="inbound-processed")
+    def inbound_processed(self, signal: InboundProcessedWorkflowSignal) -> None:
+        self._send_blocked = True
+        if self._snapshot is not None:
+            self._snapshot = replace(
+                self._snapshot,
+                last_signal="inbound_processed",
+                last_activity="inbound_processed",
+                last_activity_status="blocked",
+                skip_reason=signal.reason,
+            )
+
     @workflow.signal(name="close")
     def close(self) -> None:
         self._closed = True
@@ -250,16 +234,6 @@ class LeadNurtureWorkflow:
     @workflow.query(name="snapshot")
     def snapshot(self) -> LeadNurtureWorkflowSnapshot | None:
         return self._snapshot
-
-    async def _execute_signal_activity(
-        self, *, signal_name: str, activity_name: str, arg: object
-    ) -> WorkflowSignalActivityResult:
-        result = await workflow.execute_activity(
-            activity_name,
-            arg,
-            start_to_close_timeout=timedelta(seconds=30),
-        )
-        return _coerce_signal_result(result)
 
     async def _execute_schedule_activity(
         self,
@@ -310,19 +284,6 @@ class LeadNurtureWorkflow:
             skip_reason=result.skip_reason,
         )
 
-    def _record_signal_result(self, signal_name: str, result: WorkflowSignalActivityResult) -> None:
-        assert self._snapshot is not None
-        self._snapshot = replace(
-            self._snapshot,
-            last_signal=signal_name,
-            last_activity=signal_name,
-            last_activity_status=result.status,
-            workflow_id=result.workflow_id,
-            transition_id=result.transition_id,
-            skip_reason=result.skip_reason,
-        )
-
-
 def _coerce_schedule_result(value: object) -> ScheduleNextCadenceStepResult:
     if isinstance(value, ScheduleNextCadenceStepResult):
         return value
@@ -354,17 +315,6 @@ def _coerce_execution_result(value: object) -> ExecuteCadenceStepResult:
     raise TypeError(f"Unsupported execution result payload: {type(value)!r}")
 
 
-def _coerce_signal_result(value: object) -> WorkflowSignalActivityResult:
-    if isinstance(value, WorkflowSignalActivityResult):
-        return value
-    if isinstance(value, Mapping):
-        return WorkflowSignalActivityResult(
-            status=str(value["status"]),
-            workflow_id=_coerce_uuid(value.get("workflow_id")),
-            transition_id=_coerce_uuid(value.get("transition_id")),
-            skip_reason=_coerce_optional_str(value.get("skip_reason")),
-        )
-    raise TypeError(f"Unsupported signal result payload: {type(value)!r}")
 
 
 def _coerce_uuid(value: object) -> UUID | None:

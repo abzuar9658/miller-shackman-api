@@ -7,10 +7,7 @@ from temporalio.worker import Worker
 
 from app.core.config import Settings, get_settings
 from app.infrastructure.workflows.temporal.activities import (
-    apply_inbound_workflow_transition_activity,
     execute_campaign_cadence_step_activity,
-    record_pause_workflow_signal_activity,
-    record_resume_workflow_signal_activity,
     schedule_next_campaign_cadence_step_activity,
 )
 from app.infrastructure.workflows.temporal.lead_nurture import LeadNurtureWorkflow
@@ -26,11 +23,8 @@ def _registered_workflows() -> Sequence[type[Any]]:
 def _registered_activities() -> Sequence[Any]:
     return [
         smoke_ping_activity,
-        apply_inbound_workflow_transition_activity,
         schedule_next_campaign_cadence_step_activity,
         execute_campaign_cadence_step_activity,
-        record_pause_workflow_signal_activity,
-        record_resume_workflow_signal_activity,
     ]
 
 
