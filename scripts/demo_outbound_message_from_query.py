@@ -18,7 +18,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -37,7 +37,7 @@ from app.application.services.llm.outbound_message_drafting import (
 from app.core.config import get_settings
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord, CRMProvider, LeadType
-from app.domain.listing_sources import ListingSource, ListingSourceType
+from app.domain.listing_sources import CanonicalListingSnapshot, ListingSource, ListingSourceType
 from app.infrastructure.providers import build_listing_search_client, build_llm_client
 
 DEFAULT_QUERY = "interested in available apartments for rent in manhattan"
@@ -84,38 +84,81 @@ class _SingleSourceRepository:
     def __init__(self, source: ListingSource) -> None:
         self._source = source
 
-    async def list_for_workspace(self, workspace_id: object) -> tuple[ListingSource, ...]:
+    async def get_by_id(self, workspace_id: UUID, source_id: UUID) -> ListingSource | None:
+        if self._source.workspace_id == workspace_id and self._source.source_id == source_id:
+            return self._source
+        return None
+
+    async def get_by_name(self, workspace_id: UUID, name: str) -> ListingSource | None:
+        if self._source.workspace_id == workspace_id and self._source.name == name:
+            return self._source
+        return None
+
+    async def list_for_workspace(self, workspace_id: UUID) -> tuple[ListingSource, ...]:
         return (self._source,) if self._source.workspace_id == workspace_id else ()
+
+    async def list_enabled(self, *, limit: int = 100) -> tuple[ListingSource, ...]:
+        return (self._source,) if self._source.enabled else ()
+
+    async def save(self, source: ListingSource) -> ListingSource:
+        self._source = source
+        return source
 
 
 class _MemorySnapshotRepository:
     def __init__(self) -> None:
-        self._snapshots: list[object] = []
+        self._snapshots: list[CanonicalListingSnapshot] = []
+
+    async def get_by_id(
+        self, workspace_id: UUID, snapshot_id: UUID
+    ) -> CanonicalListingSnapshot | None:
+        for snapshot in self._snapshots:
+            if snapshot.workspace_id == workspace_id and snapshot.snapshot_id == snapshot_id:
+                return snapshot
+        return None
+
+    async def get_current_by_external_id(
+        self,
+        workspace_id: UUID,
+        source_id: UUID,
+        external_listing_id: str,
+    ) -> CanonicalListingSnapshot | None:
+        for snapshot in self._snapshots:
+            if (
+                snapshot.workspace_id == workspace_id
+                and snapshot.source_id == source_id
+                and snapshot.external_listing_id == external_listing_id
+                and snapshot.is_current
+            ):
+                return snapshot
+        return None
 
     async def list_current_for_source(
         self,
-        workspace_id: object,
-        source_id: object,
+        workspace_id: UUID,
+        source_id: UUID,
         *,
         limit: int = 100,
-    ) -> tuple[object, ...]:
+    ) -> tuple[CanonicalListingSnapshot, ...]:
         matches = [
-            item
-            for item in self._snapshots
-            if item.workspace_id == workspace_id and item.source_id == source_id and item.is_current
+            snapshot
+            for snapshot in self._snapshots
+            if snapshot.workspace_id == workspace_id
+            and snapshot.source_id == source_id
+            and snapshot.is_current
         ]
         return tuple(matches[:limit])
 
-    async def save(self, snapshot: object) -> object:
+    async def save(self, snapshot: CanonicalListingSnapshot) -> CanonicalListingSnapshot:
         self._snapshots.append(snapshot)
         return snapshot
 
     async def mark_other_versions_not_current(
         self,
-        workspace_id: object,
-        source_id: object,
+        workspace_id: UUID,
+        source_id: UUID,
         external_listing_id: str,
-        except_snapshot_id: object,
+        except_snapshot_id: UUID,
     ) -> None:
         _ = (workspace_id, source_id, external_listing_id, except_snapshot_id)
 

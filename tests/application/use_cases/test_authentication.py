@@ -576,6 +576,22 @@ class _FakeUserRepository:
             None,
         )
 
+    async def get_active_by_workspace_email_normalized(
+        self,
+        workspace_id: UUID,
+        email_normalized: str,
+        *,
+        allowed_roles: tuple[WorkspaceMembershipRole, ...],
+    ) -> User | None:
+        return next(
+            (
+                user
+                for user in self._users.values()
+                if user.email_normalized == email_normalized
+            ),
+            None,
+        )
+
     async def save(self, user: User) -> User:
         self._users[user.user_id] = user
         return user

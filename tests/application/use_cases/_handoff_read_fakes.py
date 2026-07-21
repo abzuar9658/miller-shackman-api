@@ -1,5 +1,5 @@
 from app.domain.conversations import Handoff
-from app.domain.identity import User
+from app.domain.identity import User, WorkspaceMembershipRole
 from app.domain.leads import CanonicalLeadRecord
 
 
@@ -103,6 +103,16 @@ class FakeUserRepository:
             if user.email_normalized == email_normalized:
                 return user
         return None
+
+    async def get_active_by_workspace_email_normalized(
+        self,
+        workspace_id: object,
+        email_normalized: str,
+        *,
+        allowed_roles: tuple[WorkspaceMembershipRole, ...],
+    ) -> User | None:
+        _ = (workspace_id, allowed_roles)
+        return await self.get_by_email_normalized(email_normalized)
 
     async def save(self, user: User) -> User:
         self.users[user.user_id] = user

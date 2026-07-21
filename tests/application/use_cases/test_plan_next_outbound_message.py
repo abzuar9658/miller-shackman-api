@@ -131,6 +131,19 @@ class FakeOutboundMessageRepository:
         self.messages_by_idempotency_key[(message.workspace_id, message.idempotency_key)] = message
         return message
 
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[OutboundMessage, ...]:
+        return tuple(
+            message
+            for message in self.messages_by_idempotency_key.values()
+            if message.workspace_id == workspace_id and message.lead_id == lead_id
+        )[:limit]
+
 
 class FakeLLMClient:
     def __init__(self, text: str) -> None:
@@ -178,6 +191,11 @@ class FakeListingSourceRepository:
 
     async def list_for_workspace(self, workspace_id: object) -> tuple[ListingSource, ...]:
         if self.source.workspace_id != workspace_id:
+            return ()
+        return (self.source,)
+
+    async def list_enabled(self, *, limit: int = 100) -> tuple[ListingSource, ...]:
+        if not self.source.enabled:
             return ()
         return (self.source,)
 

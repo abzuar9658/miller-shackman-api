@@ -24,6 +24,7 @@ from app.domain.campaigns.execution import (
     CampaignExecutionConfig,
     CampaignVersionStatus,
 )
+from app.domain.campaigns.outbound_message import OutboundMessageCRMCompletionRecord
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance import SmsComplianceState, WorkspaceContactPolicy
@@ -242,24 +243,30 @@ class FakeInboundMessageCRMCompletionRepository:
 
 
 class FakeOutboundMessageCRMCompletionRepository:
-    def __init__(self, record: object | None = None) -> None:
+    def __init__(
+        self,
+        record: OutboundMessageCRMCompletionRecord | None = None,
+    ) -> None:
         self.record = record
 
     async def get_by_outbound_message_id(
         self,
         workspace_id: WorkspaceId,
         outbound_message_id: UUID,
-    ) -> object | None:
+    ) -> OutboundMessageCRMCompletionRecord | None:
         if self.record is None:
             return None
         if (
-            getattr(self.record, "workspace_id", None) == workspace_id
-            and getattr(self.record, "outbound_message_id", None) == outbound_message_id
+            self.record.workspace_id == workspace_id
+            and self.record.outbound_message_id == outbound_message_id
         ):
             return self.record
         return None
 
-    async def save(self, record: object) -> object:
+    async def save(
+        self,
+        record: OutboundMessageCRMCompletionRecord,
+    ) -> OutboundMessageCRMCompletionRecord:
         self.record = record
         return record
 

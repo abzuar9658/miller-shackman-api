@@ -43,6 +43,11 @@ class FakeListingSourceRepository:
             return ()
         return (self.source,)
 
+    async def list_enabled(self, *, limit: int = 100) -> tuple[ListingSource, ...]:
+        if self.source is None or not self.source.enabled:
+            return ()
+        return (self.source,)
+
     async def save(self, source: ListingSource) -> ListingSource:
         self.source = source
         return source

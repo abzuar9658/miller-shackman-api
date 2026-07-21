@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
-from uuid import uuid4
+from typing import Any
+from uuid import UUID, uuid4
 
 from app.application.ports.listing_search import ListingSearchQuery
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
@@ -7,6 +8,7 @@ from app.application.use_cases.workspace_outbound_drafting import (
     OutboundDraftingPreviewStatus,
     preview_workspace_outbound_drafting,
 )
+from app.domain.identity import WorkspaceMembershipRole
 from app.domain.listing_sources import CanonicalListingSnapshot, ListingSource, ListingSourceType
 from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
 from tests.application.use_cases.test_authentication import (
@@ -50,12 +52,50 @@ class _FakeListingSourceRepository:
     def __init__(self, source: ListingSource) -> None:
         self._source = source
 
-    async def list_for_workspace(self, workspace_id):
+    async def get_by_id(
+        self, workspace_id: UUID, source_id: UUID
+    ) -> ListingSource | None:
+        if self._source.workspace_id == workspace_id and self._source.source_id == source_id:
+            return self._source
+        return None
+
+    async def get_by_name(
+        self, workspace_id: UUID, name: str
+    ) -> ListingSource | None:
+        if self._source.workspace_id == workspace_id and self._source.name == name:
+            return self._source
+        return None
+
+    async def list_for_workspace(
+        self, workspace_id: UUID
+    ) -> tuple[ListingSource, ...]:
         return (self._source,) if workspace_id == self._source.workspace_id else ()
+
+    async def list_enabled(self, *, limit: int = 100) -> tuple[ListingSource, ...]:
+        return (self._source,) if self._source.enabled else ()
+
+    async def save(self, source: ListingSource) -> ListingSource:
+        self._source = source
+        return source
 
 
 class _FakeListingSnapshotRepository:
-    async def list_current_for_source(self, workspace_id, source_id, *, limit=100):
+    async def get_by_id(
+        self, workspace_id: UUID, snapshot_id: UUID
+    ) -> CanonicalListingSnapshot | None:
+        return None
+
+    async def get_current_by_external_id(
+        self,
+        workspace_id: UUID,
+        source_id: UUID,
+        external_listing_id: str,
+    ) -> CanonicalListingSnapshot | None:
+        return None
+
+    async def list_current_for_source(
+        self, workspace_id: UUID, source_id: UUID, *, limit: int = 100
+    ) -> tuple[CanonicalListingSnapshot, ...]:
         return ()
 
     async def save(self, snapshot: CanonicalListingSnapshot) -> CanonicalListingSnapshot:
@@ -63,11 +103,11 @@ class _FakeListingSnapshotRepository:
 
     async def mark_other_versions_not_current(
         self,
-        workspace_id,
-        source_id,
-        external_listing_id,
-        except_snapshot_id,
-    ):
+        workspace_id: UUID,
+        source_id: UUID,
+        external_listing_id: str,
+        except_snapshot_id: UUID,
+    ) -> None:
         return None
 
 
@@ -76,7 +116,9 @@ class _FakeListingSearchClient:
         self.snapshot = snapshot
         self.search_calls: list[ListingSearchQuery] = []
 
-    async def search(self, *, source: ListingSource, query: ListingSearchQuery):
+    async def search(
+        self, *, source: ListingSource, query: ListingSearchQuery
+    ) -> tuple[CanonicalListingSnapshot, ...]:
         self.search_calls.append(query)
         return (self.snapshot,)
 
@@ -85,7 +127,7 @@ def test_preview_workspace_outbound_drafting_uses_saved_config_and_live_search()
     deps = _Dependencies()
     llm_client = _FakePreviewLLMClient()
     deps.workspaces[WORKSPACE_ID] = _workspace()
-    deps.memberships[MEMBERSHIP_ID] = _membership(role="brokerage_admin")
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
     deps.workspace_outbound_drafting_configs[WORKSPACE_ID] = WorkspaceOutboundDraftingConfig(
         workspace_id=WORKSPACE_ID,
         revision=2,
@@ -128,7 +170,7 @@ def test_preview_workspace_outbound_drafting_uses_saved_config_and_live_search()
 
     result = _run(
         preview_workspace_outbound_drafting(
-            actor=_actor(role="brokerage_admin"),
+            actor=_actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN),
             workspace_id=WORKSPACE_ID,
             query="Looking for 2 bedroom apartments for rent in Queens under $2k/month",
             agent_name="Taylor Agent",
@@ -164,7 +206,7 @@ def test_preview_workspace_outbound_drafting_uses_saved_config_and_live_search()
     )
 
 
-def _run(coroutine):
+def _run(coroutine: Any) -> Any:
     import asyncio
 
     return asyncio.run(coroutine)

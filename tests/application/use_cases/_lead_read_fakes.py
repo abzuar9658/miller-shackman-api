@@ -9,7 +9,7 @@ from app.application.ports.lead_read import LeadReadConversationSummary
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
 from app.domain.conversations import CrmConversationEvent, Handoff, InboundMessage
-from app.domain.identity import User
+from app.domain.identity import User, WorkspaceMembershipRole
 from app.domain.leads import CanonicalLeadRecord
 from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransition
 
@@ -342,6 +342,18 @@ class FakeCrmConversationEventRepository:
             if item.workspace_id == workspace_id and item.lead_id == lead_id
         )[:limit]
 
+    async def save(self, event: CrmConversationEvent) -> CrmConversationEvent:
+        self._events = tuple(
+            item
+            for item in self._events
+            if not (
+                item.workspace_id == event.workspace_id
+                and item.crm_provider == event.crm_provider
+                and item.crm_activity_id == event.crm_activity_id
+            )
+        ) + (event,)
+        return event
+
 
 class FakeUserRepository:
     def __init__(self, users: dict[UUID, User]) -> None:
@@ -349,6 +361,26 @@ class FakeUserRepository:
 
     async def get_by_id(self, user_id: UUID) -> User | None:
         return self._users.get(user_id)
+
+    async def get_by_email_normalized(self, email_normalized: str) -> User | None:
+        return next(
+            (user for user in self._users.values() if user.email_normalized == email_normalized),
+            None,
+        )
+
+    async def get_active_by_workspace_email_normalized(
+        self,
+        workspace_id: UUID,
+        email_normalized: str,
+        *,
+        allowed_roles: tuple[WorkspaceMembershipRole, ...],
+    ) -> User | None:
+        _ = (workspace_id, allowed_roles)
+        return await self.get_by_email_normalized(email_normalized)
+
+    async def save(self, user: User) -> User:
+        self._users[user.user_id] = user
+        return user
 
 
 def _preview_inbound_text(body: str, max_length: int = 120) -> str:

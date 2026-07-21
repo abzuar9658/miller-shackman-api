@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
+from app.domain.events import DomainEvent
 from app.domain.identity import (
     AuthenticatedActor,
     UserStatus,
@@ -414,9 +415,9 @@ class FakeSession:
 
 class FakeEventBus:
     def __init__(self) -> None:
-        self.events: list[object] = []
+        self.events: list[DomainEvent] = []
 
-    async def publish(self, event: object) -> None:
+    async def publish(self, event: DomainEvent) -> None:
         self.events.append(event)
 
 
