@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from uuid import UUID
 from pathlib import Path
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -16,9 +16,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.core.config import get_settings
-from app.infrastructure.persistence.postgres.models import CRMSyncJobModel
-
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check latest CRM sync job for a workspace.")
@@ -27,6 +24,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 async def _main() -> int:
+    from app.core.config import get_settings
+    from app.infrastructure.persistence.postgres.models import CRMSyncJobModel
+
     args = _parse_args()
     settings = get_settings()
     engine = create_async_engine(settings.database_url, pool_pre_ping=True, poolclass=NullPool)

@@ -38,7 +38,7 @@ from app.application.ports.preflight_digest import (
 )
 from app.application.services.campaign_enrollment_starter import start_single_campaign_enrollment
 from app.application.services.llm.outbound_message_drafting import (
-    OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION,
+    outbound_message_draft_prompt_version_for_revision,
 )
 from app.application.services.llm.reply_classification import (
     INBOUND_REPLY_CLASSIFICATION_PROMPT_VERSION,
@@ -182,6 +182,9 @@ DEMO_EMAIL_DOMAIN = "demo.millerschackman.dev"
 PRODUCTION_CONFIRM_TEXT = "CREATE_DEMO_WORKSPACE"
 BASE_TIME = datetime(2026, 7, 11, 15, 0, tzinfo=UTC)
 CAMPAIGN_NAME = "Dormant Buyers Reactivation"
+DEMO_OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION = (
+    outbound_message_draft_prompt_version_for_revision(1)
+)
 
 
 @dataclass(frozen=True)
@@ -252,7 +255,7 @@ class DemoLLMClient:
     async def complete(self, request: LLMCompletionRequest) -> LLMResult:
         if request.prompt_version == INBOUND_REPLY_CLASSIFICATION_PROMPT_VERSION:
             text = _classification_response_for_prompt(request.prompt)
-        elif request.prompt_version == OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION:
+        elif request.prompt_version == DEMO_OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION:
             text = json.dumps(
                 {
                     "body": (
@@ -326,7 +329,13 @@ class DemoCRMClient:
             email=f"agent@{DEMO_EMAIL_DOMAIN}",
         )
 
-    async def add_note(self, workspace_id: UUID, crm_lead_id: str, content: str) -> None:
+    async def add_note(
+        self,
+        workspace_id: UUID,
+        crm_lead_id: str,
+        content: str,
+        subject: str | None = None,
+    ) -> None:
         return None
 
     async def add_tag(self, workspace_id: UUID, crm_lead_id: str, tag: str) -> None:
@@ -344,6 +353,11 @@ class DemoCRMClient:
         return None
 
     async def subscribe_to_events(self, workspace_id: UUID, webhook_url: str) -> None:
+        return None
+
+    async def fetch_resource_by_uri(
+        self, workspace_id: UUID, uri: str
+    ) -> dict[str, object] | None:
         return None
 
 
@@ -365,6 +379,12 @@ class DemoNotificationProvider:
             accepted=True,
             provider_reference=f"demo-handoff-{notification.handoff_id}",
         )
+
+    async def send_review_notification(
+        self,
+        notification: object,
+    ) -> NotificationSendResult:
+        return NotificationSendResult(accepted=True, provider_reference="demo-review")
 
 
 class DemoTemporalWorkflowStarter:
@@ -1293,7 +1313,7 @@ def _outbound_message(
         provider_status_updated_at=now,
         delivered_at=now if provider_delivery_status == ProviderDeliveryStatus.DELIVERED else None,
         failure_reason=failure_reason,
-        draft_prompt_version=OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION,
+        draft_prompt_version=DEMO_OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION,
         draft_model="openai/gpt-4o-mini",
         draft_latency_ms=9,
         draft_usage_tokens=42,
@@ -1312,8 +1332,10 @@ def _classification_response_for_prompt(prompt: str) -> str:
             {
                 "intent": "opt_out",
                 "confidence": 0.98,
-                "handoff_required": False,
-                "handoff_reason": None,
+                "asks_for_human": False,
+                "shows_buying_interest": False,
+                "shows_selling_interest": False,
+                "asks_property_or_advice": False,
                 "opt_out_detected": True,
                 "summary_text": "Lead requested no further SMS outreach.",
                 "preferences": {},
@@ -1324,8 +1346,10 @@ def _classification_response_for_prompt(prompt: str) -> str:
             {
                 "intent": "seller_interest",
                 "confidence": 0.94,
-                "handoff_required": True,
-                "handoff_reason": "seller_interest",
+                "asks_for_human": False,
+                "shows_buying_interest": False,
+                "shows_selling_interest": True,
+                "asks_property_or_advice": False,
                 "opt_out_detected": False,
                 "summary_text": "Lead expressed seller interest and a near-term move need.",
                 "preferences": {"timeline": "soon", "intent": "sell_and_buy"},
@@ -1335,8 +1359,10 @@ def _classification_response_for_prompt(prompt: str) -> str:
         {
             "intent": "human_requested",
             "confidence": 0.95,
-            "handoff_required": True,
-            "handoff_reason": "human_requested",
+            "asks_for_human": True,
+            "shows_buying_interest": False,
+            "shows_selling_interest": False,
+            "asks_property_or_advice": False,
             "opt_out_detected": False,
             "summary_text": "Lead asked for an agent callback.",
             "preferences": {"next_action": "call_today"},
