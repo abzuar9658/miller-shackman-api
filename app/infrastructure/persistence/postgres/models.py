@@ -640,6 +640,50 @@ class OutboxEventModel(Base):
     last_error: Mapped[str | None] = mapped_column(String(1000))
 
 
+class TemporalSignalOutboxModel(Base):
+    __tablename__ = "temporal_signal_outbox"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "idempotency_key",
+            name="uq_temporal_signal_outbox_workspace_idempotency",
+        ),
+        Index("ix_temporal_signal_outbox_status_available", "status", "available_at"),
+        Index(
+            "ix_temporal_signal_outbox_workspace_status_created",
+            "workspace_id",
+            "status",
+            "created_at",
+        ),
+    )
+
+    temporal_signal_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    workflow_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("lead_workflows.workflow_id"),
+        nullable=False,
+    )
+    temporal_workflow_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    signal_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    claimed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class PreflightDigestModel(Base):
     __tablename__ = "preflight_digests"
     __table_args__ = (
@@ -917,6 +961,7 @@ class HandoffCompletionModel(Base):
     crm_note_written_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     crm_tag_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     crm_custom_fields_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    crm_snapshot_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_reason: Mapped[str | None] = mapped_column(String(500))
@@ -948,6 +993,36 @@ class InboundMessageCRMCompletionModel(Base):
     crm_latest_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     crm_updates_detected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     crm_note_written_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    crm_review_tag_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    crm_snapshot_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(500))
+
+
+class OutboundMessageCRMCompletionModel(Base):
+    __tablename__ = "outbound_message_crm_completions"
+    __table_args__ = (
+        Index(
+            "ix_outbound_message_crm_completions_workspace_completed",
+            "workspace_id",
+            "completed_at",
+        ),
+    )
+
+    outbound_message_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("outbound_messages.message_id"),
+        primary_key=True,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    crm_note_idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    crm_note_written_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    crm_snapshot_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_reason: Mapped[str | None] = mapped_column(String(500))
@@ -1009,7 +1084,13 @@ class WorkspaceHandoffConfigModel(Base):
     )
     fallback_recipient_email: Mapped[str | None] = mapped_column(String(320))
     crm_handoff_tag: Mapped[str | None] = mapped_column(String(255))
+    crm_review_tag: Mapped[str | None] = mapped_column(String(255))
     crm_custom_fields: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, default=dict)
+    crm_snapshot_summary_field: Mapped[str | None] = mapped_column(String(255))
+    crm_snapshot_status_field: Mapped[str | None] = mapped_column(String(255))
+    crm_snapshot_latest_inbound_field: Mapped[str | None] = mapped_column(String(255))
+    crm_snapshot_latest_outbound_field: Mapped[str | None] = mapped_column(String(255))
+    crm_snapshot_last_activity_at_field: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -1069,6 +1150,32 @@ class WorkspaceOperationalControlModel(Base):
     pause_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AttentionAcknowledgementModel(Base):
+    __tablename__ = "attention_acknowledgements"
+    __table_args__ = (
+        Index(
+            "ix_attention_acknowledgements_workspace_user_acknowledged",
+            "workspace_id",
+            "user_id",
+            "acknowledged_at",
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        primary_key=True,
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+        primary_key=True,
+    )
+    attention_item_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    attention_item_version: Mapped[str] = mapped_column(String(500), nullable=False)
+    acknowledged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class WorkspaceMembershipModel(Base):

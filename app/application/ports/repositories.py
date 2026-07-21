@@ -1,8 +1,12 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 from uuid import UUID
 
-from app.domain.campaigns.outbound_message import OutboundMessage
+from app.domain.attention import AttentionAcknowledgement
+from app.domain.campaigns.outbound_message import (
+    OutboundMessage,
+    OutboundMessageCRMCompletionRecord,
+)
 from app.domain.common.ids import (
     LeadId,
     RefreshSessionId,
@@ -27,6 +31,7 @@ from app.domain.identity import (
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.llm import WorkspaceLLMConfig
 from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
+from app.domain.workflows import TemporalSignalOutboxEntry
 from app.domain.workspace_automation import WorkspaceOperationalControl
 
 
@@ -108,6 +113,21 @@ class OutboundMessageRepository(Protocol):
         raise NotImplementedError
 
     async def save(self, message: OutboundMessage) -> OutboundMessage:
+        raise NotImplementedError
+
+
+class OutboundMessageCRMCompletionRepository(Protocol):
+    async def get_by_outbound_message_id(
+        self,
+        workspace_id: WorkspaceId,
+        outbound_message_id: UUID,
+    ) -> OutboundMessageCRMCompletionRecord | None:
+        raise NotImplementedError
+
+    async def save(
+        self,
+        record: OutboundMessageCRMCompletionRecord,
+    ) -> OutboundMessageCRMCompletionRecord:
         raise NotImplementedError
 
 
@@ -358,6 +378,37 @@ class WorkspaceOperationalControlRepository(Protocol):
         raise NotImplementedError
 
 
+class AttentionAcknowledgementRepository(Protocol):
+    async def list_for_user(
+        self,
+        workspace_id: WorkspaceId,
+        user_id: UserId,
+    ) -> tuple[AttentionAcknowledgement, ...]:
+        raise NotImplementedError
+
+    async def get_by_item_id(
+        self,
+        workspace_id: WorkspaceId,
+        user_id: UserId,
+        attention_item_id: str,
+    ) -> AttentionAcknowledgement | None:
+        raise NotImplementedError
+
+    async def save(
+        self,
+        acknowledgement: AttentionAcknowledgement,
+    ) -> AttentionAcknowledgement:
+        raise NotImplementedError
+
+    async def delete(
+        self,
+        workspace_id: WorkspaceId,
+        user_id: UserId,
+        attention_item_id: str,
+    ) -> None:
+        raise NotImplementedError
+
+
 class CampaignAdminAuditLogRepository(Protocol):
     async def append(self, audit_log: Any) -> Any:
         raise NotImplementedError
@@ -466,6 +517,48 @@ class LeadWorkflowRepository(Protocol):
 
 class WorkflowTransitionRepository(Protocol):
     async def append(self, transition: Any) -> Any:
+        raise NotImplementedError
+
+
+class TemporalSignalOutboxRepository(Protocol):
+    async def append(self, entry: TemporalSignalOutboxEntry) -> TemporalSignalOutboxEntry:
+        raise NotImplementedError
+
+    async def claim_available_batch(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        lease_duration: timedelta,
+        max_attempts: int,
+    ) -> tuple[TemporalSignalOutboxEntry, ...]:
+        raise NotImplementedError
+
+    async def mark_sent(
+        self,
+        temporal_signal_id: UUID,
+        *,
+        now: datetime,
+    ) -> TemporalSignalOutboxEntry:
+        raise NotImplementedError
+
+    async def mark_failed(
+        self,
+        temporal_signal_id: UUID,
+        *,
+        error: str,
+        available_at: datetime,
+        now: datetime,
+    ) -> TemporalSignalOutboxEntry:
+        raise NotImplementedError
+
+    async def mark_terminal_failure(
+        self,
+        temporal_signal_id: UUID,
+        *,
+        error: str,
+        now: datetime,
+    ) -> TemporalSignalOutboxEntry:
         raise NotImplementedError
 
 
