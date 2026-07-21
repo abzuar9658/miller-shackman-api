@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.interfaces.api.v1.attention import router as attention_router
 from app.interfaces.api.v1.auth import router as auth_router
 from app.interfaces.api.v1.campaigns import router as campaigns_router
 from app.interfaces.api.v1.handoffs import router as handoffs_router
@@ -17,6 +18,7 @@ api_router.include_router(auth_router, prefix="/auth")
 api_router.include_router(webhook_router, prefix="/webhooks")
 api_router.include_router(workspace_router, prefix="/workspaces")
 api_router.include_router(campaigns_router, prefix="/workspaces")
+api_router.include_router(attention_router, prefix="/workspaces")
 api_router.include_router(handoffs_router, prefix="/workspaces")
 api_router.include_router(leads_router, prefix="/workspaces")
 api_router.include_router(listing_sources_router, prefix="/workspaces")
