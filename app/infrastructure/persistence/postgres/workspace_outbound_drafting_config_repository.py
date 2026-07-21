@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.common.ids import WorkspaceId
 from app.domain.outbound_drafting import (
     DEFAULT_EMAIL_PROMPT_TEXT,
     DEFAULT_PROMPT_TEXT,
@@ -25,7 +26,7 @@ class PostgresWorkspaceOutboundDraftingConfigRepository:
 
     async def get_by_workspace_id(
         self,
-        workspace_id,
+        workspace_id: WorkspaceId,
     ) -> WorkspaceOutboundDraftingConfig | None:
         result = await self._session.execute(
             select(WorkspaceOutboundDraftingConfigModel).where(

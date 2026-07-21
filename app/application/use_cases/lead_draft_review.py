@@ -4,30 +4,33 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
+from app.application.ports.crm import CRMClient
 from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
     CampaignExecutionRepository,
+    CrmConversationEventRepository,
     ExternalEventRepository,
     LeadRepository,
     LeadWorkflowRepository,
+    OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
+    TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
+    WorkspaceHandoffConfigRepository,
     WorkspaceOperationalControlRepository,
     WorkspaceRepository,
 )
-from app.application.ports.temporal import (
-    LeadNurtureWorkflowSignaler,
-    UnblockLeadNurtureWorkflowSignal,
-)
-from app.application.services.internal_external_events import (
-    create_internal_external_event,
-    update_internal_external_event_status,
-)
+from app.application.services.internal_external_events import create_internal_external_event
 from app.application.use_cases.campaign_cadence_execution import (
+    _latest_inbound_conversation_text,
     _pre_send_policy,
+    _summary_text_for_outbound_conversation,
     advance_workflow_after_outbound_send,
+)
+from app.application.use_cases.complete_outbound_message_crm_sync import (
+    complete_outbound_message_crm_sync,
 )
 from app.application.use_cases.lead_resume import _resume_permission
 from app.application.use_cases.plan_outbound_message import _outbound_idempotency_key
@@ -40,8 +43,8 @@ from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessa
 from app.domain.campaigns.pre_send import ProviderSendStatus, WorkflowState
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReviewStatus
 from app.domain.common.ids import LeadId, WorkspaceId
-from app.domain.crm_sync import ExternalEventStatus
 from app.domain.identity import AuthenticatedActor
+from app.domain.workflows import TemporalSignalName, TemporalSignalOutboxEntry
 
 
 class ApproveRejectedDraftReviewStatus(StrEnum):
@@ -52,7 +55,6 @@ class ApproveRejectedDraftReviewStatus(StrEnum):
     NOT_ACTIONABLE = "not_actionable"
     SEND_REJECTED = "send_rejected"
     SEND_FAILED = "send_failed"
-    SIGNAL_FAILED = "signal_failed"
 
 
 @dataclass(frozen=True)
@@ -62,7 +64,7 @@ class ApproveRejectedDraftReviewResult:
     outbound_message_id: UUID | None = None
     workflow_id: UUID | None = None
     reasons: tuple[str, ...] = ()
-    signal_failure_reason: str | None = None
+    signal_queued: bool = False
 
 
 async def approve_rejected_draft_review_and_send(
@@ -82,10 +84,16 @@ async def approve_rejected_draft_review_and_send(
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
     message_repository: OutboundMessageRepository,
     external_event_repository: ExternalEventRepository,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
+    crm_conversation_event_repository: CrmConversationEventRepository | None = None,
+    crm_client: CRMClient | None = None,
+    outbound_message_crm_completion_repository: (
+        OutboundMessageCRMCompletionRepository | None
+    ) = None,
+    workspace_handoff_config_repository: WorkspaceHandoffConfigRepository | None = None,
     commit: Callable[[], Awaitable[None]],
     sms_provider: SMSProvider,
     email_provider: EmailProvider,
-    lead_nurture_workflow_signaler: LeadNurtureWorkflowSignaler,
     now: datetime,
 ) -> ApproveRejectedDraftReviewResult:
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
@@ -215,6 +223,32 @@ async def approve_rejected_draft_review_and_send(
             reasons=tuple(reason.value for reason in send_result.reasons),
         )
 
+    if (
+        send_result.message is not None
+        and crm_client is not None
+        and outbound_message_crm_completion_repository is not None
+    ):
+        handoff_config = (
+            await workspace_handoff_config_repository.get_by_workspace_id(workspace_id)
+            if workspace_handoff_config_repository is not None
+            else None
+        )
+        await complete_outbound_message_crm_sync(
+            lead=lead,
+            outbound_message=send_result.message,
+            crm_sync_completion_repository=outbound_message_crm_completion_repository,
+            crm_client=crm_client,
+            now=now,
+            summary_text=_summary_text_for_outbound_conversation(send_result.message),
+            latest_inbound_text=await _latest_inbound_conversation_text(
+                workspace_id=workspace_id,
+                lead_id=lead_id,
+                crm_conversation_event_repository=crm_conversation_event_repository,
+            ),
+            workspace_handoff_config=handoff_config,
+            snapshot_status="waiting_for_response",
+        )
+
     workflow_result = await advance_workflow_after_outbound_send(
         workspace_id=workspace_id,
         lead_id=lead_id,
@@ -245,40 +279,27 @@ async def approve_rejected_draft_review_and_send(
         now=now,
         payload_redacted={"actor_user_id": str(actor.user_id), "review_id": str(review.review_id)},
     )
-    await commit()
-    try:
-        await lead_nurture_workflow_signaler.signal_unblock_lead_nurture_workflow(
-            temporal_workflow_id=workflow.temporal_workflow_id,
-            signal=UnblockLeadNurtureWorkflowSignal(
-                workspace_id=workspace_id,
-                lead_id=lead_id,
-                occurred_at=now,
-                reason=reason.strip(),
-                actor_user_id=actor.user_id,
-                external_event_id=external_event.external_event_id,
-            ),
-        )
-    except Exception as exc:
-        await update_internal_external_event_status(
-            external_event_repository=external_event_repository,
-            event=external_event,
-            status=ExternalEventStatus.FAILED,
-            now=now,
-            failure_reason=str(exc),
-        )
-        return ApproveRejectedDraftReviewResult(
-            status=ApproveRejectedDraftReviewStatus.SIGNAL_FAILED,
-            review_id=review.review_id,
-            outbound_message_id=send_result.message.message_id if send_result.message else None,
+    await temporal_signal_outbox_repository.append(
+        TemporalSignalOutboxEntry(
+            temporal_signal_id=uuid4(),
+            workspace_id=workspace_id,
             workflow_id=workflow.workflow_id,
-            signal_failure_reason=str(exc),
+            temporal_workflow_id=workflow.temporal_workflow_id,
+            signal_name=TemporalSignalName.BLOCKED_REVIEW_COMPLETED,
+            payload={
+                "lead_id": str(lead_id),
+                "occurred_at": now.isoformat(),
+                "reason": reason.strip(),
+                "actor_user_id": str(actor.user_id),
+                "external_event_id": str(external_event.external_event_id),
+            },
+            idempotency_key=f"blocked-review-completed:{external_event.external_event_id}",
+            available_at=now,
+            created_at=now,
+            updated_at=now,
         )
-    await update_internal_external_event_status(
-        external_event_repository=external_event_repository,
-        event=external_event,
-        status=ExternalEventStatus.PROCESSED,
-        now=now,
     )
+    await commit()
     return ApproveRejectedDraftReviewResult(
         status=ApproveRejectedDraftReviewStatus.SENT,
         review_id=review.review_id,
@@ -288,4 +309,5 @@ async def approve_rejected_draft_review_and_send(
             if workflow_result.workflow
             else workflow.workflow_id
         ),
+        signal_queued=True,
     )

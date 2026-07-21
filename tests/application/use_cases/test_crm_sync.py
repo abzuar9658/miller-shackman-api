@@ -14,6 +14,14 @@ from app.application.use_cases.crm_sync import (
     request_crm_sync,
     run_follow_up_boss_lead_snapshot_sync,
 )
+from app.domain.campaigns.execution import CampaignExecutionConfig, CampaignVersionStatus
+from app.domain.campaigns.start_queue import CampaignStatus
+from app.domain.compliance.contactability import (
+    ContactChannel,
+    ContactPermissionStatus,
+    SmsComplianceState,
+    WorkspaceContactPolicy,
+)
 from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
 from app.domain.crm_sync import (
     CRMSyncJob,
@@ -25,6 +33,17 @@ from app.domain.crm_sync import (
 )
 from app.domain.events import DomainEvent, DomainEventType
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from tests.application.use_cases._campaign_cadence_fakes import (
+    FakeCampaignExecutionRepository,
+    FakeWorkspaceContactPolicyRepository,
+    FakeWorkspaceOperationalControlRepository,
+)
+from tests.application.use_cases._campaign_enrollment_fakes import (
+    FakeCampaignEnrollmentRepository,
+    FakeLeadWorkflowRepository,
+    FakeTemporalWorkflowStarter,
+    FakeWorkflowTransitionRepository,
+)
 
 NOW = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
 PREVIOUS_SYNC_AT = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
@@ -279,7 +298,18 @@ class FakeCrmConversationEventRepository:
         return event
 
 
-def _lead(crm_lead_id: str) -> CanonicalLeadRecord:
+def _lead(
+    crm_lead_id: str,
+    *,
+    tags: tuple[str, ...] = (),
+    source_updated_at: datetime | None = NOW,
+    assigned_agent_crm_id: str | None = None,
+    has_accountable_owner: bool = False,
+    primary_email: str | None = None,
+    has_email: bool = False,
+    email_permission_status: ContactPermissionStatus = ContactPermissionStatus.UNKNOWN,
+    do_not_contact: bool | None = None,
+) -> CanonicalLeadRecord:
     return CanonicalLeadRecord(
         workspace_id=WORKSPACE_ID,
         lead_id=UUID(f"00000000-0000-0000-0000-{int(crm_lead_id):012d}"),
@@ -287,7 +317,51 @@ def _lead(crm_lead_id: str) -> CanonicalLeadRecord:
         crm_lead_id=crm_lead_id,
         facts_derived_at=NOW,
         source_payload_version="follow_up_boss_person:v1",
+        source_updated_at=source_updated_at,
+        tags=tags,
+        assigned_agent_crm_id=assigned_agent_crm_id,
+        has_accountable_owner=has_accountable_owner,
+        primary_email=primary_email,
+        has_email=has_email,
+        email_permission_status=email_permission_status,
+        do_not_contact=do_not_contact,
     )
+
+
+def _campaign_config(*, crm_enrollment_tag: str | None) -> CampaignExecutionConfig:
+    return CampaignExecutionConfig(
+        campaign_id=UUID("44444444-4444-4444-4444-444444444444"),
+        campaign_version_id=UUID("55555555-5555-5555-5555-555555555555"),
+        workspace_id=WORKSPACE_ID,
+        campaign_name="Configured Campaign",
+        campaign_status=CampaignStatus.ACTIVE,
+        version_status=CampaignVersionStatus.PUBLISHED,
+        enabled_channels=(ContactChannel.EMAIL,),
+        daily_start_cap=50,
+        dormant_threshold_days=60,
+        quiet_hours_start=NOW.time(),
+        quiet_hours_end=NOW.time(),
+        timezone="UTC",
+        sms_compliance_required=False,
+        preflight_digest_enabled=False,
+        crm_enrollment_tag=crm_enrollment_tag,
+        prompt_version="v1",
+        approved_model="openai/gpt-4o-mini",
+        cadence_steps=(),
+        created_at=NOW,
+        published_at=NOW,
+    )
+
+
+def _contact_policy() -> WorkspaceContactPolicy:
+    return WorkspaceContactPolicy(
+        workspace_id=WORKSPACE_ID,
+        sms_compliance_state=SmsComplianceState.APPROVED,
+    )
+
+
+async def _record_commit(calls: list[str]) -> None:
+    calls.append("commit")
 
 
 def _activity(
@@ -522,6 +596,166 @@ async def test_marks_job_failed_when_page_fetch_raises() -> None:
     assert result.job.total_upserted == 0
     assert result.job.total_failed == 0
     assert result.job.failure_reason == "sync page fetch failed: network"
+
+
+async def test_sync_starts_matching_campaign_when_pulled_lead_has_configured_tag() -> None:
+    source = FakeLeadSnapshotSource(
+        pages=(
+            CanonicalLeadSnapshotPage(
+                leads=(
+                    _lead(
+                        "1",
+                        tags=("ai_nurture",),
+                        assigned_agent_crm_id="agent-99",
+                        has_accountable_owner=True,
+                        primary_email="lead@example.com",
+                        has_email=True,
+                        email_permission_status=ContactPermissionStatus.CONFIRMED,
+                        do_not_contact=False,
+                    ),
+                ),
+            ),
+        ),
+    )
+    enrollment_repository = FakeCampaignEnrollmentRepository()
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    temporal = FakeTemporalWorkflowStarter()
+    commit_calls: list[str] = []
+
+    result = await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=source,
+        lead_repository=FakeLeadRepository(),
+        crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _campaign_config(crm_enrollment_tag="ai_nurture"),
+        ),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _contact_policy(),
+        ),
+        campaign_enrollment_repository=enrollment_repository,
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        temporal_workflow_starter=temporal,
+        event_bus=FakeEventBus(),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(None),
+        commit=lambda: _record_commit(commit_calls),
+        now=NOW,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+
+    assert result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+    assert len(enrollment_repository.enrollments) == 1
+    assert len(workflow_repository.workflows) == 1
+    assert len(transition_repository.transitions) == 1
+    assert len(temporal.calls) == 1
+    assert commit_calls == ["commit"]
+
+
+async def test_sync_does_not_start_campaign_when_pulled_lead_tag_does_not_match() -> None:
+    source = FakeLeadSnapshotSource(
+        pages=(
+            CanonicalLeadSnapshotPage(
+                leads=(
+                    _lead(
+                        "1",
+                        tags=("other_tag",),
+                        assigned_agent_crm_id="agent-99",
+                        has_accountable_owner=True,
+                        primary_email="lead@example.com",
+                        has_email=True,
+                        email_permission_status=ContactPermissionStatus.CONFIRMED,
+                        do_not_contact=False,
+                    ),
+                ),
+            ),
+        ),
+    )
+    enrollment_repository = FakeCampaignEnrollmentRepository()
+    temporal = FakeTemporalWorkflowStarter()
+
+    result = await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=source,
+        lead_repository=FakeLeadRepository(),
+        crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _campaign_config(crm_enrollment_tag="ai_nurture"),
+        ),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _contact_policy(),
+        ),
+        campaign_enrollment_repository=enrollment_repository,
+        lead_workflow_repository=FakeLeadWorkflowRepository(),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        temporal_workflow_starter=temporal,
+        now=NOW,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+
+    assert result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+    assert enrollment_repository.enrollments == {}
+    assert temporal.calls == []
+
+
+async def test_repeat_sync_for_tagged_lead_is_idempotent_when_already_enrolled() -> None:
+    lead = _lead(
+        "1",
+        tags=("ai_nurture",),
+        assigned_agent_crm_id="agent-99",
+        has_accountable_owner=True,
+        primary_email="lead@example.com",
+        has_email=True,
+        email_permission_status=ContactPermissionStatus.CONFIRMED,
+        do_not_contact=False,
+    )
+    enrollment_repository = FakeCampaignEnrollmentRepository()
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    temporal = FakeTemporalWorkflowStarter()
+    execution_repository = FakeCampaignExecutionRepository(
+        _campaign_config(crm_enrollment_tag="ai_nurture"),
+    )
+    contact_policy_repository = FakeWorkspaceContactPolicyRepository(_contact_policy())
+
+    first = await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=FakeLeadSnapshotSource(
+            pages=(CanonicalLeadSnapshotPage(leads=(lead,)),),
+        ),
+        lead_repository=FakeLeadRepository(),
+        crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        campaign_execution_repository=execution_repository,
+        workspace_contact_policy_repository=contact_policy_repository,
+        campaign_enrollment_repository=enrollment_repository,
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        temporal_workflow_starter=temporal,
+        now=NOW,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+    second = await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=FakeLeadSnapshotSource(
+            pages=(CanonicalLeadSnapshotPage(leads=(lead,)),),
+        ),
+        lead_repository=FakeLeadRepository(),
+        crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        campaign_execution_repository=execution_repository,
+        workspace_contact_policy_repository=contact_policy_repository,
+        campaign_enrollment_repository=enrollment_repository,
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        temporal_workflow_starter=temporal,
+        now=NOW + timedelta(minutes=5),
+        sync_job_id_factory=lambda: UUID("66666666-6666-6666-6666-666666666666"),
+    )
+
+    assert first.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+    assert second.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+    assert len(enrollment_repository.enrollments) == 1
+    assert len(temporal.calls) == 1
 
 
 async def test_request_crm_sync_creates_pending_job_and_outbox_event() -> None:

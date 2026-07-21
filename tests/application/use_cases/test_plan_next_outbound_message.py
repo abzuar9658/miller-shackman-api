@@ -660,7 +660,7 @@ async def test_falls_back_to_email_when_sms_not_contactable_in_high_level_plan()
     assert result.status == PlanOutboundMessageStatus.PLANNED
     assert result.selected_channel == ContactChannel.EMAIL
     assert result.message is not None
-    assert result.message.subject == "Checking in"
+    assert result.message.subject == "Checking in | Miller Schackman"
 
 
 async def test_duplicate_plan_returns_existing_message_without_calling_llm() -> None:

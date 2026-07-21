@@ -1,16 +1,19 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
+from app.application.services.llm.reply_classification import InboundReplyIntent
 from app.application.use_cases.complete_inbound_message_crm_sync import (
     CompleteInboundMessageCRMSyncStatus,
     complete_inbound_message_crm_sync,
 )
+from app.application.use_cases.evaluate_inbound_action import InboundAction
 from app.domain.common.ids import WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.conversations import (
     InboundMessage,
-    InboundMessageCRMCompletionRecord,
     InboundMessageClassificationStatus,
+    InboundMessageCRMCompletionRecord,
+    WorkspaceHandoffConfig,
 )
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from tests.application.use_cases.test_process_inbound_message_event import FakeCRMClient
@@ -33,7 +36,10 @@ class FakeInboundMessageCRMCompletionRepository:
     ) -> InboundMessageCRMCompletionRecord | None:
         if self.record is None:
             return None
-        if self.record.workspace_id == workspace_id and self.record.inbound_message_id == inbound_message_id:
+        if (
+            self.record.workspace_id == workspace_id
+            and self.record.inbound_message_id == inbound_message_id
+        ):
             return self.record
         return None
 
@@ -56,6 +62,7 @@ async def test_complete_inbound_message_crm_sync_refreshes_before_writing_note()
         intent=None,
         handoff_required=True,
         opt_out_detected=False,
+        inbound_action=InboundAction.HUMAN_HANDOFF,
         crm_sync_completion_repository=repository,
         crm_client=crm_client,
         now=NOW,
@@ -66,6 +73,8 @@ async def test_complete_inbound_message_crm_sync_refreshes_before_writing_note()
     assert repository.record is not None
     assert repository.record.crm_updates_detected is True
     assert repository.record.completed_at == NOW
+    assert crm_client.note_subjects == ["AI INBOUND · SMS"]
+    assert crm_client.notes[0].startswith("AI INBOUND · SMS\nLead: Jamie Lead")
 
 
 async def test_complete_inbound_message_crm_sync_skips_duplicate_note_after_partial_retry() -> None:
@@ -87,6 +96,7 @@ async def test_complete_inbound_message_crm_sync_skips_duplicate_note_after_part
         intent=None,
         handoff_required=False,
         opt_out_detected=False,
+        inbound_action=InboundAction.CONTINUE_AI,
         crm_sync_completion_repository=repository,
         crm_client=crm_client,
         now=NOW,
@@ -96,6 +106,65 @@ async def test_complete_inbound_message_crm_sync_skips_duplicate_note_after_part
     assert crm_client.calls == ["get_lead", "get_recent_activity"]
     assert repository.record is not None
     assert repository.record.completed_at == NOW
+
+
+async def test_complete_inbound_message_crm_sync_applies_review_tag_without_note_retry() -> None:
+    crm_client = FakeCRMClient()
+    repository = FakeInboundMessageCRMCompletionRepository()
+
+    result = await complete_inbound_message_crm_sync(
+        lead=_lead(),
+        inbound_message=_inbound_message(),
+        summary_text="Lead replied but needs review.",
+        intent=InboundReplyIntent.UNCLEAR,
+        handoff_required=False,
+        opt_out_detected=False,
+        inbound_action=InboundAction.PAUSE_FOR_REVIEW,
+        review_tag="needs_agent_review",
+        crm_sync_completion_repository=repository,
+        crm_client=crm_client,
+        now=NOW,
+        write_inbound_note=False,
+    )
+
+    assert result.status == CompleteInboundMessageCRMSyncStatus.COMPLETED
+    assert crm_client.calls == ["get_lead", "get_recent_activity", "add_tag"]
+    assert repository.record is not None
+    assert repository.record.crm_review_tag_applied_at == NOW
+
+
+async def test_complete_inbound_message_crm_sync_updates_snapshot_fields() -> None:
+    crm_client = FakeCRMClient()
+    repository = FakeInboundMessageCRMCompletionRepository()
+
+    result = await complete_inbound_message_crm_sync(
+        lead=_lead(),
+        inbound_message=_inbound_message(),
+        summary_text="Lead asked for a callback.",
+        intent=InboundReplyIntent.GENERAL_REPLY,
+        handoff_required=False,
+        opt_out_detected=False,
+        inbound_action=InboundAction.CONTINUE_AI,
+        crm_sync_completion_repository=repository,
+        crm_client=crm_client,
+        now=NOW,
+        write_inbound_note=False,
+        workspace_handoff_config=_snapshot_config(),
+        snapshot_status="waiting_for_response",
+    )
+
+    assert result.status == CompleteInboundMessageCRMSyncStatus.COMPLETED
+    assert crm_client.calls == ["get_lead", "get_recent_activity", "update_custom_fields"]
+    assert crm_client.custom_field_updates == [
+        {
+            "ai_summary": "Lead asked for a callback.",
+            "ai_status": "waiting_for_response",
+            "ai_latest_inbound": "Can an agent call me?",
+            "ai_last_activity_at": NOW.isoformat(),
+        }
+    ]
+    assert repository.record is not None
+    assert repository.record.crm_snapshot_updated_at == NOW
 
 
 def _lead() -> CanonicalLeadRecord:
@@ -124,4 +193,14 @@ def _inbound_message() -> InboundMessage:
         received_at=NOW,
         classification_status=InboundMessageClassificationStatus.CLASSIFIED,
         created_at=NOW,
+    )
+
+
+def _snapshot_config() -> WorkspaceHandoffConfig:
+    return WorkspaceHandoffConfig(
+        workspace_id=WORKSPACE_ID,
+        crm_snapshot_summary_field="ai_summary",
+        crm_snapshot_status_field="ai_status",
+        crm_snapshot_latest_inbound_field="ai_latest_inbound",
+        crm_snapshot_last_activity_at_field="ai_last_activity_at",
     )

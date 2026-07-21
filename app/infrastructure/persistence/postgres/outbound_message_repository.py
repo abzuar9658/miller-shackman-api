@@ -6,13 +6,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.campaigns.outbound_message import (
     OutboundMessage,
+    OutboundMessageCRMCompletionRecord,
     OutboundMessageStatus,
     ProviderDeliveryStatus,
 )
 from app.domain.campaigns.pre_send import ProviderSendStatus
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
-from app.infrastructure.persistence.postgres.models import OutboundMessageModel
+from app.infrastructure.persistence.postgres.models import (
+    OutboundMessageCRMCompletionModel,
+    OutboundMessageModel,
+)
 
 
 class PostgresOutboundMessageRepository:
@@ -109,6 +113,46 @@ class PostgresOutboundMessageRepository:
         return _model_to_message(result.scalar_one())
 
 
+class PostgresOutboundMessageCRMCompletionRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_by_outbound_message_id(
+        self,
+        workspace_id: WorkspaceId,
+        outbound_message_id: UUID,
+    ) -> OutboundMessageCRMCompletionRecord | None:
+        result = await self._session.execute(
+            select(OutboundMessageCRMCompletionModel)
+            .where(OutboundMessageCRMCompletionModel.workspace_id == workspace_id)
+            .where(
+                OutboundMessageCRMCompletionModel.outbound_message_id == outbound_message_id,
+            ),
+        )
+        model = result.scalar_one_or_none()
+        return _model_to_outbound_message_crm_completion(model) if model else None
+
+    async def save(
+        self,
+        record: OutboundMessageCRMCompletionRecord,
+    ) -> OutboundMessageCRMCompletionRecord:
+        values = _outbound_message_crm_completion_to_values(record)
+        update_values = {
+            key: value for key, value in values.items() if key != "outbound_message_id"
+        }
+        statement = (
+            insert(OutboundMessageCRMCompletionModel)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=["outbound_message_id"],
+                set_=update_values,
+            )
+            .returning(OutboundMessageCRMCompletionModel)
+        )
+        result = await self._session.execute(statement)
+        return _model_to_outbound_message_crm_completion(result.scalar_one())
+
+
 def _message_to_values(message: OutboundMessage) -> dict[str, object]:
     return {
         "message_id": message.message_id,
@@ -186,6 +230,36 @@ def _model_to_message(model: OutboundMessageModel) -> OutboundMessage:
         draft_safety_flags=tuple(model.draft_safety_flags),
         created_at=model.created_at,
         updated_at=model.updated_at,
+    )
+
+
+def _outbound_message_crm_completion_to_values(
+    record: OutboundMessageCRMCompletionRecord,
+) -> dict[str, object]:
+    return {
+        "outbound_message_id": record.outbound_message_id,
+        "workspace_id": record.workspace_id,
+        "crm_note_idempotency_key": record.crm_note_idempotency_key,
+        "crm_note_written_at": record.crm_note_written_at,
+        "crm_snapshot_updated_at": record.crm_snapshot_updated_at,
+        "completed_at": record.completed_at,
+        "last_attempted_at": record.last_attempted_at,
+        "failure_reason": record.failure_reason,
+    }
+
+
+def _model_to_outbound_message_crm_completion(
+    model: OutboundMessageCRMCompletionModel,
+) -> OutboundMessageCRMCompletionRecord:
+    return OutboundMessageCRMCompletionRecord(
+        outbound_message_id=model.outbound_message_id,
+        workspace_id=model.workspace_id,
+        crm_note_idempotency_key=model.crm_note_idempotency_key,
+        crm_note_written_at=model.crm_note_written_at,
+        crm_snapshot_updated_at=model.crm_snapshot_updated_at,
+        completed_at=model.completed_at,
+        last_attempted_at=model.last_attempted_at,
+        failure_reason=model.failure_reason,
     )
 
 

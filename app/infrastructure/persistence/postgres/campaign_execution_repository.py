@@ -53,6 +53,27 @@ class PostgresCampaignExecutionRepository:
             campaign_version_id=campaign.active_version_id,
         )
 
+    async def list_active_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> tuple[CampaignExecutionConfig, ...]:
+        result = await self._session.execute(
+            select(CampaignVersionModel, CampaignModel)
+            .join(
+                CampaignModel,
+                CampaignModel.active_version_id == CampaignVersionModel.campaign_version_id,
+            )
+            .where(CampaignModel.workspace_id == workspace_id)
+            .where(CampaignModel.status == CampaignStatus.ACTIVE.value)
+            .where(CampaignVersionModel.status == CampaignVersionStatus.PUBLISHED.value)
+            .order_by(CampaignModel.updated_at.desc(), CampaignModel.name.asc())
+        )
+        rows = result.all()
+        configs: list[CampaignExecutionConfig] = []
+        for version, campaign in rows:
+            configs.append(await self._build_config(version=version, campaign=campaign))
+        return tuple(configs)
+
     async def _build_config(
         self,
         *,

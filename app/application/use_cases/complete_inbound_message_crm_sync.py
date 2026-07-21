@@ -3,10 +3,16 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from app.application.ports.crm import CRMActivity, CRMClient, CanonicalLead
+from app.application.ports.crm import CanonicalLead, CRMActivity, CRMClient
 from app.application.ports.repositories import InboundMessageCRMCompletionRepository
+from app.application.services.crm_snapshot import build_crm_snapshot_custom_fields
 from app.application.services.llm.reply_classification import InboundReplyIntent
-from app.domain.conversations import InboundMessage, InboundMessageCRMCompletionRecord
+from app.application.use_cases.evaluate_inbound_action import InboundAction
+from app.domain.conversations import (
+    InboundMessage,
+    InboundMessageCRMCompletionRecord,
+    WorkspaceHandoffConfig,
+)
 from app.domain.leads import CanonicalLeadRecord
 
 
@@ -36,7 +42,12 @@ async def complete_inbound_message_crm_sync(
     intent: InboundReplyIntent | None = None,
     handoff_required: bool,
     opt_out_detected: bool,
+    inbound_action: InboundAction,
+    review_tag: str | None = None,
     classification_rejected: bool = False,
+    write_inbound_note: bool = True,
+    workspace_handoff_config: WorkspaceHandoffConfig | None = None,
+    snapshot_status: str | None = None,
     activity_limit: int = 20,
 ) -> CompleteInboundMessageCRMSyncResult:
     existing = await crm_sync_completion_repository.get_by_inbound_message_id(
@@ -76,7 +87,9 @@ async def complete_inbound_message_crm_sync(
             replace(
                 record,
                 crm_refreshed_at=now,
-                crm_lead_updated_at=refreshed_lead.updated_at if refreshed_lead is not None else None,
+                crm_lead_updated_at=(
+                    refreshed_lead.updated_at if refreshed_lead is not None else None
+                ),
                 crm_latest_activity_at=latest_activity_at,
                 crm_updates_detected=crm_updates_detected,
                 last_attempted_at=now,
@@ -96,23 +109,62 @@ async def complete_inbound_message_crm_sync(
                 inbound_message_id=inbound_message.inbound_message_id,
                 failure_reason=saved.failure_reason,
             )
-        if record.crm_note_written_at is None:
+        if write_inbound_note and record.crm_note_written_at is None:
+            subject, content = _crm_inbound_note(
+                refreshed_lead=refreshed_lead,
+                inbound_message=inbound_message,
+                summary_text=summary_text,
+                intent=intent,
+                handoff_required=handoff_required,
+                opt_out_detected=opt_out_detected,
+                inbound_action=inbound_action,
+                classification_rejected=classification_rejected,
+                crm_updates_detected=crm_updates_detected,
+            )
             await crm_client.add_note(
                 lead.workspace_id,
                 lead.crm_lead_id,
-                _crm_inbound_note(
-                    refreshed_lead=refreshed_lead,
-                    inbound_message=inbound_message,
-                    summary_text=summary_text,
-                    intent=intent,
-                    handoff_required=handoff_required,
-                    opt_out_detected=opt_out_detected,
-                    classification_rejected=classification_rejected,
-                    crm_updates_detected=crm_updates_detected,
-                ),
+                content,
+                subject=subject,
             )
             record = await crm_sync_completion_repository.save(
-                replace(record, crm_note_written_at=now, last_attempted_at=now, failure_reason=None),
+                replace(
+                    record,
+                    crm_note_written_at=now,
+                    last_attempted_at=now,
+                    failure_reason=None,
+                ),
+            )
+        if review_tag and record.crm_review_tag_applied_at is None:
+            await crm_client.add_tag(lead.workspace_id, lead.crm_lead_id, review_tag)
+            record = await crm_sync_completion_repository.save(
+                replace(
+                    record,
+                    crm_review_tag_applied_at=now,
+                    last_attempted_at=now,
+                    failure_reason=None,
+                ),
+            )
+        snapshot_fields = build_crm_snapshot_custom_fields(
+            workspace_handoff_config,
+            summary_text=summary_text,
+            status=snapshot_status,
+            latest_inbound_text=inbound_message.body,
+            last_activity_at=inbound_message.received_at,
+        )
+        if snapshot_fields and record.crm_snapshot_updated_at is None:
+            await crm_client.update_custom_fields(
+                lead.workspace_id,
+                lead.crm_lead_id,
+                snapshot_fields,
+            )
+            record = await crm_sync_completion_repository.save(
+                replace(
+                    record,
+                    crm_snapshot_updated_at=now,
+                    last_attempted_at=now,
+                    failure_reason=None,
+                ),
             )
     except Exception as exc:
         saved = await crm_sync_completion_repository.save(
@@ -164,23 +216,29 @@ def _crm_inbound_note(
     intent: InboundReplyIntent | None,
     handoff_required: bool,
     opt_out_detected: bool,
+    inbound_action: InboundAction,
     classification_rejected: bool,
     crm_updates_detected: bool,
-) -> str:
+) -> tuple[str, str]:
     display_name = _lead_display_name(refreshed_lead)
+    channel = inbound_message.channel.value.upper()
+    subject = f"AI INBOUND · {channel}"
     summary = summary_text or inbound_message.body
     intent_value = intent.value if intent is not None else "unknown"
-    return (
-        f"AI inbound {inbound_message.channel.value} reply captured for {display_name}.\n"
+    content = (
+        f"{subject}\n"
+        f"Lead: {display_name}\n"
         f"Received at: {inbound_message.received_at.isoformat()}\n"
         f"Intent: {intent_value}\n"
+        f"Action: {inbound_action.value}\n"
         f"Handoff required: {'yes' if handoff_required else 'no'}\n"
         f"Opt out detected: {'yes' if opt_out_detected else 'no'}\n"
         f"Classification rejected: {'yes' if classification_rejected else 'no'}\n"
-        f"CRM updates detected before sync: {'yes' if crm_updates_detected else 'no'}\n\n"
+        f"CRM updates detected: {'yes' if crm_updates_detected else 'no'}\n\n"
         f"Latest inbound:\n{inbound_message.body}\n\n"
         f"Conversation summary:\n{summary}"
     )
+    return subject, content
 
 
 def _lead_display_name(lead: CanonicalLead | None) -> str:

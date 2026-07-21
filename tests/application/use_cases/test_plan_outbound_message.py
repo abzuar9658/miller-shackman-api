@@ -168,6 +168,7 @@ def _planning_context(
     enabled_channels: tuple[ContactChannel, ...] = (ContactChannel.SMS,),
     campaign_status: CampaignStatus = CampaignStatus.ACTIVE,
     workflow_state: WorkflowState = WorkflowState.ACTIVE_NURTURE,
+    sms_compliance_state: SmsComplianceState = SmsComplianceState.APPROVED,
 ) -> OutboundPlanningContext:
     return OutboundPlanningContext(
         campaign_status=campaign_status,
@@ -175,7 +176,7 @@ def _planning_context(
         enabled_channels=enabled_channels,
         workspace_contact_policy=WorkspaceContactPolicy(
             workspace_id=WORKSPACE_ID,
-            sms_compliance_state=SmsComplianceState.APPROVED,
+            sms_compliance_state=sms_compliance_state,
         ),
         campaign_goal="Re-engage dormant buyer leads without giving property or finance advice.",
         brokerage_name="Miller Schackman",
@@ -253,7 +254,50 @@ async def test_falls_back_to_email_when_sms_is_not_contactable() -> None:
     assert result.status == PlanOutboundMessageStatus.PLANNED
     assert result.selected_channel == ContactChannel.EMAIL
     assert result.message is not None
-    assert result.message.subject == "Checking in"
+    assert result.message.subject == "Checking in | Miller Schackman"
+
+
+async def test_falls_back_to_email_when_workspace_sms_compliance_is_not_approved() -> None:
+    llm = FakeLLMClient(_draft_json(subject="Checking in"))
+
+    result = await plan_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        context=_planning_context(
+            enabled_channels=(ContactChannel.SMS, ContactChannel.EMAIL),
+            sms_compliance_state=SmsComplianceState.NOT_APPROVED,
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=FakeOutboundMessageRepository(),
+        llm_client=llm,
+        now=NOW,
+        message_id_factory=lambda: MESSAGE_ID,
+    )
+
+    assert result.status == PlanOutboundMessageStatus.PLANNED
+    assert result.selected_channel == ContactChannel.EMAIL
+    assert result.message is not None
+    assert len(llm.requests) == 1
+
+
+async def test_rejects_without_calling_llm_when_sms_only_workspace_is_not_approved() -> None:
+    llm = FakeLLMClient(_draft_json())
+
+    result = await plan_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        context=_planning_context(sms_compliance_state=SmsComplianceState.NOT_APPROVED),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=FakeOutboundMessageRepository(),
+        llm_client=llm,
+        now=NOW,
+    )
+
+    assert result.status == PlanOutboundMessageStatus.REJECTED
+    assert result.reasons == (PlanOutboundMessageReasonCode.CHANNEL_NOT_CONTACTABLE,)
+    assert llm.requests == []
 
 
 async def test_rejects_without_calling_llm_when_no_enabled_channel_has_destination() -> None:

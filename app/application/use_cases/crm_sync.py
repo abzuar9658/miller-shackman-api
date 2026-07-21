@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -9,16 +9,26 @@ from app.application.ports.crm import CRMActivity
 from app.application.ports.crm_sync import CanonicalLeadSnapshotSource
 from app.application.ports.event_bus import EventBus
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
+    CampaignExecutionRepository,
     CrmConversationEventRepository,
     CRMSyncJobRepository,
     LeadRepository,
+    LeadWorkflowRepository,
+    WorkflowTransitionRepository,
+    WorkspaceContactPolicyRepository,
     WorkspaceCRMSyncConfigRepository,
+    WorkspaceOperationalControlRepository,
+)
+from app.application.ports.temporal import TemporalWorkflowStarter
+from app.application.use_cases.process_crm_tag_campaign_enrollment import (
+    process_crm_tag_campaign_enrollment,
 )
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
 from app.domain.crm_sync import CRMSyncJob, CRMSyncJobStatus, CRMSyncLeadSort, CRMSyncType
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
-from app.domain.leads import CRMProvider
+from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workspace_automation import WorkspaceAutomationStatus
 
 
@@ -96,6 +106,15 @@ async def run_follow_up_boss_lead_snapshot_sync(
     sync_job: CRMSyncJob | None = None,
     crm_activity_source: CRMActivitySource | None = None,
     crm_conversation_event_repository: CrmConversationEventRepository | None = None,
+    campaign_execution_repository: CampaignExecutionRepository | None = None,
+    workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
+    lead_workflow_repository: LeadWorkflowRepository | None = None,
+    workflow_transition_repository: WorkflowTransitionRepository | None = None,
+    temporal_workflow_starter: TemporalWorkflowStarter | None = None,
+    event_bus: EventBus | None = None,
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
+    commit: Callable[[], Awaitable[None]] | None = None,
     activity_limit: int = 50,
 ) -> RunFollowUpBossLeadSyncResult:
     if not 1 <= page_size <= 100:
@@ -167,6 +186,37 @@ async def run_follow_up_boss_lead_snapshot_sync(
                             crm_conversation_event_repository=crm_conversation_event_repository,
                             activity_limit=activity_limit,
                             now=now,
+                        )
+                    if _can_process_crm_tag_enrollment(
+                        campaign_execution_repository=campaign_execution_repository,
+                        workspace_contact_policy_repository=workspace_contact_policy_repository,
+                        campaign_enrollment_repository=campaign_enrollment_repository,
+                        lead_workflow_repository=lead_workflow_repository,
+                        workflow_transition_repository=workflow_transition_repository,
+                        temporal_workflow_starter=temporal_workflow_starter,
+                    ):
+                        assert campaign_execution_repository is not None
+                        assert workspace_contact_policy_repository is not None
+                        assert campaign_enrollment_repository is not None
+                        assert lead_workflow_repository is not None
+                        assert workflow_transition_repository is not None
+                        assert temporal_workflow_starter is not None
+                        await process_crm_tag_campaign_enrollment(
+                            workspace_id=workspace_id,
+                            lead=upserted_lead,
+                            observed_at=_crm_tag_enrollment_observed_at(upserted_lead),
+                            now=now,
+                            campaign_execution_repository=campaign_execution_repository,
+                            workspace_contact_policy_repository=workspace_contact_policy_repository,
+                            campaign_enrollment_repository=campaign_enrollment_repository,
+                            lead_workflow_repository=lead_workflow_repository,
+                            workflow_transition_repository=workflow_transition_repository,
+                            temporal_workflow_starter=temporal_workflow_starter,
+                            event_bus=event_bus,
+                            workspace_operational_control_repository=(
+                                workspace_operational_control_repository
+                            ),
+                            commit=commit,
                         )
                 except Exception as exc:
                     total_failed += 1
@@ -306,6 +356,15 @@ async def execute_queued_follow_up_boss_crm_sync(
     mapped_custom_field_keys: tuple[str, ...] = (),
     crm_activity_source: CRMActivitySource | None = None,
     crm_conversation_event_repository: CrmConversationEventRepository | None = None,
+    campaign_execution_repository: CampaignExecutionRepository | None = None,
+    workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
+    lead_workflow_repository: LeadWorkflowRepository | None = None,
+    workflow_transition_repository: WorkflowTransitionRepository | None = None,
+    temporal_workflow_starter: TemporalWorkflowStarter | None = None,
+    event_bus: EventBus | None = None,
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
+    commit: Callable[[], Awaitable[None]] | None = None,
     activity_limit: int = 50,
 ) -> ExecuteQueuedCRMSyncResult:
     claimed = await crm_sync_job_repository.claim_pending_by_id(
@@ -331,6 +390,15 @@ async def execute_queued_follow_up_boss_crm_sync(
         sync_job=claimed,
         crm_activity_source=crm_activity_source,
         crm_conversation_event_repository=crm_conversation_event_repository,
+        campaign_execution_repository=campaign_execution_repository,
+        workspace_contact_policy_repository=workspace_contact_policy_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        temporal_workflow_starter=temporal_workflow_starter,
+        event_bus=event_bus,
+        workspace_operational_control_repository=workspace_operational_control_repository,
+        commit=commit,
         activity_limit=activity_limit,
     )
     return ExecuteQueuedCRMSyncResult(
@@ -498,6 +566,32 @@ def _crm_activity_direction(value: str | None) -> CrmConversationEventDirection 
         return CrmConversationEventDirection(value)
     except ValueError:
         return None
+
+
+def _can_process_crm_tag_enrollment(
+    *,
+    campaign_execution_repository: CampaignExecutionRepository | None,
+    workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None,
+    lead_workflow_repository: LeadWorkflowRepository | None,
+    workflow_transition_repository: WorkflowTransitionRepository | None,
+    temporal_workflow_starter: TemporalWorkflowStarter | None,
+) -> bool:
+    return all(
+        dependency is not None
+        for dependency in (
+            campaign_execution_repository,
+            workspace_contact_policy_repository,
+            campaign_enrollment_repository,
+            lead_workflow_repository,
+            workflow_transition_repository,
+            temporal_workflow_starter,
+        )
+    )
+
+
+def _crm_tag_enrollment_observed_at(lead: CanonicalLeadRecord) -> datetime:
+    return lead.source_updated_at or lead.crm_updated_at or lead.facts_derived_at
 
 
 def _normalize_recent_limit(
