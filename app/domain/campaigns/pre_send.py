@@ -47,6 +47,7 @@ def _default_sendable_workflow_states() -> frozenset[WorkflowState]:
         {
             WorkflowState.ACTIVE_NURTURE,
             WorkflowState.WAITING_FOR_RESPONSE,
+            WorkflowState.RESPONSE_PROCESSING,
         },
     )
 

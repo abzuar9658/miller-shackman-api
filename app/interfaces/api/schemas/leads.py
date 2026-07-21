@@ -243,7 +243,7 @@ class ResumeLeadWorkflowResponse(BaseModel):
     workflow_id: UUID | None = None
     workflow_state: str | None = None
     reasons: list[str] = Field(default_factory=list)
-    signal_failure_reason: str | None = None
+    signal_queued: bool = False
 
 
 class ApproveRejectedDraftReviewRequest(BaseModel):
@@ -256,4 +256,4 @@ class ApproveRejectedDraftReviewResponse(BaseModel):
     outbound_message_id: UUID | None = None
     workflow_id: UUID | None = None
     reasons: list[str] = Field(default_factory=list)
-    signal_failure_reason: str | None = None
+    signal_queued: bool = False

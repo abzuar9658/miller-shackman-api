@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -75,6 +75,7 @@ class CRMClient(Protocol):
         workspace_id: UUID,
         crm_lead_id: str,
         content: str,
+        subject: str | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -107,4 +108,11 @@ class CRMClient(Protocol):
         workspace_id: UUID,
         webhook_url: str,
     ) -> None:
+        raise NotImplementedError
+
+    async def fetch_resource_by_uri(
+        self,
+        workspace_id: UUID,
+        uri: str,
+    ) -> dict[str, Any] | None:
         raise NotImplementedError

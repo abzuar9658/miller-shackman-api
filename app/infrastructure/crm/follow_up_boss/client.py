@@ -4,7 +4,7 @@ import math
 import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import httpx
@@ -25,7 +25,7 @@ class FollowUpBossCRMClient:
     supports_custom_fields: bool = True
     supports_tags: bool = True
     supports_notes: bool = True
-    supports_webhooks: bool = False
+    supports_webhooks: bool = True
     _activity_retry_max_attempts: int = 3
     _activity_retry_base_delay_seconds: float = 1.0
     _activity_retry_max_delay_seconds: float = 8.0
@@ -191,18 +191,30 @@ class FollowUpBossCRMClient:
         response.raise_for_status()
         return self._map_agent(response.json())
 
-    async def add_note(self, workspace_id: UUID, crm_lead_id: str, content: str) -> None:
-        await self._client.post(f"/people/{crm_lead_id}/notes", json={"note": content})
+    async def add_note(
+        self,
+        workspace_id: UUID,
+        crm_lead_id: str,
+        content: str,
+        subject: str | None = None,
+    ) -> None:
+        payload: dict[str, object] = {"personId": int(crm_lead_id), "body": content}
+        if subject is not None:
+            payload["subject"] = subject
+        response = await self._client.post("/notes", json=payload)
+        response.raise_for_status()
 
     async def add_tag(self, workspace_id: UUID, crm_lead_id: str, tag: str) -> None:
-        await self._client.put(f"/people/{crm_lead_id}/tags", json={"tags": [tag]})
+        response = await self._client.put(f"/people/{crm_lead_id}/tags", json={"tags": [tag]})
+        response.raise_for_status()
 
     async def remove_tag(self, workspace_id: UUID, crm_lead_id: str, tag: str) -> None:
-        await self._client.request(
+        response = await self._client.request(
             "DELETE",
             f"/people/{crm_lead_id}/tags",
             json={"tags": [tag]},
         )
+        response.raise_for_status()
 
     async def update_custom_fields(
         self,
@@ -210,10 +222,22 @@ class FollowUpBossCRMClient:
         crm_lead_id: str,
         fields: dict[str, str],
     ) -> None:
-        await self._client.put(f"/people/{crm_lead_id}", json={"customFields": fields})
+        response = await self._client.put(f"/people/{crm_lead_id}", json={"customFields": fields})
+        response.raise_for_status()
 
     async def subscribe_to_events(self, workspace_id: UUID, webhook_url: str) -> None:
         raise NotImplementedError
+
+    async def fetch_resource_by_uri(
+        self,
+        workspace_id: UUID,
+        uri: str,
+    ) -> dict[str, Any] | None:
+        response = await self._client.get(uri)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return cast("dict[str, Any]", response.json())
 
     def _map_person(self, workspace_id: UUID, payload: dict[str, Any]) -> CanonicalLead:
         return CanonicalLead(
@@ -223,14 +247,26 @@ class FollowUpBossCRMClient:
             last_name=payload.get("lastName"),
             email=payload.get("email"),
             phone=payload.get("phone"),
-            assigned_agent_id=str(payload.get("assignedTo"))
-            if payload.get("assignedTo") is not None
-            else None,
+            assigned_agent_id=self._assigned_agent_id(payload),
             tags=payload.get("tags", []) or [],
             custom_fields=payload.get("customFields", {}) or {},
             created_at=self._parse_datetime(payload.get("created")) or datetime.utcnow(),
             updated_at=self._parse_datetime(payload.get("updated")),
         )
+
+    def _assigned_agent_id(self, payload: dict[str, Any]) -> str | None:
+        assigned_user_id = payload.get("assignedUserId")
+        if assigned_user_id is not None:
+            normalized = str(assigned_user_id).strip()
+            return normalized or None
+
+        assigned_to = payload.get("assignedTo")
+        if isinstance(assigned_to, int):
+            return str(assigned_to)
+        if isinstance(assigned_to, str):
+            normalized = assigned_to.strip()
+            return normalized if normalized.isdigit() else None
+        return None
 
     async def _fetch_activity_collection(
         self,

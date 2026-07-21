@@ -127,18 +127,24 @@ def test_denied_email_permission_blocks_email() -> None:
     assert decision.reasons == (ContactabilityReasonCode.EMAIL_PERMISSION_DENIED,)
 
 
-def test_sms_contactability_ignores_compliance_state_in_v1() -> None:
+@pytest.mark.parametrize(
+    "sms_compliance_state",
+    [SmsComplianceState.NOT_APPROVED, SmsComplianceState.UNKNOWN],
+)
+def test_sms_contactability_blocks_when_workspace_not_approved(
+    sms_compliance_state: SmsComplianceState,
+) -> None:
     decision = evaluate_contactability(
         _base_facts(),
         WorkspaceContactPolicy(
             workspace_id=WORKSPACE_ID,
-            sms_compliance_state=SmsComplianceState.NOT_APPROVED,
+            sms_compliance_state=sms_compliance_state,
         ),
         ContactChannel.SMS,
     )
 
-    assert decision.allowed is True
-    assert decision.reasons == ()
+    assert decision.allowed is False
+    assert decision.reasons == (ContactabilityReasonCode.SMS_COMPLIANCE_NOT_APPROVED,)
 
 
 def test_confirmed_sms_consent_with_approved_workspace_allows_sms() -> None:
@@ -171,6 +177,7 @@ def test_multiple_sms_blockers_return_deterministic_precedence() -> None:
     assert decision.allowed is False
     assert decision.reasons == (
         ContactabilityReasonCode.SMS_OPTED_OUT,
+        ContactabilityReasonCode.SMS_COMPLIANCE_NOT_APPROVED,
         ContactabilityReasonCode.SMS_PERMISSION_DENIED,
     )
 

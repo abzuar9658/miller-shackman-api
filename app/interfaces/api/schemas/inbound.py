@@ -138,6 +138,15 @@ class InboundWebhookResponse(BaseModel):
     intent: str | None = None
     handoff_required: bool = False
     opt_out_detected: bool = False
+    signal_queued: bool = False
+    review_tag_applied: bool = False
+    review_notification_sent: bool = False
+    review_notification_recipient: str | None = None
+    review_notification_failure_reason: str | None = None
+    continue_ai_status: str | None = None
+    continue_ai_outbound_message_id: UUID | None = None
+    continue_ai_provider_message_id: str | None = None
+    continue_ai_pause_reason: str | None = None
     reasons: list[str] = Field(default_factory=list)
     classification_reasons: list[str] = Field(default_factory=list)
 
@@ -151,8 +160,7 @@ class CRMHumanActivityWebhookResponse(BaseModel):
     activity_kind: str | None = None
     pause_reason: str | None = None
     pause_requested: bool = False
-    signal_sent: bool = False
-    signal_failure_reason: str | None = None
+    signal_queued: bool = False
     transition_skip_reason: str | None = None
     reasons: list[str] = Field(default_factory=list)
 
@@ -166,7 +174,16 @@ class ContactSuppressionWebhookResponse(BaseModel):
     suppression_kind: str | None = None
     workflow_state: str | None = None
     suppression_applied: bool = False
-    signal_sent: bool = False
-    signal_failure_reason: str | None = None
+    signal_queued: bool = False
     transition_skip_reason: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+
+class FollowUpBossWebhookResponse(BaseModel):
+    status: str
+    external_event_id: UUID | None = None
+    event_type: str | None = None
+    processed_count: int = 0
+    ignored_count: int = 0
+    duplicate_count: int = 0
     reasons: list[str] = Field(default_factory=list)

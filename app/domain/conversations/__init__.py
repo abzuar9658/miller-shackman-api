@@ -8,9 +8,9 @@ from app.domain.conversations.models import (
     HandoffCompletionRecord,
     HandoffReasonCode,
     HandoffStatus,
-    InboundMessageCRMCompletionRecord,
     InboundMessage,
     InboundMessageClassificationStatus,
+    InboundMessageCRMCompletionRecord,
     WorkspaceHandoffConfig,
     default_workspace_handoff_config,
 )

@@ -97,7 +97,13 @@ class WorkspaceHandoffConfigResponse(BaseModel):
     workspace_id: UUID
     fallback_recipient_email: str | None = None
     crm_handoff_tag: str | None = None
+    crm_review_tag: str | None = None
     crm_custom_fields: dict[str, str]
+    crm_snapshot_summary_field: str | None = None
+    crm_snapshot_status_field: str | None = None
+    crm_snapshot_latest_inbound_field: str | None = None
+    crm_snapshot_latest_outbound_field: str | None = None
+    crm_snapshot_last_activity_at_field: str | None = None
 
 
 class WorkspaceCRMSyncConfigResponse(BaseModel):
@@ -168,7 +174,13 @@ class UpdateWorkspaceContactPolicyResponse(BaseModel):
 class UpdateWorkspaceHandoffConfigRequest(BaseModel):
     fallback_recipient_email: EmailStr | None = None
     crm_handoff_tag: str | None = Field(default=None, max_length=255)
+    crm_review_tag: str | None = Field(default=None, max_length=255)
     crm_custom_fields: dict[str, str] = Field(default_factory=dict)
+    crm_snapshot_summary_field: str | None = Field(default=None, max_length=255)
+    crm_snapshot_status_field: str | None = Field(default=None, max_length=255)
+    crm_snapshot_latest_inbound_field: str | None = Field(default=None, max_length=255)
+    crm_snapshot_latest_outbound_field: str | None = Field(default=None, max_length=255)
+    crm_snapshot_last_activity_at_field: str | None = Field(default=None, max_length=255)
 
 
 class UpdateWorkspaceHandoffConfigResponse(BaseModel):

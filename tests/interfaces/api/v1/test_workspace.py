@@ -99,6 +99,9 @@ def workspace_client() -> WorkspaceTestClient:
                 deps.workspace_outbound_drafting_config_repository
             ),
             workspace_operational_control_repository=deps.workspace_operational_control_repository,
+            lead_workflow_repository=deps.lead_workflow_repository,
+            workflow_transition_repository=deps.workflow_transition_repository,
+            temporal_signal_outbox_repository=deps.temporal_signal_outbox_repository,
             default_crm_sync_interval_seconds=300,
             default_openrouter_model="openai/gpt-4o-mini",
             allowed_openrouter_models=("openai/gpt-4o-mini", "openai/gpt-4.1-mini"),
@@ -247,6 +250,50 @@ def test_get_workspace_settings_returns_crm_sync_defaults(
         "workspace_id": str(WORKSPACE_ID),
         "automation_status": "active",
         "pause_reason": None,
+    }
+    assert body["handoff_config"] == {
+        "workspace_id": str(WORKSPACE_ID),
+        "fallback_recipient_email": None,
+        "crm_handoff_tag": None,
+        "crm_review_tag": None,
+        "crm_custom_fields": {},
+        "crm_snapshot_summary_field": None,
+        "crm_snapshot_status_field": None,
+        "crm_snapshot_latest_inbound_field": None,
+        "crm_snapshot_latest_outbound_field": None,
+        "crm_snapshot_last_activity_at_field": None,
+    }
+
+
+def test_update_workspace_handoff_config_returns_200(
+    workspace_client: WorkspaceTestClient,
+) -> None:
+    response = workspace_client.client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/settings/handoff-config",
+        json={
+            "fallback_recipient_email": "review@example.com",
+            "crm_handoff_tag": "human_handoff_required",
+            "crm_review_tag": "needs_agent_review",
+            "crm_custom_fields": {"handoff_status": "required"},
+            "crm_snapshot_summary_field": "ai_summary",
+            "crm_snapshot_status_field": "ai_status",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "updated"
+    assert body["handoff_config"] == {
+        "workspace_id": str(WORKSPACE_ID),
+        "fallback_recipient_email": "review@example.com",
+        "crm_handoff_tag": "human_handoff_required",
+        "crm_review_tag": "needs_agent_review",
+        "crm_custom_fields": {"handoff_status": "required"},
+        "crm_snapshot_summary_field": "ai_summary",
+        "crm_snapshot_status_field": "ai_status",
+        "crm_snapshot_latest_inbound_field": None,
+        "crm_snapshot_latest_outbound_field": None,
+        "crm_snapshot_last_activity_at_field": None,
     }
 
 

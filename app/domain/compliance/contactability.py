@@ -93,8 +93,6 @@ def evaluate_contactability(
     policy: WorkspaceContactPolicy,
     channel: ContactChannel,
 ) -> ContactabilityDecision:
-    _ = policy
-
     if facts.do_not_contact is True:
         return ContactabilityDecision(
             allowed=False,
@@ -105,7 +103,7 @@ def evaluate_contactability(
     reasons: list[ContactabilityReasonCode] = []
 
     if channel == ContactChannel.SMS:
-        reasons.extend(_evaluate_sms_reasons(facts))
+        reasons.extend(_evaluate_sms_reasons(facts, policy))
     else:
         reasons.extend(_evaluate_email_reasons(facts))
 
@@ -119,11 +117,17 @@ def evaluate_contactability(
     )
 
 
-def _evaluate_sms_reasons(facts: LeadContactabilityFacts) -> list[ContactabilityReasonCode]:
+def _evaluate_sms_reasons(
+    facts: LeadContactabilityFacts,
+    policy: WorkspaceContactPolicy,
+) -> list[ContactabilityReasonCode]:
     reasons: list[ContactabilityReasonCode] = []
 
     if SuppressionType.SMS_OPT_OUT in facts.suppressions:
         reasons.append(ContactabilityReasonCode.SMS_OPTED_OUT)
+
+    if policy.sms_compliance_state != SmsComplianceState.APPROVED:
+        reasons.append(ContactabilityReasonCode.SMS_COMPLIANCE_NOT_APPROVED)
 
     if (
         facts.sms_consent_status in (None, ContactPermissionStatus.UNKNOWN)

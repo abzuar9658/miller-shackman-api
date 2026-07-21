@@ -456,8 +456,12 @@ def _channel_prompt_text_for_config(
     )
 
 
+def outbound_message_draft_prompt_version_for_revision(revision: int) -> str:
+    return f"{OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX}:r{revision}"
+
+
 def _prompt_version_for_config(config: WorkspaceOutboundDraftingConfig) -> str:
-    return f"{OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX}:r{config.revision}"
+    return outbound_message_draft_prompt_version_for_revision(config.revision)
 
 
 def _listing_context_payload(

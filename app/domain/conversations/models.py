@@ -56,7 +56,13 @@ class WorkspaceHandoffConfig:
     workspace_id: WorkspaceId
     fallback_recipient_email: str | None = None
     crm_handoff_tag: str | None = None
+    crm_review_tag: str | None = None
     crm_custom_fields: Mapping[str, str] = field(default_factory=_empty_string_mapping)
+    crm_snapshot_summary_field: str | None = None
+    crm_snapshot_status_field: str | None = None
+    crm_snapshot_latest_inbound_field: str | None = None
+    crm_snapshot_latest_outbound_field: str | None = None
+    crm_snapshot_last_activity_at_field: str | None = None
 
 
 def default_workspace_handoff_config(workspace_id: WorkspaceId) -> WorkspaceHandoffConfig:
@@ -75,6 +81,7 @@ class HandoffCompletionRecord:
     crm_note_written_at: datetime | None = None
     crm_tag_applied_at: datetime | None = None
     crm_custom_fields_updated_at: datetime | None = None
+    crm_snapshot_updated_at: datetime | None = None
     completed_at: datetime | None = None
     last_attempted_at: datetime | None = None
     failure_reason: str | None = None
@@ -90,6 +97,8 @@ class InboundMessageCRMCompletionRecord:
     crm_latest_activity_at: datetime | None = None
     crm_updates_detected: bool = False
     crm_note_written_at: datetime | None = None
+    crm_review_tag_applied_at: datetime | None = None
+    crm_snapshot_updated_at: datetime | None = None
     completed_at: datetime | None = None
     last_attempted_at: datetime | None = None
     failure_reason: str | None = None

@@ -75,9 +75,7 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeOutboundMessageRepository as FakeCadenceOutboundMessageRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
-    FakeCampaignEnrollmentRepository,
-    FakeLeadNurtureWorkflowSignaler,
-    FakeTemporalWorkflowStarter,
+    FakeTemporalSignalOutboxRepository,
 )
 from tests.application.use_cases._lead_read_fakes import (
     FakeCrmConversationEventRepository,
@@ -90,6 +88,12 @@ from tests.application.use_cases._lead_read_fakes import (
     FakeRejectedDraftReviewRepository,
     FakeUserRepository,
     FakeWorkflowTransitionRepository,
+)
+from tests.application.use_cases.test_process_inbound_message_event import (
+    FakeCRMClient,
+    FakeOutboundMessageCRMCompletionRepository,
+    FakeWorkspaceHandoffConfigRepository,
+    _workspace_handoff_config_with_snapshot_fields,
 )
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
@@ -105,7 +109,8 @@ REVIEW_ID = UUID("00000000-0000-0000-0000-000000000021")
 @dataclass
 class LeadsTestClient:
     client: TestClient
-    signaler: FakeLeadNurtureWorkflowSignaler
+    outbox: FakeTemporalSignalOutboxRepository
+    crm_client: FakeCRMClient
 
 
 def test_lead_routes_return_list_and_detail() -> None:
@@ -142,7 +147,19 @@ def test_admin_can_approve_rejected_draft_review() -> None:
 
     assert response.status_code == 200
     assert response.json()["status"] == "sent"
-    assert client.signaler.calls[-1]["temporal_workflow_id"] == "wf-1"
+    assert response.json()["signal_queued"] is True
+    assert len(client.outbox.entries) == 1
+    assert len(client.crm_client.notes) == 1
+    assert client.crm_client.note_subjects == ["AI OUTBOUND · EMAIL"]
+    assert "AI OUTBOUND · EMAIL" in client.crm_client.notes[0]
+    assert client.crm_client.custom_field_updates == [
+        {
+            "ai_summary": "Used safe canonical context.",
+            "ai_status": "waiting_for_response",
+            "ai_latest_outbound": "Would you like to continue the conversation this week?",
+            "ai_last_activity_at": "2030-01-01T18:00:00+00:00",
+        }
+    ]
 
 
 def test_lead_routes_return_contactability_and_sendability() -> None:
@@ -188,7 +205,8 @@ def test_resume_routes_return_eligibility_and_request_resume() -> None:
     assert eligibility_response.json()["can_resume"] is True
     assert resume_response.status_code == 200
     assert resume_response.json()["status"] == "requested"
-    assert client.signaler.calls[0]["temporal_workflow_id"] == "wf-1"
+    assert resume_response.json()["signal_queued"] is True
+    assert len(client.outbox.entries) == 1
 
 
 def test_assigned_agent_can_resume_own_lead() -> None:
@@ -201,6 +219,27 @@ def test_assigned_agent_can_resume_own_lead() -> None:
 
     assert response.status_code == 200
     assert response.json()["status"] == "requested"
+
+
+def test_assigned_agent_cannot_resume_handoff_owned_lead() -> None:
+    client = _client_for_role(
+        WorkspaceMembershipRole.ASSIGNED_AGENT,
+        workflow_state=WorkflowState.HUMAN_HANDOFF,
+    )
+
+    eligibility_response = client.client.get(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/resume-eligibility"
+    )
+    resume_response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/resume",
+        json={"reason": "Trying to resume a handed off lead."},
+    )
+
+    assert eligibility_response.status_code == 200
+    assert eligibility_response.json()["can_resume"] is False
+    assert eligibility_response.json()["reasons"] == ["handoff_requires_manager"]
+    assert resume_response.status_code == 200
+    assert resume_response.json()["status"] == "not_resumable"
 
 
 def test_assigned_agent_can_read_own_lead_routes() -> None:
@@ -233,6 +272,8 @@ def _client_for_role(
     assigned_agent_user_id: UUID = USER_ID,
     sms_permission_status: ContactPermissionStatus = ContactPermissionStatus.CONFIRMED,
     email_permission_status: ContactPermissionStatus = ContactPermissionStatus.CONFIRMED,
+    workflow_state: WorkflowState = WorkflowState.PAUSED,
+    workflow_pause_reason: str | None = None,
 ) -> LeadsTestClient:
     app = create_app()
     lead = CanonicalLeadRecord(
@@ -263,11 +304,12 @@ def _client_for_role(
         campaign_enrollment_id=UUID("00000000-0000-0000-0000-000000000006"),
         campaign_id=CAMPAIGN_ID,
         lead_id=LEAD_ID,
-        state=WorkflowState.PAUSED,
+        state=workflow_state,
         last_transition_at=NOW,
         state_version=1,
         created_at=NOW,
         updated_at=NOW,
+        pause_reason=workflow_pause_reason,
     )
     policy_repository = FakeWorkspaceContactPolicyRepository(
         WorkspaceContactPolicy(
@@ -275,7 +317,8 @@ def _client_for_role(
             sms_compliance_state=SmsComplianceState.APPROVED,
         )
     )
-    signaler = FakeLeadNurtureWorkflowSignaler()
+    outbox = FakeTemporalSignalOutboxRepository()
+    crm_client = FakeCRMClient()
     bundle = LeadReadBundle(
         lead_repository=FakeLeadRepository((lead,)),
         workflow_repository=FakeLeadWorkflowRepository((workflow,)),
@@ -379,16 +422,11 @@ def _client_for_role(
         session=_FakeSession(),
         lead_repository=bundle.lead_repository,
         workflow_repository=bundle.workflow_repository,
+        lead_workflow_repository=FakeLeadWorkflowRepository((workflow,)),
         workspace_contact_policy_repository=policy_repository,
-        inbound_message_repository=bundle.inbound_message_repository,
-        handoff_repository=bundle.handoff_repository,
-        campaign_enrollment_repository=FakeCampaignEnrollmentRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(()),
-        temporal_workflow_starter=FakeTemporalWorkflowStarter(),
-        lead_nurture_workflow_signaler=signaler,
+        temporal_signal_outbox_repository=outbox,
         external_event_repository=_FakeExternalEventRepository(),
-        event_bus=None,
-        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
     )
     draft_review_action_bundle = LeadDraftReviewActionBundle(
         session=_FakeSession(),
@@ -402,9 +440,15 @@ def _client_for_role(
         workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
         message_repository=FakeCadenceOutboundMessageRepository(),
         external_event_repository=_FakeExternalEventRepository(),
+        temporal_signal_outbox_repository=outbox,
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(()),
+        crm_client=crm_client,
+        outbound_message_crm_completion_repository=FakeOutboundMessageCRMCompletionRepository(),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            _workspace_handoff_config_with_snapshot_fields()
+        ),
         sms_provider=FakeSMSProvider("msg-1"),
         email_provider=FakeEmailProvider("email-1"),
-        lead_nurture_workflow_signaler=signaler,
     )
     app.dependency_overrides[get_workspace_actor] = lambda: _actor(role)
     app.dependency_overrides[get_lead_read_bundle] = lambda: bundle
@@ -413,7 +457,7 @@ def _client_for_role(
     app.dependency_overrides[get_lead_draft_review_action_bundle] = lambda: (
         draft_review_action_bundle
     )
-    return LeadsTestClient(client=TestClient(app), signaler=signaler)
+    return LeadsTestClient(client=TestClient(app), outbox=outbox, crm_client=crm_client)
 
 
 def _activity_items() -> tuple[LeadActivityItem, ...]:

@@ -64,6 +64,58 @@ async def test_get_lead_maps_payload(workspace_id: uuid.UUID) -> None:
     assert lead.custom_fields == {"budget": "650000"}
 
 
+async def test_get_lead_prefers_assigned_user_id_over_assigned_to_name(
+    workspace_id: uuid.UUID,
+) -> None:
+    payload = {
+        "id": 123,
+        "firstName": "Ada",
+        "assignedUserId": 42,
+        "assignedTo": "The Miller Schackman Team Test",
+    }
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=_transport(payload),
+    )
+
+    lead = await client.get_lead(workspace_id, "123")
+
+    assert lead is not None
+    assert lead.assigned_agent_id == "42"
+
+
+async def test_get_assigned_agent_ignores_team_name_assigned_to_without_user_id(
+    workspace_id: uuid.UUID,
+) -> None:
+    request_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_paths.append(request.url.path)
+        if request.url.path == "/v1/people/123":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 123,
+                    "assignedTo": "The Miller Schackman Team Test",
+                },
+            )
+        return httpx.Response(500, json={"message": "unexpected downstream user lookup"})
+
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    agent = await client.get_assigned_agent(workspace_id, "123")
+
+    assert agent is None
+    assert request_paths == ["/v1/people/123"]
+
+
 async def test_list_lead_snapshots_maps_payload_and_pagination_metadata(
     workspace_id: uuid.UUID,
 ) -> None:
@@ -101,7 +153,11 @@ async def test_list_lead_snapshots_maps_payload_and_pagination_metadata(
     assert len(page.leads) == 1
     assert page.leads[0].crm_lead_id == "123"
     assert page.leads[0].lead_source == "Zillow"
-    assert page.leads[0].mapped_custom_fields == {"budget": "650000"}
+    assert page.leads[0].mapped_custom_fields == {
+        "budget": "650000",
+        "assigned_agent_user_id": "42",
+        "assigned_agent_name": "Agent Name",
+    }
 
 
 async def test_list_lead_snapshots_sends_incremental_filters_and_cursor(
@@ -267,6 +323,84 @@ async def test_get_recent_activity_uses_events_endpoint_with_person_id(
     assert activities[3].activity_type == "Inquiry"
     assert activities[3].content == "We are hoping to move before school starts."
     assert activities[3].agent_id == "42"
+
+
+async def test_add_note_posts_to_notes_collection_with_person_id_and_body(
+    workspace_id: uuid.UUID,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["method"] = request.method
+        captured["json"] = request.read().decode("utf-8")
+        return httpx.Response(200, json={})
+
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    await client.add_note(workspace_id, "12443", "AI outbound email message sent")
+
+    assert captured == {
+        "path": "/v1/notes",
+        "method": "POST",
+        "json": '{"personId":12443,"body":"AI outbound email message sent"}',
+    }
+
+
+async def test_add_note_includes_subject_when_provided(workspace_id: uuid.UUID) -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = request.read().decode("utf-8")
+        return httpx.Response(200, json={})
+
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    await client.add_note(
+        workspace_id,
+        "12443",
+        "AI outbound email message sent",
+        subject="AI OUTBOUND · EMAIL",
+    )
+
+    assert captured["json"] == (
+        '{"personId":12443,"body":"AI outbound email message sent",'
+        '"subject":"AI OUTBOUND \u00b7 EMAIL"}'
+    )
+
+
+async def test_add_note_raises_for_http_error(workspace_id: uuid.UUID) -> None:
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=_transport({"message": "bad request"}, status=400),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.add_note(workspace_id, "12443", "AI outbound email message sent")
+
+
+async def test_update_custom_fields_raises_for_http_error(workspace_id: uuid.UUID) -> None:
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=_transport({"message": "bad request"}, status=400),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.update_custom_fields(workspace_id, "12443", {"ai_summary": "test"})
 
 
 async def test_get_recent_activity_accepts_empty_events_list(

@@ -45,7 +45,13 @@ def _config_from_model(model: WorkspaceHandoffConfigModel) -> WorkspaceHandoffCo
         workspace_id=model.workspace_id,
         fallback_recipient_email=model.fallback_recipient_email,
         crm_handoff_tag=model.crm_handoff_tag,
+        crm_review_tag=model.crm_review_tag,
         crm_custom_fields=model.crm_custom_fields,
+        crm_snapshot_summary_field=model.crm_snapshot_summary_field,
+        crm_snapshot_status_field=model.crm_snapshot_status_field,
+        crm_snapshot_latest_inbound_field=model.crm_snapshot_latest_inbound_field,
+        crm_snapshot_latest_outbound_field=model.crm_snapshot_latest_outbound_field,
+        crm_snapshot_last_activity_at_field=model.crm_snapshot_last_activity_at_field,
     )
 
 
@@ -57,7 +63,13 @@ def _config_to_values(
         "workspace_id": config.workspace_id,
         "fallback_recipient_email": config.fallback_recipient_email,
         "crm_handoff_tag": config.crm_handoff_tag,
+        "crm_review_tag": config.crm_review_tag,
         "crm_custom_fields": dict(config.crm_custom_fields),
+        "crm_snapshot_summary_field": config.crm_snapshot_summary_field,
+        "crm_snapshot_status_field": config.crm_snapshot_status_field,
+        "crm_snapshot_latest_inbound_field": config.crm_snapshot_latest_inbound_field,
+        "crm_snapshot_latest_outbound_field": config.crm_snapshot_latest_outbound_field,
+        "crm_snapshot_last_activity_at_field": config.crm_snapshot_last_activity_at_field,
         "created_at": now,
         "updated_at": now,
     }
@@ -70,6 +82,12 @@ def _config_update_values(
     return {
         "fallback_recipient_email": config.fallback_recipient_email,
         "crm_handoff_tag": config.crm_handoff_tag,
+        "crm_review_tag": config.crm_review_tag,
         "crm_custom_fields": dict(config.crm_custom_fields),
+        "crm_snapshot_summary_field": config.crm_snapshot_summary_field,
+        "crm_snapshot_status_field": config.crm_snapshot_status_field,
+        "crm_snapshot_latest_inbound_field": config.crm_snapshot_latest_inbound_field,
+        "crm_snapshot_latest_outbound_field": config.crm_snapshot_latest_outbound_field,
+        "crm_snapshot_last_activity_at_field": config.crm_snapshot_last_activity_at_field,
         "updated_at": now,
     }
