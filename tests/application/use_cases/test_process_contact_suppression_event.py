@@ -1,9 +1,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import cast
 from uuid import UUID
 
-from app.application.ports.temporal import PauseLeadNurtureWorkflowSignal
 from app.application.use_cases.process_contact_suppression_event import (
     ContactSuppressionEvent,
     ProcessContactSuppressionEventReasonCode,
@@ -17,8 +15,9 @@ from app.domain.compliance import (
     SuppressionType,
     WorkspaceContactPolicy,
 )
+from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
-from app.domain.workflows import LeadWorkflow, WorkflowState
+from app.domain.workflows import LeadWorkflow, TemporalSignalName, WorkflowState
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeLeadRepository,
     FakeLeadWorkflowRepository,
@@ -26,7 +25,7 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeWorkspaceContactPolicyRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
-    FakeLeadNurtureWorkflowSignaler,
+    FakeTemporalSignalOutboxRepository,
 )
 from tests.application.use_cases.test_process_inbound_message_event import (
     FakeExternalEventRepository,
@@ -85,7 +84,7 @@ async def test_processes_sms_opt_out_and_pauses_when_email_remains_usable() -> N
     workflow = _workflow()
     workflow_repository.workflows[workflow.workflow_id] = workflow
     workflow_repository.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow
-    signaler = FakeLeadNurtureWorkflowSignaler()
+    outbox = FakeTemporalSignalOutboxRepository()
 
     result = await process_contact_suppression_event(
         event=ContactSuppressionEvent(
@@ -108,7 +107,7 @@ async def test_processes_sms_opt_out_and_pauses_when_email_remains_usable() -> N
                 sms_compliance_state=SmsComplianceState.APPROVED,
             )
         ),
-        lead_nurture_workflow_signaler=signaler,
+        temporal_signal_outbox_repository=outbox,
         now=NOW,
     )
 
@@ -117,8 +116,11 @@ async def test_processes_sms_opt_out_and_pauses_when_email_remains_usable() -> N
     assert lead_repository.lead is not None
     assert lead_repository.lead.sms_opted_out is True
     assert SuppressionType.SMS_OPT_OUT in lead_repository.lead.suppression_types
-    pause_signal = cast(PauseLeadNurtureWorkflowSignal, signaler.calls[0]["signal"])
-    assert pause_signal.reason == "sms_opt_out"
+    assert result.signal_queued is True
+    assert len(outbox.entries) == 1
+    entry = next(iter(outbox.entries.values()))
+    assert entry.signal_name == TemporalSignalName.PAUSE_REQUESTED
+    assert entry.payload["reason"] == "sms_opt_out"
 
 
 async def test_processes_email_unsubscribe_and_suppresses_when_no_channel_remains() -> None:
@@ -147,7 +149,7 @@ async def test_processes_email_unsubscribe_and_suppresses_when_no_channel_remain
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             WorkspaceContactPolicy(workspace_id=WORKSPACE_ID)
         ),
-        lead_nurture_workflow_signaler=FakeLeadNurtureWorkflowSignaler(),
+        temporal_signal_outbox_repository=FakeTemporalSignalOutboxRepository(),
         now=NOW,
     )
 
@@ -169,6 +171,7 @@ async def test_returns_duplicate_when_suppression_event_replays() -> None:
         occurred_at=NOW,
     )
     external_events = FakeExternalEventRepository()
+    outbox = FakeTemporalSignalOutboxRepository()
 
     first = await process_contact_suppression_event(
         event=event,
@@ -177,7 +180,7 @@ async def test_returns_duplicate_when_suppression_event_replays() -> None:
         lead_workflow_repository=FakeLeadWorkflowRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(None),
-        lead_nurture_workflow_signaler=FakeLeadNurtureWorkflowSignaler(),
+        temporal_signal_outbox_repository=outbox,
         now=NOW,
     )
     second = await process_contact_suppression_event(
@@ -187,63 +190,69 @@ async def test_returns_duplicate_when_suppression_event_replays() -> None:
         lead_workflow_repository=FakeLeadWorkflowRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(None),
-        lead_nurture_workflow_signaler=FakeLeadNurtureWorkflowSignaler(),
+        temporal_signal_outbox_repository=outbox,
         now=NOW,
     )
 
     assert first.status == ProcessContactSuppressionEventStatus.PROCESSED
     assert second.status == ProcessContactSuppressionEventStatus.DUPLICATE
     assert second.reasons == (ProcessContactSuppressionEventReasonCode.DUPLICATE_EVENT,)
+    assert len(outbox.entries) == 0
 
 
-async def test_commits_before_signaling_temporal_pause() -> None:
-    call_order: list[str] = []
-
-    class RecordingLeadNurtureWorkflowSignaler(FakeLeadNurtureWorkflowSignaler):
-        async def signal_pause_lead_nurture_workflow(
-            self,
-            *,
-            temporal_workflow_id: str,
-            signal: PauseLeadNurtureWorkflowSignal,
-        ) -> None:
-            call_order.append("signal")
-            await super().signal_pause_lead_nurture_workflow(
-                temporal_workflow_id=temporal_workflow_id,
-                signal=signal,
-            )
-
-    async def commit() -> None:
-        call_order.append("commit")
-
-    workflow_repository = FakeLeadWorkflowRepository()
-    workflow = _workflow()
-    workflow_repository.workflows[workflow.workflow_id] = workflow
-    workflow_repository.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow
+async def test_does_not_create_duplicate_outbox_row_for_duplicate_suppression_event() -> None:
+    external_events = FakeExternalEventRepository()
+    await external_events.save(
+        _external_event(
+            external_event_id=UUID("70000000-0000-0000-0000-000000000006"),
+            provider_event_id="evt-dup",
+            lead_id=LEAD_ID,
+        )
+    )
+    outbox = FakeTemporalSignalOutboxRepository()
 
     result = await process_contact_suppression_event(
         event=ContactSuppressionEvent(
             workspace_id=WORKSPACE_ID,
             source_provider="twilio",
-            provider_event_id="evt-order",
+            provider_event_id="evt-dup",
             crm_provider=CRMProvider.FOLLOW_UP_BOSS,
             crm_lead_id="crm-123",
             suppression_kind=ContactSuppressionKind.SMS_OPT_OUT,
             occurred_at=NOW,
         ),
         lead_repository=FakeLeadRepository(_lead()),
-        external_event_repository=FakeExternalEventRepository(),
-        lead_workflow_repository=workflow_repository,
+        external_event_repository=external_events,
+        lead_workflow_repository=FakeLeadWorkflowRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
-        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
-            WorkspaceContactPolicy(
-                workspace_id=WORKSPACE_ID,
-                sms_compliance_state=SmsComplianceState.APPROVED,
-            )
-        ),
-        lead_nurture_workflow_signaler=RecordingLeadNurtureWorkflowSignaler(),
-        commit=commit,
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(None),
+        temporal_signal_outbox_repository=outbox,
         now=NOW,
     )
 
-    assert result.signal_sent is True
-    assert call_order == ["commit", "signal"]
+    assert result.status == ProcessContactSuppressionEventStatus.DUPLICATE
+    assert len(outbox.entries) == 0
+
+
+def _external_event(
+    *,
+    external_event_id: UUID,
+    provider_event_id: str,
+    lead_id: UUID,
+) -> ExternalEvent:
+    return ExternalEvent(
+        external_event_id=external_event_id,
+        workspace_id=WORKSPACE_ID,
+        provider="twilio",
+        event_type="sms_opt_out",
+        provider_event_id=provider_event_id,
+        crm_lead_id="crm-123",
+        lead_id=lead_id,
+        received_at=NOW,
+        processed_at=NOW,
+        status=ExternalEventStatus.PROCESSED,
+        payload_redacted={"event": "redacted"},
+        failure_reason=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )

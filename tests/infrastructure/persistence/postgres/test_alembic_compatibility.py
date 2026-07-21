@@ -1,13 +1,13 @@
 import psycopg
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from tests.infrastructure.persistence.postgres._harness import (
     postgres_connect_kwargs,
     run_migrations,
     temporary_postgres_database,
 )
-
-LATEST_REVISION = "0029_create_workspace_operational_controls_table"
 
 
 def test_migrations_upgrade_legacy_alembic_version_table() -> None:
@@ -33,7 +33,7 @@ def test_migrations_upgrade_legacy_alembic_version_table() -> None:
                 with connection.cursor() as cursor:
                     assert _version_num_length(cursor) == 255
                     cursor.execute("SELECT version_num FROM alembic_version")
-                    assert cursor.fetchone() == (LATEST_REVISION,)
+                    assert cursor.fetchone() == (_latest_revision(),)
     except psycopg.OperationalError as error:
         pytest.skip(f"Local Postgres is unavailable for the migration compatibility test: {error}")
 
@@ -51,3 +51,10 @@ def _version_num_length(cursor: psycopg.Cursor[tuple[object]]) -> int:
     value = row[0]
     assert isinstance(value, int)
     return value
+
+
+def _latest_revision() -> str:
+    script = ScriptDirectory.from_config(Config("alembic.ini"))
+    revision = script.get_current_head()
+    assert revision is not None
+    return revision

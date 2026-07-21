@@ -1,7 +1,6 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from app.application.ports.temporal import PauseLeadNurtureWorkflowSignal
 from app.application.use_cases.process_crm_human_activity_event import (
     CRMHumanActivityEvent,
     CRMHumanActivityKind,
@@ -12,14 +11,19 @@ from app.application.use_cases.process_crm_human_activity_event import (
 from app.domain.common.ids import LeadId
 from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
-from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransitionReasonCode
+from app.domain.workflows import (
+    LeadWorkflow,
+    TemporalSignalName,
+    WorkflowState,
+    WorkflowTransitionReasonCode,
+)
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeLeadRepository,
     FakeLeadWorkflowRepository,
     FakeWorkflowTransitionRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
-    FakeLeadNurtureWorkflowSignaler,
+    FakeTemporalSignalOutboxRepository,
 )
 from tests.application.use_cases.test_process_inbound_message_event import (
     FakeExternalEventRepository,
@@ -34,12 +38,12 @@ ENROLLMENT_ID = UUID("40000000-0000-0000-0000-000000000005")
 EXTERNAL_EVENT_ID = UUID("40000000-0000-0000-0000-000000000006")
 
 
-async def test_pauses_workflow_and_signals_temporal_for_meaningful_activity() -> None:
+async def test_pauses_workflow_and_queues_signal_for_meaningful_activity() -> None:
     lead_repository = FakeLeadRepository(_lead())
     external_events = FakeExternalEventRepository()
     workflows = FakeLeadWorkflowRepository()
     transitions = FakeWorkflowTransitionRepository()
-    signaler = FakeLeadNurtureWorkflowSignaler()
+    outbox = FakeTemporalSignalOutboxRepository()
     await workflows.save(_workflow())
 
     result = await process_crm_human_activity_event(
@@ -48,7 +52,7 @@ async def test_pauses_workflow_and_signals_temporal_for_meaningful_activity() ->
         external_event_repository=external_events,
         lead_workflow_repository=workflows,
         workflow_transition_repository=transitions,
-        lead_nurture_workflow_signaler=signaler,
+        temporal_signal_outbox_repository=outbox,
         now=NOW,
         external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
     )
@@ -56,7 +60,7 @@ async def test_pauses_workflow_and_signals_temporal_for_meaningful_activity() ->
     assert result.status == ProcessCRMHumanActivityEventStatus.PROCESSED
     assert result.activity_kind == CRMHumanActivityKind.NOTE_ADDED
     assert result.pause_requested is True
-    assert result.signal_sent is True
+    assert result.signal_queued is True
     assert result.pause_reason == "crm_note_added"
     assert lead_repository.saved[-1].last_agent_activity_at == NOW
     workflow = workflows.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
@@ -64,9 +68,13 @@ async def test_pauses_workflow_and_signals_temporal_for_meaningful_activity() ->
     transition = next(iter(transitions.transitions.values()))
     assert transition.reason_code == WorkflowTransitionReasonCode.CRM_HUMAN_ACTIVITY_DETECTED
     assert transition.metadata["human_activity_kind"] == "crm_note_added"
-    assert signaler.calls[0]["temporal_workflow_id"] == "workflow-123"
     saved_event = external_events.events[(WORKSPACE_ID, CRMProvider.FOLLOW_UP_BOSS.value, "evt-1")]
     assert saved_event.status.value == "processed"
+    assert len(outbox.entries) == 1
+    entry = next(iter(outbox.entries.values()))
+    assert entry.signal_name == TemporalSignalName.PAUSE_REQUESTED
+    assert entry.temporal_workflow_id == "workflow-123"
+    assert entry.payload["reason"] == "crm_note_added"
 
 
 async def test_returns_duplicate_when_provider_event_was_already_processed() -> None:
@@ -85,7 +93,7 @@ async def test_returns_duplicate_when_provider_event_was_already_processed() -> 
         external_event_repository=external_events,
         lead_workflow_repository=FakeLeadWorkflowRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
-        lead_nurture_workflow_signaler=FakeLeadNurtureWorkflowSignaler(),
+        temporal_signal_outbox_repository=FakeTemporalSignalOutboxRepository(),
         now=NOW,
     )
 
@@ -100,7 +108,7 @@ async def test_ignores_non_meaningful_activity() -> None:
         external_event_repository=FakeExternalEventRepository(),
         lead_workflow_repository=FakeLeadWorkflowRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
-        lead_nurture_workflow_signaler=FakeLeadNurtureWorkflowSignaler(),
+        temporal_signal_outbox_repository=FakeTemporalSignalOutboxRepository(),
         now=NOW,
         external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
     )
@@ -116,52 +124,40 @@ async def test_records_processed_event_when_no_workflow_exists() -> None:
         external_event_repository=FakeExternalEventRepository(),
         lead_workflow_repository=FakeLeadWorkflowRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
-        lead_nurture_workflow_signaler=FakeLeadNurtureWorkflowSignaler(),
+        temporal_signal_outbox_repository=FakeTemporalSignalOutboxRepository(),
         now=NOW,
         external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
     )
 
     assert result.status == ProcessCRMHumanActivityEventStatus.PROCESSED
     assert result.pause_requested is False
-    assert result.signal_sent is False
+    assert result.signal_queued is False
     assert result.reasons == (ProcessCRMHumanActivityEventReasonCode.NO_WORKFLOW,)
 
 
-async def test_commits_before_signaling_temporal_pause() -> None:
-    call_order: list[str] = []
-
-    class RecordingLeadNurtureWorkflowSignaler(FakeLeadNurtureWorkflowSignaler):
-        async def signal_pause_lead_nurture_workflow(
-            self,
-            *,
-            temporal_workflow_id: str,
-            signal: PauseLeadNurtureWorkflowSignal,
-        ) -> None:
-            call_order.append("signal")
-            await super().signal_pause_lead_nurture_workflow(
-                temporal_workflow_id=temporal_workflow_id,
-                signal=signal,
-            )
-
-    async def commit() -> None:
-        call_order.append("commit")
-
-    workflows = FakeLeadWorkflowRepository()
-    await workflows.save(_workflow())
+async def test_does_not_create_duplicate_outbox_row_for_duplicate_event() -> None:
+    external_events = FakeExternalEventRepository()
+    await external_events.save(
+        _external_event(
+            external_event_id=EXTERNAL_EVENT_ID,
+            provider_event_id="evt-dup",
+            lead_id=LEAD_ID,
+        )
+    )
+    outbox = FakeTemporalSignalOutboxRepository()
 
     result = await process_crm_human_activity_event(
-        event=_event(event_type="activity_created", activity_type="note"),
+        event=_event(provider_event_id="evt-dup", event_type="activity_created"),
         lead_repository=FakeLeadRepository(_lead()),
-        external_event_repository=FakeExternalEventRepository(),
-        lead_workflow_repository=workflows,
+        external_event_repository=external_events,
+        lead_workflow_repository=FakeLeadWorkflowRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
-        lead_nurture_workflow_signaler=RecordingLeadNurtureWorkflowSignaler(),
-        commit=commit,
+        temporal_signal_outbox_repository=outbox,
         now=NOW,
     )
 
-    assert result.signal_sent is True
-    assert call_order == ["commit", "signal"]
+    assert result.status == ProcessCRMHumanActivityEventStatus.DUPLICATE
+    assert len(outbox.entries) == 0
 
 
 def _lead() -> CanonicalLeadRecord:

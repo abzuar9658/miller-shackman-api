@@ -112,6 +112,10 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeSMSProvider,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import FakeTemporalWorkflowStarter
+from tests.application.use_cases.test_process_inbound_message_event import (
+    _draft_json,
+    _FakeLLMClientForContinuation,
+)
 
 BASE_TIME = datetime(2026, 7, 11, 15, 0, tzinfo=UTC)
 SYNC_TIME = BASE_TIME
@@ -185,6 +189,7 @@ class FakeCRMClient:
 
     def __init__(self) -> None:
         self.notes: list[tuple[WorkspaceId, str, str]] = []
+        self.note_subjects: list[str | None] = []
         self.tags: list[tuple[WorkspaceId, str, str]] = []
         self.updated_fields: list[tuple[WorkspaceId, str, dict[str, str]]] = []
 
@@ -225,8 +230,15 @@ class FakeCRMClient:
     ) -> CRMAgent | None:
         return CRMAgent(crm_agent_id="agent-99", name="Agent Smith", email="agent@example.com")
 
-    async def add_note(self, workspace_id: WorkspaceId, crm_lead_id: str, content: str) -> None:
+    async def add_note(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+        content: str,
+        subject: str | None = None,
+    ) -> None:
         self.notes.append((workspace_id, crm_lead_id, content))
+        self.note_subjects.append(subject)
 
     async def add_tag(self, workspace_id: WorkspaceId, crm_lead_id: str, tag: str) -> None:
         self.tags.append((workspace_id, crm_lead_id, tag))
@@ -244,6 +256,12 @@ class FakeCRMClient:
 
     async def subscribe_to_events(self, workspace_id: WorkspaceId, webhook_url: str) -> None:
         _ = (workspace_id, webhook_url)
+
+    async def fetch_resource_by_uri(
+        self, workspace_id: WorkspaceId, uri: str
+    ) -> dict[str, object] | None:
+        _ = (workspace_id, uri)
+        return None
 
 
 class FakeNotificationProvider:
@@ -514,6 +532,172 @@ async def test_business_flow_harness_runs_against_real_postgres(
     assert audit_entries[0].action == CampaignAdminAuditAction.BATCH_LAUNCHED
 
 
+async def test_business_flow_harness_runs_continue_ai_path_against_real_postgres(
+    postgres_session: AsyncSession,
+) -> None:
+    await _seed_business_flow_prerequisites(postgres_session)
+
+    lead_repository = PostgresLeadRepository(postgres_session)
+    crm_sync_job_repository = PostgresCRMSyncJobRepository(postgres_session)
+    external_event_repository = PostgresExternalEventRepository(postgres_session)
+    campaign_enrollment_repository = PostgresCampaignEnrollmentRepository(postgres_session)
+    lead_workflow_repository = PostgresLeadWorkflowRepository(postgres_session)
+    workflow_transition_repository = PostgresWorkflowTransitionRepository(postgres_session)
+    campaign_execution_repository = PostgresCampaignExecutionRepository(postgres_session)
+    workspace_repository = PostgresWorkspaceRepository(postgres_session)
+    workspace_contact_policy_repository = PostgresWorkspaceContactPolicyRepository(postgres_session)
+    message_repository = PostgresOutboundMessageRepository(postgres_session)
+    provider_message_event_repository = PostgresProviderMessageEventRepository(postgres_session)
+    conversation_repository = PostgresConversationRepository(postgres_session)
+    inbound_message_repository = PostgresInboundMessageRepository(postgres_session)
+    conversation_summary_repository = PostgresConversationSummaryRepository(postgres_session)
+
+    sync_result = await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=FakeLeadSnapshotSource(
+            pages=(CanonicalLeadSnapshotPage(leads=(_lead(),), next_cursor=None),)
+        ),
+        lead_repository=lead_repository,
+        crm_sync_job_repository=crm_sync_job_repository,
+        now=SYNC_TIME,
+        sync_type=CRMSyncType.FULL,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+    assert sync_result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+
+    enrollment_result = await start_selected_campaign_batch(
+        workspace_id=WORKSPACE_ID,
+        campaign_id=CAMPAIGN_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        lead_ids=[LEAD_ID],
+        source=CampaignEnrollmentSource.MANUAL_ADMIN,
+        reason_codes=["postgres_business_flow_harness_continue"],
+        actor_user_id=ACTOR_ID,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        temporal_workflow_starter=FakeTemporalWorkflowStarter(),
+        now=ENROLL_TIME,
+    )
+    assert enrollment_result.started_count == 1
+
+    schedule_result = await schedule_next_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        campaign_execution_repository=campaign_execution_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        now=ENROLL_TIME,
+    )
+    assert schedule_result.status == CadenceStepScheduleStatus.SCHEDULED
+
+    execute_result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=STEP_ID,
+        scheduled_for=ENROLL_TIME,
+        campaign_execution_repository=campaign_execution_repository,
+        workspace_repository=workspace_repository,
+        workspace_contact_policy_repository=workspace_contact_policy_repository,
+        lead_repository=lead_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        message_repository=message_repository,
+        llm_client=FakeLLMClient(),
+        sms_provider=FakeSMSProvider(),
+        email_provider=FakeEmailProvider("email-123"),
+        now=EXECUTE_TIME,
+    )
+    assert execute_result.status == CadenceStepExecutionStatus.SENT
+    assert execute_result.outbound_message_id is not None
+
+    delivery_result = await process_provider_delivery_callback(
+        callback=ProviderDeliveryCallback(
+            provider="sendgrid",
+            provider_event_id="delivery-evt-continue-1",
+            provider_message_id="email-123",
+            event_type="delivered",
+            status=ProviderDeliveryStatus.DELIVERED,
+            occurred_at=DELIVERY_TIME,
+            payload_redacted={"event": "delivered"},
+        ),
+        message_repository=message_repository,
+        provider_message_event_repository=provider_message_event_repository,
+        now=DELIVERY_TIME,
+    )
+    assert delivery_result.status == ProcessProviderDeliveryCallbackStatus.PROCESSED
+
+    inbound_result = await process_inbound_message_event(
+        event=_event(
+            provider_event_id="evt-continue-1",
+            provider_message_id="msg-continue-1",
+            body="Can you share a little more detail?",
+        ),
+        lead_repository=lead_repository,
+        external_event_repository=external_event_repository,
+        conversation_repository=conversation_repository,
+        inbound_message_repository=inbound_message_repository,
+        conversation_summary_repository=conversation_summary_repository,
+        handoff_repository=PostgresHandoffRepository(postgres_session),
+        crm_client=cast(CRMClient, FakeCRMClient()),
+        notification_provider=cast(NotificationProvider, FakeNotificationProvider()),
+        workspace_handoff_config_repository=PostgresWorkspaceHandoffConfigRepository(postgres_session),
+        handoff_completion_repository=PostgresHandoffCompletionRepository(postgres_session),
+        llm_client=_FakeLLMClientForContinuation(
+            classification_text=_classification_json(
+                intent="general_reply",
+                asks_for_human=False,
+                summary_text="Lead asked a general follow-up question.",
+            ),
+            draft_text=_draft_json(body="Absolutely — here are a few more details."),
+        ),
+        workspace_repository=workspace_repository,
+        campaign_execution_repository=campaign_execution_repository,
+        workspace_contact_policy_repository=workspace_contact_policy_repository,
+        message_repository=message_repository,
+        sms_provider=FakeSMSProvider(),
+        email_provider=FakeEmailProvider("email-456"),
+        now=INBOUND_TIME,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        summary_id_factory=lambda: SUMMARY_ID,
+    )
+
+    assert inbound_result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert inbound_result.handoff_required is False
+    assert inbound_result.handoff_id is None
+    assert inbound_result.continue_ai_provider_message_id == "email-456"
+    assert inbound_result.continue_ai_outbound_message_id is not None
+
+    final_workflow = await lead_workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID)
+    assert final_workflow is not None
+    assert final_workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+
+    final_conversation = await conversation_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID)
+    assert final_conversation is not None
+    assert final_conversation.ai_interaction_count == 1
+
+    continuation_message = await message_repository.get_by_id(
+        WORKSPACE_ID,
+        inbound_result.continue_ai_outbound_message_id,
+    )
+    assert continuation_message is not None
+    assert continuation_message.provider_message_id == "email-456"
+    assert continuation_message.status.value == "sent"
+
+    external_event = await external_event_repository.get_by_provider_event_id(
+        WORKSPACE_ID,
+        CRMProvider.FOLLOW_UP_BOSS.value,
+        "evt-continue-1",
+    )
+    assert external_event is not None
+    assert external_event.status == ExternalEventStatus.PROCESSED
+
+
 async def _seed_business_flow_prerequisites(session: AsyncSession) -> None:
     workspace_repository = PostgresWorkspaceRepository(session)
     workspace_contact_policy_repository = PostgresWorkspaceContactPolicyRepository(session)
@@ -646,29 +830,45 @@ def _lead() -> CanonicalLeadRecord:
     )
 
 
-def _event() -> InboundMessageEvent:
+def _event(
+    *,
+    provider_event_id: str = "evt-1",
+    provider_message_id: str = "msg-1",
+    body: str = "Can an agent call me today?",
+    channel: ContactChannel = ContactChannel.EMAIL,
+) -> InboundMessageEvent:
     return InboundMessageEvent(
         workspace_id=WORKSPACE_ID,
         provider=CRMProvider.FOLLOW_UP_BOSS.value,
-        provider_event_id="evt-1",
-        provider_message_id="msg-1",
+        provider_event_id=provider_event_id,
+        provider_message_id=provider_message_id,
         crm_lead_id="crm-123",
-        channel=ContactChannel.EMAIL,
-        body="Can an agent call me today?",
+        channel=channel,
+        body=body,
         received_at=INBOUND_TIME,
         payload_redacted={"event": "redacted"},
     )
 
 
-def _classification_json() -> str:
+def _classification_json(
+    *,
+    intent: str = "human_requested",
+    asks_for_human: bool | None = None,
+    opt_out_detected: bool = False,
+    summary_text: str = "Lead asked for a human callback.",
+) -> str:
+    if asks_for_human is None:
+        asks_for_human = intent == "human_requested"
     return json.dumps(
         {
-            "intent": "human_requested",
+            "intent": intent,
             "confidence": 0.94,
-            "handoff_required": True,
-            "handoff_reason": "human_requested",
-            "opt_out_detected": False,
-            "summary_text": "Lead asked for a human callback.",
+            "asks_for_human": asks_for_human,
+            "shows_buying_interest": False,
+            "shows_selling_interest": False,
+            "asks_property_or_advice": False,
+            "opt_out_detected": opt_out_detected,
+            "summary_text": summary_text,
             "preferences": {"timeline": "today"},
         }
     )

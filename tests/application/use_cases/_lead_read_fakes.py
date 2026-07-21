@@ -11,7 +11,7 @@ from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
 from app.domain.conversations import CrmConversationEvent, Handoff, InboundMessage
 from app.domain.identity import User
 from app.domain.leads import CanonicalLeadRecord
-from app.domain.workflows import LeadWorkflow, WorkflowTransition
+from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransition
 
 
 class FakeLeadRepository:
@@ -94,6 +94,18 @@ class FakeLeadWorkflowRepository:
     ) -> tuple[LeadWorkflow, ...]:
         return tuple(
             wf for (wid, _), wf in self._latest.items() if wid == workspace_id
+        )[:limit]
+
+    async def list_paused_for_workspace(
+        self,
+        workspace_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadWorkflow, ...]:
+        return tuple(
+            wf
+            for (wid, _), wf in self._latest.items()
+            if wid == workspace_id and wf.state == WorkflowState.PAUSED
         )[:limit]
 
     async def save(self, workflow: LeadWorkflow) -> LeadWorkflow:

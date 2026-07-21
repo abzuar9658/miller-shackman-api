@@ -8,6 +8,11 @@ from app.application.use_cases.campaign_cadence_execution import (
     execute_campaign_cadence_step,
     schedule_next_campaign_cadence_step,
 )
+from app.application.use_cases.process_inbound_message_event import (
+    InboundMessageEvent,
+    ProcessInboundMessageEventStatus,
+    process_inbound_message_event,
+)
 from app.domain.campaigns import CampaignStatus, CampaignVersionStatus
 from app.domain.campaigns.execution import CampaignCadenceStep, CampaignExecutionConfig
 from app.domain.compliance.contactability import (
@@ -33,6 +38,23 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeWorkflowTransitionRepository,
     FakeWorkspaceContactPolicyRepository,
     FakeWorkspaceRepository,
+)
+from tests.application.use_cases.test_process_inbound_message_event import (
+    FakeConversationRepository,
+    FakeConversationSummaryRepository,
+    FakeCRMClient,
+    FakeExternalEventRepository,
+    FakeHandoffRepository,
+    FakeInboundMessageRepository,
+    FakeOutboundMessageCRMCompletionRepository,
+    FakeWorkspaceHandoffConfigRepository,
+    _workspace_handoff_config_with_snapshot_fields,
+)
+from tests.application.use_cases.test_process_inbound_message_event import (
+    FakeLLMClient as FakeInboundLLMClient,
+)
+from tests.application.use_cases.test_process_inbound_message_event import (
+    _classification_json as _inbound_classification_json,
 )
 
 NOW = datetime(2026, 7, 9, 12, 0, tzinfo=UTC)
@@ -104,6 +126,7 @@ async def test_execute_campaign_cadence_step_sends_first_step_and_advances_curso
 
     message_repository = FakeOutboundMessageRepository()
     email_provider = FakeEmailProvider("email-123")
+    crm_client = FakeCRMClient()
     result = await execute_campaign_cadence_step(
         workspace_id=WORKSPACE_ID,
         lead_id=LEAD_ID,
@@ -136,6 +159,11 @@ async def test_execute_campaign_cadence_step_sends_first_step_and_advances_curso
         llm_client=llm_client,
         sms_provider=FakeSMSProvider(),
         email_provider=email_provider,
+        crm_client=crm_client,
+        outbound_message_crm_completion_repository=FakeOutboundMessageCRMCompletionRepository(),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            _workspace_handoff_config_with_snapshot_fields()
+        ),
         now=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
     )
 
@@ -149,6 +177,19 @@ async def test_execute_campaign_cadence_step_sends_first_step_and_advances_curso
     assert len(email_provider.messages) == 1
     assert message_repository.saved[-1].provider_message_id == "email-123"
     assert message_repository.saved[-1].status.value == "sent"
+    assert len(crm_client.notes) == 1
+    assert crm_client.note_subjects == ["AI OUTBOUND · EMAIL"]
+    assert "AI OUTBOUND · EMAIL" in crm_client.notes[0]
+    assert "Latest inbound:\nWe are hoping to move before school starts." in crm_client.notes[0]
+    assert crm_client.custom_field_updates == [
+        {
+            "ai_summary": "Used safe canonical context.",
+            "ai_status": "waiting_for_response",
+            "ai_latest_inbound": "We are hoping to move before school starts.",
+            "ai_latest_outbound": message_repository.saved[-1].body,
+            "ai_last_activity_at": datetime(2026, 7, 10, 15, 0, tzinfo=UTC).isoformat(),
+        }
+    ]
     assert [
         transition.reason_code for transition in transition_repository.transitions.values()
     ] == [
@@ -341,12 +382,15 @@ async def test_execute_campaign_cadence_step_persists_rich_draft_rejection_detai
     assert "Draft validation failed: safety flags present." in explanation
     assert "Safety flags: property advice requested, tour request detected." in explanation
     assert len(review_repository.saved) == 1
-    assert review_repository.saved[0].draft_body == "just checking in."
+    assert (
+        review_repository.saved[0].draft_body
+        == "Hi there,\n\njust checking in.\n\nBest,\nMiller Schackman"
+    )
     assert review_repository.saved[0].review_blockers == ("safety_flags_present",)
     assert review_repository.saved[0].can_approve_send is False
 
 
-async def test_execute_campaign_cadence_step_allows_sms_without_compliance_gate() -> None:
+async def test_execute_campaign_cadence_step_pauses_when_sms_compliance_is_not_approved() -> None:
     workflow_repository = FakeLeadWorkflowRepository()
     transition_repository = FakeWorkflowTransitionRepository()
     await workflow_repository.save(_workflow())
@@ -384,9 +428,14 @@ async def test_execute_campaign_cadence_step_allows_sms_without_compliance_gate(
         now=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
     )
 
-    assert result.status == CadenceStepExecutionStatus.SENT
+    assert result.status == CadenceStepExecutionStatus.REJECTED
     assert result.workflow is not None
-    assert result.workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+    assert result.workflow.state == WorkflowState.PAUSED
+    last_transition = list(transition_repository.transitions.values())[-1]
+    assert last_transition.metadata["block_stage"] == "planning"
+    assert last_transition.metadata["reason_codes"] == ["channel_not_contactable"]
+    assert last_transition.metadata["evaluated_channels"] == ["sms"]
+    assert last_transition.metadata["channel_block_outcomes"] == ["not_contactable"]
 
 
 async def test_execute_campaign_cadence_step_respects_persisted_quiet_hours() -> None:
@@ -479,6 +528,95 @@ async def test_execute_campaign_cadence_step_ignores_quiet_hour_window_when_disa
     assert result.status == CadenceStepExecutionStatus.SENT
     assert result.workflow is not None
     assert result.workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+
+
+async def test_execute_campaign_cadence_step_rejects_when_inbound_opt_out_arrives_before_send(
+) -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    lead_repository = FakeLeadRepository(_lead())
+    await workflow_repository.save(_workflow())
+    await _send_first_step(
+        workflow_repository=workflow_repository,
+        transition_repository=transition_repository,
+    )
+
+    schedule_result = await schedule_next_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        lead_workflow_repository=workflow_repository,
+        now=NOW + timedelta(days=1),
+    )
+    assert schedule_result.status == CadenceStepScheduleStatus.SCHEDULED
+
+    inbound_result = await process_inbound_message_event(
+        event=InboundMessageEvent(
+            workspace_id=WORKSPACE_ID,
+            provider=CRMProvider.FOLLOW_UP_BOSS.value,
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+            provider_event_id="evt-inbound-before-step-two",
+            provider_message_id="msg-inbound-before-step-two",
+            crm_lead_id="123",
+            channel=ContactChannel.EMAIL,
+            body="Please unsubscribe me from future emails.",
+            received_at=NOW + timedelta(hours=12),
+            payload_redacted={"event": "redacted"},
+        ),
+        lead_repository=lead_repository,
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=FakeConversationRepository(),
+        inbound_message_repository=FakeInboundMessageRepository(),
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        llm_client=FakeInboundLLMClient(
+            _inbound_classification_json(
+                intent="opt_out",
+                opt_out_detected=True,
+                summary_text="Lead opted out of automated outreach.",
+            )
+        ),
+        now=NOW + timedelta(hours=12),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+    )
+
+    assert inbound_result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert inbound_result.opt_out_detected is True
+
+    email_provider = FakeEmailProvider("email-456")
+    result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=STEP_TWO_ID,
+        scheduled_for=schedule_result.scheduled_for or NOW,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy(
+                quiet_hours_start=time(10, 0),
+                quiet_hours_end=time(17, 0),
+            )
+        ),
+        lead_repository=lead_repository,
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        message_repository=FakeOutboundMessageRepository(),
+        llm_client=FakeLLMClient(),
+        sms_provider=FakeSMSProvider(),
+        email_provider=email_provider,
+        now=schedule_result.scheduled_for or NOW,
+    )
+
+    assert result.status == CadenceStepExecutionStatus.SKIPPED
+    assert email_provider.messages == []
+    final_workflow = await workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID)
+    assert final_workflow is not None
+    assert final_workflow.state == WorkflowState.PAUSED
+    assert final_workflow.current_step_id == STEP_TWO_ID
+    assert final_workflow.pause_reason == "opt_out_detected"
 
 
 async def _send_first_step(

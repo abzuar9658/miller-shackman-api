@@ -32,6 +32,7 @@ from app.application.use_cases.workspace import (
     update_workspace_operational_control,
     update_workspace_outbound_drafting_config,
 )
+from app.domain.common.ids import CampaignId, LeadId
 from app.domain.compliance import SmsComplianceState, WorkspaceContactPolicy
 from app.domain.crm_sync import default_workspace_crm_sync_config
 from app.domain.identity import (
@@ -43,6 +44,12 @@ from app.domain.identity import (
 )
 from app.domain.llm import default_workspace_llm_config
 from app.domain.outbound_drafting import default_workspace_outbound_drafting_config
+from app.domain.workflows import (
+    LeadWorkflow,
+    WorkflowState,
+    WorkflowTransition,
+    WorkflowTransitionReasonCode,
+)
 from app.domain.workspace_automation import (
     WorkspaceAutomationStatus,
     default_workspace_operational_control,
@@ -387,6 +394,7 @@ def test_get_workspace_settings_returns_defaults_when_missing() -> None:
         WORKSPACE_ID
     )
     assert result.view.operational_control == default_workspace_operational_control(WORKSPACE_ID)
+    assert result.view.handoff_config.crm_review_tag is None
     assert result.view.handoff_config.crm_custom_fields == {}
 
 
@@ -425,6 +433,9 @@ def test_update_workspace_contact_policy_persists_values() -> None:
             membership_repository=deps.membership_repository,
             contact_policy_repository=deps.workspace_contact_policy_repository,
             audit_log_repository=deps.audit_log_repository,
+            lead_workflow_repository=deps.lead_workflow_repository,
+            workflow_transition_repository=deps.workflow_transition_repository,
+            temporal_signal_outbox_repository=deps.temporal_signal_outbox_repository,
             now=NOW,
         ),
     )
@@ -458,6 +469,9 @@ def test_update_workspace_contact_policy_persists_inbound_email_address() -> Non
             membership_repository=deps.membership_repository,
             contact_policy_repository=deps.workspace_contact_policy_repository,
             audit_log_repository=deps.audit_log_repository,
+            lead_workflow_repository=deps.lead_workflow_repository,
+            workflow_transition_repository=deps.workflow_transition_repository,
+            temporal_signal_outbox_repository=deps.temporal_signal_outbox_repository,
             now=NOW,
         ),
     )
@@ -497,6 +511,9 @@ def test_update_workspace_contact_policy_preserves_inbound_email_when_not_provid
             membership_repository=deps.membership_repository,
             contact_policy_repository=deps.workspace_contact_policy_repository,
             audit_log_repository=deps.audit_log_repository,
+            lead_workflow_repository=deps.lead_workflow_repository,
+            workflow_transition_repository=deps.workflow_transition_repository,
+            temporal_signal_outbox_repository=deps.temporal_signal_outbox_repository,
             now=NOW,
         ),
     )
@@ -524,6 +541,9 @@ def test_update_workspace_contact_policy_disables_quiet_hours_without_clearing_w
             membership_repository=deps.membership_repository,
             contact_policy_repository=deps.workspace_contact_policy_repository,
             audit_log_repository=deps.audit_log_repository,
+            lead_workflow_repository=deps.lead_workflow_repository,
+            workflow_transition_repository=deps.workflow_transition_repository,
+            temporal_signal_outbox_repository=deps.temporal_signal_outbox_repository,
             now=NOW,
         ),
     )
@@ -533,6 +553,80 @@ def test_update_workspace_contact_policy_disables_quiet_hours_without_clearing_w
     assert result.contact_policy.quiet_hours_enabled is False
     assert result.contact_policy.quiet_hours_start == time(10, 0)
     assert result.contact_policy.quiet_hours_end == time(17, 0)
+
+
+def test_update_workspace_contact_policy_reactivates_timing_blocked_workflows() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    workflow_id = UUID("00000000-0000-0000-0000-000000000010")
+    lead_id = LeadId("00000000-0000-0000-0000-000000000011")
+    campaign_id = CampaignId("00000000-0000-0000-0000-000000000012")
+    campaign_enrollment_id = UUID("00000000-0000-0000-0000-000000000014")
+    transition_id = UUID("00000000-0000-0000-0000-000000000013")
+    step_id = UUID("00000000-0000-0000-0000-000000000015")
+
+    workflow = LeadWorkflow(
+        workflow_id=workflow_id,
+        workspace_id=WORKSPACE_ID,
+        lead_id=lead_id,
+        campaign_id=campaign_id,
+        campaign_enrollment_id=campaign_enrollment_id,
+        temporal_workflow_id="temporal-123",
+        state=WorkflowState.PAUSED,
+        state_version=2,
+        created_at=NOW,
+        updated_at=NOW,
+        last_transition_at=NOW,
+        current_step_id=step_id,
+        next_action_at=None,
+        pause_reason="cadence_step_blocked",
+    )
+    deps.lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, lead_id)] = workflow
+
+    transition = WorkflowTransition(
+        transition_id=transition_id,
+        workspace_id=WORKSPACE_ID,
+        workflow_id=workflow_id,
+        lead_id=lead_id,
+        campaign_id=campaign_id,
+        from_state=WorkflowState.ACTIVE_NURTURE,
+        to_state=WorkflowState.PAUSED,
+        reason_code=WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED,
+        created_at=NOW,
+        metadata={
+            "pre_send_reasons": ["outside_allowed_hours"],
+            "explanation": "Outside allowed hours",
+        },
+    )
+    deps.workflow_transition_repository.transitions[transition_id] = transition
+
+    result = _run(
+        update_workspace_contact_policy(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            sms_compliance_state=SmsComplianceState.APPROVED,
+            quiet_hours_enabled=False,
+            quiet_hours_start=time(10, 0),
+            quiet_hours_end=time(17, 0),
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            contact_policy_repository=deps.workspace_contact_policy_repository,
+            audit_log_repository=deps.audit_log_repository,
+            lead_workflow_repository=deps.lead_workflow_repository,
+            workflow_transition_repository=deps.workflow_transition_repository,
+            temporal_signal_outbox_repository=deps.temporal_signal_outbox_repository,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceContactPolicyStatus.UPDATED
+    resumed = deps.lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, lead_id)]
+    assert resumed.state == WorkflowState.ACTIVE_NURTURE
+    assert resumed.pause_reason is None
+    assert len(deps.temporal_signal_outbox_repository.entries.values()) == 1
 
 
 def test_update_workspace_handoff_config_normalizes_values() -> None:
@@ -547,7 +641,13 @@ def test_update_workspace_handoff_config_normalizes_values() -> None:
             workspace_id=WORKSPACE_ID,
             fallback_recipient_email=" fallback@example.com ",
             crm_handoff_tag=" human_handoff_required ",
+            crm_review_tag=" needs_agent_review ",
             crm_custom_fields={" handoff_status ": " required ", "": "skip"},
+            crm_snapshot_summary_field=" ai_summary ",
+            crm_snapshot_status_field=" ai_status ",
+            crm_snapshot_latest_inbound_field=" ai_latest_inbound ",
+            crm_snapshot_latest_outbound_field=" ai_latest_outbound ",
+            crm_snapshot_last_activity_at_field=" ai_last_activity_at ",
             workspace_repository=deps.workspace_repository,
             membership_repository=deps.membership_repository,
             handoff_config_repository=deps.workspace_handoff_config_repository,
@@ -560,7 +660,13 @@ def test_update_workspace_handoff_config_normalizes_values() -> None:
     assert result.handoff_config is not None
     assert result.handoff_config.fallback_recipient_email == "fallback@example.com"
     assert result.handoff_config.crm_handoff_tag == "human_handoff_required"
+    assert result.handoff_config.crm_review_tag == "needs_agent_review"
     assert dict(result.handoff_config.crm_custom_fields) == {"handoff_status": "required"}
+    assert result.handoff_config.crm_snapshot_summary_field == "ai_summary"
+    assert result.handoff_config.crm_snapshot_status_field == "ai_status"
+    assert result.handoff_config.crm_snapshot_latest_inbound_field == "ai_latest_inbound"
+    assert result.handoff_config.crm_snapshot_latest_outbound_field == "ai_latest_outbound"
+    assert result.handoff_config.crm_snapshot_last_activity_at_field == "ai_last_activity_at"
     assert deps.audit_log_repository.logs[-1].event_type == (
         AuthAuditEventType.WORKSPACE_HANDOFF_CONFIG_UPDATED
     )

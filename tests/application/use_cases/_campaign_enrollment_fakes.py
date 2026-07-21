@@ -1,14 +1,23 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import UUID
 
 from app.application.ports.temporal import (
+    InboundProcessedLeadNurtureWorkflowSignal,
     PauseLeadNurtureWorkflowSignal,
     ResumeLeadNurtureWorkflowSignal,
     UnblockLeadNurtureWorkflowSignal,
 )
 from app.domain.campaigns.enrollment import CampaignEnrollment
 from app.domain.common.ids import CampaignVersionId, LeadId, WorkspaceId
-from app.domain.workflows import LeadWorkflow, WorkflowTransition
+from app.domain.workflows import (
+    LeadWorkflow,
+    TemporalSignalOutboxEntry,
+    TemporalSignalOutboxStatus,
+    WorkflowState,
+    WorkflowTransition,
+)
 
 
 class FakeCampaignEnrollmentRepository:
@@ -69,6 +78,20 @@ class FakeLeadWorkflowRepository:
         lead_id: LeadId,
     ) -> LeadWorkflow | None:
         return self.latest_by_lead.get((workspace_id, lead_id))
+
+    async def list_paused_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadWorkflow, ...]:
+        matches = tuple(
+            workflow
+            for workflow in self.latest_by_lead.values()
+            if workflow.workspace_id == workspace_id
+            and workflow.state == WorkflowState.PAUSED
+        )
+        return matches[:limit]
 
     async def save(self, workflow: LeadWorkflow) -> LeadWorkflow:
         self.workflows[workflow.workflow_id] = workflow
@@ -166,3 +189,129 @@ class FakeLeadNurtureWorkflowSignaler:
         self.calls.append({"temporal_workflow_id": temporal_workflow_id, "signal": signal})
         if self.always_fail:
             raise RuntimeError("Temporal unblock signal failed")
+
+    async def signal_inbound_processed_lead_nurture_workflow(
+        self,
+        *,
+        temporal_workflow_id: str,
+        signal: InboundProcessedLeadNurtureWorkflowSignal,
+    ) -> None:
+        self.calls.append({"temporal_workflow_id": temporal_workflow_id, "signal": signal})
+        if self.always_fail:
+            raise RuntimeError("Temporal inbound processed signal failed")
+
+
+NOW = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+
+class FakeTemporalSignalOutboxRepository:
+    def __init__(self) -> None:
+        self.entries: dict[tuple[UUID, str], TemporalSignalOutboxEntry] = {}
+
+    async def append(self, entry: TemporalSignalOutboxEntry) -> TemporalSignalOutboxEntry:
+        key = (entry.workspace_id, entry.idempotency_key)
+        existing = self.entries.get(key)
+        if existing is not None:
+            return existing
+        self.entries[key] = entry
+        return entry
+
+    async def claim_available_batch(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        lease_duration: timedelta,
+        max_attempts: int,
+    ) -> tuple[TemporalSignalOutboxEntry, ...]:
+        claimed: list[TemporalSignalOutboxEntry] = []
+        for key, entry in sorted(self.entries.items(), key=lambda item: item[1].created_at or NOW):
+            if len(claimed) >= limit:
+                break
+            ready = (
+                entry.status
+                in {
+                    TemporalSignalOutboxStatus.PENDING,
+                    TemporalSignalOutboxStatus.FAILED,
+                }
+                and entry.available_at is not None
+                and entry.available_at <= now
+            ) or (
+                entry.status == TemporalSignalOutboxStatus.DISPATCHING
+                and entry.claimed_until is not None
+                and entry.claimed_until <= now
+            )
+            if not ready or entry.attempt_count >= max_attempts:
+                continue
+            updated = replace(
+                entry,
+                status=TemporalSignalOutboxStatus.DISPATCHING,
+                attempt_count=entry.attempt_count + 1,
+                claimed_until=now + lease_duration,
+                last_error=None,
+                updated_at=now,
+            )
+            self.entries[key] = updated
+            claimed.append(updated)
+        return tuple(claimed)
+
+    async def mark_sent(
+        self,
+        temporal_signal_id: UUID,
+        *,
+        now: datetime,
+    ) -> TemporalSignalOutboxEntry:
+        return self._replace_by_id(
+            temporal_signal_id,
+            status=TemporalSignalOutboxStatus.SENT,
+            sent_at=now,
+            claimed_until=None,
+            available_at=now,
+            last_error=None,
+            updated_at=now,
+        )
+
+    async def mark_failed(
+        self,
+        temporal_signal_id: UUID,
+        *,
+        error: str,
+        available_at: datetime,
+        now: datetime,
+    ) -> TemporalSignalOutboxEntry:
+        return self._replace_by_id(
+            temporal_signal_id,
+            status=TemporalSignalOutboxStatus.FAILED,
+            claimed_until=None,
+            available_at=available_at,
+            last_error=error,
+            updated_at=now,
+        )
+
+    async def mark_terminal_failure(
+        self,
+        temporal_signal_id: UUID,
+        *,
+        error: str,
+        now: datetime,
+    ) -> TemporalSignalOutboxEntry:
+        return self._replace_by_id(
+            temporal_signal_id,
+            status=TemporalSignalOutboxStatus.TERMINAL_FAILURE,
+            claimed_until=None,
+            available_at=now,
+            last_error=error,
+            updated_at=now,
+        )
+
+    def _replace_by_id(
+        self,
+        temporal_signal_id: UUID,
+        **changes: object,
+    ) -> TemporalSignalOutboxEntry:
+        for key, entry in self.entries.items():
+            if entry.temporal_signal_id == temporal_signal_id:
+                updated = replace(entry, **cast(Any, changes))
+                self.entries[key] = updated
+                return updated
+        raise KeyError(temporal_signal_id)

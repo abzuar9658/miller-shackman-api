@@ -97,6 +97,9 @@ class FakeNotificationProvider:
     async def send_handoff_notification(self, notification: object) -> NotificationSendResult:
         raise AssertionError("handoff notification should not be used in preflight digest tests")
 
+    async def send_review_notification(self, notification: object) -> NotificationSendResult:
+        raise AssertionError("review notification should not be used in preflight digest tests")
+
 
 def _start_policy(veto_window_hours: int = 24) -> CampaignStartPolicy:
     return CampaignStartPolicy(veto_window_hours=veto_window_hours)

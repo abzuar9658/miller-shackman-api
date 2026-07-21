@@ -98,7 +98,13 @@ class FakeCRMClient(CRMClient):
     ) -> list[CRMActivity]:
         return []
 
-    async def add_note(self, workspace_id: UUID, crm_lead_id: str, content: str) -> None:
+    async def add_note(
+        self,
+        workspace_id: UUID,
+        crm_lead_id: str,
+        content: str,
+        subject: str | None = None,
+    ) -> None:
         return None
 
     async def add_tag(self, workspace_id: UUID, crm_lead_id: str, tag: str) -> None:
@@ -116,6 +122,11 @@ class FakeCRMClient(CRMClient):
         return None
 
     async def subscribe_to_events(self, workspace_id: UUID, webhook_url: str) -> None:
+        return None
+
+    async def fetch_resource_by_uri(
+        self, workspace_id: UUID, uri: str
+    ) -> dict[str, object] | None:
         return None
 
 

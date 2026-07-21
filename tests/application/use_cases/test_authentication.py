@@ -57,6 +57,13 @@ from app.domain.workspace_automation import (
     WorkspaceAutomationStatus,
     WorkspaceOperationalControl,
 )
+from tests.application.use_cases._campaign_cadence_fakes import (
+    FakeLeadWorkflowRepository,
+    FakeWorkflowTransitionRepository,
+)
+from tests.application.use_cases._campaign_enrollment_fakes import (
+    FakeTemporalSignalOutboxRepository,
+)
 
 T = TypeVar("T")
 
@@ -545,6 +552,9 @@ class _Dependencies:
         self.reset_token_repository = _FakePasswordResetTokenRepository(self.reset_tokens)
         self.invitation_repository = _FakeInvitationRepository(self.invitations)
         self.audit_log_repository = _FakeAuthAuditLogRepository()
+        self.lead_workflow_repository = FakeLeadWorkflowRepository()
+        self.workflow_transition_repository = FakeWorkflowTransitionRepository()
+        self.temporal_signal_outbox_repository = FakeTemporalSignalOutboxRepository()
         self.email_provider = _FakeEmailProvider()
         self.password_hasher = _FakePasswordHasher()
         self.opaque_token_service = _FakeOpaqueTokenService(

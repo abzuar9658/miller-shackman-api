@@ -3,48 +3,69 @@ from uuid import UUID
 
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
 from app.application.ports.messaging import EmailMessage, SMSMessage
-from app.domain.campaigns.execution import CampaignExecutionConfig
+from app.domain.campaigns.execution import CampaignExecutionConfig, CampaignVersionStatus
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
+from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import WorkspaceContactPolicy
 from app.domain.conversations import CrmConversationEvent
 from app.domain.identity import Workspace
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.llm import WorkspaceLLMConfig
-from app.domain.workflows import LeadWorkflow, WorkflowTransition
+from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
+from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransition
 from app.domain.workspace_automation import WorkspaceOperationalControl
 
 
 class FakeCampaignExecutionRepository:
-    def __init__(self, config: CampaignExecutionConfig | None) -> None:
-        self.config = config
+    def __init__(
+        self,
+        config: CampaignExecutionConfig | tuple[CampaignExecutionConfig, ...] | None,
+    ) -> None:
+        if config is None:
+            self.configs: tuple[CampaignExecutionConfig, ...] = ()
+        elif isinstance(config, tuple):
+            self.configs = config
+        else:
+            self.configs = (config,)
+        self.config = self.configs[0] if self.configs else None
 
     async def get_by_version_id(
         self,
         workspace_id: WorkspaceId,
         campaign_version_id: UUID,
     ) -> CampaignExecutionConfig | None:
-        if self.config is None:
-            return None
-        if self.config.workspace_id != workspace_id:
-            return None
-        if self.config.campaign_version_id != campaign_version_id:
-            return None
-        return self.config
+        for config in self.configs:
+            if config.workspace_id != workspace_id:
+                continue
+            if config.campaign_version_id == campaign_version_id:
+                return config
+        return None
+
+    async def list_active_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> tuple[CampaignExecutionConfig, ...]:
+        return tuple(
+            config
+            for config in self.configs
+            if config.workspace_id == workspace_id
+            and config.campaign_status == CampaignStatus.ACTIVE
+            and config.version_status == CampaignVersionStatus.PUBLISHED
+        )
 
     async def get_active_for_campaign(
         self,
         workspace_id: WorkspaceId,
         campaign_id: UUID,
     ) -> CampaignExecutionConfig | None:
-        if self.config is None:
-            return None
-        if self.config.workspace_id != workspace_id:
-            return None
-        if self.config.campaign_id != campaign_id:
-            return None
-        return self.config
+        for config in self.configs:
+            if config.workspace_id != workspace_id:
+                continue
+            if config.campaign_id == campaign_id:
+                return config
+        return None
 
 
 class FakeWorkspaceRepository:
@@ -125,6 +146,30 @@ class FakeWorkspaceOperationalControlRepository:
         self.saved.append(control)
         self.control = control
         return control
+
+
+class FakeWorkspaceOutboundDraftingConfigRepository:
+    def __init__(self, config: WorkspaceOutboundDraftingConfig | None = None) -> None:
+        self.config = config
+        self.saved: list[WorkspaceOutboundDraftingConfig] = []
+
+    async def get_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceOutboundDraftingConfig | None:
+        if self.config is None:
+            return None
+        if self.config.workspace_id != workspace_id:
+            return None
+        return self.config
+
+    async def save(
+        self,
+        config: WorkspaceOutboundDraftingConfig,
+    ) -> WorkspaceOutboundDraftingConfig:
+        self.saved.append(config)
+        self.config = config
+        return config
 
 
 class FakeLeadRepository:
@@ -276,6 +321,20 @@ class FakeLeadWorkflowRepository:
         )
         return matches[:limit]
 
+    async def list_paused_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadWorkflow, ...]:
+        matches = tuple(
+            workflow
+            for workflow in self.latest_by_lead.values()
+            if workflow.workspace_id == workspace_id
+            and workflow.state == WorkflowState.PAUSED
+        )
+        return matches[:limit]
+
 
 class FakeWorkflowTransitionRepository:
     def __init__(self) -> None:
@@ -291,11 +350,16 @@ class FakeWorkflowTransitionRepository:
         workflow_id: UUID,
         limit: int = 100,
     ) -> tuple[WorkflowTransition, ...]:
-        return tuple(
-            transition
-            for transition in self.transitions.values()
-            if transition.workspace_id == workspace_id and transition.workflow_id == workflow_id
+        matches = sorted(
+            (
+                transition
+                for transition in self.transitions.values()
+                if transition.workspace_id == workspace_id and transition.workflow_id == workflow_id
+            ),
+            key=lambda transition: transition.created_at,
+            reverse=True,
         )
+        return tuple(matches[:limit])
 
 
 class FakeOutboundMessageRepository:

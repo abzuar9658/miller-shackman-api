@@ -4,7 +4,11 @@ from typing import cast
 from uuid import UUID
 
 from app.application.ports.crm import CanonicalLead, CRMActivity, CRMAgent, CRMClient
-from app.application.ports.notifications import HandoffNotification, NotificationSendResult
+from app.application.ports.notifications import (
+    HandoffNotification,
+    NotificationSendResult,
+    ReviewNotification,
+)
 from app.application.use_cases.complete_handoff import HandoffCompletionStatus, complete_handoff
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.conversations import (
@@ -167,8 +171,15 @@ class FakeCRMClient:
     ) -> CRMAgent | None:
         return CRMAgent(crm_agent_id="agent-99", name="Agent Smith", email="agent@example.com")
 
-    async def add_note(self, workspace_id: WorkspaceId, crm_lead_id: str, content: str) -> None:
+    async def add_note(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+        content: str,
+        subject: str | None = None,
+    ) -> None:
         self.note = content
+        self.note_subject = subject
 
     async def add_tag(self, workspace_id: WorkspaceId, crm_lead_id: str, tag: str) -> None:
         self.tag = tag
@@ -184,16 +195,31 @@ class FakeCRMClient:
     async def subscribe_to_events(self, workspace_id: WorkspaceId, webhook_url: str) -> None:
         return None
 
+    async def fetch_resource_by_uri(
+        self, workspace_id: WorkspaceId, uri: str
+    ) -> dict[str, object] | None:
+        return None
+
 
 class FakeNotificationProvider:
     def __init__(self) -> None:
         self.notifications: list[HandoffNotification] = []
+        self.review_notifications: list[ReviewNotification] = []
+        self.review_send_result: NotificationSendResult = NotificationSendResult(
+            accepted=True, provider_reference="review-notif-123"
+        )
 
     async def send_handoff_notification(
         self, notification: HandoffNotification
     ) -> NotificationSendResult:
         self.notifications.append(notification)
         return NotificationSendResult(accepted=True, provider_reference="notif-123")
+
+    async def send_review_notification(
+        self, notification: ReviewNotification
+    ) -> NotificationSendResult:
+        self.review_notifications.append(notification)
+        return self.review_send_result
 
     async def send_preflight_digest(self, notification: object) -> NotificationSendResult:
         raise AssertionError
@@ -253,6 +279,34 @@ async def test_complete_handoff_retries_partial_record_without_resending_notific
     assert crm_client.tag == "human_handoff_required"
 
 
+async def test_complete_handoff_updates_snapshot_fields() -> None:
+    crm_client = FakeCRMClient()
+    notification_provider = FakeNotificationProvider()
+
+    result = await complete_handoff(
+        workspace_id=WORKSPACE_ID,
+        handoff_id=HANDOFF_ID,
+        handoff_repository=FakeHandoffRepository(_handoff()),
+        handoff_completion_repository=FakeHandoffCompletionRepository(),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            _config_with_snapshot_fields()
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        crm_client=cast(CRMClient, crm_client),
+        notification_provider=notification_provider,
+        now=NOW,
+    )
+
+    assert result.status == HandoffCompletionStatus.COMPLETED
+    assert crm_client.fields == {
+        "handoff_status": "required",
+        "ai_summary": "Lead asked for a callback.",
+        "ai_status": "human_handoff_required",
+        "ai_latest_inbound": "Can an agent call me?",
+        "ai_last_activity_at": NOW.isoformat(),
+    }
+
+
 def _lead() -> CanonicalLeadRecord:
     return CanonicalLeadRecord(
         workspace_id=WORKSPACE_ID,
@@ -288,4 +342,14 @@ def _config() -> WorkspaceHandoffConfig:
         fallback_recipient_email="fallback@example.com",
         crm_handoff_tag="human_handoff_required",
         crm_custom_fields={"handoff_status": "required"},
+    )
+
+
+def _config_with_snapshot_fields() -> WorkspaceHandoffConfig:
+    return replace(
+        _config(),
+        crm_snapshot_summary_field="ai_summary",
+        crm_snapshot_status_field="ai_status",
+        crm_snapshot_latest_inbound_field="ai_latest_inbound",
+        crm_snapshot_last_activity_at_field="ai_last_activity_at",
     )

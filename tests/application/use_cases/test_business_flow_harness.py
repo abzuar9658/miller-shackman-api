@@ -1,6 +1,6 @@
 import json
 from datetime import UTC, datetime, time
-from typing import cast
+from typing import NamedTuple, cast
 from uuid import UUID
 
 from app.application.ports.crm import CanonicalLead, CRMActivity, CRMAgent, CRMClient
@@ -66,6 +66,14 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
     FakeCampaignEnrollmentRepository,
     FakeTemporalWorkflowStarter,
 )
+from tests.application.use_cases.test_process_inbound_message_event import (
+    FakeInboundMessageCRMCompletionRepository,
+    _draft_json,
+    _FakeLLMClientForContinuation,
+)
+from tests.application.use_cases.test_process_inbound_message_event import (
+    FakeLLMClient as FakeInboundLLMClient,
+)
 
 NOW = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -80,6 +88,16 @@ INBOUND_MESSAGE_ID = UUID("00000000-0000-0000-0000-000000000009")
 SUMMARY_ID = UUID("00000000-0000-0000-0000-000000000010")
 HANDOFF_ID = UUID("00000000-0000-0000-0000-000000000011")
 ACTOR_ID = UUID("00000000-0000-0000-0000-000000000012")
+
+
+class _PreparedBusinessFlow(NamedTuple):
+    lead_repository: FakeLeadRepository
+    lead_workflow_repository: FakeLeadWorkflowRepository
+    workflow_transition_repository: FakeWorkflowTransitionRepository
+    message_repository: FakeOutboundMessageRepository
+    conversations: "FakeConversationRepository"
+    inbound_messages: "FakeInboundMessageRepository"
+    summaries: "FakeConversationSummaryRepository"
 
 
 class FakeCRMSyncJobRepository:
@@ -318,6 +336,7 @@ class FakeCRMClient:
 
     def __init__(self) -> None:
         self.notes: list[tuple[WorkspaceId, str, str]] = []
+        self.note_subjects: list[str | None] = []
         self.tags: list[tuple[WorkspaceId, str, str]] = []
         self.updated_fields: list[tuple[WorkspaceId, str, dict[str, str]]] = []
 
@@ -356,8 +375,15 @@ class FakeCRMClient:
     ) -> CRMAgent | None:
         return CRMAgent(crm_agent_id="agent-99", name="Agent Smith", email="agent@example.com")
 
-    async def add_note(self, workspace_id: WorkspaceId, crm_lead_id: str, content: str) -> None:
+    async def add_note(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+        content: str,
+        subject: str | None = None,
+    ) -> None:
         self.notes.append((workspace_id, crm_lead_id, content))
+        self.note_subjects.append(subject)
 
     async def add_tag(self, workspace_id: WorkspaceId, crm_lead_id: str, tag: str) -> None:
         self.tags.append((workspace_id, crm_lead_id, tag))
@@ -375,6 +401,12 @@ class FakeCRMClient:
 
     async def subscribe_to_events(self, workspace_id: WorkspaceId, webhook_url: str) -> None:
         _ = (workspace_id, webhook_url)
+
+    async def fetch_resource_by_uri(
+        self, workspace_id: WorkspaceId, uri: str
+    ) -> dict[str, object] | None:
+        _ = (workspace_id, uri)
+        return None
 
 
 class FakeNotificationProvider:
@@ -562,6 +594,239 @@ async def test_business_flow_harness_runs_sync_to_handoff_path() -> None:
     assert crm_client.tags == [(WORKSPACE_ID, "crm-123", "human_handoff_required")]
 
 
+async def test_business_flow_harness_runs_sync_to_continue_ai_path() -> None:
+    prepared = await _prepare_business_flow_until_waiting_for_response()
+    handoffs = FakeHandoffRepository()
+    continuation_email_provider = FakeEmailProvider("email-456")
+
+    inbound_result = await process_inbound_message_event(
+        event=_event(
+            provider_event_id="evt-continue-1",
+            provider_message_id="msg-continue-1",
+            body="Can you send a little more detail?",
+        ),
+        lead_repository=prepared.lead_repository,
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=prepared.conversations,
+        inbound_message_repository=prepared.inbound_messages,
+        conversation_summary_repository=prepared.summaries,
+        handoff_repository=handoffs,
+        crm_client=cast(CRMClient, FakeCRMClient()),
+        notification_provider=cast(NotificationProvider, FakeNotificationProvider()),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            WorkspaceHandoffConfig(workspace_id=WORKSPACE_ID)
+        ),
+        handoff_completion_repository=FakeHandoffCompletionRepository(),
+        llm_client=_FakeLLMClientForContinuation(
+            classification_text=_classification_json(
+                intent="general_reply",
+                asks_for_human=False,
+                summary_text="Lead asked a general follow-up question.",
+            ),
+            draft_text=_draft_json(body="Absolutely — here are a few more details."),
+        ),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(None),
+        message_repository=prepared.message_repository,
+        sms_provider=FakeSMSProvider(),
+        email_provider=continuation_email_provider,
+        now=NOW,
+        lead_workflow_repository=prepared.lead_workflow_repository,
+        workflow_transition_repository=prepared.workflow_transition_repository,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        summary_id_factory=lambda: SUMMARY_ID,
+    )
+
+    assert inbound_result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert inbound_result.handoff_required is False
+    assert inbound_result.continue_ai_provider_message_id == "email-456"
+    assert inbound_result.continue_ai_outbound_message_id is not None
+    final_workflow = prepared.lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert final_workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+    assert prepared.conversations.by_id[CONVERSATION_ID].ai_interaction_count == 1
+    assert len(continuation_email_provider.messages) == 1
+    assert handoffs.saved == []
+
+
+async def test_business_flow_harness_runs_sync_to_review_pause_path() -> None:
+    prepared = await _prepare_business_flow_until_waiting_for_response()
+    crm_client = FakeCRMClient()
+    notification_provider = FakeNotificationProvider()
+    handoffs = FakeHandoffRepository()
+
+    inbound_result = await process_inbound_message_event(
+        event=_event(
+            provider_event_id="evt-review-1",
+            provider_message_id="msg-review-1",
+            body="I'm not really sure what I want yet.",
+        ),
+        lead_repository=prepared.lead_repository,
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=prepared.conversations,
+        inbound_message_repository=prepared.inbound_messages,
+        conversation_summary_repository=prepared.summaries,
+        handoff_repository=handoffs,
+        crm_client=cast(CRMClient, crm_client),
+        notification_provider=cast(NotificationProvider, notification_provider),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            WorkspaceHandoffConfig(
+                workspace_id=WORKSPACE_ID,
+                fallback_recipient_email="fallback@example.com",
+                crm_review_tag="needs_agent_review",
+            )
+        ),
+        inbound_message_crm_completion_repository=FakeInboundMessageCRMCompletionRepository(),
+        handoff_completion_repository=FakeHandoffCompletionRepository(),
+        llm_client=FakeInboundLLMClient(
+            _classification_json(
+                intent="unclear",
+                asks_for_human=False,
+                summary_text="Lead reply is ambiguous.",
+            )
+        ),
+        now=NOW,
+        lead_workflow_repository=prepared.lead_workflow_repository,
+        workflow_transition_repository=prepared.workflow_transition_repository,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        summary_id_factory=lambda: SUMMARY_ID,
+    )
+
+    assert inbound_result.status == ProcessInboundMessageEventStatus.PROCESSED
+    final_workflow = prepared.lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert final_workflow.state == WorkflowState.PAUSED
+    assert handoffs.saved == []
+
+
+async def test_business_flow_harness_runs_sync_to_suppress_path() -> None:
+    prepared = await _prepare_business_flow_until_waiting_for_response()
+    handoffs = FakeHandoffRepository()
+
+    inbound_result = await process_inbound_message_event(
+        event=_event(
+            provider_event_id="evt-suppress-1",
+            provider_message_id="msg-suppress-1",
+            body="Please unsubscribe me from these emails.",
+        ),
+        lead_repository=prepared.lead_repository,
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=prepared.conversations,
+        inbound_message_repository=prepared.inbound_messages,
+        conversation_summary_repository=prepared.summaries,
+        handoff_repository=handoffs,
+        llm_client=FakeInboundLLMClient(
+            _classification_json(
+                intent="opt_out",
+                asks_for_human=False,
+                opt_out_detected=True,
+                summary_text="Lead opted out of automated outreach.",
+            )
+        ),
+        now=NOW,
+        lead_workflow_repository=prepared.lead_workflow_repository,
+        workflow_transition_repository=prepared.workflow_transition_repository,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        summary_id_factory=lambda: SUMMARY_ID,
+    )
+
+    assert inbound_result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert inbound_result.opt_out_detected is True
+    assert prepared.lead_repository.lead is not None
+    assert prepared.lead_repository.lead.email_unsubscribed is True
+    final_workflow = prepared.lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert final_workflow.state == WorkflowState.PAUSED
+    assert handoffs.saved == []
+
+
+async def _prepare_business_flow_until_waiting_for_response() -> _PreparedBusinessFlow:
+    lead_repository = FakeLeadRepository(None)
+    sync_job_repository = FakeCRMSyncJobRepository()
+    campaign_enrollment_repository = FakeCampaignEnrollmentRepository()
+    lead_workflow_repository = FakeLeadWorkflowRepository()
+    workflow_transition_repository = FakeWorkflowTransitionRepository()
+    temporal_workflow_starter = FakeTemporalWorkflowStarter()
+    message_repository = FakeOutboundMessageRepository()
+    email_provider = FakeEmailProvider("email-123")
+    conversations = FakeConversationRepository()
+    inbound_messages = FakeInboundMessageRepository()
+    summaries = FakeConversationSummaryRepository()
+
+    sync_result = await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=FakeLeadSnapshotSource(
+            pages=(CanonicalLeadSnapshotPage(leads=(_lead(),), next_cursor=None),)
+        ),
+        lead_repository=lead_repository,
+        crm_sync_job_repository=sync_job_repository,
+        now=NOW,
+        sync_type=CRMSyncType.FULL,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+    assert sync_result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+
+    enrollment_result = await start_selected_campaign_batch(
+        workspace_id=WORKSPACE_ID,
+        campaign_id=CAMPAIGN_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        lead_ids=[LEAD_ID],
+        source=CampaignEnrollmentSource.MANUAL_ADMIN,
+        reason_codes=["business_flow_harness"],
+        actor_user_id=ACTOR_ID,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        temporal_workflow_starter=temporal_workflow_starter,
+        now=NOW,
+    )
+    assert enrollment_result.started_count == 1
+
+    schedule_result = await schedule_next_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        lead_workflow_repository=lead_workflow_repository,
+        now=NOW,
+    )
+    assert schedule_result.status == CadenceStepScheduleStatus.SCHEDULED
+
+    execute_result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=STEP_ID,
+        scheduled_for=NOW,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(None),
+        lead_repository=lead_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        message_repository=message_repository,
+        llm_client=FakeLLMClient(),
+        sms_provider=FakeSMSProvider(),
+        email_provider=email_provider,
+        now=NOW,
+    )
+    assert execute_result.status == CadenceStepExecutionStatus.SENT
+
+    return _PreparedBusinessFlow(
+        lead_repository=lead_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        message_repository=message_repository,
+        conversations=conversations,
+        inbound_messages=inbound_messages,
+        summaries=summaries,
+    )
+
+
 def _lead() -> CanonicalLeadRecord:
     return CanonicalLeadRecord(
         workspace_id=WORKSPACE_ID,
@@ -633,29 +898,45 @@ def _step() -> CampaignCadenceStep:
     )
 
 
-def _event() -> InboundMessageEvent:
+def _event(
+    *,
+    provider_event_id: str = "evt-1",
+    provider_message_id: str = "msg-1",
+    body: str = "Can an agent call me today?",
+    channel: ContactChannel = ContactChannel.EMAIL,
+) -> InboundMessageEvent:
     return InboundMessageEvent(
         workspace_id=WORKSPACE_ID,
         provider=CRMProvider.FOLLOW_UP_BOSS.value,
-        provider_event_id="evt-1",
-        provider_message_id="msg-1",
+        provider_event_id=provider_event_id,
+        provider_message_id=provider_message_id,
         crm_lead_id="crm-123",
-        channel=ContactChannel.EMAIL,
-        body="Can an agent call me today?",
+        channel=channel,
+        body=body,
         received_at=NOW,
         payload_redacted={"event": "redacted"},
     )
 
 
-def _classification_json() -> str:
+def _classification_json(
+    *,
+    intent: str = "human_requested",
+    asks_for_human: bool | None = None,
+    opt_out_detected: bool = False,
+    summary_text: str = "Lead asked for a human callback.",
+) -> str:
+    if asks_for_human is None:
+        asks_for_human = intent == "human_requested"
     return json.dumps(
         {
-            "intent": "human_requested",
+            "intent": intent,
             "confidence": 0.94,
-            "handoff_required": True,
-            "handoff_reason": "human_requested",
-            "opt_out_detected": False,
-            "summary_text": "Lead asked for a human callback.",
+            "asks_for_human": asks_for_human,
+            "shows_buying_interest": False,
+            "shows_selling_interest": False,
+            "asks_property_or_advice": False,
+            "opt_out_detected": opt_out_detected,
+            "summary_text": summary_text,
             "preferences": {"timeline": "today"},
         }
     )

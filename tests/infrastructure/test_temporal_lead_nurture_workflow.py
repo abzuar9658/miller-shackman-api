@@ -5,8 +5,10 @@ import pytest
 
 from app.infrastructure.workflows.temporal.lead_nurture import (
     ExecuteCadenceStepResult,
+    InboundProcessedWorkflowSignal,
     LeadNurtureWorkflow,
     LeadNurtureWorkflowInput,
+    LeadNurtureWorkflowSnapshot,
     ScheduleNextCadenceStepResult,
 )
 
@@ -273,3 +275,32 @@ async def test_lead_nurture_workflow_accepts_dict_activity_payloads(
     assert snapshot.transition_id == TRANSITION_ID
     assert snapshot.outbound_message_id == MESSAGE_ID
     assert snapshot.provider_message_id == "email-1"
+
+
+async def test_lead_nurture_workflow_inbound_processed_signal_blocks_sends() -> None:
+    workflow_instance = LeadNurtureWorkflow()
+    workflow_instance._snapshot = LeadNurtureWorkflowSnapshot(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+    )
+
+    workflow_instance.inbound_processed(
+        InboundProcessedWorkflowSignal(
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            occurred_at=NOW.isoformat(),
+            external_event_id=UUID("00000000-0000-0000-0000-000000000009"),
+            conversation_id=UUID("00000000-0000-0000-0000-00000000000a"),
+            inbound_message_id=UUID("00000000-0000-0000-0000-00000000000b"),
+            workflow_transition_id=UUID("00000000-0000-0000-0000-00000000000c"),
+            inbound_action="human_handoff",
+            reason="human_requested",
+        )
+    )
+
+    assert workflow_instance._send_blocked is True
+    assert workflow_instance._snapshot.last_signal == "inbound_processed"
+    assert workflow_instance._snapshot.last_activity == "inbound_processed"
+    assert workflow_instance._snapshot.last_activity_status == "blocked"
+    assert workflow_instance._snapshot.skip_reason == "human_requested"

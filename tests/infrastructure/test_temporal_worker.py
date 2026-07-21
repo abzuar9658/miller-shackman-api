@@ -1,22 +1,14 @@
-from datetime import UTC, datetime
 from typing import cast
-from uuid import UUID
 
 import pytest
 from temporalio.client import Client
 
 from app.core.config import Settings
 from app.infrastructure.workflows.temporal.activities import (
-    apply_inbound_workflow_transition_activity,
     execute_campaign_cadence_step_activity,
-    record_pause_workflow_signal_activity,
-    record_resume_workflow_signal_activity,
     schedule_next_campaign_cadence_step_activity,
 )
-from app.infrastructure.workflows.temporal.lead_nurture import (
-    LeadNurtureWorkflow,
-    ResumeWorkflowSignal,
-)
+from app.infrastructure.workflows.temporal.lead_nurture import LeadNurtureWorkflow
 from app.infrastructure.workflows.temporal.smoke import SmokePingWorkflow, smoke_ping_activity
 from app.infrastructure.workflows.temporal.worker import (
     build_temporal_worker,
@@ -80,28 +72,10 @@ def test_build_temporal_worker_registers_smoke_components(monkeypatch: pytest.Mo
         "workflows": [SmokePingWorkflow, LeadNurtureWorkflow],
         "activities": [
             smoke_ping_activity,
-            apply_inbound_workflow_transition_activity,
             schedule_next_campaign_cadence_step_activity,
             execute_campaign_cadence_step_activity,
-            record_pause_workflow_signal_activity,
-            record_resume_workflow_signal_activity,
         ],
     }
-
-
-async def test_resume_signal_activity_requires_actor_and_reason() -> None:
-    result = await record_resume_workflow_signal_activity(
-        ResumeWorkflowSignal(
-            workspace_id=UUID("00000000-0000-0000-0000-000000000001"),
-            lead_id=UUID("00000000-0000-0000-0000-000000000002"),
-            occurred_at=datetime(2026, 7, 8, 12, 0, tzinfo=UTC).isoformat(),
-            reason="",
-            actor_user_id=None,
-        ),
-    )
-
-    assert result.status == "skipped"
-    assert result.skip_reason == "Resume requires an authorized actor and a reason."
 
 
 async def test_run_temporal_worker_connects_and_runs(monkeypatch: pytest.MonkeyPatch) -> None:
