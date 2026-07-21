@@ -8,6 +8,7 @@ from app.domain.campaigns.outbound_message import (
     OutboundMessageCRMCompletionRecord,
 )
 from app.domain.common.ids import (
+    CRMAgentRecordId,
     LeadId,
     RefreshSessionId,
     UserId,
@@ -17,7 +18,17 @@ from app.domain.common.ids import (
 )
 from app.domain.compliance import WorkspaceContactPolicy
 from app.domain.conversations import CrmConversationEvent, Handoff, WorkspaceHandoffConfig
-from app.domain.crm_sync import CRMSyncJob, WorkspaceCRMSyncConfig, WorkspaceCRMSyncScheduleTarget
+from app.domain.crm_agent_mapping import (
+    CRMAgent,
+    WorkspaceAgentCRMMapping,
+    WorkspaceAgentMappingConfig,
+)
+from app.domain.crm_sync import (
+    CRMSyncJob,
+    ExternalEvent,
+    WorkspaceCRMSyncConfig,
+    WorkspaceCRMSyncScheduleTarget,
+)
 from app.domain.identity import (
     AuthAuditLog,
     PasswordCredential,
@@ -27,6 +38,7 @@ from app.domain.identity import (
     UserInvitation,
     Workspace,
     WorkspaceMembership,
+    WorkspaceMembershipRole,
 )
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.llm import WorkspaceLLMConfig
@@ -112,6 +124,15 @@ class OutboundMessageRepository(Protocol):
     ) -> OutboundMessage | None:
         raise NotImplementedError
 
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[OutboundMessage, ...]:
+        raise NotImplementedError
+
     async def save(self, message: OutboundMessage) -> OutboundMessage:
         raise NotImplementedError
 
@@ -136,6 +157,15 @@ class UserRepository(Protocol):
         raise NotImplementedError
 
     async def get_by_email_normalized(self, email_normalized: str) -> User | None:
+        raise NotImplementedError
+
+    async def get_active_by_workspace_email_normalized(
+        self,
+        workspace_id: WorkspaceId,
+        email_normalized: str,
+        *,
+        allowed_roles: tuple[WorkspaceMembershipRole, ...],
+    ) -> User | None:
         raise NotImplementedError
 
     async def save(self, user: User) -> User:
@@ -282,10 +312,65 @@ class ExternalEventRepository(Protocol):
         workspace_id: WorkspaceId,
         provider_name: str,
         provider_event_id: str,
-    ) -> Any | None:
+    ) -> ExternalEvent | None:
         raise NotImplementedError
 
-    async def save(self, event: Any) -> Any:
+    async def save(self, event: ExternalEvent) -> ExternalEvent:
+        raise NotImplementedError
+
+
+class CRMAgentRepository(Protocol):
+    async def get_by_record_id(
+        self,
+        workspace_id: WorkspaceId,
+        agent_record_id: CRMAgentRecordId,
+    ) -> CRMAgent | None:
+        raise NotImplementedError
+
+    async def get_by_external_id(
+        self,
+        workspace_id: WorkspaceId,
+        crm_provider: CRMProvider,
+        external_agent_id: str,
+    ) -> CRMAgent | None:
+        raise NotImplementedError
+
+    async def list_for_workspace(self, workspace_id: WorkspaceId) -> tuple[CRMAgent, ...]:
+        raise NotImplementedError
+
+    async def save(self, agent: CRMAgent) -> CRMAgent:
+        raise NotImplementedError
+
+
+class WorkspaceAgentCRMMappingRepository(Protocol):
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        mapping_id: UUID,
+    ) -> WorkspaceAgentCRMMapping | None:
+        raise NotImplementedError
+
+    async def get_by_crm_agent_record_id(
+        self,
+        workspace_id: WorkspaceId,
+        crm_agent_record_id: CRMAgentRecordId,
+    ) -> WorkspaceAgentCRMMapping | None:
+        raise NotImplementedError
+
+    async def get_by_app_user_id(
+        self,
+        workspace_id: WorkspaceId,
+        app_user_id: UserId,
+    ) -> WorkspaceAgentCRMMapping | None:
+        raise NotImplementedError
+
+    async def list_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> tuple[WorkspaceAgentCRMMapping, ...]:
+        raise NotImplementedError
+
+    async def save(self, mapping: WorkspaceAgentCRMMapping) -> WorkspaceAgentCRMMapping:
         raise NotImplementedError
 
 
@@ -336,6 +421,17 @@ class WorkspaceCRMSyncConfigRepository(Protocol):
         raise NotImplementedError
 
     async def save(self, config: WorkspaceCRMSyncConfig) -> WorkspaceCRMSyncConfig:
+        raise NotImplementedError
+
+
+class WorkspaceAgentMappingConfigRepository(Protocol):
+    async def get_by_workspace_id(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceAgentMappingConfig | None:
+        raise NotImplementedError
+
+    async def save(self, config: WorkspaceAgentMappingConfig) -> WorkspaceAgentMappingConfig:
         raise NotImplementedError
 
 
@@ -481,6 +577,12 @@ class CampaignExecutionRepository(Protocol):
     ) -> Any | None:
         raise NotImplementedError
 
+    async def list_active_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> tuple[Any, ...]:
+        raise NotImplementedError
+
 
 class CampaignEnrollmentRepository(Protocol):
     async def save(self, enrollment: Any) -> Any:
@@ -511,12 +613,28 @@ class LeadWorkflowRepository(Protocol):
     ) -> Any | None:
         raise NotImplementedError
 
+    async def list_paused_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[Any, ...]:
+        raise NotImplementedError
+
     async def save(self, workflow: Any) -> Any:
         raise NotImplementedError
 
 
 class WorkflowTransitionRepository(Protocol):
     async def append(self, transition: Any) -> Any:
+        raise NotImplementedError
+
+    async def list_for_workflow(
+        self,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        limit: int = 100,
+    ) -> tuple[Any, ...]:
         raise NotImplementedError
 
 
