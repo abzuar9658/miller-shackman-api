@@ -23,6 +23,7 @@ htmlcov/
 
 # Local exploration output
 tmp/
+logs/
 
 # OS files
 .DS_Store
