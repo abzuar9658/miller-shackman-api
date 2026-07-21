@@ -7,8 +7,8 @@ services:
       - path: .env
         required: false
     environment:
-      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres:5432/miller_schackman"
-      DATABASE_MIGRATION_URL: "postgresql+psycopg://postgres:postgres@postgres:5432/miller_schackman"
+      DATABASE_URL: "${DATABASE_URL_DOCKER:-postgresql+asyncpg://postgres:postgres@postgres:5432/miller_schackman}"
+      DATABASE_MIGRATION_URL: "${DATABASE_MIGRATION_URL_DOCKER:-postgresql+psycopg://postgres:postgres@postgres:5432/miller_schackman}"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
       TEMPORAL_ADDRESS: "temporal:7233"
       REDIS_URL: "redis://redis:6379/0"
@@ -25,18 +25,48 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_DB: miller_schackman
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: "${POSTGRES_DB:-miller_schackman}"
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
     ports:
       - "55432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d miller_schackman"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-miller_schackman}",
+        ]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  cloudbeaver:
+    image: dbeaver/cloudbeaver:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/opt/cloudbeaver/init/bootstrap.sh"]
+    environment:
+      CB_SERVER_NAME: "${CLOUDBEAVER_SERVER_NAME:-Miller Schackman DB Explorer}"
+      CB_SERVER_URL: "${CLOUDBEAVER_SERVER_URL:-http://localhost:58978/}"
+      CB_ADMIN_NAME: "${CLOUDBEAVER_ADMIN_NAME:-cbadmin}"
+      CB_ADMIN_PASSWORD: "${CLOUDBEAVER_ADMIN_PASSWORD:-change-me-local-cloudbeaver-admin}"
+      CLOUDBEAVER_APP_ANONYMOUS_ACCESS_ENABLED: "false"
+      CLOUDBEAVER_SYSTEM_VARIABLES_RESOLVING_ENABLED: "true"
+      CB_DB_CONNECTION_NAME: "${CLOUDBEAVER_DB_CONNECTION_NAME:-Miller Schackman Postgres}"
+      CB_DB_HOST: "${CLOUDBEAVER_DB_HOST:-postgres}"
+      CB_DB_PORT: "${CLOUDBEAVER_DB_PORT:-5432}"
+      CB_DB_NAME: "${POSTGRES_DB:-miller_schackman}"
+      CB_DB_USER: "${POSTGRES_USER:-postgres}"
+      CB_DB_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
+    ports:
+      - "58978:8978"
+    volumes:
+      - cloudbeaver_workspace:/opt/cloudbeaver/workspace
+      - ./docker/cloudbeaver/bootstrap.sh:/opt/cloudbeaver/init/bootstrap.sh:ro
+      - ./docker/cloudbeaver/data-sources.template.json:/opt/cloudbeaver/init/data-sources.template.json:ro
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
@@ -106,6 +136,7 @@ services:
       - "58080:8080"
 
 volumes:
+  cloudbeaver_workspace:
   postgres_data:
   redis_data:
   temporal_postgres_data:

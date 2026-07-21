@@ -53,6 +53,7 @@ If you change the frontend dev origin, update `ALLOWED_ORIGINS` in `.env` accord
 Local infrastructure includes:
 
 - PostgreSQL on `localhost:55432`
+- CloudBeaver DB explorer on `http://localhost:58978`
 - RabbitMQ on `localhost:55672`
 - RabbitMQ management UI on `http://localhost:15673`
 - Redis on `localhost:56379`
@@ -63,6 +64,23 @@ Local infrastructure includes:
 
 These host ports intentionally avoid the default ports commonly used by locally
 installed PostgreSQL, Redis, and RabbitMQ services.
+
+CloudBeaver is preconfigured on first boot with a shared connection to the app's
+PostgreSQL database. It reads the DB host, name, user, and password from the
+Compose environment, so you do not need to create the connection manually.
+
+Use these `.env` values for CloudBeaver access and bootstrapping:
+
+- `CLOUDBEAVER_SERVER_URL`
+- `CLOUDBEAVER_ADMIN_NAME`
+- `CLOUDBEAVER_ADMIN_PASSWORD`
+- `POSTGRES_DB`
+- `POSTGRES_USER`
+- `POSTGRES_PASSWORD`
+
+If you expose CloudBeaver anywhere beyond local development, change the default
+admin password, keep anonymous access disabled, and place it behind private
+networking, VPN, or SSO/reverse-proxy protection rather than a public open port.
 
 Provider credentials for Follow Up Boss, OpenRouter, Twilio, SendGrid, and S3 may
 remain empty for routine local development. They are required only when exercising
@@ -114,6 +132,9 @@ Key routes:
 - `make infra-down`
 - `make infra-logs`
 - `make infra-ps`
+- `make db-ui-up`
+- `make db-ui-down`
+- `make db-ui-logs`
 
 ## Checks
 

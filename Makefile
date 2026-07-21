@@ -1,16 +1,25 @@
-.PHONY: infra-up infra-down infra-logs infra-ps run worker outbox-publisher crm-sync-worker crm-sync-scheduler crm-sync-publisher listing-crawl-worker listing-crawl-scheduler test lint format typecheck check migrate revision
+.PHONY: infra-up infra-down infra-logs infra-ps db-ui-up db-ui-down db-ui-logs run worker outbox-publisher temporal-signal-dispatcher crm-sync-worker crm-sync-scheduler crm-sync-publisher listing-crawl-worker listing-crawl-scheduler start-all start-temporal start-workers stop-all tail-logs test lint format typecheck check migrate revision
 
 infra-up:
-	docker compose up -d postgres rabbitmq redis temporal temporal-ui mailpit
+	docker compose up -d postgres cloudbeaver rabbitmq redis temporal temporal-ui mailpit
 
 infra-down:
 	docker compose down
 
 infra-logs:
-	docker compose logs -f postgres rabbitmq redis temporal temporal-ui mailpit
+	docker compose logs -f postgres cloudbeaver rabbitmq redis temporal temporal-ui mailpit
 
 infra-ps:
 	docker compose ps
+
+db-ui-up:
+	docker compose up -d postgres cloudbeaver
+
+db-ui-down:
+	docker compose stop cloudbeaver
+
+db-ui-logs:
+	docker compose logs -f cloudbeaver
 
 run:
 	uv run uvicorn app.main:app --reload
@@ -20,6 +29,9 @@ worker:
 
 outbox-publisher:
 	uv run python -c "import asyncio; from app.interfaces.workers.outbox_publisher_worker import main; asyncio.run(main())"
+
+temporal-signal-dispatcher:
+	uv run python -c "import asyncio; from app.interfaces.workers.temporal_signal_dispatcher_worker import main; asyncio.run(main())"
 
 crm-sync-worker:
 	uv run python -c "import asyncio; from app.interfaces.workers.crm_sync_worker import main; asyncio.run(main())"
@@ -54,3 +66,19 @@ migrate:
 
 revision:
 	uv run alembic revision --autogenerate -m "$(message)"
+
+start-all:
+	uv run python scripts/start_workers.py --group all
+
+start-temporal:
+	uv run python scripts/start_workers.py --group temporal
+
+start-workers:
+	uv run python scripts/start_workers.py --group workers
+
+stop-all:
+	uv run python scripts/stop_workers.py
+
+tail-logs:
+	@mkdir -p logs
+	@tail -f logs/*.log

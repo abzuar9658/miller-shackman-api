@@ -1,0 +1,28 @@
+{
+  "folders": {},
+  "connections": {
+    "miller-schackman-postgres": {
+      "provider": "postgresql",
+      "driver": "postgres-jdbc",
+      "name": "${CB_DB_CONNECTION_NAME}",
+      "save-password": true,
+      "configuration": {
+        "host": "${CB_DB_HOST}",
+        "port": "${CB_DB_PORT}",
+        "database": "${CB_DB_NAME}",
+        "url": "jdbc:postgresql://${CB_DB_HOST}:${CB_DB_PORT}/${CB_DB_NAME}",
+        "configurationType": "MANUAL",
+        "type": "dev",
+        "closeIdleConnection": true,
+        "auth-model": "native",
+        "auth-properties": {
+          "name": "${CB_DB_USER}",
+          "password": "${CB_DB_PASSWORD}"
+        },
+        "bootstrap": {
+          "autocommit": true
+        }
+      }
+    }
+  }
+}
