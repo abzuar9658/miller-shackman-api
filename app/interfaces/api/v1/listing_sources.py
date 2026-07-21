@@ -32,11 +32,11 @@ from app.interfaces.api.dependencies.listing_sources import (
 from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.interfaces.api.schemas.listing_sources import (
     ListingCrawlRunResponse,
-    ListingSourceCrawlRequestResponse,
     ListingSearchScopeListResponse,
     ListingSearchScopeRequest,
     ListingSearchScopeResponse,
     ListingSearchScopeResultResponse,
+    ListingSourceCrawlRequestResponse,
     ListingSourceListResponse,
     ListingSourceRequest,
     ListingSourceResponse,
@@ -147,7 +147,9 @@ def _raise_for_scope_reasons(reasons: tuple[ListingSearchScopeReasonCode, ...]) 
     raise HTTPException(status_code=status_code, detail=[reason.value for reason in reasons])
 
 
-def _raise_for_crawl_request_reasons(reasons: tuple[RequestListingSourceCrawlReasonCode, ...]) -> None:
+def _raise_for_crawl_request_reasons(
+    reasons: tuple[RequestListingSourceCrawlReasonCode, ...],
+) -> None:
     if RequestListingSourceCrawlReasonCode.PERMISSION_DENIED in reasons:
         status_code = status.HTTP_403_FORBIDDEN
     elif RequestListingSourceCrawlReasonCode.SOURCE_NOT_FOUND in reasons:

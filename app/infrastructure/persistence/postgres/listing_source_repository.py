@@ -115,7 +115,10 @@ class PostgresListingSearchScopeRepository:
             select(ListingSearchScopeModel)
             .where(ListingSearchScopeModel.workspace_id == workspace_id)
             .where(ListingSearchScopeModel.source_id == source_id)
-            .order_by(ListingSearchScopeModel.created_at.asc(), ListingSearchScopeModel.scope_id.asc())
+            .order_by(
+                ListingSearchScopeModel.created_at.asc(),
+                ListingSearchScopeModel.scope_id.asc(),
+            )
         )
         return tuple(_scope_from_model(model) for model in result.scalars().all())
 
@@ -173,7 +176,10 @@ class PostgresListingCrawlRunRepository:
             select(ListingCrawlRunModel)
             .where(ListingCrawlRunModel.workspace_id == workspace_id)
             .where(ListingCrawlRunModel.source_id == source_id)
-            .order_by(ListingCrawlRunModel.started_at.desc(), ListingCrawlRunModel.crawl_run_id.desc())
+            .order_by(
+                ListingCrawlRunModel.started_at.desc(),
+                ListingCrawlRunModel.crawl_run_id.desc(),
+            )
             .limit(1)
         )
         model = result.scalar_one_or_none()
@@ -189,13 +195,19 @@ class PostgresListingCrawlRunRepository:
             .where(ListingCrawlRunModel.workspace_id == workspace_id)
             .where(ListingCrawlRunModel.source_id == source_id)
             .where(ListingCrawlRunModel.status.in_(_ACTIVE_CRAWL_RUN_STATUSES))
-            .order_by(ListingCrawlRunModel.started_at.desc(), ListingCrawlRunModel.crawl_run_id.desc())
+            .order_by(
+                ListingCrawlRunModel.started_at.desc(),
+                ListingCrawlRunModel.crawl_run_id.desc(),
+            )
             .limit(1)
         )
         model = result.scalar_one_or_none()
         return _crawl_run_from_model(model) if model is not None else None
 
-    async def insert_pending_if_no_active(self, crawl_run: ListingCrawlRun) -> ListingCrawlRun | None:
+    async def insert_pending_if_no_active(
+        self,
+        crawl_run: ListingCrawlRun,
+    ) -> ListingCrawlRun | None:
         result = await self._session.execute(
             insert(ListingCrawlRunModel)
             .values(**_crawl_run_to_values(crawl_run))

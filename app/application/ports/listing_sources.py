@@ -1,6 +1,5 @@
-from typing import Protocol
-
 from datetime import datetime
+from typing import Protocol
 
 from app.domain.common.ids import (
     ListingCrawlRunId,
@@ -88,7 +87,10 @@ class ListingCrawlRunRepository(Protocol):
     ) -> ListingCrawlRun | None:
         raise NotImplementedError
 
-    async def insert_pending_if_no_active(self, crawl_run: ListingCrawlRun) -> ListingCrawlRun | None:
+    async def insert_pending_if_no_active(
+        self,
+        crawl_run: ListingCrawlRun,
+    ) -> ListingCrawlRun | None:
         raise NotImplementedError
 
     async def claim_pending_by_id(

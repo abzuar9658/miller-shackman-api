@@ -206,7 +206,9 @@ def compute_listing_source_next_due_at(
         return None
     if latest_crawl_run is None:
         return now
-    due_at = _latest_attempt_at(latest_crawl_run) + timedelta(minutes=source.crawl_frequency_minutes)
+    due_at = _latest_attempt_at(latest_crawl_run) + timedelta(
+        minutes=source.crawl_frequency_minutes
+    )
     return due_at if due_at > now else now
 
 
@@ -242,11 +244,17 @@ async def enqueue_due_listing_source_crawls(
         if not enabled_scopes:
             skipped_no_scopes_count += 1
             continue
-        active = await crawl_run_repository.get_active_for_source(source.workspace_id, source.source_id)
+        active = await crawl_run_repository.get_active_for_source(
+            source.workspace_id,
+            source.source_id,
+        )
         if active is not None:
             skipped_active_count += 1
             continue
-        latest = await crawl_run_repository.get_latest_for_source(source.workspace_id, source.source_id)
+        latest = await crawl_run_repository.get_latest_for_source(
+            source.workspace_id,
+            source.source_id,
+        )
         if latest is not None and _latest_attempt_at(latest) > now - timedelta(
             minutes=source.crawl_frequency_minutes,
         ):
@@ -318,7 +326,10 @@ async def execute_queued_listing_source_crawl(
                 status=ListingCrawlStatus.FAILED,
                 finished_at=now,
                 updated_at=now,
-                error_summary=_execution_rejection_reason(source=source, enabled_scopes=enabled_scopes),
+                error_summary=_execution_rejection_reason(
+                    source=source,
+                    enabled_scopes=enabled_scopes,
+                ),
             )
         )
         return ExecuteQueuedListingSourceCrawlResult(

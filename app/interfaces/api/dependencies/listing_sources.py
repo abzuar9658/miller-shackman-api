@@ -4,22 +4,22 @@ from typing import Annotated, Protocol
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.ports.event_bus import EventBus
 from app.application.ports.listing_sources import (
     ListingCrawlRunRepository,
     ListingSearchScopeRepository,
     ListingSourceRepository,
 )
 from app.core.database import get_session
-from app.infrastructure.persistence.postgres.outbox_event_repository import (
-    PostgresOutboxEventRepository,
-    PostgresTransactionalEventBus,
-)
 from app.infrastructure.persistence.postgres.listing_source_repository import (
     PostgresListingCrawlRunRepository,
     PostgresListingSearchScopeRepository,
     PostgresListingSourceRepository,
 )
-from app.application.ports.event_bus import EventBus
+from app.infrastructure.persistence.postgres.outbox_event_repository import (
+    PostgresOutboxEventRepository,
+    PostgresTransactionalEventBus,
+)
 
 
 class SessionCommitter(Protocol):

@@ -52,6 +52,23 @@ class HandoffNotification:
     idempotency_key: str
 
 
+@dataclass(frozen=True)
+class ReviewNotification:
+    workspace_id: WorkspaceId
+    inbound_message_id: UUID
+    lead_id: LeadId
+    recipient_id: str
+    recipient_destination: str
+    lead_display_name: str
+    lead_primary_email: str | None
+    lead_primary_phone: str | None
+    latest_inbound_text: str
+    summary: str
+    review_reason: str
+    channel: str
+    idempotency_key: str
+
+
 class NotificationProvider(Protocol):
     async def send_preflight_digest(
         self,
@@ -62,5 +79,11 @@ class NotificationProvider(Protocol):
     async def send_handoff_notification(
         self,
         notification: HandoffNotification,
+    ) -> NotificationSendResult:
+        raise NotImplementedError
+
+    async def send_review_notification(
+        self,
+        notification: ReviewNotification,
     ) -> NotificationSendResult:
         raise NotImplementedError

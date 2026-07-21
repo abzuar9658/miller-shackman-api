@@ -135,10 +135,14 @@ def test_manager_cannot_manage_listing_sources() -> None:
     assert response.json()["detail"] == ["permission_denied"]
 
 
-def test_create_and_update_listing_search_scope(listing_source_client: ListingSourceApiTestClient) -> None:
+def test_create_and_update_listing_search_scope(
+    listing_source_client: ListingSourceApiTestClient,
+) -> None:
     source = _source(name="StreetEasy", enabled=True)
     listing_source_client.repository.save_sync(source)
-    listing_source_client.crawl_run_repository.runs_by_source[source.source_id] = [_crawl_run(source.source_id)]
+    listing_source_client.crawl_run_repository.runs_by_source[source.source_id] = [
+        _crawl_run(source.source_id)
+    ]
 
     create_response = listing_source_client.client.post(
         f"/api/v1/workspaces/{WORKSPACE_ID}/listing-sources/{source.source_id}/scopes",
@@ -192,7 +196,10 @@ def test_request_listing_source_crawl_route_requests_pending_run(
     assert body["status"] == "requested"
     assert body["crawl_run"]["status"] == "pending"
     assert listing_source_client.session.commits == 1
-    assert listing_source_client.event_bus.events[-1].event_type.value == "listing_source_crawl.requested"
+    assert (
+        listing_source_client.event_bus.events[-1].event_type.value
+        == "listing_source_crawl.requested"
+    )
 
 
 def _client_for_role(role: WorkspaceMembershipRole) -> ListingSourceApiTestClient:
@@ -312,7 +319,11 @@ class FakeListingSearchScopeRepository:
             return None
         return scope
 
-    async def list_for_source(self, workspace_id: UUID, source_id: UUID) -> tuple[ListingSearchScope, ...]:
+    async def list_for_source(
+        self,
+        workspace_id: UUID,
+        source_id: UUID,
+    ) -> tuple[ListingSearchScope, ...]:
         return tuple(
             scope
             for scope in self.scopes.values()
@@ -332,17 +343,31 @@ class FakeListingCrawlRunRepository:
         _ = workspace_id, crawl_run_id
         return None
 
-    async def list_for_source(self, workspace_id: UUID, source_id: UUID, *, limit: int = 100) -> tuple[ListingCrawlRun, ...]:
+    async def list_for_source(
+        self,
+        workspace_id: UUID,
+        source_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> tuple[ListingCrawlRun, ...]:
         _ = workspace_id, limit
         runs = self.runs_by_source.get(source_id, [])
         return tuple(runs[:limit])
 
-    async def get_latest_for_source(self, workspace_id: UUID, source_id: UUID) -> ListingCrawlRun | None:
+    async def get_latest_for_source(
+        self,
+        workspace_id: UUID,
+        source_id: UUID,
+    ) -> ListingCrawlRun | None:
         _ = workspace_id
         runs = self.runs_by_source.get(source_id, [])
         return runs[0] if runs else None
 
-    async def get_active_for_source(self, workspace_id: UUID, source_id: UUID) -> ListingCrawlRun | None:
+    async def get_active_for_source(
+        self,
+        workspace_id: UUID,
+        source_id: UUID,
+    ) -> ListingCrawlRun | None:
         _ = workspace_id
         runs = self.runs_by_source.get(source_id, [])
         for run in runs:
@@ -350,12 +375,21 @@ class FakeListingCrawlRunRepository:
                 return run
         return None
 
-    async def insert_pending_if_no_active(self, crawl_run: ListingCrawlRun) -> ListingCrawlRun | None:
+    async def insert_pending_if_no_active(
+        self,
+        crawl_run: ListingCrawlRun,
+    ) -> ListingCrawlRun | None:
         runs = self.runs_by_source.setdefault(crawl_run.source_id, [])
         runs.insert(0, crawl_run)
         return crawl_run
 
-    async def claim_pending_by_id(self, workspace_id: UUID, crawl_run_id: UUID, *, now: datetime) -> ListingCrawlRun | None:
+    async def claim_pending_by_id(
+        self,
+        workspace_id: UUID,
+        crawl_run_id: UUID,
+        *,
+        now: datetime,
+    ) -> ListingCrawlRun | None:
         _ = workspace_id, crawl_run_id, now
         return None
 

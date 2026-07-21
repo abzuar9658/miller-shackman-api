@@ -65,7 +65,11 @@ class FakeListingSearchScopeRepository:
         _ = workspace_id, scope_id
         return None
 
-    async def list_for_source(self, workspace_id: UUID, source_id: UUID) -> tuple[ListingSearchScope, ...]:
+    async def list_for_source(
+        self,
+        workspace_id: UUID,
+        source_id: UUID,
+    ) -> tuple[ListingSearchScope, ...]:
         _ = workspace_id, source_id
         return ()
 

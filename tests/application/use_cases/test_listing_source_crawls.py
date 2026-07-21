@@ -50,7 +50,9 @@ class FakeListingSourceRepository:
         return None
 
     async def list_for_workspace(self, workspace_id: UUID) -> tuple[ListingSource, ...]:
-        return tuple(source for source in self.sources.values() if source.workspace_id == workspace_id)
+        return tuple(
+            source for source in self.sources.values() if source.workspace_id == workspace_id
+        )
 
     async def list_enabled(self, *, limit: int = 100) -> tuple[ListingSource, ...]:
         enabled = [source for source in self.sources.values() if source.enabled]
@@ -71,7 +73,11 @@ class FakeListingSearchScopeRepository:
             return None
         return scope
 
-    async def list_for_source(self, workspace_id: UUID, source_id: UUID) -> tuple[ListingSearchScope, ...]:
+    async def list_for_source(
+        self,
+        workspace_id: UUID,
+        source_id: UUID,
+    ) -> tuple[ListingSearchScope, ...]:
         return tuple(
             scope
             for scope in self.scopes.values()
@@ -93,7 +99,13 @@ class FakeListingCrawlRunRepository:
             return None
         return run
 
-    async def list_for_source(self, workspace_id: UUID, source_id: UUID, *, limit: int = 100) -> tuple[ListingCrawlRun, ...]:
+    async def list_for_source(
+        self,
+        workspace_id: UUID,
+        source_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> tuple[ListingCrawlRun, ...]:
         matches = [
             run
             for run in self.runs.values()
@@ -102,11 +114,19 @@ class FakeListingCrawlRunRepository:
         matches.sort(key=lambda run: run.started_at, reverse=True)
         return tuple(matches[:limit])
 
-    async def get_latest_for_source(self, workspace_id: UUID, source_id: UUID) -> ListingCrawlRun | None:
+    async def get_latest_for_source(
+        self,
+        workspace_id: UUID,
+        source_id: UUID,
+    ) -> ListingCrawlRun | None:
         runs = await self.list_for_source(workspace_id, source_id, limit=1)
         return runs[0] if runs else None
 
-    async def get_active_for_source(self, workspace_id: UUID, source_id: UUID) -> ListingCrawlRun | None:
+    async def get_active_for_source(
+        self,
+        workspace_id: UUID,
+        source_id: UUID,
+    ) -> ListingCrawlRun | None:
         for run in self.runs.values():
             if (
                 run.workspace_id == workspace_id
@@ -116,14 +136,23 @@ class FakeListingCrawlRunRepository:
                 return run
         return None
 
-    async def insert_pending_if_no_active(self, crawl_run: ListingCrawlRun) -> ListingCrawlRun | None:
+    async def insert_pending_if_no_active(
+        self,
+        crawl_run: ListingCrawlRun,
+    ) -> ListingCrawlRun | None:
         active = await self.get_active_for_source(crawl_run.workspace_id, crawl_run.source_id)
         if active is not None:
             return None
         self.runs[crawl_run.crawl_run_id] = crawl_run
         return crawl_run
 
-    async def claim_pending_by_id(self, workspace_id: UUID, crawl_run_id: UUID, *, now: datetime) -> ListingCrawlRun | None:
+    async def claim_pending_by_id(
+        self,
+        workspace_id: UUID,
+        crawl_run_id: UUID,
+        *,
+        now: datetime,
+    ) -> ListingCrawlRun | None:
         run = await self.get_by_id(workspace_id, crawl_run_id)
         if run is None or run.status != ListingCrawlStatus.PENDING:
             return None
@@ -140,7 +169,11 @@ class FakeListingSnapshotRepository:
     def __init__(self) -> None:
         self.snapshots: dict[UUID, CanonicalListingSnapshot] = {}
 
-    async def get_by_id(self, workspace_id: UUID, snapshot_id: UUID) -> CanonicalListingSnapshot | None:
+    async def get_by_id(
+        self,
+        workspace_id: UUID,
+        snapshot_id: UUID,
+    ) -> CanonicalListingSnapshot | None:
         snapshot = self.snapshots.get(snapshot_id)
         if snapshot is None or snapshot.workspace_id != workspace_id:
             return None
@@ -162,11 +195,21 @@ class FakeListingSnapshotRepository:
                 return snapshot
         return None
 
-    async def list_current_for_source(self, workspace_id: UUID, source_id: UUID, *, limit: int = 100) -> tuple[CanonicalListingSnapshot, ...]:
+    async def list_current_for_source(
+        self,
+        workspace_id: UUID,
+        source_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> tuple[CanonicalListingSnapshot, ...]:
         matches = [
             snapshot
             for snapshot in self.snapshots.values()
-            if snapshot.workspace_id == workspace_id and snapshot.source_id == source_id and snapshot.is_current
+            if (
+                snapshot.workspace_id == workspace_id
+                and snapshot.source_id == source_id
+                and snapshot.is_current
+            )
         ]
         matches.sort(key=lambda snapshot: snapshot.scraped_at, reverse=True)
         return tuple(matches[:limit])
@@ -178,7 +221,11 @@ class FakeListingSnapshotRepository:
             snapshot.external_listing_id,
         )
         if current is not None and current.source_payload_hash == snapshot.source_payload_hash:
-            updated = replace(current, valid_until=snapshot.valid_until, updated_at=snapshot.updated_at)
+            updated = replace(
+                current,
+                valid_until=snapshot.valid_until,
+                updated_at=snapshot.updated_at,
+            )
             self.snapshots[current.snapshot_id] = updated
             return updated
         self.snapshots[snapshot.snapshot_id] = snapshot
@@ -202,11 +249,19 @@ class FakeListingSnapshotRepository:
 
 
 class FakeListingSearchClient:
-    def __init__(self, results_by_location: dict[str, tuple[CanonicalListingSnapshot, ...] | Exception]) -> None:
+    def __init__(
+        self,
+        results_by_location: dict[str, tuple[CanonicalListingSnapshot, ...] | Exception],
+    ) -> None:
         self.results_by_location = results_by_location
         self.calls: list[ListingSearchQuery] = []
 
-    async def search(self, *, source: ListingSource, query: ListingSearchQuery) -> tuple[CanonicalListingSnapshot, ...]:
+    async def search(
+        self,
+        *,
+        source: ListingSource,
+        query: ListingSearchQuery,
+    ) -> tuple[CanonicalListingSnapshot, ...]:
         _ = source
         self.calls.append(query)
         key = query.locations[0] if query.locations else query.addresses[0]
@@ -297,7 +352,9 @@ async def test_scheduler_requests_only_due_supported_sources_with_scopes() -> No
 
 @pytest.mark.asyncio
 async def test_execute_listing_source_crawl_persists_snapshots_and_marks_completed() -> None:
-    crawl_run_repository = FakeListingCrawlRunRepository((_crawl_run(status=ListingCrawlStatus.PENDING),))
+    crawl_run_repository = FakeListingCrawlRunRepository(
+        (_crawl_run(status=ListingCrawlStatus.PENDING),)
+    )
     snapshot_repository = FakeListingSnapshotRepository()
     event_bus = FakeEventBus()
 
@@ -324,8 +381,11 @@ async def test_execute_listing_source_crawl_persists_snapshots_and_marks_complet
 
 
 @pytest.mark.asyncio
-async def test_execute_listing_source_crawl_marks_completed_with_errors_for_partial_failures() -> None:
-    crawl_run_repository = FakeListingCrawlRunRepository((_crawl_run(status=ListingCrawlStatus.PENDING),))
+async def test_execute_listing_source_crawl_marks_completed_with_errors_for_partial_failures(
+) -> None:
+    crawl_run_repository = FakeListingCrawlRunRepository(
+        (_crawl_run(status=ListingCrawlStatus.PENDING),)
+    )
 
     result = await execute_queued_listing_source_crawl(
         workspace_id=WORKSPACE_ID,

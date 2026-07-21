@@ -38,7 +38,11 @@ def upgrade() -> None:
         sa.Column("source_type", sa.String(length=50), nullable=False),
         sa.Column("base_url", sa.String(length=500), nullable=False),
         sa.Column("allowed_url_patterns", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("disallowed_url_patterns", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column(
+            "disallowed_url_patterns",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+        ),
         sa.Column("crawl_frequency_minutes", sa.Integer(), nullable=False),
         sa.Column("enabled", sa.Boolean(), nullable=False),
         sa.Column("requires_auth", sa.Boolean(), nullable=False),
