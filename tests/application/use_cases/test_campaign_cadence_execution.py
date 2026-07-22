@@ -2,6 +2,9 @@ from datetime import UTC, datetime, time, timedelta
 from typing import cast
 from uuid import UUID, uuid4
 
+from app.application.services.llm.outbound_query_extraction import (
+    OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION,
+)
 from app.application.use_cases.campaign_cadence_execution import (
     CadenceStepExecutionStatus,
     CadenceStepScheduleStatus,
@@ -196,9 +199,10 @@ async def test_execute_campaign_cadence_step_sends_first_step_and_advances_curso
         WorkflowTransitionReasonCode.CADENCE_STEP_STARTED,
         WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_SENT,
     ]
-    assert len(llm_client.requests) == 1
-    assert "Recent CRM conversation history:" in llm_client.requests[0].prompt
-    assert "We are hoping to move before school starts." in llm_client.requests[0].prompt
+    draft_requests = _draft_requests(llm_client)
+    assert len(draft_requests) == 1
+    assert "Recent CRM conversation history:" in draft_requests[0].prompt
+    assert "We are hoping to move before school starts." in draft_requests[0].prompt
 
 
 async def test_schedule_next_campaign_cadence_step_schedules_second_step_after_first_send() -> None:
@@ -376,7 +380,7 @@ async def test_execute_campaign_cadence_step_persists_rich_draft_rejection_detai
     ]
     assert last_transition.metadata["draft_confidence"] == 0.91
     assert last_transition.metadata["draft_model"] == "openai/gpt-4o-mini"
-    assert last_transition.metadata["draft_prompt_version"] == "outbound_message_draft:v8:r1"
+    assert last_transition.metadata["draft_prompt_version"] == "outbound_message_draft:v9:r1"
     assert last_transition.metadata["selected_channel"] == "email"
     explanation = cast(str, last_transition.metadata["explanation"])
     assert "Draft validation failed: safety flags present." in explanation
@@ -797,3 +801,12 @@ def _step(
         max_attempts=1,
         created_at=NOW,
     )
+
+
+
+def _draft_requests(llm_client: FakeLLMClient) -> list:
+    return [
+        request
+        for request in llm_client.requests
+        if request.prompt_version != OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION
+    ]
