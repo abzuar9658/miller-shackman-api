@@ -1,5 +1,4 @@
 from datetime import time
-from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -300,6 +299,17 @@ class OutboundDraftPreviewResponse(BaseModel):
     model: str | None = None
 
 
+class ListingRelevanceBriefResponse(BaseModel):
+    search_basis: str
+    match_count: int
+    matching_areas: list[str] = Field(default_factory=list)
+    matching_property_types: list[str] = Field(default_factory=list)
+    budget_alignment_note: str | None = None
+    safe_talking_point: str | None = None
+    safe_cta: str
+    draft_directive: str | None = None
+
+
 class WorkspaceOutboundDraftingPreviewRequest(BaseModel):
     query: str = Field(min_length=1, max_length=1000)
     agent_name: str | None = Field(default=None, max_length=255)
@@ -317,8 +327,11 @@ class WorkspaceOutboundDraftingPreviewRequest(BaseModel):
 class WorkspaceOutboundDraftingPreviewResponse(BaseModel):
     status: str
     parsed_preferences: dict[str, str] = Field(default_factory=dict)
+    extraction_method: str = "fallback"
+    extraction_confidence: float | None = None
+    extraction_reasons: list[str] = Field(default_factory=list)
     listing_context_found: bool = False
-    listing_relevance_brief: dict[str, Any] | None = None
+    listing_relevance_brief: ListingRelevanceBriefResponse | None = None
     sms_preview: OutboundDraftPreviewResponse | None = None
     email_preview: OutboundDraftPreviewResponse | None = None
 

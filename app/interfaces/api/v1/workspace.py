@@ -513,6 +513,9 @@ async def preview_workspace_outbound_drafting_route(
     return WorkspaceOutboundDraftingPreviewResponse(
         status=result.status.value,
         parsed_preferences=result.parsed_preferences or {},
+        extraction_method=result.extraction_method.value,
+        extraction_confidence=result.extraction_confidence,
+        extraction_reasons=[reason.value for reason in result.extraction_reasons],
         listing_context_found=result.listing_relevance_brief is not None,
         listing_relevance_brief=result.listing_relevance_brief,
         sms_preview=(
