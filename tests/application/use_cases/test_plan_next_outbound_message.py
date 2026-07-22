@@ -6,6 +6,9 @@ from uuid import UUID, uuid4
 from app.application.ports.lead_activity import LeadActivityItem, LeadActivityKind
 from app.application.ports.listing_search import ListingSearchQuery
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
+from app.application.services.llm.outbound_query_extraction import (
+    OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION,
+)
 from app.application.use_cases.plan_next_outbound_message import (
     PlanNextOutboundMessageContext,
     plan_next_outbound_message_for_lead,
@@ -146,14 +149,32 @@ class FakeOutboundMessageRepository:
 
 
 class FakeLLMClient:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, *, extraction_text: str | None = None) -> None:
         self.text = text
+        self.extraction_text = extraction_text or json.dumps(
+            {
+                "search_type": None,
+                "address": None,
+                "location": None,
+                "keywords": None,
+                "beds": None,
+                "min_price": None,
+                "max_price": None,
+                "price_band": None,
+                "confidence": 0.1,
+                "reasons": ["Not enough detail to improve on deterministic extraction."],
+            }
+        )
         self.requests: list[LLMCompletionRequest] = []
 
     async def complete(self, request: LLMCompletionRequest) -> LLMResult:
         self.requests.append(request)
         return LLMResult(
-            text=self.text,
+            text=(
+                self.extraction_text
+                if request.prompt_version == OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION
+                else self.text
+            ),
             model="openai/gpt-4o-mini",
             prompt_version=request.prompt_version,
             latency_ms=13,
@@ -364,6 +385,14 @@ def _draft_json(
     )
 
 
+def _draft_requests(llm: FakeLLMClient) -> list[LLMCompletionRequest]:
+    return [
+        request
+        for request in llm.requests
+        if request.prompt_version != OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION
+    ]
+
+
 def _listing_source() -> ListingSource:
     return ListingSource(
         source_id=uuid4(),
@@ -422,11 +451,12 @@ async def test_plans_message_using_safe_context_assembled_from_canonical_lead() 
     assert result.message.message_id == MESSAGE_ID
     assert result.message.status == OutboundMessageStatus.PENDING
     assert result.message.provider_send_status == ProviderSendStatus.NOT_ATTEMPTED
-    assert len(llm.requests) == 1
-    assert "No meaningful communication recorded for 90 days." in llm.requests[0].prompt
-    assert "the lead inquired about a property" in llm.requests[0].prompt
-    assert "Bronx" in llm.requests[0].prompt
-    assert "Austin" not in llm.requests[0].prompt
+    draft_requests = _draft_requests(llm)
+    assert len(draft_requests) == 1
+    assert "No meaningful communication recorded for 90 days." in draft_requests[0].prompt
+    assert "the lead inquired about a property" in draft_requests[0].prompt
+    assert "Bronx" in draft_requests[0].prompt
+    assert "Austin" not in draft_requests[0].prompt
 
 
 async def test_uses_workspace_llm_model_for_outbound_planning() -> None:
@@ -452,7 +482,7 @@ async def test_uses_workspace_llm_model_for_outbound_planning() -> None:
         message_id_factory=lambda: MESSAGE_ID,
     )
 
-    assert llm.requests[0].model == "openai/gpt-4.1-mini"
+    assert all(request.model == "openai/gpt-4.1-mini" for request in llm.requests)
 
 
 async def test_prefers_recent_crm_conversation_history_when_available() -> None:
@@ -485,11 +515,12 @@ async def test_prefers_recent_crm_conversation_history_when_available() -> None:
     )
 
     assert result.status == PlanOutboundMessageStatus.PLANNED
-    assert len(llm.requests) == 1
-    assert "Recent CRM conversation history:" in llm.requests[0].prompt
-    assert "Sent a quick check-in email last week." in llm.requests[0].prompt
-    assert "We are hoping to move before school starts." in llm.requests[0].prompt
-    assert "No meaningful communication recorded for 90 days." not in llm.requests[0].prompt
+    draft_requests = _draft_requests(llm)
+    assert len(draft_requests) == 1
+    assert "Recent CRM conversation history:" in draft_requests[0].prompt
+    assert "Sent a quick check-in email last week." in draft_requests[0].prompt
+    assert "We are hoping to move before school starts." in draft_requests[0].prompt
+    assert "No meaningful communication recorded for 90 days." not in draft_requests[0].prompt
 
 
 async def test_prefers_unified_activity_context_when_available() -> None:
@@ -542,19 +573,20 @@ async def test_prefers_unified_activity_context_when_available() -> None:
     )
 
     assert result.status == PlanOutboundMessageStatus.PLANNED
-    assert len(llm.requests) == 1
-    assert "Recent meaningful activity:" in llm.requests[0].prompt
-    assert "conversation_memory_summary" in llm.requests[0].prompt
-    assert "recent_conversation_items" in llm.requests[0].prompt
-    assert "recent_outbound_messages" in llm.requests[0].prompt
+    draft_requests = _draft_requests(llm)
+    assert len(draft_requests) == 1
+    assert "Recent meaningful activity:" in draft_requests[0].prompt
+    assert "conversation_memory_summary" in draft_requests[0].prompt
+    assert "recent_conversation_items" in draft_requests[0].prompt
+    assert "recent_outbound_messages" in draft_requests[0].prompt
     assert (
         "Sent a safe check-in email two days ago asking whether Riverdale"
-        in llm.requests[0].prompt
+        in draft_requests[0].prompt
     )
     assert "We are hoping to move before school starts and still need at least 2 bedrooms." in (
-        llm.requests[0].prompt
+        draft_requests[0].prompt
     )
-    assert "No meaningful communication recorded for 90 days." not in llm.requests[0].prompt
+    assert "No meaningful communication recorded for 90 days." not in draft_requests[0].prompt
 
 
 async def test_enriches_prompt_with_streeteasy_listing_context_when_enabled() -> None:
@@ -581,11 +613,12 @@ async def test_enriches_prompt_with_streeteasy_listing_context_when_enabled() ->
 
     assert result.status == PlanOutboundMessageStatus.PLANNED
     assert len(search_client.queries) == 1
-    assert "approved_listing_context" in llm.requests[0].prompt
-    assert "listing_relevance_brief" in llm.requests[0].prompt
-    assert "StreetEasy" in llm.requests[0].prompt
-    assert "2738 Miles Avenue" not in llm.requests[0].prompt
-    assert "$650,000" not in llm.requests[0].prompt
+    draft_requests = _draft_requests(llm)
+    assert "approved_listing_context" in draft_requests[0].prompt
+    assert "listing_relevance_brief" in draft_requests[0].prompt
+    assert "StreetEasy" in draft_requests[0].prompt
+    assert "2738 Miles Avenue" not in draft_requests[0].prompt
+    assert "$650,000" not in draft_requests[0].prompt
 
 
 async def test_listing_enrichment_uses_preferences_extracted_from_activity_history() -> None:
@@ -634,6 +667,61 @@ async def test_listing_enrichment_uses_preferences_extracted_from_activity_histo
     assert search_client.queries[0].min_beds == Decimal("2")
     assert search_client.queries[0].max_price == Decimal("600000")
     assert search_client.queries[0].keywords == ("co-op",)
+
+
+async def test_llm_query_extraction_updates_listing_search_type_for_production_path() -> None:
+    source = _listing_source()
+    search_client = FakeListingSearchClient((_listing_snapshot(source.source_id),))
+    llm = FakeLLMClient(
+        _draft_json(),
+        extraction_text=json.dumps(
+            {
+                "search_type": "rent",
+                "location": "Queens",
+                "max_price": "2400",
+                "confidence": 0.91,
+                "reasons": ["Monthly budget language indicates rent."],
+            }
+        ),
+    )
+
+    result = await plan_next_outbound_message_for_lead(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        context=_planning_context(
+            activity_items=(
+                LeadActivityItem(
+                    activity_id=uuid4(),
+                    lead_id=LEAD_ID,
+                    kind=LeadActivityKind.INBOUND_MESSAGE,
+                    occurred_at=NOW,
+                    title="Lead replied",
+                    preview="Need something in Queens around $2,400 per month.",
+                    content="Need something in Queens around $2,400 per month.",
+                    channel="email",
+                    direction="inbound",
+                    actor_name="lead",
+                ),
+            ),
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=FakeOutboundMessageRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        llm_client=llm,
+        now=NOW,
+        listing_source_repository=FakeListingSourceRepository(source),
+        listing_snapshot_repository=FakeListingSnapshotRepository(),
+        listing_search_client=search_client,
+        listing_enrichment_enabled=True,
+        message_id_factory=lambda: MESSAGE_ID,
+    )
+
+    assert result.status == PlanOutboundMessageStatus.PLANNED
+    assert len(search_client.queries) == 1
+    assert search_client.queries[0].search_type.value == "rent"
+    assert search_client.queries[0].locations == ("Queens",)
+    assert search_client.queries[0].max_price == Decimal("2400")
 
 
 async def test_rejects_without_calling_llm_when_pre_send_blocks_high_level_plan() -> None:

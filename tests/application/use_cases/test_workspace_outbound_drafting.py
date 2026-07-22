@@ -4,6 +4,9 @@ from uuid import UUID, uuid4
 
 from app.application.ports.listing_search import ListingSearchQuery
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
+from app.application.services.llm.outbound_query_extraction import (
+    OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION,
+)
 from app.application.use_cases.workspace_outbound_drafting import (
     OutboundDraftingPreviewStatus,
     preview_workspace_outbound_drafting,
@@ -29,7 +32,12 @@ class _FakePreviewLLMClient:
 
     async def complete(self, request: LLMCompletionRequest) -> LLMResult:
         self.requests.append(request)
-        if '"channel": "sms"' in request.prompt:
+        if request.prompt_version == OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION:
+            payload = (
+                '{"search_type":"rent","location":"Queens","max_price":"2000",'
+                '"confidence":0.92,"reasons":["Monthly rent language indicates rent."]}'
+            )
+        elif '"channel": "sms"' in request.prompt:
             payload = (
                 '{"body":"SMS preview body","subject":null,'
                 '"confidence":0.91,"personalization_notes":[],"safety_flags":[]}'
@@ -151,6 +159,8 @@ def test_preview_workspace_outbound_drafting_uses_saved_config_and_live_search()
         created_at=NOW,
         updated_at=NOW,
         enabled=True,
+        terms_reviewed_at=NOW,
+        data_use_policy="Reviewed for optional enrichment.",
     )
     live_snapshot = CanonicalListingSnapshot(
         snapshot_id=uuid4(),
@@ -189,20 +199,31 @@ def test_preview_workspace_outbound_drafting_uses_saved_config_and_live_search()
 
     assert result.status == OutboundDraftingPreviewStatus.PREVIEWED
     assert result.parsed_preferences is not None
+    assert result.extraction_method.value == "llm"
+    assert result.extraction_confidence == 0.92
+    assert result.extraction_reasons == ()
     assert result.parsed_preferences["max_price"] == "2000"
     assert result.parsed_preferences["location"].startswith("Queens")
     assert "beds" not in result.parsed_preferences
+    assert result.listing_relevance_brief is not None
+    assert result.listing_relevance_brief["match_count"] == 1
+    assert "draft_directive" in result.listing_relevance_brief
     assert result.sms_preview is not None
     assert result.sms_preview.body == "Hi Taylor Agent\n\nSMS preview body"
     assert result.email_preview is not None
     assert result.email_preview.subject == "Preview subject | Taylor Brokerage"
     assert result.email_preview.body is not None
     assert result.email_preview.body == "Regards,\nTaylor Brokerage\n\nEmail preview body"
-    assert result.sms_preview.prompt_version == "outbound_message_draft:v8:r2"
-    assert len(llm_client.requests) == 2
+    assert result.sms_preview.prompt_version == "outbound_message_draft:v9:r2"
+    assert len(llm_client.requests) == 3
+    assert len(listing_search_client.search_calls) == 1
+    assert listing_search_client.search_calls[0].search_type.value == "rent"
+    assert listing_search_client.search_calls[0].locations == ("Queens",)
+    assert listing_search_client.search_calls[0].max_price is not None
     assert all(
         "You are the brokerage's preview drafting assistant." in request.prompt
         for request in llm_client.requests
+        if request.prompt_version != OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION
     )
 
 
