@@ -14,17 +14,21 @@ from app.application.ports.repositories import (
     WorkspaceLLMConfigRepository,
     WorkspaceOutboundDraftingConfigRepository,
 )
-from app.application.services.canonical_lead_inputs import (
-    approved_outbound_context_from_canonical_lead,
-)
 from app.application.services.listing_context_enrichment import (
     maybe_enrich_outbound_lead_context,
+)
+from app.application.services.llm.outbound_query_extraction import (
+    build_outbound_context_with_query_extraction,
+)
+from app.application.services.llm.workspace_model_resolution import (
+    resolve_workspace_openrouter_model,
 )
 from app.application.use_cases.plan_outbound_message import (
     OutboundPlanningContext,
     PlanOutboundMessageReasonCode,
     PlanOutboundMessageResult,
     PlanOutboundMessageStatus,
+    _select_channel,
     plan_outbound_message_for_lead_record,
 )
 from app.domain.campaigns.pre_send import PreSendPolicy, WorkflowState
@@ -134,8 +138,60 @@ async def plan_next_outbound_message_for_lead(
         if drafting_config is not None:
             enabled_query_extraction_fields = drafting_config.enabled_extraction_fields
 
-    lead_context = approved_outbound_context_from_canonical_lead(
-        lead,
+    preflight_context = OutboundPlanningContext(
+        campaign_status=context.campaign_status,
+        workflow_state=context.workflow_state,
+        enabled_channels=context.enabled_channels,
+        workspace_contact_policy=context.workspace_contact_policy,
+        campaign_goal=context.campaign_goal,
+        brokerage_name=context.brokerage_name,
+        cadence_step_id=context.cadence_step_id,
+        assigned_agent_name=context.assigned_agent_name or _assigned_agent_name_from_lead(lead),
+        scheduled_for=context.scheduled_for,
+        message_version=context.message_version,
+        pre_send_policy=context.pre_send_policy,
+        preflight_vetoed=context.preflight_vetoed,
+        handoff_active=context.handoff_active,
+        human_owned=context.human_owned,
+        lead_replied_since_scheduled=context.lead_replied_since_scheduled,
+        recent_human_activity=context.recent_human_activity,
+        ownership_changed=context.ownership_changed,
+        last_global_outreach_at=context.last_global_outreach_at,
+        last_campaign_outreach_at=context.last_campaign_outreach_at,
+        last_channel_outreach_at=context.last_channel_outreach_at,
+        other_channel_sent_at=context.other_channel_sent_at,
+    )
+    selected = await _select_channel(
+        workspace_id=workspace_id,
+        lead=lead,
+        campaign_id=campaign_id,
+        context=preflight_context,
+        message_repository=message_repository,
+        now=now,
+    )
+    if selected.duplicate_message is not None:
+        return PlanOutboundMessageResult(
+            status=PlanOutboundMessageStatus.DUPLICATE,
+            message=selected.duplicate_message,
+            selected_channel=selected.channel,
+            pre_send_decision=selected.pre_send_decision,
+            reasons=(PlanOutboundMessageReasonCode.DUPLICATE_PLAN,),
+            channel_evaluations=selected.evaluations,
+        )
+    if selected.channel is None or selected.pre_send_decision is None:
+        return PlanOutboundMessageResult(
+            status=PlanOutboundMessageStatus.REJECTED,
+            reasons=tuple(dict.fromkeys(selected.reasons)),
+            channel_evaluations=selected.evaluations,
+        )
+
+    model = await resolve_workspace_openrouter_model(
+        workspace_id=workspace_id,
+        workspace_llm_config_repository=workspace_llm_config_repository,
+        default_openrouter_model=default_openrouter_model,
+    )
+    extraction = await build_outbound_context_with_query_extraction(
+        lead=lead,
         now=now,
         conversation_summary=context.conversation_summary,
         latest_lead_request=context.latest_lead_request,
@@ -144,7 +200,10 @@ async def plan_next_outbound_message_for_lead(
         allowed_mapped_custom_field_keys=context.allowed_mapped_custom_field_keys,
         activity_items=activity_items,
         crm_conversation_events=crm_conversation_events,
+        llm_client=llm_client,
+        model=model,
     )
+    lead_context = extraction.lead_context
     lead_context = await maybe_enrich_outbound_lead_context(
         lead=lead,
         lead_context=lead_context,

@@ -14,17 +14,19 @@ from app.application.ports.repositories import (
     WorkspaceOutboundDraftingConfigRepository,
     WorkspaceRepository,
 )
-from app.application.services.canonical_lead_inputs import (
-    approved_outbound_context_from_canonical_lead,
-)
 from app.application.services.listing_context_enrichment import (
     maybe_enrich_outbound_lead_context,
 )
 from app.application.services.llm.outbound_message_drafting import (
     ApprovedOutboundLeadContext,
     OutboundMessageDraftResult,
-    build_listing_relevance_brief,
+    build_listing_relevance_brief_payload,
     draft_outbound_message,
+)
+from app.application.services.llm.outbound_query_extraction import (
+    OutboundQueryExtractionMethod,
+    OutboundQueryExtractionReasonCode,
+    build_outbound_context_with_query_extraction,
 )
 from app.application.services.llm.workspace_model_resolution import (
     resolve_workspace_openrouter_model,
@@ -57,6 +59,9 @@ class OutboundDraftingPreviewResult:
     status: OutboundDraftingPreviewStatus
     parsed_preferences: dict[str, str] | None = None
     lead_context: ApprovedOutboundLeadContext | None = None
+    extraction_method: OutboundQueryExtractionMethod = OutboundQueryExtractionMethod.FALLBACK
+    extraction_confidence: float | None = None
+    extraction_reasons: tuple[OutboundQueryExtractionReasonCode, ...] = ()
     sms_preview: OutboundDraftPreview | None = None
     email_preview: OutboundDraftPreview | None = None
     listing_relevance_brief: dict[str, object] | None = None
@@ -113,9 +118,14 @@ async def preview_workspace_outbound_drafting(
     drafting_config = (
         await workspace_outbound_drafting_config_repository.get_by_workspace_id(workspace_id)
     ) or default_workspace_outbound_drafting_config(workspace_id)
+    model = await resolve_workspace_openrouter_model(
+        workspace_id=workspace_id,
+        workspace_llm_config_repository=workspace_llm_config_repository,
+        default_openrouter_model=default_openrouter_model,
+    )
     lead = _preview_lead(workspace_id=workspace_id, query=query, now=now)
-    lead_context = approved_outbound_context_from_canonical_lead(
-        lead,
+    extraction = await build_outbound_context_with_query_extraction(
+        lead=lead,
         now=now,
         activity_items=(
             LeadActivityItem(
@@ -132,7 +142,10 @@ async def preview_workspace_outbound_drafting(
             ),
         ),
         enabled_query_extraction_fields=drafting_config.enabled_extraction_fields,
+        llm_client=llm_client,
+        model=model,
     )
+    lead_context = extraction.lead_context
     lead_context = await maybe_enrich_outbound_lead_context(
         lead=lead,
         lead_context=lead_context,
@@ -144,11 +157,6 @@ async def preview_workspace_outbound_drafting(
         snapshot_repository=listing_snapshot_repository,
         listing_search_client=listing_search_client,
         bypass_cache=True,
-    )
-    model = await resolve_workspace_openrouter_model(
-        workspace_id=workspace_id,
-        workspace_llm_config_repository=workspace_llm_config_repository,
-        default_openrouter_model=default_openrouter_model,
     )
     sms_result, email_result = await asyncio.gather(
         draft_outbound_message(
@@ -174,22 +182,16 @@ async def preview_workspace_outbound_drafting(
             model=model,
         ),
     )
-    listing_relevance_brief = None
-    if lead_context.listing_context is not None:
-        brief = build_listing_relevance_brief(lead_context.listing_context)
-        listing_relevance_brief = {
-            "search_basis": brief.search_basis,
-            "match_count": brief.match_count,
-            "matching_areas": list(brief.matching_areas),
-            "matching_property_types": list(brief.matching_property_types),
-            "budget_alignment_note": brief.budget_alignment_note,
-            "safe_talking_point": brief.safe_talking_point,
-            "safe_cta": brief.safe_cta,
-        }
+    listing_relevance_brief = build_listing_relevance_brief_payload(
+        lead_context.listing_context
+    )
     return OutboundDraftingPreviewResult(
         status=OutboundDraftingPreviewStatus.PREVIEWED,
         parsed_preferences=dict(lead_context.extracted_preferences),
         lead_context=lead_context,
+        extraction_method=extraction.method,
+        extraction_confidence=extraction.confidence,
+        extraction_reasons=extraction.reasons,
         sms_preview=_preview_from_draft(sms_result),
         email_preview=_preview_from_draft(email_result),
         listing_relevance_brief=listing_relevance_brief,
