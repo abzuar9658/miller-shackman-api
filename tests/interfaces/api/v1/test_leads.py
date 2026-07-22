@@ -1,11 +1,19 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID
 
 import time_machine
 from fastapi.testclient import TestClient
 
 from app.application.ports.lead_activity import LeadActivityItem, LeadActivityKind
+from app.application.ports.repositories import (
+    CRMAgentRepository,
+    UserRepository,
+    WorkspaceAgentCRMMappingRepository,
+    WorkspaceAgentMappingConfigRepository,
+    WorkspaceMembershipRepository,
+)
 from app.domain.campaigns.execution import (
     CampaignCadenceStep,
     CampaignExecutionConfig,
@@ -30,17 +38,30 @@ from app.domain.conversations import (
     InboundMessage,
     InboundMessageClassificationStatus,
 )
+from app.domain.crm_agent_mapping import (
+    CRMAgent,
+    CRMAgentMappingResolutionSource,
+    CRMAgentMappingStatus,
+    WorkspaceAgentCRMMapping,
+    WorkspaceAgentMappingConfig,
+)
 from app.domain.crm_sync import ExternalEvent
 from app.domain.identity import (
     AuthenticatedActor,
     User,
     UserStatus,
     Workspace,
+    WorkspaceMembership,
     WorkspaceMembershipRole,
     WorkspaceMembershipStatus,
     WorkspaceStatus,
 )
-from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.leads import (
+    AssignmentResolutionStatus,
+    CanonicalLeadRecord,
+    CRMProvider,
+    EffectiveOwnerSource,
+)
 from app.domain.workflows import (
     LeadWorkflow,
     WorkflowState,
@@ -111,6 +132,120 @@ class LeadsTestClient:
     client: TestClient
     outbox: FakeTemporalSignalOutboxRepository
     crm_client: FakeCRMClient
+
+
+class LeadRouteCRMClient(FakeCRMClient):
+    async def get_lead_snapshot(
+        self,
+        *,
+        workspace_id: UUID,
+        crm_lead_id: str,
+        mapped_custom_field_keys: tuple[str, ...] = (),
+    ) -> CanonicalLeadRecord | None:
+        _ = mapped_custom_field_keys
+        return CanonicalLeadRecord(
+            workspace_id=workspace_id,
+            lead_id=LEAD_ID,
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+            crm_lead_id=crm_lead_id,
+            facts_derived_at=NOW,
+            source_payload_version="test:v1",
+            assigned_agent_crm_id="agent-1",
+            primary_email="lead@example.com",
+            primary_phone="+15555550100",
+            has_email=True,
+            has_phone=True,
+            has_sms_capable_phone=True,
+            sms_permission_status=ContactPermissionStatus.CONFIRMED,
+            email_permission_status=ContactPermissionStatus.CONFIRMED,
+            do_not_contact=False,
+        )
+
+
+class FakeCRMAgentRepository:
+    async def list_for_workspace(self, workspace_id: UUID) -> tuple[CRMAgent, ...]:
+        return (
+            CRMAgent(
+                agent_record_id=UUID("00000000-0000-0000-0000-000000000031"),
+                workspace_id=workspace_id,
+                crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+                external_agent_id="agent-1",
+                name="Jordan Agent",
+                email="agent@example.com",
+                email_normalized="agent@example.com",
+                phone="+15555550100",
+                is_active=True,
+                last_seen_at=NOW,
+                raw_payload={"id": "agent-1"},
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        )
+
+
+class FakeWorkspaceAgentCRMMappingRepository:
+    async def get_by_id(
+        self,
+        workspace_id: UUID,
+        mapping_id: UUID,
+    ) -> WorkspaceAgentCRMMapping | None:
+        return next(
+            (
+                mapping
+                for mapping in await self.list_for_workspace(workspace_id)
+                if mapping.mapping_id == mapping_id
+            ),
+            None,
+        )
+
+    async def list_for_workspace(
+        self,
+        workspace_id: UUID,
+    ) -> tuple[WorkspaceAgentCRMMapping, ...]:
+        return (
+            WorkspaceAgentCRMMapping(
+                mapping_id=UUID("00000000-0000-0000-0000-000000000032"),
+                workspace_id=workspace_id,
+                crm_agent_record_id=UUID("00000000-0000-0000-0000-000000000031"),
+                app_user_id=USER_ID,
+                mapping_status=CRMAgentMappingStatus.VERIFIED,
+                resolution_source=CRMAgentMappingResolutionSource.ADMIN_MANUAL,
+                resolved_by_user_id=None,
+                resolved_at=NOW,
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        )
+
+
+class FakeWorkspaceAgentMappingConfigRepository:
+    async def get_by_workspace_id(
+        self, workspace_id: UUID
+    ) -> WorkspaceAgentMappingConfig | None:
+        return WorkspaceAgentMappingConfig(
+            workspace_id=workspace_id,
+            unmapped_assignment_fallback_user_id=USER_ID,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+    async def save(self, config: WorkspaceAgentMappingConfig) -> WorkspaceAgentMappingConfig:
+        return config
+
+
+class FakeWorkspaceMembershipRepository:
+    async def list_by_workspace_id(self, workspace_id: UUID) -> tuple[WorkspaceMembership, ...]:
+        return (
+            WorkspaceMembership(
+                membership_id=UUID("00000000-0000-0000-0000-000000000033"),
+                workspace_id=workspace_id,
+                user_id=USER_ID,
+                role=WorkspaceMembershipRole.ASSIGNED_AGENT,
+                status=WorkspaceMembershipStatus.ACTIVE,
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        )
 
 
 def test_lead_routes_return_list_and_detail() -> None:
@@ -283,6 +418,11 @@ def _client_for_role(
         crm_lead_id="crm-1",
         facts_derived_at=NOW,
         source_payload_version="test:v1",
+        assigned_agent_crm_id="agent-1",
+        assigned_agent_user_id=assigned_agent_user_id,
+        effective_owner_user_id=assigned_agent_user_id,
+        effective_owner_source=EffectiveOwnerSource.CRM_MAPPING,
+        assignment_resolution_status=AssignmentResolutionStatus.RESOLVED,
         primary_email="lead@example.com",
         primary_phone="+15555550100",
         has_email=True,
@@ -318,7 +458,7 @@ def _client_for_role(
         )
     )
     outbox = FakeTemporalSignalOutboxRepository()
-    crm_client = FakeCRMClient()
+    crm_client = LeadRouteCRMClient()
     bundle = LeadReadBundle(
         lead_repository=FakeLeadRepository((lead,)),
         workflow_repository=FakeLeadWorkflowRepository((workflow,)),
@@ -443,6 +583,20 @@ def _client_for_role(
         temporal_signal_outbox_repository=outbox,
         crm_conversation_event_repository=FakeCrmConversationEventRepository(()),
         crm_client=crm_client,
+        crm_agent_repository=cast(CRMAgentRepository, FakeCRMAgentRepository()),
+        workspace_agent_crm_mapping_repository=cast(
+            WorkspaceAgentCRMMappingRepository,
+            FakeWorkspaceAgentCRMMappingRepository(),
+        ),
+        workspace_agent_mapping_config_repository=cast(
+            WorkspaceAgentMappingConfigRepository,
+            FakeWorkspaceAgentMappingConfigRepository(),
+        ),
+        workspace_membership_repository=cast(
+            WorkspaceMembershipRepository,
+            FakeWorkspaceMembershipRepository(),
+        ),
+        user_repository=cast(UserRepository, bundle.user_repository),
         outbound_message_crm_completion_repository=FakeOutboundMessageCRMCompletionRepository(),
         workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
             _workspace_handoff_config_with_snapshot_fields()

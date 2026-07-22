@@ -9,6 +9,7 @@ from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
     CampaignExecutionRepository,
+    CRMAgentRepository,
     CrmConversationEventRepository,
     ExternalEventRepository,
     LeadRepository,
@@ -16,9 +17,13 @@ from app.application.ports.repositories import (
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
     TemporalSignalOutboxRepository,
+    UserRepository,
     WorkflowTransitionRepository,
+    WorkspaceAgentCRMMappingRepository,
+    WorkspaceAgentMappingConfigRepository,
     WorkspaceContactPolicyRepository,
     WorkspaceHandoffConfigRepository,
+    WorkspaceMembershipRepository,
     WorkspaceOperationalControlRepository,
     WorkspaceRepository,
 )
@@ -30,10 +35,19 @@ from app.infrastructure.persistence.postgres.campaign_execution_repository impor
 from app.infrastructure.persistence.postgres.conversation_repository import (
     PostgresCrmConversationEventRepository,
 )
+from app.infrastructure.persistence.postgres.crm_agent_mapping_repository import (
+    PostgresCRMAgentRepository,
+    PostgresWorkspaceAgentCRMMappingRepository,
+    PostgresWorkspaceAgentMappingConfigRepository,
+)
 from app.infrastructure.persistence.postgres.crm_sync_repository import (
     PostgresExternalEventRepository,
 )
-from app.infrastructure.persistence.postgres.identity_repository import PostgresWorkspaceRepository
+from app.infrastructure.persistence.postgres.identity_repository import (
+    PostgresUserRepository,
+    PostgresWorkspaceMembershipRepository,
+    PostgresWorkspaceRepository,
+)
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
 from app.infrastructure.persistence.postgres.outbound_message_repository import (
     PostgresOutboundMessageCRMCompletionRepository,
@@ -86,6 +100,11 @@ class LeadDraftReviewActionBundle:
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository
     crm_conversation_event_repository: CrmConversationEventRepository
     crm_client: CRMClient
+    crm_agent_repository: CRMAgentRepository
+    workspace_agent_crm_mapping_repository: WorkspaceAgentCRMMappingRepository
+    workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository
+    workspace_membership_repository: WorkspaceMembershipRepository
+    user_repository: UserRepository
     outbound_message_crm_completion_repository: OutboundMessageCRMCompletionRepository
     workspace_handoff_config_repository: WorkspaceHandoffConfigRepository
     sms_provider: SMSProvider
@@ -113,6 +132,13 @@ async def get_lead_draft_review_action_bundle(
         temporal_signal_outbox_repository=PostgresTemporalSignalOutboxRepository(session),
         crm_conversation_event_repository=PostgresCrmConversationEventRepository(session),
         crm_client=build_crm_client(settings),
+        crm_agent_repository=PostgresCRMAgentRepository(session),
+        workspace_agent_crm_mapping_repository=PostgresWorkspaceAgentCRMMappingRepository(session),
+        workspace_agent_mapping_config_repository=PostgresWorkspaceAgentMappingConfigRepository(
+            session,
+        ),
+        workspace_membership_repository=PostgresWorkspaceMembershipRepository(session),
+        user_repository=PostgresUserRepository(session),
         outbound_message_crm_completion_repository=(
             PostgresOutboundMessageCRMCompletionRepository(session)
         ),

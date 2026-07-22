@@ -105,7 +105,7 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
     assert result.body == "Hi there,\n\nare you still thinking about making a move this year?"
     assert result.model == "openai/gpt-4o-mini"
     assert result.usage_tokens == 42
-    assert llm.requests[0].prompt_version == "outbound_message_draft:v8:r1"
+    assert llm.requests[0].prompt_version == "outbound_message_draft:v9:r1"
     assert "Austin" in llm.requests[0].prompt
     assert "Do not invent listings" in llm.requests[0].prompt
     assert (
@@ -223,10 +223,16 @@ async def test_includes_safe_listing_relevance_brief_in_prompt_when_present() ->
 
     assert "approved_listing_context" in llm.requests[0].prompt
     assert "listing_relevance_brief" in llm.requests[0].prompt
+    assert "listing_message_guidance" in llm.requests[0].prompt
+    assert '"must_acknowledge_current_matches": true' in llm.requests[0].prompt
     assert "Bronx" in llm.requests[0].prompt
     assert "Throgs Neck" in llm.requests[0].prompt
     assert "StreetEasy" in llm.requests[0].prompt
     assert "budget_alignment_note" in llm.requests[0].prompt
+    assert "Use this factual basis once in general terms" in llm.requests[0].prompt
+    assert "Ask whether they want their assigned agent to send a few current options." in (
+        llm.requests[0].prompt
+    )
     assert "2738 Miles Avenue" not in llm.requests[0].prompt
     assert "$650,000" not in llm.requests[0].prompt
 
@@ -441,3 +447,59 @@ async def test_substitutes_agent_placeholder_when_message_body_placeholder_is_mi
 
     assert result.status == OutboundMessageDraftStatus.DRAFTED
     assert result.body == "Hi Taylor Agent\n\nare you still thinking about making a move this year?"
+
+
+async def test_strips_duplicate_email_wrapper_from_generated_body() -> None:
+    result = await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.EMAIL,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name="Alex Agent",
+        lead_context=ApprovedOutboundLeadContext(),
+        llm_client=FakeLLMClient(
+            _draft_json(
+                body=(
+                    "Hi there,\n\n"
+                    "I wanted to check whether Queens is still the right area for you.\n\n"
+                    "Best,\n"
+                    "Miller Schackman"
+                ),
+                subject="Quick follow-up",
+            )
+        ),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.DRAFTED
+    assert result.body == (
+        "Hi there,\n\n"
+        "I wanted to check whether Queens is still the right area for you.\n\n"
+        "Best,\n"
+        "Miller Schackman"
+    )
+
+
+async def test_strips_duplicate_prefix_when_template_appends_message_body() -> None:
+    result = await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name="Taylor Agent",
+        lead_context=ApprovedOutboundLeadContext(),
+        llm_client=FakeLLMClient(
+            _draft_json(body="Hi Taylor Agent\n\nAre you still looking in Queens?")
+        ),
+        drafting_config=WorkspaceOutboundDraftingConfig(
+            workspace_id=_lead().workspace_id,
+            sms_prompt_text="Keep the SMS concise.",
+            sms_template="Hi {{agent_name}}",
+            email_prompt_text="Keep the email concise.",
+            email_template="Regards,\n{{brokerage_name}}",
+            email_subject_template="{{message_subject}} | {{brokerage_name}}",
+            enabled_extraction_fields=("location",),
+        ),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.DRAFTED
+    assert result.body == "Hi Taylor Agent\n\nAre you still looking in Queens?"

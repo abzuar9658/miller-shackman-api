@@ -1,9 +1,19 @@
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID
 
+from app.application.ports.crm import CRMActivity
 from app.application.ports.messaging import EmailMessage, SMSMessage
+from app.application.ports.repositories import (
+    CRMAgentRepository,
+    UserRepository,
+    WorkspaceAgentCRMMappingRepository,
+    WorkspaceAgentMappingConfigRepository,
+    WorkspaceMembershipRepository,
+)
 from app.application.use_cases.send_outbound_message import (
     OutboundSendContext,
+    PreSendCRMRefreshContext,
     SendOutboundMessageReasonCode,
     SendOutboundMessageStatus,
     send_outbound_message,
@@ -135,6 +145,21 @@ class FakeOutboundMessageRepository:
         self.saved.append(message)
         return message
 
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[OutboundMessage, ...]:
+        if (
+            self.message
+            and self.message.workspace_id == workspace_id
+            and self.message.lead_id == lead_id
+        ):
+            return (self.message,)
+        return ()
+
 
 class FakeSMSProvider:
     provider_name = "twilio"
@@ -170,6 +195,82 @@ class FakeEventBus:
 
     async def publish(self, event: DomainEvent) -> None:
         self.events.append(event)
+
+
+class FakeLeadRefreshSource:
+    def __init__(self, lead: CanonicalLeadRecord | None) -> None:
+        self.lead = lead
+
+    async def get_lead_snapshot(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+        mapped_custom_field_keys: tuple[str, ...] = (),
+    ) -> CanonicalLeadRecord | None:
+        _ = (workspace_id, crm_lead_id, mapped_custom_field_keys)
+        return self.lead
+
+
+class FakeCRMActivitySource:
+    def __init__(self, activities: list[CRMActivity] | None = None) -> None:
+        self.activities = activities or []
+
+    async def get_recent_activity(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+        limit: int = 50,
+    ) -> list[CRMActivity]:
+        _ = (workspace_id, crm_lead_id, limit)
+        return list(self.activities)
+
+
+class FakeCRMAgentRepository:
+    async def list_for_workspace(self, workspace_id: WorkspaceId) -> tuple[object, ...]:
+        _ = workspace_id
+        return ()
+
+
+class FakeWorkspaceAgentCRMMappingRepository:
+    async def get_by_id(self, workspace_id: WorkspaceId, mapping_id: UUID) -> None:
+        _ = (workspace_id, mapping_id)
+        return None
+
+    async def get_by_crm_agent_record_id(
+        self, workspace_id: WorkspaceId, crm_agent_record_id: UUID
+    ) -> None:
+        _ = (workspace_id, crm_agent_record_id)
+        return None
+
+    async def get_by_app_user_id(self, workspace_id: WorkspaceId, app_user_id: UUID) -> None:
+        _ = (workspace_id, app_user_id)
+        return None
+
+    async def list_for_workspace(self, workspace_id: WorkspaceId) -> tuple[object, ...]:
+        _ = workspace_id
+        return ()
+
+    async def save(self, mapping: object) -> object:
+        return mapping
+
+
+class FakeWorkspaceAgentMappingConfigRepository:
+    async def get_by_workspace_id(self, workspace_id: WorkspaceId) -> None:
+        _ = workspace_id
+        return None
+
+
+class FakeWorkspaceMembershipRepository:
+    async def list_by_workspace_id(self, workspace_id: WorkspaceId) -> tuple[object, ...]:
+        _ = workspace_id
+        return ()
+
+
+class FakeUserRepository:
+    async def get_by_id(self, user_id: UUID) -> None:
+        _ = user_id
+        return None
 
 
 def _lead(
@@ -243,6 +344,31 @@ def _send_context(
     )
 
 
+def _crm_refresh_context(
+    *,
+    lead: CanonicalLeadRecord | None,
+    activities: list[CRMActivity] | None = None,
+) -> PreSendCRMRefreshContext:
+    return PreSendCRMRefreshContext(
+        lead_refresh_source=FakeLeadRefreshSource(lead),
+        crm_activity_source=FakeCRMActivitySource(activities),
+        crm_agent_repository=cast(CRMAgentRepository, FakeCRMAgentRepository()),
+        workspace_agent_crm_mapping_repository=cast(
+            WorkspaceAgentCRMMappingRepository,
+            FakeWorkspaceAgentCRMMappingRepository(),
+        ),
+        workspace_agent_mapping_config_repository=cast(
+            WorkspaceAgentMappingConfigRepository,
+            FakeWorkspaceAgentMappingConfigRepository(),
+        ),
+        workspace_membership_repository=cast(
+            WorkspaceMembershipRepository,
+            FakeWorkspaceMembershipRepository(),
+        ),
+        user_repository=cast(UserRepository, FakeUserRepository()),
+    )
+
+
 async def test_sends_pending_sms_message_and_persists_sent_state() -> None:
     message_repository = FakeOutboundMessageRepository(_message())
     lead_repository = FakeLeadRepository(_lead())
@@ -272,6 +398,49 @@ async def test_sends_pending_sms_message_and_persists_sent_state() -> None:
     assert lead_repository.locked_ids == [LEAD_ID]
     assert message_repository.locked_idempotency_keys == [result.message.idempotency_key]
     assert len(email_provider.messages) == 0
+
+
+async def test_sends_message_after_successful_pre_send_crm_refresh() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    lead_repository = FakeLeadRepository(_lead())
+    sms_provider = FakeSMSProvider("SM123")
+
+    assert message_repository.message is not None
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=lead_repository,
+        message_repository=message_repository,
+        sms_provider=sms_provider,
+        email_provider=FakeEmailProvider(),
+        crm_refresh_context=_crm_refresh_context(lead=_lead()),
+        now=NOW,
+    )
+
+    assert result.status == SendOutboundMessageStatus.SENT
+    assert sms_provider.messages
+
+
+async def test_rejects_when_pre_send_crm_refresh_cannot_find_lead() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    lead_repository = FakeLeadRepository(_lead())
+
+    assert message_repository.message is not None
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=lead_repository,
+        message_repository=message_repository,
+        sms_provider=FakeSMSProvider(),
+        email_provider=FakeEmailProvider(),
+        crm_refresh_context=_crm_refresh_context(lead=None),
+        now=NOW,
+    )
+
+    assert result.status == SendOutboundMessageStatus.REJECTED
+    assert result.reasons == (SendOutboundMessageReasonCode.CRM_LEAD_NOT_FOUND,)
 
 
 async def test_sends_message_sent_event_after_successful_send() -> None:

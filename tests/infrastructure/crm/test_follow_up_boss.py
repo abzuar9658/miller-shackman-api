@@ -64,6 +64,49 @@ async def test_get_lead_maps_payload(workspace_id: uuid.UUID) -> None:
     assert lead.custom_fields == {"budget": "650000"}
 
 
+async def test_get_lead_snapshot_maps_payload_to_canonical_record(
+    workspace_id: uuid.UUID,
+) -> None:
+    payload = {
+        "id": 123,
+        "assignedUserId": 42,
+        "assignedTo": "Agent Name",
+        "type": "Buyer",
+        "source": "Zillow",
+        "stage": "Lead",
+        "createdVia": "Email Parsing",
+        "emails": [{"value": "ada@example.com"}],
+        "phones": [{"value": "+15551234567", "isLandline": False}],
+        "customFields": {"budget": "650000", "other": "ignore"},
+        "created": "2024-01-01T00:00:00Z",
+        "updated": "2024-01-02T00:00:00Z",
+    }
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=_transport(payload),
+    )
+
+    lead = await client.get_lead_snapshot(
+        workspace_id=workspace_id,
+        crm_lead_id="123",
+        mapped_custom_field_keys=("budget",),
+    )
+
+    assert lead is not None
+    assert lead.crm_lead_id == "123"
+    assert lead.assigned_agent_crm_id == "42"
+    assert lead.primary_email == "ada@example.com"
+    assert lead.primary_phone == "+15551234567"
+    assert lead.has_sms_capable_phone is True
+    assert lead.source_payload_version == "follow_up_boss_person:v1"
+    assert lead.mapped_custom_fields == {
+        "budget": "650000",
+        "assigned_agent_name": "Agent Name",
+    }
+
+
 async def test_get_lead_prefers_assigned_user_id_over_assigned_to_name(
     workspace_id: uuid.UUID,
 ) -> None:
@@ -155,7 +198,6 @@ async def test_list_lead_snapshots_maps_payload_and_pagination_metadata(
     assert page.leads[0].lead_source == "Zillow"
     assert page.leads[0].mapped_custom_fields == {
         "budget": "650000",
-        "assigned_agent_user_id": "42",
         "assigned_agent_name": "Agent Name",
     }
 
@@ -214,6 +256,62 @@ async def test_list_lead_snapshots_sends_sort_for_recent_limited_sync(
 
     assert captured["limit"] == "50"
     assert captured["sort"] == "-updated"
+
+
+async def test_list_agents_maps_users_payload_and_paginates(workspace_id: uuid.UUID) -> None:
+    captured_params: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_params.append(dict(request.url.params))
+        if request.url.params.get("next") == "cursor-2":
+            return httpx.Response(
+                200,
+                json={
+                    "users": [
+                        {
+                            "id": 8,
+                            "name": "Grace Hopper",
+                            "email": "grace@example.com",
+                            "cellPhone": "+15550000008",
+                            "status": "inactive",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "_metadata": {"next": "cursor-2"},
+                "users": [
+                    {
+                        "id": 7,
+                        "firstName": "Ada",
+                        "lastName": "Lovelace",
+                        "email": "ada@example.com",
+                        "phone": "+15550000007",
+                        "isActive": True,
+                    }
+                ],
+            },
+        )
+
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    agents = await client.list_agents(workspace_id)
+
+    assert [params.get("next") for params in captured_params] == [None, "cursor-2"]
+    assert len(agents) == 2
+    assert agents[0].crm_agent_id == "7"
+    assert agents[0].name == "Ada Lovelace"
+    assert agents[0].phone == "+15550000007"
+    assert agents[0].is_active is True
+    assert agents[1].crm_agent_id == "8"
+    assert agents[1].is_active is False
 
 
 async def test_get_recent_activity_uses_events_endpoint_with_person_id(

@@ -13,6 +13,7 @@ from app.domain.identity.models import (
 class PermissionCapability(StrEnum):
     CREATE_WORKSPACE = "create_workspace"
     INVITE_WORKSPACE_USER = "invite_workspace_user"
+    MANAGE_CRM_AGENT_MAPPINGS = "manage_crm_agent_mappings"
     VIEW_WORKSPACE_REPORTING = "view_workspace_reporting"
     MANAGE_LISTING_SOURCES = "manage_listing_sources"
     VIEW_OWN_ASSIGNED_LEAD = "view_own_assigned_lead"
@@ -154,6 +155,7 @@ def _role_allows(
         return capability in {
             PermissionCapability.CREATE_WORKSPACE,
             PermissionCapability.INVITE_WORKSPACE_USER,
+            PermissionCapability.MANAGE_CRM_AGENT_MAPPINGS,
             PermissionCapability.VIEW_WORKSPACE_REPORTING,
             PermissionCapability.MANAGE_LISTING_SOURCES,
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,

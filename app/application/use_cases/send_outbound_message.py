@@ -1,18 +1,37 @@
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
+from typing import Protocol
 
+from app.application.ports.crm import CRMActivity
+from app.application.ports.crm_sync import CanonicalLeadRefreshSource
 from app.application.ports.event_bus import EventBus
 from app.application.ports.messaging import EmailMessage, EmailProvider, SMSMessage, SMSProvider
 from app.application.ports.repositories import (
+    CRMAgentRepository,
     LeadRepository,
+    LeadWorkflowRepository,
     OutboundMessageRepository,
+    TemporalSignalOutboxRepository,
+    UserRepository,
+    WorkflowTransitionRepository,
+    WorkspaceAgentCRMMappingRepository,
+    WorkspaceAgentMappingConfigRepository,
+    WorkspaceMembershipRepository,
     WorkspaceOperationalControlRepository,
 )
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
+from app.application.services.lead_assignment_resolution import (
+    apply_lead_assignment_resolution,
+    load_workspace_lead_assignment_context,
+)
 from app.application.services.workspace_automation_control import (
     resolve_workspace_operational_control,
     workspace_automation_is_active,
+)
+from app.application.use_cases.reconcile_lead_assignment import (
+    LeadAssignmentMessageRepository,
+    reconcile_lead_assignment_change,
 )
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
 from app.domain.campaigns.pre_send import (
@@ -32,6 +51,7 @@ from app.domain.compliance.contactability import (
     evaluate_contactability,
 )
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
+from app.domain.leads import CanonicalLeadRecord
 
 
 class SendOutboundMessageStatus(StrEnum):
@@ -46,6 +66,9 @@ class SendOutboundMessageReasonCode(StrEnum):
     MESSAGE_NOT_FOUND = "message_not_found"
     LEAD_NOT_FOUND = "lead_not_found"
     WORKSPACE_AUTOMATION_BLOCKED = "workspace_automation_blocked"
+    CRM_REFRESH_UNAVAILABLE = "crm_refresh_unavailable"
+    CRM_REFRESH_FAILED = "crm_refresh_failed"
+    CRM_LEAD_NOT_FOUND = "crm_lead_not_found"
     PRE_SEND_BLOCKED = "pre_send_blocked"
     CHANNEL_DESTINATION_MISSING = "channel_destination_missing"
     EMAIL_SUBJECT_MISSING = "email_subject_missing"
@@ -71,12 +94,52 @@ class OutboundSendContext:
     other_channel_sent_at: datetime | None = None
 
 
+class CRMActivitySource(Protocol):
+    async def get_recent_activity(
+        self,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+        limit: int = 50,
+    ) -> list[CRMActivity]:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class PreSendCRMRefreshContext:
+    lead_refresh_source: CanonicalLeadRefreshSource
+    crm_activity_source: CRMActivitySource
+    crm_agent_repository: CRMAgentRepository
+    workspace_agent_crm_mapping_repository: WorkspaceAgentCRMMappingRepository
+    workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository
+    workspace_membership_repository: WorkspaceMembershipRepository
+    user_repository: UserRepository
+    lead_workflow_repository: LeadWorkflowRepository | None = None
+    workflow_transition_repository: WorkflowTransitionRepository | None = None
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None
+    activity_limit: int = 20
+
+
 @dataclass(frozen=True)
 class SendOutboundMessageResult:
     status: SendOutboundMessageStatus
     message: OutboundMessage | None = None
     pre_send_decision: PreSendDecision | None = None
     reasons: tuple[SendOutboundMessageReasonCode, ...] = ()
+
+
+class _PreSendCRMRefreshStatus(StrEnum):
+    REFRESHED = "refreshed"
+    FAILED = "failed"
+    LEAD_NOT_FOUND = "lead_not_found"
+
+
+@dataclass(frozen=True)
+class _PreSendCRMRefreshResult:
+    status: _PreSendCRMRefreshStatus
+    lead: CanonicalLeadRecord | None = None
+    recent_human_activity: bool = False
+    ownership_changed: bool = False
+    failure_reason: str | None = None
 
 
 async def send_outbound_message(
@@ -91,6 +154,7 @@ async def send_outbound_message(
     now: datetime,
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
+    crm_refresh_context: PreSendCRMRefreshContext | None = None,
 ) -> SendOutboundMessageResult:
     message = await message_repository.get_by_idempotency_key_for_update(
         workspace_id,
@@ -139,34 +203,76 @@ async def send_outbound_message(
             reasons=(SendOutboundMessageReasonCode.LEAD_NOT_FOUND,),
         )
 
+    effective_context = context
+    if crm_refresh_context is not None:
+        refresh_result = await _refresh_lead_for_pre_send(
+            lead=lead,
+            message=message,
+            lead_repository=lead_repository,
+            message_repository=message_repository,
+            crm_refresh_context=crm_refresh_context,
+            event_bus=event_bus,
+            now=now,
+        )
+        if refresh_result.status == _PreSendCRMRefreshStatus.FAILED:
+            return SendOutboundMessageResult(
+                status=SendOutboundMessageStatus.FAILED,
+                message=message,
+                reasons=(SendOutboundMessageReasonCode.CRM_REFRESH_FAILED,),
+            )
+        if refresh_result.status == _PreSendCRMRefreshStatus.LEAD_NOT_FOUND:
+            return SendOutboundMessageResult(
+                status=SendOutboundMessageStatus.REJECTED,
+                message=message,
+                reasons=(SendOutboundMessageReasonCode.CRM_LEAD_NOT_FOUND,),
+            )
+        lead = refresh_result.lead or lead
+        message = await message_repository.get_by_idempotency_key_for_update(
+            workspace_id,
+            idempotency_key,
+        )
+        if message is None:
+            return SendOutboundMessageResult(
+                status=SendOutboundMessageStatus.REJECTED,
+                reasons=(SendOutboundMessageReasonCode.MESSAGE_NOT_FOUND,),
+            )
+        effective_context = replace(
+            context,
+            recent_human_activity=(
+                context.recent_human_activity or refresh_result.recent_human_activity
+            ),
+            ownership_changed=context.ownership_changed or refresh_result.ownership_changed,
+        )
+
     contactability_decision = evaluate_contactability(
         contactability_facts_from_canonical_lead(lead),
-        context.workspace_contact_policy,
+        effective_context.workspace_contact_policy,
         message.channel,
     )
     pre_send_decision = evaluate_pre_send_safety(
         PreSendFacts(
             channel=message.channel,
-            campaign_status=context.campaign_status,
-            workflow_state=context.workflow_state,
+            campaign_status=effective_context.campaign_status,
+            workflow_state=effective_context.workflow_state,
             message_status=_scheduled_message_status(message),
             provider_send_status=message.provider_send_status,
             scheduled_message_version=message.message_version,
-            current_message_version=context.current_message_version or message.message_version,
-            channel_enabled=message.channel in context.enabled_channels,
+            current_message_version=effective_context.current_message_version
+            or message.message_version,
+            channel_enabled=message.channel in effective_context.enabled_channels,
             contactability_decision=contactability_decision,
-            preflight_vetoed=context.preflight_vetoed,
-            handoff_active=context.handoff_active,
-            human_owned=context.human_owned,
-            lead_replied_since_scheduled=context.lead_replied_since_scheduled,
-            recent_human_activity=context.recent_human_activity,
-            ownership_changed=context.ownership_changed,
-            last_global_outreach_at=context.last_global_outreach_at,
-            last_campaign_outreach_at=context.last_campaign_outreach_at,
-            last_channel_outreach_at=context.last_channel_outreach_at,
-            other_channel_sent_at=context.other_channel_sent_at,
+            preflight_vetoed=effective_context.preflight_vetoed,
+            handoff_active=effective_context.handoff_active,
+            human_owned=effective_context.human_owned,
+            lead_replied_since_scheduled=effective_context.lead_replied_since_scheduled,
+            recent_human_activity=effective_context.recent_human_activity,
+            ownership_changed=effective_context.ownership_changed,
+            last_global_outreach_at=effective_context.last_global_outreach_at,
+            last_campaign_outreach_at=effective_context.last_campaign_outreach_at,
+            last_channel_outreach_at=effective_context.last_channel_outreach_at,
+            other_channel_sent_at=effective_context.other_channel_sent_at,
         ),
-        context.pre_send_policy,
+        effective_context.pre_send_policy,
         now,
     )
     if not pre_send_decision.allowed:
@@ -275,6 +381,96 @@ async def send_outbound_message(
         status=SendOutboundMessageStatus.UNCERTAIN,
         message=saved,
         pre_send_decision=pre_send_decision,
+    )
+
+
+async def _refresh_lead_for_pre_send(
+    *,
+    lead: CanonicalLeadRecord,
+    message: OutboundMessage,
+    lead_repository: LeadRepository,
+    message_repository: LeadAssignmentMessageRepository,
+    crm_refresh_context: PreSendCRMRefreshContext,
+    event_bus: EventBus | None,
+    now: datetime,
+) -> _PreSendCRMRefreshResult:
+    try:
+        refreshed_lead = await crm_refresh_context.lead_refresh_source.get_lead_snapshot(
+            workspace_id=lead.workspace_id,
+            crm_lead_id=lead.crm_lead_id,
+            mapped_custom_field_keys=tuple(lead.mapped_custom_fields.keys()),
+        )
+        activities = await crm_refresh_context.crm_activity_source.get_recent_activity(
+            lead.workspace_id,
+            lead.crm_lead_id,
+            limit=crm_refresh_context.activity_limit,
+        )
+    except Exception as exc:
+        return _PreSendCRMRefreshResult(
+            status=_PreSendCRMRefreshStatus.FAILED,
+            failure_reason=str(exc) or exc.__class__.__name__,
+        )
+
+    if refreshed_lead is None:
+        return _PreSendCRMRefreshResult(status=_PreSendCRMRefreshStatus.LEAD_NOT_FOUND)
+
+    assignment_context = await load_workspace_lead_assignment_context(
+        workspace_id=lead.workspace_id,
+        crm_agent_repository=crm_refresh_context.crm_agent_repository,
+        workspace_agent_crm_mapping_repository=(
+            crm_refresh_context.workspace_agent_crm_mapping_repository
+        ),
+        workspace_agent_mapping_config_repository=(
+            crm_refresh_context.workspace_agent_mapping_config_repository
+        ),
+        workspace_membership_repository=crm_refresh_context.workspace_membership_repository,
+        user_repository=crm_refresh_context.user_repository,
+    )
+    resolved_lead = apply_lead_assignment_resolution(
+        refreshed_lead,
+        context=assignment_context,
+        now=now,
+    )
+    saved_lead = await lead_repository.upsert(resolved_lead)
+    reconciliation = await reconcile_lead_assignment_change(
+        previous_lead=lead,
+        current_lead=saved_lead,
+        lead_workflow_repository=crm_refresh_context.lead_workflow_repository,
+        workflow_transition_repository=crm_refresh_context.workflow_transition_repository,
+        temporal_signal_outbox_repository=crm_refresh_context.temporal_signal_outbox_repository,
+        outbound_message_repository=message_repository,
+        event_bus=event_bus,
+        now=now,
+    )
+    return _PreSendCRMRefreshResult(
+        status=_PreSendCRMRefreshStatus.REFRESHED,
+        lead=saved_lead,
+        recent_human_activity=_recent_human_activity_detected(
+            lead=lead,
+            refreshed_lead=saved_lead,
+            activities=activities,
+            message=message,
+        ),
+        ownership_changed=reconciliation.ownership_changed,
+    )
+
+
+def _recent_human_activity_detected(
+    *,
+    lead: CanonicalLeadRecord,
+    refreshed_lead: CanonicalLeadRecord,
+    activities: list[CRMActivity],
+    message: OutboundMessage,
+) -> bool:
+    if (
+        refreshed_lead.last_agent_activity_at is not None
+        and refreshed_lead.last_agent_activity_at > message.created_at
+        and refreshed_lead.last_agent_activity_at != lead.last_agent_activity_at
+    ):
+        return True
+    return any(
+        activity.agent_id is not None and activity.timestamp > message.created_at
+        for activity in activities
     )
 
 

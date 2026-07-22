@@ -163,12 +163,11 @@ def _lead() -> CanonicalLeadRecord:
         crm_lead_id="crm-1",
         facts_derived_at=NOW,
         source_payload_version="test:v1",
+        assigned_agent_user_id=USER_ID,
+        effective_owner_user_id=USER_ID,
         primary_email="lead@example.com",
         primary_phone="+15555550123",
-        mapped_custom_fields={
-            "assigned_agent_user_id": str(USER_ID),
-            "display_name": "Jordan Seller",
-        },
+        mapped_custom_fields={"display_name": "Jordan Seller"},
     )
 
 
@@ -180,12 +179,11 @@ def _other_lead() -> CanonicalLeadRecord:
         crm_lead_id="crm-2",
         facts_derived_at=NOW,
         source_payload_version="test:v1",
+        assigned_agent_user_id=UUID("00000000-0000-0000-0000-000000000098"),
+        effective_owner_user_id=UUID("00000000-0000-0000-0000-000000000098"),
         primary_email="other@example.com",
         primary_phone="+15555550124",
-        mapped_custom_fields={
-            "assigned_agent_user_id": str(UUID("00000000-0000-0000-0000-000000000098")),
-            "display_name": "Casey Unowned",
-        },
+        mapped_custom_fields={"display_name": "Casey Unowned"},
     )
 
 

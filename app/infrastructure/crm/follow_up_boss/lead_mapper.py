@@ -60,7 +60,6 @@ def map_follow_up_boss_person_to_canonical_lead(
         mapped_custom_fields=_mapped_custom_fields(
             payload.get("customFields"),
             mapped_custom_field_keys,
-            assigned_agent_user_id=assigned_agent_crm_id,
             assigned_agent_name=assigned_agent_name,
         ),
         primary_email=_primary_email(emails),
@@ -175,7 +174,6 @@ def _mapped_custom_fields(
     raw: object,
     allowed_keys: Iterable[str],
     *,
-    assigned_agent_user_id: str | None,
     assigned_agent_name: str | None,
 ) -> dict[str, str]:
     if not isinstance(raw, Mapping):
@@ -187,8 +185,6 @@ def _mapped_custom_fields(
             for key, value in raw.items()
             if str(key) in allowed and isinstance(value, str | int | float | bool)
         }
-    if assigned_agent_user_id:
-        fields.setdefault("assigned_agent_user_id", assigned_agent_user_id)
     if assigned_agent_name:
         fields.setdefault("assigned_agent_name", assigned_agent_name)
     return fields

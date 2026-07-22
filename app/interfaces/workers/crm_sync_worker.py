@@ -27,11 +27,26 @@ from app.infrastructure.persistence.postgres.campaign_execution_repository impor
 from app.infrastructure.persistence.postgres.conversation_repository import (
     PostgresCrmConversationEventRepository,
 )
+from app.infrastructure.persistence.postgres.crm_agent_mapping_repository import (
+    PostgresCRMAgentRepository,
+    PostgresWorkspaceAgentCRMMappingRepository,
+    PostgresWorkspaceAgentMappingConfigRepository,
+)
 from app.infrastructure.persistence.postgres.crm_sync_repository import PostgresCRMSyncJobRepository
+from app.infrastructure.persistence.postgres.identity_repository import (
+    PostgresUserRepository,
+    PostgresWorkspaceMembershipRepository,
+)
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
+from app.infrastructure.persistence.postgres.outbound_message_repository import (
+    PostgresOutboundMessageRepository,
+)
 from app.infrastructure.persistence.postgres.outbox_event_repository import (
     PostgresOutboxEventRepository,
     PostgresTransactionalEventBus,
+)
+from app.infrastructure.persistence.postgres.temporal_signal_outbox_repository import (
+    PostgresTemporalSignalOutboxRepository,
 )
 from app.infrastructure.persistence.postgres.workflow_repository import (
     PostgresLeadWorkflowRepository,
@@ -94,6 +109,17 @@ async def run_once(
             workspace_operational_control_repository=PostgresWorkspaceOperationalControlRepository(
                 session,
             ),
+            crm_agent_repository=PostgresCRMAgentRepository(session),
+            workspace_agent_crm_mapping_repository=PostgresWorkspaceAgentCRMMappingRepository(
+                session,
+            ),
+            workspace_agent_mapping_config_repository=PostgresWorkspaceAgentMappingConfigRepository(
+                session,
+            ),
+            workspace_membership_repository=PostgresWorkspaceMembershipRepository(session),
+            user_repository=PostgresUserRepository(session),
+            temporal_signal_outbox_repository=PostgresTemporalSignalOutboxRepository(session),
+            outbound_message_repository=PostgresOutboundMessageRepository(session),
             commit=session.commit,
             now=datetime.now(UTC),
             max_leads=message.payload.max_leads,

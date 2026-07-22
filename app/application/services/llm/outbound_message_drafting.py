@@ -22,7 +22,7 @@ from app.domain.outbound_drafting import (
     render_outbound_template,
 )
 
-OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v8"
+OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v9"
 MIN_DRAFT_CONFIDENCE = 0.7
 MAX_SMS_BODY_LENGTH = 320
 MAX_EMAIL_BODY_LENGTH = 4000
@@ -113,6 +113,16 @@ class ApprovedListingRelevanceBrief:
     budget_alignment_note: str | None = None
     safe_talking_point: str | None = None
     safe_cta: str = "Ask whether they want their assigned agent to send a few current options."
+
+
+@dataclass(frozen=True)
+class ApprovedListingMessageGuidance:
+    must_acknowledge_current_matches: bool
+    mentionable_areas: tuple[str, ...] = field(default_factory=_empty_string_tuple)
+    mentionable_property_types: tuple[str, ...] = field(default_factory=_empty_string_tuple)
+    safe_talking_point: str | None = None
+    safe_cta: str = "Ask whether they want their assigned agent to send a few current options."
+    draft_directive: str | None = None
 
 
 @dataclass(frozen=True)
@@ -391,14 +401,18 @@ def _build_prompt(
         "continue the thread naturally. Avoid repeating the same greeting, ask, or "
         "call-to-action if recent outbound messages already covered it, unless the lead's "
         "context clearly changed.\n"
-        "If approved listing context is present, use only the listing_relevance_brief to "
-        "make the outreach feel timely and specific. Focus on the lead's general criteria "
-        "and the existence of current matches, then offer to have the assigned agent share "
-        "current options. If the brief includes matching areas, property types, or a budget "
-        "alignment note, you may mention them in general terms. Do not mention exact "
+        "If approved listing context is present, the payload will include both "
+        "listing_relevance_brief and listing_message_guidance. You MUST follow "
+        "listing_message_guidance.draft_directive and explicitly acknowledge current "
+        "matches in general terms using listing_message_guidance.safe_talking_point as "
+        "your factual basis. Keep that acknowledgement to one concise sentence in SMS "
+        "or at most two short sentences in email, and include "
+        "listing_message_guidance.safe_cta or an equivalent offer to have the assigned "
+        "agent share a few current options. You may mention matching areas, property "
+        "types, or budget alignment only in general terms. Do not mention exact "
         "addresses, exact listing prices, or claim any listing is guaranteed to still be "
         "available.\n"
-        "If approved listing context is NOT present (i.e., listing_relevance_brief is null), "
+        "If approved listing context is NOT present (i.e., approved_listing_context is null), "
         "you MUST NOT imply that listings, properties, or options are currently available. "
         "In that case, acknowledge the lead's request and offer to have the assigned agent "
         "look into current options and follow up. Do not use phrases like 'great options "
@@ -470,18 +484,12 @@ def _listing_context_payload(
     if listing_context is None:
         return None
     relevance_brief = build_listing_relevance_brief(listing_context)
+    message_guidance = build_listing_message_guidance(listing_context)
     return {
         "source_name": listing_context.source_name,
         "result_count": listing_context.result_count,
-        "listing_relevance_brief": {
-            "search_basis": relevance_brief.search_basis,
-            "match_count": relevance_brief.match_count,
-            "matching_areas": list(relevance_brief.matching_areas),
-            "matching_property_types": list(relevance_brief.matching_property_types),
-            "budget_alignment_note": relevance_brief.budget_alignment_note,
-            "safe_talking_point": relevance_brief.safe_talking_point,
-            "safe_cta": relevance_brief.safe_cta,
-        },
+        "listing_relevance_brief": _listing_relevance_brief_payload(relevance_brief),
+        "listing_message_guidance": _listing_message_guidance_payload(message_guidance),
     }
 
 
@@ -515,6 +523,28 @@ def build_listing_relevance_brief(
             budget_alignment_note=budget_alignment_note,
         ),
     )
+
+
+def build_listing_message_guidance(
+    listing_context: ApprovedOutboundListingContext,
+) -> ApprovedListingMessageGuidance:
+    relevance_brief = build_listing_relevance_brief(listing_context)
+    return ApprovedListingMessageGuidance(
+        must_acknowledge_current_matches=relevance_brief.match_count > 0,
+        mentionable_areas=relevance_brief.matching_areas,
+        mentionable_property_types=relevance_brief.matching_property_types,
+        safe_talking_point=relevance_brief.safe_talking_point,
+        safe_cta=relevance_brief.safe_cta,
+        draft_directive=_listing_draft_directive(relevance_brief),
+    )
+
+
+def build_listing_relevance_brief_payload(
+    listing_context: ApprovedOutboundListingContext | None,
+) -> dict[str, object] | None:
+    if listing_context is None:
+        return None
+    return _listing_relevance_brief_payload(build_listing_relevance_brief(listing_context))
 
 
 def _listing_search_basis(search_summary: str) -> str:
@@ -551,6 +581,53 @@ def _safe_listing_talking_point(
     if budget_alignment_note:
         alignment_basis = f"{alignment_basis} and {budget_alignment_note}"
     return f"{result_count} current {source_name} {match_noun} {match_verb} with {alignment_basis}."
+
+
+def _listing_relevance_brief_payload(
+    relevance_brief: ApprovedListingRelevanceBrief,
+) -> dict[str, object]:
+    return {
+        "search_basis": relevance_brief.search_basis,
+        "match_count": relevance_brief.match_count,
+        "matching_areas": list(relevance_brief.matching_areas),
+        "matching_property_types": list(relevance_brief.matching_property_types),
+        "budget_alignment_note": relevance_brief.budget_alignment_note,
+        "safe_talking_point": relevance_brief.safe_talking_point,
+        "safe_cta": relevance_brief.safe_cta,
+        "draft_directive": _listing_draft_directive(relevance_brief),
+    }
+
+
+def _listing_message_guidance_payload(
+    message_guidance: ApprovedListingMessageGuidance,
+) -> dict[str, object]:
+    return {
+        "must_acknowledge_current_matches": message_guidance.must_acknowledge_current_matches,
+        "mentionable_areas": list(message_guidance.mentionable_areas),
+        "mentionable_property_types": list(message_guidance.mentionable_property_types),
+        "safe_talking_point": message_guidance.safe_talking_point,
+        "safe_cta": message_guidance.safe_cta,
+        "draft_directive": message_guidance.draft_directive,
+    }
+
+
+def _listing_draft_directive(relevance_brief: ApprovedListingRelevanceBrief) -> str:
+    parts = [
+        f"Use this factual basis once in general terms: '{relevance_brief.safe_talking_point}'."
+    ]
+    if relevance_brief.matching_areas:
+        areas = ", ".join(relevance_brief.matching_areas)
+        parts.append(f"If helpful, you may mention general areas like {areas}.")
+    if relevance_brief.matching_property_types:
+        property_types = ", ".join(relevance_brief.matching_property_types)
+        parts.append(
+            f"If helpful, you may mention general property types like {property_types}."
+        )
+    parts.append(
+        "Keep any listing reference general and never mention exact addresses or exact prices."
+    )
+    parts.append(relevance_brief.safe_cta)
+    return " ".join(parts)
 
 
 def _top_unique_values(values: Iterable[str]) -> tuple[str, ...]:

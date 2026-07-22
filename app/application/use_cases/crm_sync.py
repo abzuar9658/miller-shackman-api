@@ -11,18 +11,33 @@ from app.application.ports.event_bus import EventBus
 from app.application.ports.repositories import (
     CampaignEnrollmentRepository,
     CampaignExecutionRepository,
+    CRMAgentRepository,
     CrmConversationEventRepository,
     CRMSyncJobRepository,
     LeadRepository,
     LeadWorkflowRepository,
+    TemporalSignalOutboxRepository,
+    UserRepository,
     WorkflowTransitionRepository,
+    WorkspaceAgentCRMMappingRepository,
+    WorkspaceAgentMappingConfigRepository,
     WorkspaceContactPolicyRepository,
     WorkspaceCRMSyncConfigRepository,
+    WorkspaceMembershipRepository,
     WorkspaceOperationalControlRepository,
 )
 from app.application.ports.temporal import TemporalWorkflowStarter
+from app.application.services.lead_assignment_resolution import (
+    WorkspaceLeadAssignmentContext,
+    apply_lead_assignment_resolution,
+    load_workspace_lead_assignment_context,
+)
 from app.application.use_cases.process_crm_tag_campaign_enrollment import (
     process_crm_tag_campaign_enrollment,
+)
+from app.application.use_cases.reconcile_lead_assignment import (
+    LeadAssignmentMessageRepository,
+    reconcile_lead_assignment_change,
 )
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
@@ -114,6 +129,13 @@ async def run_follow_up_boss_lead_snapshot_sync(
     temporal_workflow_starter: TemporalWorkflowStarter | None = None,
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
+    crm_agent_repository: CRMAgentRepository | None = None,
+    workspace_agent_crm_mapping_repository: WorkspaceAgentCRMMappingRepository | None = None,
+    workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository | None = None,
+    workspace_membership_repository: WorkspaceMembershipRepository | None = None,
+    user_repository: UserRepository | None = None,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
+    outbound_message_repository: LeadAssignmentMessageRepository | None = None,
     commit: Callable[[], Awaitable[None]] | None = None,
     activity_limit: int = 50,
 ) -> RunFollowUpBossLeadSyncResult:
@@ -149,6 +171,14 @@ async def run_follow_up_boss_lead_snapshot_sync(
     remaining_leads = max_leads
     page_count = 0
     first_failure: str | None = None
+    assignment_context = await _load_assignment_context(
+        workspace_id=workspace_id,
+        crm_agent_repository=crm_agent_repository,
+        workspace_agent_crm_mapping_repository=workspace_agent_crm_mapping_repository,
+        workspace_agent_mapping_config_repository=workspace_agent_mapping_config_repository,
+        workspace_membership_repository=workspace_membership_repository,
+        user_repository=user_repository,
+    )
     try:
         while True:
             request_page_size = page_size
@@ -171,7 +201,27 @@ async def run_follow_up_boss_lead_snapshot_sync(
             total_failed = job.total_failed
             for lead in page.leads:
                 try:
-                    upserted_lead = await lead_repository.upsert(lead)
+                    existing_lead = await lead_repository.get_by_crm_id(
+                        workspace_id,
+                        lead.crm_provider,
+                        lead.crm_lead_id,
+                    )
+                    resolved_lead = _resolve_lead_assignment(
+                        lead,
+                        assignment_context=assignment_context,
+                        now=now,
+                    )
+                    upserted_lead = await lead_repository.upsert(resolved_lead)
+                    await reconcile_lead_assignment_change(
+                        previous_lead=existing_lead,
+                        current_lead=upserted_lead,
+                        lead_workflow_repository=lead_workflow_repository,
+                        workflow_transition_repository=workflow_transition_repository,
+                        temporal_signal_outbox_repository=temporal_signal_outbox_repository,
+                        outbound_message_repository=outbound_message_repository,
+                        event_bus=event_bus,
+                        now=now,
+                    )
                     total_upserted += 1
                     if (
                         crm_activity_source is not None
@@ -364,6 +414,13 @@ async def execute_queued_follow_up_boss_crm_sync(
     temporal_workflow_starter: TemporalWorkflowStarter | None = None,
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
+    crm_agent_repository: CRMAgentRepository | None = None,
+    workspace_agent_crm_mapping_repository: WorkspaceAgentCRMMappingRepository | None = None,
+    workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository | None = None,
+    workspace_membership_repository: WorkspaceMembershipRepository | None = None,
+    user_repository: UserRepository | None = None,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
+    outbound_message_repository: LeadAssignmentMessageRepository | None = None,
     commit: Callable[[], Awaitable[None]] | None = None,
     activity_limit: int = 50,
 ) -> ExecuteQueuedCRMSyncResult:
@@ -398,6 +455,13 @@ async def execute_queued_follow_up_boss_crm_sync(
         temporal_workflow_starter=temporal_workflow_starter,
         event_bus=event_bus,
         workspace_operational_control_repository=workspace_operational_control_repository,
+        crm_agent_repository=crm_agent_repository,
+        workspace_agent_crm_mapping_repository=workspace_agent_crm_mapping_repository,
+        workspace_agent_mapping_config_repository=workspace_agent_mapping_config_repository,
+        workspace_membership_repository=workspace_membership_repository,
+        user_repository=user_repository,
+        temporal_signal_outbox_repository=temporal_signal_outbox_repository,
+        outbound_message_repository=outbound_message_repository,
         commit=commit,
         activity_limit=activity_limit,
     )
@@ -587,6 +651,56 @@ def _can_process_crm_tag_enrollment(
             workflow_transition_repository,
             temporal_workflow_starter,
         )
+    )
+
+
+async def _load_assignment_context(
+    *,
+    workspace_id: WorkspaceId,
+    crm_agent_repository: CRMAgentRepository | None,
+    workspace_agent_crm_mapping_repository: WorkspaceAgentCRMMappingRepository | None,
+    workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository | None,
+    workspace_membership_repository: WorkspaceMembershipRepository | None,
+    user_repository: UserRepository | None,
+) -> WorkspaceLeadAssignmentContext | None:
+    if not all(
+        dependency is not None
+        for dependency in (
+            crm_agent_repository,
+            workspace_agent_crm_mapping_repository,
+            workspace_agent_mapping_config_repository,
+            workspace_membership_repository,
+            user_repository,
+        )
+    ):
+        return None
+    assert crm_agent_repository is not None
+    assert workspace_agent_crm_mapping_repository is not None
+    assert workspace_agent_mapping_config_repository is not None
+    assert workspace_membership_repository is not None
+    assert user_repository is not None
+    return await load_workspace_lead_assignment_context(
+        workspace_id=workspace_id,
+        crm_agent_repository=crm_agent_repository,
+        workspace_agent_crm_mapping_repository=workspace_agent_crm_mapping_repository,
+        workspace_agent_mapping_config_repository=workspace_agent_mapping_config_repository,
+        workspace_membership_repository=workspace_membership_repository,
+        user_repository=user_repository,
+    )
+
+
+def _resolve_lead_assignment(
+    lead: CanonicalLeadRecord,
+    *,
+    assignment_context: WorkspaceLeadAssignmentContext | None,
+    now: datetime,
+) -> CanonicalLeadRecord:
+    if assignment_context is None:
+        return lead
+    return apply_lead_assignment_resolution(
+        lead,
+        context=assignment_context,
+        now=now,
     )
 
 

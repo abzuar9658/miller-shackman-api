@@ -2,9 +2,11 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
+from typing import cast
 from uuid import UUID, uuid4
 
 from app.application.ports.crm import CRMClient
+from app.application.ports.crm_sync import CanonicalLeadRefreshSource
 from app.application.ports.lead_activity import LeadActivityRepository
 from app.application.ports.listing_search import ListingSearchClient
 from app.application.ports.listing_sources import ListingSnapshotRepository, ListingSourceRepository
@@ -13,15 +15,21 @@ from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
     CampaignExecutionRepository,
+    CRMAgentRepository,
     CrmConversationEventRepository,
     LeadRepository,
     LeadWorkflowRepository,
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
+    TemporalSignalOutboxRepository,
+    UserRepository,
     WorkflowTransitionRepository,
+    WorkspaceAgentCRMMappingRepository,
+    WorkspaceAgentMappingConfigRepository,
     WorkspaceContactPolicyRepository,
     WorkspaceHandoffConfigRepository,
     WorkspaceLLMConfigRepository,
+    WorkspaceMembershipRepository,
     WorkspaceOperationalControlRepository,
     WorkspaceOutboundDraftingConfigRepository,
     WorkspaceRepository,
@@ -49,6 +57,7 @@ from app.application.use_cases.plan_outbound_message import (
 )
 from app.application.use_cases.send_outbound_message import (
     OutboundSendContext,
+    PreSendCRMRefreshContext,
     SendOutboundMessageResult,
     SendOutboundMessageStatus,
     send_outbound_message,
@@ -188,6 +197,12 @@ async def execute_campaign_cadence_step(
     sms_provider: SMSProvider,
     email_provider: EmailProvider,
     crm_client: CRMClient | None = None,
+    crm_agent_repository: CRMAgentRepository | None = None,
+    workspace_agent_crm_mapping_repository: WorkspaceAgentCRMMappingRepository | None = None,
+    workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository | None = None,
+    workspace_membership_repository: WorkspaceMembershipRepository | None = None,
+    user_repository: UserRepository | None = None,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     outbound_message_crm_completion_repository: (
         OutboundMessageCRMCompletionRepository | None
     ) = None,
@@ -407,6 +422,17 @@ async def execute_campaign_cadence_step(
         sms_provider=sms_provider,
         email_provider=email_provider,
         workspace_operational_control_repository=workspace_operational_control_repository,
+        crm_refresh_context=_pre_send_crm_refresh_context(
+            crm_client=crm_client,
+            crm_agent_repository=crm_agent_repository,
+            workspace_agent_crm_mapping_repository=workspace_agent_crm_mapping_repository,
+            workspace_agent_mapping_config_repository=workspace_agent_mapping_config_repository,
+            workspace_membership_repository=workspace_membership_repository,
+            user_repository=user_repository,
+            lead_workflow_repository=lead_workflow_repository,
+            workflow_transition_repository=workflow_transition_repository,
+            temporal_signal_outbox_repository=temporal_signal_outbox_repository,
+        ),
         now=now,
     )
     if send_result.status in {
@@ -816,6 +842,50 @@ def _planning_pre_send_reasons(channel_evaluations: tuple[ChannelEvaluation, ...
             for evaluation in channel_evaluations
             for reason in evaluation.pre_send_reasons
         )
+    )
+
+
+def _pre_send_crm_refresh_context(
+    *,
+    crm_client: CRMClient | None,
+    crm_agent_repository: CRMAgentRepository | None,
+    workspace_agent_crm_mapping_repository: WorkspaceAgentCRMMappingRepository | None,
+    workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository | None,
+    workspace_membership_repository: WorkspaceMembershipRepository | None,
+    user_repository: UserRepository | None,
+    lead_workflow_repository: LeadWorkflowRepository,
+    workflow_transition_repository: WorkflowTransitionRepository,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None,
+) -> PreSendCRMRefreshContext | None:
+    if not all(
+        dependency is not None
+        for dependency in (
+            crm_client,
+            crm_agent_repository,
+            workspace_agent_crm_mapping_repository,
+            workspace_agent_mapping_config_repository,
+            workspace_membership_repository,
+            user_repository,
+        )
+    ):
+        return None
+    assert crm_client is not None
+    assert crm_agent_repository is not None
+    assert workspace_agent_crm_mapping_repository is not None
+    assert workspace_agent_mapping_config_repository is not None
+    assert workspace_membership_repository is not None
+    assert user_repository is not None
+    return PreSendCRMRefreshContext(
+        lead_refresh_source=cast(CanonicalLeadRefreshSource, crm_client),
+        crm_activity_source=crm_client,
+        crm_agent_repository=crm_agent_repository,
+        workspace_agent_crm_mapping_repository=workspace_agent_crm_mapping_repository,
+        workspace_agent_mapping_config_repository=workspace_agent_mapping_config_repository,
+        workspace_membership_repository=workspace_membership_repository,
+        user_repository=user_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        temporal_signal_outbox_repository=temporal_signal_outbox_repository,
     )
 
 

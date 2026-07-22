@@ -25,6 +25,15 @@ class CRMAgent(BaseModel):
     email: str | None = None
 
 
+class CRMAgentDirectoryEntry(BaseModel):
+    crm_agent_id: str
+    name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    is_active: bool = True
+    raw_payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class CRMActivity(BaseModel):
     crm_activity_id: str
     activity_type: str
@@ -115,4 +124,9 @@ class CRMClient(Protocol):
         workspace_id: UUID,
         uri: str,
     ) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+
+class CRMAgentDirectorySource(Protocol):
+    async def list_agents(self, workspace_id: UUID) -> list[CRMAgentDirectoryEntry]:
         raise NotImplementedError

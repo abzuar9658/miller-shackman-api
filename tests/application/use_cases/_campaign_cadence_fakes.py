@@ -367,6 +367,20 @@ class FakeOutboundMessageRepository:
         self.messages_by_idempotency_key: dict[tuple[WorkspaceId, str], OutboundMessage] = {}
         self.saved: list[OutboundMessage] = []
 
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[OutboundMessage, ...]:
+        matches = tuple(
+            message
+            for message in self.messages_by_idempotency_key.values()
+            if message.workspace_id == workspace_id and message.lead_id == lead_id
+        )
+        return matches[:limit]
+
     async def get_by_id(
         self, workspace_id: WorkspaceId, message_id: UUID
     ) -> OutboundMessage | None:

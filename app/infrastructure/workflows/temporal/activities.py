@@ -17,7 +17,16 @@ from app.infrastructure.persistence.postgres.campaign_execution_repository impor
 from app.infrastructure.persistence.postgres.conversation_repository import (
     PostgresCrmConversationEventRepository,
 )
-from app.infrastructure.persistence.postgres.identity_repository import PostgresWorkspaceRepository
+from app.infrastructure.persistence.postgres.crm_agent_mapping_repository import (
+    PostgresCRMAgentRepository,
+    PostgresWorkspaceAgentCRMMappingRepository,
+    PostgresWorkspaceAgentMappingConfigRepository,
+)
+from app.infrastructure.persistence.postgres.identity_repository import (
+    PostgresUserRepository,
+    PostgresWorkspaceMembershipRepository,
+    PostgresWorkspaceRepository,
+)
 from app.infrastructure.persistence.postgres.lead_activity_repository import (
     PostgresLeadActivityRepository,
 )
@@ -32,6 +41,9 @@ from app.infrastructure.persistence.postgres.outbound_message_repository import 
 )
 from app.infrastructure.persistence.postgres.rejected_draft_review_repository import (
     PostgresRejectedDraftReviewRepository,
+)
+from app.infrastructure.persistence.postgres.temporal_signal_outbox_repository import (
+    PostgresTemporalSignalOutboxRepository,
 )
 from app.infrastructure.persistence.postgres.workflow_repository import (
     PostgresLeadWorkflowRepository,
@@ -127,6 +139,16 @@ async def execute_campaign_cadence_step_activity(
             sms_provider=build_sms_provider(),
             email_provider=build_email_provider(),
             crm_client=build_crm_client(settings),
+            crm_agent_repository=PostgresCRMAgentRepository(session),
+            workspace_agent_crm_mapping_repository=PostgresWorkspaceAgentCRMMappingRepository(
+                session,
+            ),
+            workspace_agent_mapping_config_repository=PostgresWorkspaceAgentMappingConfigRepository(
+                session,
+            ),
+            workspace_membership_repository=PostgresWorkspaceMembershipRepository(session),
+            user_repository=PostgresUserRepository(session),
+            temporal_signal_outbox_repository=PostgresTemporalSignalOutboxRepository(session),
             outbound_message_crm_completion_repository=(
                 PostgresOutboundMessageCRMCompletionRepository(session)
             ),

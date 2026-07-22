@@ -8,8 +8,10 @@ from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactPermissionStatus, SuppressionType
 from app.domain.leads import (
     ActivityReliability,
+    AssignmentResolutionStatus,
     CanonicalLeadRecord,
     CRMProvider,
+    EffectiveOwnerSource,
     LeadClassificationReason,
     LeadType,
     PropertyEventType,
@@ -162,6 +164,13 @@ def _record_to_values(
         "source_updated_at": record.source_updated_at,
         "facts_derived_at": record.facts_derived_at,
         "assigned_agent_crm_id": record.assigned_agent_crm_id,
+        "assigned_agent_user_id": record.assigned_agent_user_id,
+        "effective_owner_user_id": record.effective_owner_user_id,
+        "effective_owner_source": record.effective_owner_source.value
+        if record.effective_owner_source is not None
+        else None,
+        "assignment_resolution_status": record.assignment_resolution_status.value,
+        "assignment_last_resolved_at": record.assignment_last_resolved_at,
         "assigned_agent_name_present": record.assigned_agent_name_present,
         "has_accountable_owner": record.has_accountable_owner,
         "ownership_last_changed_at": record.ownership_last_changed_at,
@@ -215,6 +224,15 @@ def _model_to_record(model: LeadModel) -> CanonicalLeadRecord:
         source_updated_at=model.source_updated_at,
         facts_derived_at=model.facts_derived_at,
         assigned_agent_crm_id=model.assigned_agent_crm_id,
+        assigned_agent_user_id=model.assigned_agent_user_id,
+        effective_owner_user_id=model.effective_owner_user_id,
+        effective_owner_source=EffectiveOwnerSource(model.effective_owner_source)
+        if model.effective_owner_source
+        else None,
+        assignment_resolution_status=AssignmentResolutionStatus(
+            model.assignment_resolution_status,
+        ),
+        assignment_last_resolved_at=model.assignment_last_resolved_at,
         assigned_agent_name_present=model.assigned_agent_name_present,
         has_accountable_owner=model.has_accountable_owner,
         ownership_last_changed_at=model.ownership_last_changed_at,

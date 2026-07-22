@@ -27,6 +27,7 @@ class DomainEventType(StrEnum):
     CAMPAIGN_RESUMED = "campaign.resumed"
     CRM_SYNC_REQUESTED = "crm_sync.requested"
     HANDOFF_CREATED = "handoff.created"
+    LEAD_ASSIGNMENT_RECONCILED = "lead.assignment_reconciled"
     LEAD_OPTED_OUT = "lead.opted_out"
     LISTING_SNAPSHOT_CREATED = "listing.snapshot_created"
     LISTING_SOURCE_CRAWL_REQUESTED = "listing_source_crawl.requested"

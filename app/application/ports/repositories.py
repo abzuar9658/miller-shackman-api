@@ -357,13 +357,6 @@ class WorkspaceAgentCRMMappingRepository(Protocol):
     ) -> WorkspaceAgentCRMMapping | None:
         raise NotImplementedError
 
-    async def get_by_app_user_id(
-        self,
-        workspace_id: WorkspaceId,
-        app_user_id: UserId,
-    ) -> WorkspaceAgentCRMMapping | None:
-        raise NotImplementedError
-
     async def list_for_workspace(
         self,
         workspace_id: WorkspaceId,

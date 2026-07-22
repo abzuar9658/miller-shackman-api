@@ -26,6 +26,7 @@ class WorkflowTransitionReasonCode(StrEnum):
     CADENCE_STEP_STARTED = "cadence_step_started"
     INBOUND_REPLY_RECEIVED = "inbound_reply_received"
     CRM_HUMAN_ACTIVITY_DETECTED = "crm_human_activity_detected"
+    CRM_OWNERSHIP_CHANGED = "crm_ownership_changed"
     CONTACT_SUPPRESSION_DETECTED = "contact_suppression_detected"
     REPLY_CLASSIFICATION_REJECTED = "reply_classification_rejected"
     HUMAN_HANDOFF_REQUIRED = "human_handoff_required"

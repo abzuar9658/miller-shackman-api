@@ -119,6 +119,39 @@ def test_user_repository_get_by_email_normalized_maps_domain_user() -> None:
     assert "users.email_normalized" in str(session.statements[0])
 
 
+def test_user_repository_get_active_by_workspace_email_normalized_joins_memberships() -> None:
+    model = UserModel(
+        user_id=USER_ID,
+        email="Agent@example.com",
+        email_normalized="agent@example.com",
+        full_name="Agent Smith",
+        status=UserStatus.ACTIVE.value,
+        email_verified_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    session = _FakeSession(_FakeResult(scalar_value=model))
+
+    result = _run(
+        PostgresUserRepository(
+            cast(AsyncSession, session),
+        ).get_active_by_workspace_email_normalized(
+            WORKSPACE_ID,
+            "agent@example.com",
+            allowed_roles=(
+                WorkspaceMembershipRole.ASSIGNED_AGENT,
+                WorkspaceMembershipRole.MANAGER,
+            ),
+        ),
+    )
+
+    assert result is not None
+    statement = str(session.statements[0])
+    assert "JOIN workspace_memberships" in statement
+    assert "users.email_normalized" in statement
+    assert "workspace_memberships.workspace_id" in statement
+
+
 def test_workspace_membership_repository_lists_user_memberships() -> None:
     first = WorkspaceMembershipModel(
         membership_id=MEMBERSHIP_ID,

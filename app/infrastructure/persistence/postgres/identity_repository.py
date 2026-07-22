@@ -57,6 +57,34 @@ class PostgresUserRepository:
         model = result.scalar_one_or_none()
         return _user_from_model(model) if model else None
 
+    async def get_active_by_workspace_email_normalized(
+        self,
+        workspace_id: WorkspaceId,
+        email_normalized: str,
+        *,
+        allowed_roles: tuple[WorkspaceMembershipRole, ...],
+    ) -> User | None:
+        if not allowed_roles:
+            return None
+
+        result = await self._session.execute(
+            select(UserModel)
+            .join(
+                WorkspaceMembershipModel,
+                WorkspaceMembershipModel.user_id == UserModel.user_id,
+            )
+            .where(UserModel.email_normalized == email_normalized)
+            .where(UserModel.status == UserStatus.ACTIVE.value)
+            .where(WorkspaceMembershipModel.workspace_id == workspace_id)
+            .where(WorkspaceMembershipModel.status == WorkspaceMembershipStatus.ACTIVE.value)
+            .where(
+                WorkspaceMembershipModel.role.in_(tuple(role.value for role in allowed_roles)),
+            )
+            .limit(1),
+        )
+        model = result.scalar_one_or_none()
+        return _user_from_model(model) if model else None
+
     async def save(self, user: User) -> User:
         statement = (
             insert(UserModel)

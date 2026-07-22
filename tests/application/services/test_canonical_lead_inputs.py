@@ -281,6 +281,28 @@ def test_history_preferences_are_extracted_from_activity_items() -> None:
     assert context.extracted_preferences["keywords"] == "co-op"
 
 
+def test_history_location_extraction_stops_before_budget_phrase() -> None:
+    context = approved_outbound_context_from_canonical_lead(
+        _canonical_lead(),
+        now=NOW,
+        activity_items=(
+            _activity_item(
+                title="Inbound message",
+                preview="Looking for 2 bedroom apartments in Queens under $2k/month.",
+                content="Looking for 2 bedroom apartments in Queens under $2k/month.",
+                kind=LeadActivityKind.INBOUND_MESSAGE,
+                occurred_at=NOW,
+                direction="inbound",
+                channel="sms",
+                actor_name="lead",
+            ),
+        ),
+    )
+
+    assert context.extracted_preferences["location"] == "Queens"
+    assert context.extracted_preferences["max_price"] == "2000"
+
+
 def test_history_preferences_fall_back_to_crm_events_when_activity_items_missing() -> None:
     context = approved_outbound_context_from_canonical_lead(
         _canonical_lead(),

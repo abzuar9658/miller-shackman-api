@@ -10,9 +10,15 @@ from uuid import UUID
 import httpx
 import structlog
 
-from app.application.ports.crm import CanonicalLead, CRMActivity, CRMAgent
+from app.application.ports.crm import (
+    CanonicalLead,
+    CRMActivity,
+    CRMAgent,
+    CRMAgentDirectoryEntry,
+)
 from app.application.ports.crm_sync import CanonicalLeadSnapshotPage
 from app.domain.crm_sync import CRMSyncLeadSort
+from app.domain.leads import CanonicalLeadRecord
 from app.infrastructure.crm.follow_up_boss.lead_mapper import (
     map_follow_up_boss_person_to_canonical_lead,
 )
@@ -46,6 +52,23 @@ class FollowUpBossCRMClient:
         response.raise_for_status()
         return self._map_person(workspace_id, response.json())
 
+    async def get_lead_snapshot(
+        self,
+        *,
+        workspace_id: UUID,
+        crm_lead_id: str,
+        mapped_custom_field_keys: tuple[str, ...] = (),
+    ) -> CanonicalLeadRecord | None:
+        response = await self._client.get(f"/people/{crm_lead_id}")
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return self._map_canonical_lead_snapshot(
+            workspace_id=workspace_id,
+            payload=response.json(),
+            mapped_custom_field_keys=mapped_custom_field_keys,
+        )
+
     async def search_leads(
         self,
         workspace_id: UUID,
@@ -59,6 +82,34 @@ class FollowUpBossCRMClient:
         response.raise_for_status()
         data = response.json()
         return [self._map_person(workspace_id, p) for p in data.get("people", [])]
+
+    async def list_agents(self, workspace_id: UUID) -> list[CRMAgentDirectoryEntry]:
+        _ = workspace_id
+        next_cursor: str | None = None
+        agents: list[CRMAgentDirectoryEntry] = []
+        while True:
+            params: dict[str, Any] = {"limit": 100}
+            if next_cursor:
+                params["next"] = next_cursor
+
+            response = await self._client.get("/users", params=params)
+            response.raise_for_status()
+            data = response.json()
+            users = data.get("users", [])
+            if isinstance(users, list):
+                agents.extend(
+                    self._map_agent_directory_entry(user)
+                    for user in users
+                    if isinstance(user, dict)
+                )
+
+            metadata = data.get("_metadata") if isinstance(data.get("_metadata"), dict) else {}
+            next_value = metadata.get("next") or data.get("next")
+            if not next_value:
+                break
+            next_cursor = str(next_value)
+
+        return agents
 
     async def list_lead_snapshots(
         self,
@@ -87,11 +138,11 @@ class FollowUpBossCRMClient:
         page_now = datetime.now(UTC)
         people = data.get("people", [])
         leads = tuple(
-            map_follow_up_boss_person_to_canonical_lead(
+            self._map_canonical_lead_snapshot(
                 workspace_id=workspace_id,
                 payload=person,
-                now=page_now,
                 mapped_custom_field_keys=mapped_custom_field_keys,
+                now=page_now,
             )
             for person in people
             if isinstance(person, dict)
@@ -413,6 +464,54 @@ class FollowUpBossCRMClient:
             crm_agent_id=str(payload.get("id", "")),
             name=payload.get("name", ""),
             email=payload.get("email"),
+        )
+
+    def _map_agent_directory_entry(self, payload: dict[str, Any]) -> CRMAgentDirectoryEntry:
+        return CRMAgentDirectoryEntry(
+            crm_agent_id=str(payload.get("id", "")),
+            name=self._agent_name(payload),
+            email=self._first_non_empty(payload.get("email")),
+            phone=self._first_non_empty(
+                payload.get("phone"),
+                payload.get("mobilePhone"),
+                payload.get("cellPhone"),
+            ),
+            is_active=self._agent_is_active(payload),
+            raw_payload=payload,
+        )
+
+    def _agent_name(self, payload: dict[str, Any]) -> str | None:
+        name = self._first_non_empty(payload.get("name"), payload.get("fullName"))
+        if name is not None:
+            return name
+        first_name = self._first_non_empty(payload.get("firstName"))
+        last_name = self._first_non_empty(payload.get("lastName"))
+        parts = tuple(part for part in (first_name, last_name) if part is not None)
+        if not parts:
+            return None
+        return " ".join(parts)
+
+    def _agent_is_active(self, payload: dict[str, Any]) -> bool:
+        if isinstance(payload.get("isActive"), bool):
+            return bool(payload["isActive"])
+        status = self._first_non_empty(payload.get("status"))
+        if status is None:
+            return True
+        return status.lower() not in {"inactive", "disabled", "deleted", "archived"}
+
+    def _map_canonical_lead_snapshot(
+        self,
+        *,
+        workspace_id: UUID,
+        payload: dict[str, Any],
+        mapped_custom_field_keys: tuple[str, ...] = (),
+        now: datetime | None = None,
+    ) -> CanonicalLeadRecord:
+        return map_follow_up_boss_person_to_canonical_lead(
+            workspace_id=workspace_id,
+            payload=payload,
+            now=now or datetime.now(UTC),
+            mapped_custom_field_keys=mapped_custom_field_keys,
         )
 
     def _parse_datetime(self, value: Any) -> datetime | None:

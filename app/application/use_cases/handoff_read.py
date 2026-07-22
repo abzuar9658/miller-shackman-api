@@ -3,6 +3,7 @@ from enum import StrEnum
 from uuid import UUID
 
 from app.application.ports.repositories import HandoffRepository, LeadRepository, UserRepository
+from app.application.services.lead_assignment import lead_effective_owner_user_id
 from app.domain.common.ids import UserId, WorkspaceId
 from app.domain.conversations import Handoff, HandoffStatus
 from app.domain.identity import (
@@ -228,13 +229,7 @@ async def _assigned_agent_name(
 def _assigned_agent_user_id(handoff: Handoff, lead: CanonicalLeadRecord) -> UserId | None:
     if handoff.assigned_agent_user_id is not None:
         return handoff.assigned_agent_user_id
-    assigned_agent_user_id = lead.mapped_custom_fields.get("assigned_agent_user_id")
-    if not assigned_agent_user_id:
-        return None
-    try:
-        return UUID(assigned_agent_user_id)
-    except ValueError:
-        return None
+    return lead_effective_owner_user_id(lead)
 
 
 def _acts_on_assigned_lead(

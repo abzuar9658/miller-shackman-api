@@ -100,6 +100,37 @@ async def test_run_once_passes_recent_limit_options_to_execute(
     )
     monkeypatch.setattr(
         crm_sync_worker,
+        "PostgresCRMAgentRepository",
+        lambda _: "crm-agent-repository",
+    )
+    monkeypatch.setattr(
+        crm_sync_worker,
+        "PostgresWorkspaceAgentCRMMappingRepository",
+        lambda _: "crm-agent-mapping-repository",
+    )
+    monkeypatch.setattr(
+        crm_sync_worker,
+        "PostgresWorkspaceAgentMappingConfigRepository",
+        lambda _: "crm-agent-mapping-config-repository",
+    )
+    monkeypatch.setattr(
+        crm_sync_worker,
+        "PostgresWorkspaceMembershipRepository",
+        lambda _: "workspace-membership-repository",
+    )
+    monkeypatch.setattr(crm_sync_worker, "PostgresUserRepository", lambda _: "user-repository")
+    monkeypatch.setattr(
+        crm_sync_worker,
+        "PostgresTemporalSignalOutboxRepository",
+        lambda _: "temporal-signal-outbox-repository",
+    )
+    monkeypatch.setattr(
+        crm_sync_worker,
+        "PostgresOutboundMessageRepository",
+        lambda _: "outbound-message-repository",
+    )
+    monkeypatch.setattr(
+        crm_sync_worker,
         "execute_queued_follow_up_boss_crm_sync",
         fake_execute_queued_follow_up_boss_crm_sync,
     )
@@ -134,5 +165,15 @@ async def test_run_once_passes_recent_limit_options_to_execute(
     assert captured["temporal_workflow_starter"] is temporal_starter
     assert captured["event_bus"] == "event-bus"
     assert captured["workspace_operational_control_repository"] == "operational-control-repository"
+    assert captured["crm_agent_repository"] == "crm-agent-repository"
+    assert captured["workspace_agent_crm_mapping_repository"] == "crm-agent-mapping-repository"
+    assert (
+        captured["workspace_agent_mapping_config_repository"]
+        == "crm-agent-mapping-config-repository"
+    )
+    assert captured["workspace_membership_repository"] == "workspace-membership-repository"
+    assert captured["user_repository"] == "user-repository"
+    assert captured["temporal_signal_outbox_repository"] == "temporal-signal-outbox-repository"
+    assert captured["outbound_message_repository"] == "outbound-message-repository"
     assert callable(captured["commit"])
     assert session.committed is True

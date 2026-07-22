@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -19,6 +20,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from app.domain.lead_assignment import AssignmentResolutionStatus
 
 
 class Base(DeclarativeBase):
@@ -52,6 +55,21 @@ class LeadModel(Base):
     source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     facts_derived_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     assigned_agent_crm_id: Mapped[str | None] = mapped_column(String(255))
+    assigned_agent_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+    )
+    effective_owner_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+    )
+    effective_owner_source: Mapped[str | None] = mapped_column(String(100))
+    assignment_resolution_status: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        default=AssignmentResolutionStatus.UNRESOLVED.value,
+    )
+    assignment_last_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     assigned_agent_name_present: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -526,6 +544,72 @@ class CRMSyncJobModel(Base):
         PG_UUID(as_uuid=True),
         ForeignKey("users.user_id"),
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CRMAgentModel(Base):
+    __tablename__ = "crm_agents"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "crm_provider",
+            "crm_agent_id",
+            name="uq_crm_agents_workspace_provider_agent",
+        ),
+        UniqueConstraint("workspace_id", "id", name="uq_crm_agents_workspace_id"),
+        Index("ix_crm_agents_workspace_active", "workspace_id", "is_active"),
+        Index("ix_crm_agents_workspace_email", "workspace_id", "email_normalized"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    crm_provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    crm_agent_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(255))
+    email: Mapped[str | None] = mapped_column(String(320))
+    email_normalized: Mapped[str | None] = mapped_column(String(320))
+    phone: Mapped[str | None] = mapped_column(String(50))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceAgentCRMMappingModel(Base):
+    __tablename__ = "workspace_agent_crm_mappings"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "crm_agent_id"],
+            ["crm_agents.workspace_id", "crm_agents.id"],
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "crm_agent_id",
+            name="uq_workspace_agent_crm_mappings_workspace_crm_agent",
+        ),
+        Index("ix_workspace_agent_crm_mappings_workspace_status", "workspace_id", "mapping_status"),
+    )
+
+    mapping_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    crm_agent_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    app_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.user_id")
+    )
+    mapping_status: Mapped[str] = mapped_column(String(50), nullable=False)
+    resolution_source: Mapped[str] = mapped_column(String(100), nullable=False)
+    resolved_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.user_id")
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -1103,6 +1187,19 @@ class WorkspaceCRMSyncConfigModel(Base):
     )
     crm_sync_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     crm_sync_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceAgentMappingConfigModel(Base):
+    __tablename__ = "workspace_agent_mapping_configs"
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), primary_key=True
+    )
+    unmapped_assignment_fallback_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.user_id")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

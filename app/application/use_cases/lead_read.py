@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from uuid import UUID
 
 from app.application.ports.lead_activity import (
     LeadActivityItem,
@@ -17,7 +16,10 @@ from app.application.ports.lead_read import (
     LeadReadWorkflowTransitionRepository,
 )
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
-from app.application.services.lead_assignment import is_actor_assigned_to_lead
+from app.application.services.lead_assignment import (
+    is_actor_assigned_to_lead,
+    lead_effective_owner_user_id,
+)
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
 from app.domain.common.ids import LeadId, UserId, WorkspaceId
@@ -207,23 +209,13 @@ async def _assigned_agent_name(
     user_repository: LeadReadUserRepository,
     user_name_cache: dict[UserId, str | None],
 ) -> str | None:
-    user_id = _assigned_agent_user_id(lead)
+    user_id = lead_effective_owner_user_id(lead)
     if user_id is None:
         return None
     if user_id not in user_name_cache:
         user = await user_repository.get_by_id(user_id)
         user_name_cache[user_id] = user.full_name if user is not None else None
     return user_name_cache[user_id]
-
-
-def _assigned_agent_user_id(lead: CanonicalLeadRecord) -> UserId | None:
-    value = lead.mapped_custom_fields.get("assigned_agent_user_id")
-    if not value:
-        return None
-    try:
-        return UUID(value)
-    except ValueError:
-        return None
 
 
 def _can_view_workspace_leads(actor: AuthenticatedActor) -> bool:

@@ -2,9 +2,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from uuid import UUID
 
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactPermissionStatus, SuppressionType
+from app.domain.lead_assignment import AssignmentResolutionStatus, EffectiveOwnerSource
 
 
 class CRMProvider(StrEnum):
@@ -59,6 +61,11 @@ class CanonicalLeadRecord:
     source_payload_version: str
     source_updated_at: datetime | None = None
     assigned_agent_crm_id: str | None = None
+    assigned_agent_user_id: UUID | None = None
+    effective_owner_user_id: UUID | None = None
+    effective_owner_source: EffectiveOwnerSource | None = None
+    assignment_resolution_status: AssignmentResolutionStatus = AssignmentResolutionStatus.UNRESOLVED
+    assignment_last_resolved_at: datetime | None = None
     assigned_agent_name_present: bool = False
     has_accountable_owner: bool = False
     ownership_last_changed_at: datetime | None = None

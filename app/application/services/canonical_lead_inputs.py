@@ -47,7 +47,8 @@ LOCATION_TRIGGER_PATTERNS = (
         r"\b(?:looking|searching|interested|focusing|prefer(?:ring)?|want|need|thinking|considering|move(?:ing)?|buy(?:ing)?|rent(?:ing)?)\b"
         r"[^.!?;]{0,40}\b(?:in|near|around)\s+"
         r"([A-Za-z][A-Za-z'’-]*(?:[ -][A-Za-z][A-Za-z'’-]*){0,4}(?:\s*(?:,|/|or|and)\s*"
-        r"[A-Za-z][A-Za-z'’-]*(?:[ -][A-Za-z][A-Za-z'’-]*){0,4})*)",
+        r"[A-Za-z][A-Za-z'’-]*(?:[ -][A-Za-z][A-Za-z'’-]*){0,4})*)"
+        r"(?=\s+(?:with|under|over|budget|priced|and\s+need|and\s+want|still)\b|[.!?]|$)",
         re.IGNORECASE,
     ),
     re.compile(

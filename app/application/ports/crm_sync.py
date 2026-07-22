@@ -26,3 +26,14 @@ class CanonicalLeadSnapshotSource(Protocol):
         mapped_custom_field_keys: tuple[str, ...] = (),
     ) -> CanonicalLeadSnapshotPage:
         raise NotImplementedError
+
+
+class CanonicalLeadRefreshSource(Protocol):
+    async def get_lead_snapshot(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        crm_lead_id: str,
+        mapped_custom_field_keys: tuple[str, ...] = (),
+    ) -> CanonicalLeadRecord | None:
+        raise NotImplementedError
