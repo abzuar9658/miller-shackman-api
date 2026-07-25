@@ -1,6 +1,8 @@
 import base64
+import hmac
 import json
 from datetime import UTC, datetime
+from hashlib import sha256
 from uuid import UUID
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -134,6 +136,7 @@ def _client(bundle: ProviderDeliveryServiceBundle, settings: Settings | None = N
         or Settings(
             twilio_auth_token=None,
             sendgrid_event_webhook_public_key=None,
+            mailgun_webhook_signing_key=None,
         )
     )
     return TestClient(app)
@@ -314,3 +317,160 @@ def test_sendgrid_signature_validation_and_duplicate_event_handling() -> None:
     assert second.status_code == 200
     assert first.json()["processed_count"] == 1
     assert second.json()["duplicate_count"] == 1
+
+
+def _mailgun_signature(signing_key: str, token: str, timestamp: str) -> str:
+    return hmac.new(
+        signing_key.encode(),
+        f"{timestamp}{token}".encode(),
+        sha256,
+    ).hexdigest()
+
+
+def _mailgun_delivery_body(
+    *,
+    event: str,
+    provider_message_id: str,
+    event_id: str,
+    timestamp: int,
+    severity: str | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "event": event,
+            "timestamp": timestamp,
+            "id": event_id,
+            "severity": severity,
+            "recipient": "lead@example.com",
+            "message": {
+                "headers": {"message-id": f"<{provider_message_id}>"},
+            },
+            "delivery-status": {"message": "OK", "description": "Accepted"},
+        }
+    )
+
+
+def test_mailgun_delivery_webhook_processes_delivered_event() -> None:
+    message_repository = FakeOutboundMessageRepository(
+        _message(
+            provider_name="mailgun",
+            provider_message_id="msg-123@example.com",
+            channel=ContactChannel.EMAIL,
+        )
+    )
+    bundle = ProviderDeliveryServiceBundle(
+        session=FakeSession(),
+        message_repository=message_repository,
+        provider_message_event_repository=FakeProviderMessageEventRepository(),
+        event_bus=FakeEventBus(),
+    )
+    body = _mailgun_delivery_body(
+        event="delivered",
+        provider_message_id="msg-123@example.com",
+        event_id="evt-1",
+        timestamp=int(NOW.timestamp()),
+    )
+
+    with _client(bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/mailgun/message-events/{WORKSPACE_ID}",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["processed_count"] == 1
+    assert payload["results"][0]["status"] == "processed"
+    message = message_repository.message
+    assert message is not None
+    assert message.provider_delivery_status is not None
+    assert message.provider_delivery_status.value == "delivered"
+
+
+def test_mailgun_delivery_webhook_ignores_unsupported_event() -> None:
+    bundle = ProviderDeliveryServiceBundle(
+        session=FakeSession(),
+        message_repository=FakeOutboundMessageRepository(
+            _message(
+                provider_name="mailgun",
+                provider_message_id="msg-123@example.com",
+                channel=ContactChannel.EMAIL,
+            )
+        ),
+        provider_message_event_repository=FakeProviderMessageEventRepository(),
+        event_bus=FakeEventBus(),
+    )
+    body = _mailgun_delivery_body(
+        event="opened",
+        provider_message_id="msg-123@example.com",
+        event_id="evt-2",
+        timestamp=int(NOW.timestamp()),
+    )
+
+    with _client(bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/mailgun/message-events/{WORKSPACE_ID}",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["processed_count"] == 0
+    assert payload["ignored_count"] == 1
+    assert payload["results"][0]["reasons"] == ["unsupported_event_type:opened"]
+
+
+def test_mailgun_delivery_signature_is_required_when_signing_key_is_configured() -> None:
+    signing_key = "mailgun-signing-key"
+    settings = Settings(mailgun_webhook_signing_key=SecretStr(signing_key))
+    token = "token-123"
+    timestamp = "1234567890"
+    signature = _mailgun_signature(signing_key, token, timestamp)
+    body = json.dumps(
+        {
+            "signature": {"token": token, "timestamp": timestamp, "signature": signature},
+            "event": "delivered",
+            "timestamp": int(NOW.timestamp()),
+            "id": "evt-1",
+            "recipient": "lead@example.com",
+            "message": {"headers": {"message-id": "<msg-123@example.com>"}},
+        }
+    )
+    bundle = ProviderDeliveryServiceBundle(
+        session=FakeSession(),
+        message_repository=FakeOutboundMessageRepository(
+            _message(
+                provider_name="mailgun",
+                provider_message_id="msg-123@example.com",
+                channel=ContactChannel.EMAIL,
+            )
+        ),
+        provider_message_event_repository=FakeProviderMessageEventRepository(),
+        event_bus=FakeEventBus(),
+    )
+
+    with _client(bundle, settings) as client:
+        good = client.post(
+            f"/api/v1/webhooks/mailgun/message-events/{WORKSPACE_ID}",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+        bad = client.post(
+            f"/api/v1/webhooks/mailgun/message-events/{WORKSPACE_ID}",
+            content=json.dumps(
+                {
+                    "signature": {"token": token, "timestamp": timestamp, "signature": "bad"},
+                    "event": "delivered",
+                    "timestamp": int(NOW.timestamp()),
+                    "id": "evt-1",
+                    "recipient": "lead@example.com",
+                    "message": {"headers": {"message-id": "<msg-123@example.com>"}},
+                }
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert good.status_code == 200
+    assert bad.status_code == 401

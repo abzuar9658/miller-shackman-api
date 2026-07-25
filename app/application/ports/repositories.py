@@ -70,6 +70,13 @@ class LeadRepository(Protocol):
     ) -> CanonicalLeadRecord | None:
         raise NotImplementedError
 
+    async def list_by_assigned_agent_crm_id(
+        self,
+        workspace_id: WorkspaceId,
+        assigned_agent_crm_id: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        raise NotImplementedError
+
     async def get_by_primary_phone(
         self,
         workspace_id: WorkspaceId,
@@ -82,6 +89,13 @@ class LeadRepository(Protocol):
         workspace_id: WorkspaceId,
         email_address: str,
     ) -> CanonicalLeadRecord | None:
+        raise NotImplementedError
+
+    async def list_by_primary_email(
+        self,
+        workspace_id: WorkspaceId,
+        email_address: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
         raise NotImplementedError
 
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
@@ -131,6 +145,21 @@ class OutboundMessageRepository(Protocol):
         *,
         limit: int = 100,
     ) -> tuple[OutboundMessage, ...]:
+        raise NotImplementedError
+
+    async def get_by_provider_message_id_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        provider_name: str,
+        provider_message_id: str,
+    ) -> OutboundMessage | None:
+        raise NotImplementedError
+
+    async def get_by_reply_routing_token(
+        self,
+        workspace_id: WorkspaceId,
+        reply_routing_token: str,
+    ) -> OutboundMessage | None:
         raise NotImplementedError
 
     async def save(self, message: OutboundMessage) -> OutboundMessage:
@@ -273,11 +302,27 @@ class AuthAuditLogRepository(Protocol):
 
 
 class ConversationSummaryRepository(Protocol):
+    async def get_latest_for_conversation(
+        self,
+        workspace_id: WorkspaceId,
+        conversation_id: UUID,
+    ) -> Any | None:
+        raise NotImplementedError
+
     async def save(self, summary: Any) -> Any:
         raise NotImplementedError
 
 
 class HandoffRepository(Protocol):
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[Handoff, ...]:
+        raise NotImplementedError
+
     async def list_handoffs(
         self,
         workspace_id: WorkspaceId,
@@ -302,6 +347,18 @@ class ConversationRepository(Protocol):
 
 
 class InboundMessageRepository(Protocol):
+    async def get_by_id(self, workspace_id: WorkspaceId, inbound_message_id: UUID) -> Any | None:
+        raise NotImplementedError
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[Any, ...]:
+        raise NotImplementedError
+
     async def save(self, message: Any) -> Any:
         raise NotImplementedError
 

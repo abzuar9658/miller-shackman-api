@@ -110,14 +110,94 @@ async def test_complete_outbound_message_crm_sync_skips_duplicate_note_after_par
     assert getattr(repository.record, "completed_at", None) == NOW
 
 
-def _lead() -> CanonicalLeadRecord:
+async def test_complete_outbound_message_crm_sync_publishes_sms_to_crm_conversation() -> None:
+    crm_client = FakeCRMClient()
+    repository = FakeOutboundMessageCRMCompletionRepository()
+    publisher = FakeCRMConversationPublisher()
+
+    result = await complete_outbound_message_crm_sync(
+        lead=_lead(assigned_agent_crm_id="42"),
+        outbound_message=_message(),
+        crm_sync_completion_repository=repository,
+        crm_client=crm_client,
+        crm_conversation_publisher=publisher,
+        now=NOW,
+        workspace_handoff_config=_snapshot_config(),
+        snapshot_status="waiting_for_response",
+    )
+
+    assert result.status == CompleteOutboundMessageCRMSyncStatus.COMPLETED
+    assert len(publisher.published_leads) == 1
+    assert publisher.published_leads[0].crm_lead_id == "123"
+    assert publisher.published_leads[0].assigned_agent_crm_id == "42"
+    assert crm_client.calls == ["update_custom_fields"]
+    assert repository.record is not None
+    assert getattr(repository.record, "crm_conversation_published_at", None) == NOW
+    assert getattr(repository.record, "completed_at", None) == NOW
+
+
+async def test_complete_outbound_message_crm_sync_falls_back_to_note_when_publish_unavailable(
+) -> None:
+    crm_client = FakeCRMClient()
+    repository = FakeOutboundMessageCRMCompletionRepository()
+    publisher = FakeCRMConversationPublisher(should_publish=False)
+
+    result = await complete_outbound_message_crm_sync(
+        lead=_lead(assigned_agent_crm_id="42"),
+        outbound_message=_message(),
+        crm_sync_completion_repository=repository,
+        crm_client=crm_client,
+        crm_conversation_publisher=publisher,
+        now=NOW,
+    )
+
+    assert result.status == CompleteOutboundMessageCRMSyncStatus.COMPLETED
+    assert len(publisher.published_leads) == 1
+    assert crm_client.calls == ["add_note"]
+    assert repository.record is not None
+    assert getattr(repository.record, "crm_conversation_published_at", None) is None
+    assert getattr(repository.record, "crm_note_written_at", None) == NOW
+
+
+async def test_complete_outbound_message_crm_sync_skips_duplicate_conversation_publish(
+) -> None:
+    repository = FakeOutboundMessageCRMCompletionRepository(
+        OutboundMessageCRMCompletionRecord(
+            outbound_message_id=MESSAGE_ID,
+            workspace_id=WORKSPACE_ID,
+            crm_note_idempotency_key="outbound-message:test:v1",
+            crm_conversation_published_at=NOW,
+            last_attempted_at=NOW,
+        )
+    )
+    crm_client = FakeCRMClient()
+    publisher = FakeCRMConversationPublisher()
+
+    result = await complete_outbound_message_crm_sync(
+        lead=_lead(assigned_agent_crm_id="42"),
+        outbound_message=_message(),
+        crm_sync_completion_repository=repository,
+        crm_client=crm_client,
+        crm_conversation_publisher=publisher,
+        now=NOW,
+    )
+
+    assert result.status == CompleteOutboundMessageCRMSyncStatus.COMPLETED
+    assert publisher.published_leads == []
+    assert crm_client.calls == []
+    assert repository.record is not None
+    assert getattr(repository.record, "completed_at", None) == NOW
+
+
+def _lead(*, assigned_agent_crm_id: str | None = None) -> CanonicalLeadRecord:
     return CanonicalLeadRecord(
         workspace_id=WORKSPACE_ID,
         lead_id=LEAD_ID,
         crm_provider=CRMProvider.FOLLOW_UP_BOSS,
-        crm_lead_id="crm-123",
+        crm_lead_id="123",
         facts_derived_at=NOW,
         source_payload_version="test:v1",
+        assigned_agent_crm_id=assigned_agent_crm_id,
         primary_phone="+15555550123",
     )
 
@@ -151,3 +231,20 @@ def _snapshot_config() -> WorkspaceHandoffConfig:
         crm_snapshot_latest_outbound_field="ai_latest_outbound",
         crm_snapshot_last_activity_at_field="ai_last_activity_at",
     )
+
+
+class FakeCRMConversationPublisher:
+    def __init__(self, *, should_publish: bool = True) -> None:
+        self.should_publish = should_publish
+        self.published_leads: list[CanonicalLeadRecord] = []
+        self.published_messages: list[OutboundMessage] = []
+
+    async def publish_outbound_message(
+        self,
+        *,
+        lead: CanonicalLeadRecord,
+        outbound_message: OutboundMessage,
+    ) -> bool:
+        self.published_leads.append(lead)
+        self.published_messages.append(outbound_message)
+        return self.should_publish

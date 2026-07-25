@@ -1,6 +1,8 @@
 import base64
+import hmac
 from dataclasses import replace
 from datetime import UTC, datetime, time
+from hashlib import sha256
 from typing import Any, cast
 from uuid import UUID
 
@@ -17,6 +19,12 @@ from app.application.ports.notifications import NotificationProvider
 from app.core.config import Settings, get_settings
 from app.domain.campaigns import CampaignStatus, CampaignVersionStatus
 from app.domain.campaigns.execution import CampaignCadenceStep, CampaignExecutionConfig
+from app.domain.campaigns.outbound_message import (
+    OutboundMessage,
+    OutboundMessageStatus,
+    build_outbound_email_message_id,
+)
+from app.domain.campaigns.pre_send import ProviderSendStatus
 from app.domain.compliance import (
     ContactPermissionStatus,
     ContactSuppressionKind,
@@ -39,6 +47,7 @@ from app.interfaces.api.dependencies.inbound import (
     InboundServiceBundle,
     get_inbound_service_bundle,
 )
+from app.interfaces.api.schemas.inbound import MailgunInboundParsePayload
 from app.main import create_app
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCampaignExecutionRepository,
@@ -76,6 +85,7 @@ from tests.application.use_cases.test_process_inbound_message_event import (
     FakeInboundMessageRepository,
     FakeLLMClient,
     FakeOutboundMessageCRMCompletionRepository,
+    _acknowledgment_json,
     _classification_json,
     _draft_json,
     _FakeLLMClientForContinuation,
@@ -184,6 +194,7 @@ def _build_webhook_client(
         or Settings(
             twilio_auth_token=None,
             sendgrid_event_webhook_public_key=None,
+            mailgun_webhook_signing_key=None,
         )
     )
     return TestClient(app)
@@ -231,6 +242,7 @@ def _build_webhook_client_with_handler(
         or Settings(
             twilio_auth_token=None,
             sendgrid_event_webhook_public_key=None,
+            mailgun_webhook_signing_key=None,
         )
     )
     return TestClient(app)
@@ -305,6 +317,14 @@ def _continue_ai_webhook_bundle(
                 summary_text="Lead asked a general follow-up question.",
             ),
             draft_text=_draft_json(body="Absolutely — I can share a few more details."),
+        ),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            WorkspaceContactPolicy(
+                workspace_id=WORKSPACE_ID,
+                sms_compliance_state=SmsComplianceState.APPROVED,
+                quiet_hours_enabled=False,
+                inbound_email_address="nurture@inbound.example.com",
+            )
         ),
         workspace_repository=FakeWorkspaceRepository(_workspace()),
         campaign_execution_repository=FakeCampaignExecutionRepository(
@@ -439,6 +459,60 @@ def test_twilio_inbound_webhook_processes_sms_reply_with_workspace_scoped_route(
     assert cast(FakeSession, webhook_bundle.session).commit_count == 1
 
 
+def test_twilio_inbound_webhook_sends_handoff_sms_acknowledgment_with_workspace_policy(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    sms_provider = FakeSMSProvider("SM-ACK-1")
+    bundle = replace(
+        webhook_bundle,
+        llm_client=FakeLLMClient(
+            _classification_json(intent="human_requested"),
+            _acknowledgment_json(body="Thanks — our team will get back to you soon."),
+        ),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            WorkspaceContactPolicy(
+                workspace_id=WORKSPACE_ID,
+                sms_compliance_state=SmsComplianceState.APPROVED,
+                quiet_hours_enabled=False,
+                inbound_email_address="nurture@inbound.example.com",
+            )
+        ),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _campaign_execution_config(channel=ContactChannel.SMS)
+        ),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            WorkspaceHandoffConfig(
+                workspace_id=WORKSPACE_ID,
+                lead_acknowledgment_sms_enabled=True,
+                lead_acknowledgment_sms_body="Thanks — our team will get back to you soon.",
+            )
+        ),
+        message_repository=FakeOutboundMessageRepository(),
+        sms_provider=sms_provider,
+    )
+
+    with _build_webhook_client(
+        bundle,
+        Settings(twilio_auth_token=None, twilio_from_phone="+15551234567"),
+    ) as client:
+        response = client.post(
+            f"/api/v1/webhooks/twilio/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "MessageSid": "SM-IN-ACK-1",
+                "From": "+1 (555) 555-0123",
+                "To": "+15551234567",
+                "Body": "Can someone call me today?",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "processed"
+    assert [message.body for message in sms_provider.messages] == [
+        "Thanks — our team will get back to you soon.",
+    ]
+
+
 def test_twilio_inbound_webhook_returns_general_reply_fields_for_sms_route(
     webhook_bundle: InboundServiceBundle,
 ) -> None:
@@ -466,9 +540,9 @@ def test_twilio_inbound_webhook_returns_general_reply_fields_for_sms_route(
     assert body["signal_queued"] is True
     assert body["review_tag_applied"] is False
     assert body["review_notification_sent"] is False
-    assert body["continue_ai_status"] is None
-    assert body["continue_ai_outbound_message_id"] is None
-    assert body["continue_ai_provider_message_id"] is None
+    assert body["continue_ai_status"] == "sent"
+    assert body["continue_ai_outbound_message_id"] is not None
+    assert body["continue_ai_provider_message_id"] == "SM-CONT-123"
     assert body["continue_ai_pause_reason"] is None
     outbox_repository = cast(
         FakeTemporalSignalOutboxRepository,
@@ -613,6 +687,73 @@ def test_sendgrid_inbound_webhook_processes_email_reply_with_workspace_scoped_ro
     assert cast(FakeSession, webhook_bundle.session).commit_count == 1
 
 
+def test_sendgrid_inbound_webhook_sends_handoff_email_acknowledgment_only_on_email_channel(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    sms_provider = FakeSMSProvider("SM-ACK-EMAIL-1")
+    email_provider = FakeEmailProvider("email-ack-1")
+    bundle = replace(
+        webhook_bundle,
+        llm_client=FakeLLMClient(
+            _classification_json(intent="human_requested"),
+            _acknowledgment_json(
+                body="Thanks for your note. An agent will reply shortly.",
+                subject="Ignored in favor of thread subject",
+            ),
+        ),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            WorkspaceContactPolicy(
+                workspace_id=WORKSPACE_ID,
+                sms_compliance_state=SmsComplianceState.APPROVED,
+                quiet_hours_enabled=False,
+                inbound_email_address="nurture@inbound.example.com",
+            )
+        ),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _campaign_execution_config(channel=ContactChannel.EMAIL)
+        ),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            WorkspaceHandoffConfig(
+                workspace_id=WORKSPACE_ID,
+                lead_acknowledgment_sms_enabled=True,
+                lead_acknowledgment_sms_body="Thanks — our team will get back to you soon.",
+                lead_acknowledgment_email_enabled=True,
+                lead_acknowledgment_email_subject="We received your request",
+                lead_acknowledgment_email_body="Thanks for reaching out. Our team will reply soon.",
+            )
+        ),
+        message_repository=FakeOutboundMessageRepository(),
+        sms_provider=sms_provider,
+        email_provider=email_provider,
+    )
+
+    with _build_webhook_client(bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/sendgrid/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "headers": (
+                    "From: Lead Person <lead@example.com>\n"
+                    "To: nurture@inbound.example.com\n"
+                    "Subject: Re: Need to chat\n"
+                    "Message-ID: <sendgrid-inbound-ack@example.com>\n"
+                ),
+                "from": "Lead Person <lead@example.com>",
+                "to": "nurture@inbound.example.com",
+                "subject": "Re: Need to chat",
+                "text": "Can someone contact me by email?",
+                "attachments": "0",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "processed"
+    assert sms_provider.messages == []
+    assert len(email_provider.messages) == 1
+    assert email_provider.messages[0].subject == "Re: Need to chat"
+    assert email_provider.messages[0].body == "Thanks for your note. An agent will reply shortly."
+
+
 def test_sendgrid_inbound_webhook_returns_general_reply_fields_for_email_route(
     webhook_bundle: InboundServiceBundle,
 ) -> None:
@@ -644,9 +785,9 @@ def test_sendgrid_inbound_webhook_returns_general_reply_fields_for_email_route(
     assert body["signal_queued"] is True
     assert body["review_tag_applied"] is False
     assert body["review_notification_sent"] is False
-    assert body["continue_ai_status"] is None
-    assert body["continue_ai_outbound_message_id"] is None
-    assert body["continue_ai_provider_message_id"] is None
+    assert body["continue_ai_status"] == "sent"
+    assert body["continue_ai_outbound_message_id"] is not None
+    assert body["continue_ai_provider_message_id"] == "email-cont-123"
     assert body["continue_ai_pause_reason"] is None
     outbox_repository = cast(
         FakeTemporalSignalOutboxRepository,
@@ -951,19 +1092,24 @@ def test_sendgrid_inbound_webhook_allows_when_no_contact_policy_is_configured(
     assert body["status"] == "processed"
 
 
-def _lead() -> CanonicalLeadRecord:
+def _lead(
+    *,
+    lead_id: UUID = LEAD_ID,
+    crm_lead_id: str = "crm-123",
+    primary_email: str = "lead@example.com",
+) -> CanonicalLeadRecord:
     return CanonicalLeadRecord(
         workspace_id=WORKSPACE_ID,
-        lead_id=LEAD_ID,
+        lead_id=lead_id,
         crm_provider=CRMProvider.FOLLOW_UP_BOSS,
-        crm_lead_id="crm-123",
+        crm_lead_id=crm_lead_id,
         facts_derived_at=NOW,
         source_payload_version="test:v1",
         lead_source="website",
         lead_stage="nurture",
         assigned_agent_crm_id="agent-99",
         has_accountable_owner=True,
-        primary_email="lead@example.com",
+        primary_email=primary_email,
         primary_phone="+15555550123",
         has_email=True,
         has_phone=True,
@@ -973,6 +1119,37 @@ def _lead() -> CanonicalLeadRecord:
         sms_permission_status=ContactPermissionStatus.CONFIRMED,
         email_permission_status=ContactPermissionStatus.CONFIRMED,
         do_not_contact=False,
+    )
+
+
+def _outbound_email_message(
+    *,
+    message_id: UUID,
+    lead_id: UUID,
+    provider_name: str,
+    provider_message_id: str,
+    idempotency_key: str,
+    subject: str = "Checking in",
+    reply_routing_token: str | None = None,
+) -> OutboundMessage:
+    return OutboundMessage(
+        message_id=message_id,
+        workspace_id=WORKSPACE_ID,
+        lead_id=lead_id,
+        campaign_id=CAMPAIGN_ID,
+        cadence_step_id="email-step-1",
+        channel=ContactChannel.EMAIL,
+        status=OutboundMessageStatus.SENT,
+        idempotency_key=idempotency_key,
+        body="Checking in",
+        created_at=NOW,
+        updated_at=NOW,
+        subject=subject,
+        sent_at=NOW,
+        provider_send_status=ProviderSendStatus.ACCEPTED,
+        provider_name=provider_name,
+        provider_message_id=provider_message_id,
+        reply_routing_token=reply_routing_token,
     )
 
 
@@ -1035,6 +1212,8 @@ def test_follow_up_boss_human_activity_webhook_returns_duplicate_on_replay(
     )
 
     assert first.status_code == 200
+    assert first.json()["status"] == "ignored"
+    assert first.json()["reasons"] == ["not_meaningful_human_activity"]
     assert second.status_code == 200
     assert second.json()["status"] == "duplicate"
     assert second.json()["reasons"] == ["duplicate_event"]
@@ -1141,7 +1320,7 @@ def test_follow_up_boss_suppression_webhook_returns_duplicate_on_replay(
     assert second.json()["reasons"] == ["duplicate_event"]
 
 
-def test_follow_up_boss_crm_webhook_processes_people_updated_and_pauses_workflow(
+def test_follow_up_boss_crm_webhook_processes_people_updated_without_pausing_workflow(
     webhook_bundle: InboundServiceBundle,
 ) -> None:
     fetch_result = {
@@ -1150,8 +1329,8 @@ def test_follow_up_boss_crm_webhook_processes_people_updated_and_pauses_workflow
                 "id": "crm-123",
                 "firstName": "Jamie",
                 "lastName": "Lead",
-                "stage": "hot",
-                "assignedTo": "agent-99",
+                "stage": "nurture",
+                "assignedTo": "agent-100",
             }
         ]
     }
@@ -1179,7 +1358,7 @@ def test_follow_up_boss_crm_webhook_processes_people_updated_and_pauses_workflow
     assert body["processed_count"] == 1
     workflow_repository = cast(FakeLeadWorkflowRepository, bundle.lead_workflow_repository)
     workflow = workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
-    assert workflow.state == WorkflowState.PAUSED
+    assert workflow.state == WorkflowState.WAITING_FOR_RESPONSE
 
 
 def test_follow_up_boss_crm_webhook_returns_duplicate_on_replay(
@@ -1191,8 +1370,8 @@ def test_follow_up_boss_crm_webhook_returns_duplicate_on_replay(
                 "id": "crm-123",
                 "firstName": "Jamie",
                 "lastName": "Lead",
-                "stage": "hot",
-                "assignedTo": "agent-99",
+                "stage": "nurture",
+                "assignedTo": "agent-100",
             }
         ]
     }
@@ -1303,3 +1482,444 @@ def test_follow_up_boss_crm_webhook_auto_enrolls_matching_configured_tag(
     temporal = cast(FakeTemporalWorkflowStarter, bundle.temporal_workflow_starter)
     assert len(temporal.calls) == 1
     assert cast(FakeSession, bundle.session).commit_count == 2
+
+
+def _mailgun_signature(signing_key: str, token: str, timestamp: str) -> str:
+    return hmac.new(
+        signing_key.encode(),
+        f"{timestamp}{token}".encode(),
+        sha256,
+    ).hexdigest()
+
+
+def test_mailgun_inbound_webhook_processes_email_reply(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    with _build_webhook_client(webhook_bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/mailgun/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "sender": "lead@example.com",
+                "from": "Lead Person <lead@example.com>",
+                "recipient": "nurture@inbound.example.com",
+                "subject": "Re: Checking in",
+                "stripped-text": "Can someone call me today?",
+                "body-plain": "Can someone call me today?",
+                "Message-Id": "<mailgun-inbound-1@example.com>",
+                "attachments": "0",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "processed"
+    assert body["handoff_required"] is True
+    assert body["intent"] == "human_requested"
+    assert cast(FakeSession, webhook_bundle.session).commit_count == 1
+
+
+def test_mailgun_inbound_payload_uses_subject_from_message_headers_when_field_missing() -> None:
+    payload = MailgunInboundParsePayload.model_validate(
+        {
+            "sender": "lead@example.com",
+            "from": "Lead Person <lead@example.com>",
+            "recipient": "nurture@inbound.example.com",
+            "stripped-text": "Can someone call me today?",
+            "Message-Id": "<mailgun-inbound-headers-only@example.com>",
+            "message-headers": (
+                '[["Subject", "Re: Checking in"], '
+                '["In-Reply-To", "<thread-root@example.com>"], '
+                '["References", "<thread-root@example.com>"]]'
+            ),
+        }
+    )
+
+    assert payload.subject == "Re: Checking in"
+    assert payload.in_reply_to_message_ids == ("thread-root@example.com",)
+    assert payload.reference_message_ids == ("thread-root@example.com",)
+
+
+def test_mailgun_inbound_webhook_matches_duplicate_email_lead_from_thread_reference(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    older_lead_id = UUID("40000000-0000-0000-0000-000000000099")
+    older_lead = _lead(
+        lead_id=older_lead_id,
+        crm_lead_id="crm-older",
+        primary_email="lead@example.com",
+    )
+    lead_repository = cast(FakeLeadRepository, webhook_bundle.lead_repository)
+    lead_repository._store(older_lead)
+
+    message_repository = cast(FakeOutboundMessageRepository, webhook_bundle.message_repository)
+    message_repository._store(
+        _outbound_email_message(
+            message_id=UUID("60000000-0000-0000-0000-000000000001"),
+            lead_id=older_lead_id,
+            provider_name="mailgun",
+            provider_message_id="thread-older@example.com",
+            idempotency_key="email:older-thread",
+        )
+    )
+
+    with _build_webhook_client(webhook_bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/mailgun/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "sender": "lead@example.com",
+                "from": "Lead Person <lead@example.com>",
+                "recipient": "nurture@inbound.example.com",
+                "subject": "Re: Checking in",
+                "stripped-text": "Following up on the older thread.",
+                "body-plain": "Following up on the older thread.",
+                "Message-Id": "<mailgun-inbound-threaded@example.com>",
+                "message-headers": (
+                    '[["In-Reply-To", "<'
+                    + build_outbound_email_message_id(
+                        UUID("60000000-0000-0000-0000-000000000001")
+                    )
+                    + '>"], ["References", "<'
+                    + build_outbound_email_message_id(
+                        UUID("60000000-0000-0000-0000-000000000001")
+                    )
+                    + '>"]]'
+                ),
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "processed"
+    assert body["lead_id"] == str(older_lead_id)
+
+
+def test_mailgun_inbound_webhook_matches_duplicate_email_lead_from_reply_token(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    older_lead_id = UUID("40000000-0000-0000-0000-000000000102")
+    older_lead = _lead(
+        lead_id=older_lead_id,
+        crm_lead_id="crm-older-token",
+        primary_email="lead@example.com",
+    )
+    lead_repository = cast(FakeLeadRepository, webhook_bundle.lead_repository)
+    lead_repository._store(older_lead)
+
+    message_repository = cast(FakeOutboundMessageRepository, webhook_bundle.message_repository)
+    message_repository._store(
+        _outbound_email_message(
+            message_id=UUID("60000000-0000-0000-0000-000000000003"),
+            lead_id=older_lead_id,
+            provider_name="mailgun",
+            provider_message_id="thread-token-older@example.com",
+            idempotency_key="email:older-token",
+            reply_routing_token="replytoken123",
+        )
+    )
+
+    with _build_webhook_client(webhook_bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/mailgun/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "sender": "lead@example.com",
+                "from": "Lead Person <lead@example.com>",
+                "recipient": "nurture+replytoken123@inbound.example.com",
+                "subject": "Re: Checking in",
+                "stripped-text": "Following up using reply routing.",
+                "body-plain": "Following up using reply routing.",
+                "Message-Id": "<mailgun-inbound-reply-token@example.com>",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "processed"
+    assert body["lead_id"] == str(older_lead_id)
+
+
+def test_mailgun_inbound_webhook_rejects_unknown_reply_token_before_sender_fallback(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    duplicate_lead = _lead(
+        lead_id=UUID("40000000-0000-0000-0000-000000000103"),
+        crm_lead_id="crm-duplicate-token",
+        primary_email="lead@example.com",
+    )
+    lead_repository = cast(FakeLeadRepository, webhook_bundle.lead_repository)
+    lead_repository._store(duplicate_lead)
+
+    with _build_webhook_client(webhook_bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/mailgun/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "sender": "lead@example.com",
+                "from": "Lead Person <lead@example.com>",
+                "recipient": "nurture+missingtoken@inbound.example.com",
+                "subject": "Re: Checking in",
+                "stripped-text": "This token should not resolve.",
+                "body-plain": "This token should not resolve.",
+                "Message-Id": "<mailgun-missing-token@example.com>",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "rejected"
+    assert body["reasons"] == ["reply_token_not_found"]
+
+
+def test_mailgun_inbound_webhook_rejects_when_to_address_does_not_match_configured_inbound_email(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    with _build_webhook_client(webhook_bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/mailgun/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "sender": "lead@example.com",
+                "from": "Lead Person <lead@example.com>",
+                "recipient": "wrong@inbound.example.com",
+                "subject": "Re: Checking in",
+                "stripped-text": "Can someone call me today?",
+                "Message-Id": "<mailgun-mismatch@example.com>",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "rejected"
+    assert body["reasons"] == ["inbound_email_address_mismatch"]
+
+
+def test_mailgun_inbound_webhook_rejects_when_lead_is_not_found(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    workflow = LeadWorkflow(
+        workflow_id=WORKFLOW_ID,
+        temporal_workflow_id="workflow-123",
+        workspace_id=WORKSPACE_ID,
+        campaign_enrollment_id=ENROLLMENT_ID,
+        campaign_id=CAMPAIGN_ID,
+        lead_id=LEAD_ID,
+        state=WorkflowState.WAITING_FOR_RESPONSE,
+        last_transition_at=NOW,
+        state_version=3,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    lead_workflow_repository = FakeLeadWorkflowRepository()
+    lead_workflow_repository.workflows[workflow.workflow_id] = workflow
+    lead_workflow_repository.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow
+    bundle = replace(
+        webhook_bundle,
+        lead_repository=FakeLeadRepository(None),
+        lead_workflow_repository=lead_workflow_repository,
+    )
+
+    with _build_webhook_client(bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/mailgun/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "sender": "missing@example.com",
+                "from": "Missing Person <missing@example.com>",
+                "recipient": "nurture@inbound.example.com",
+                "stripped-text": "Hello?",
+                "Message-Id": "<mailgun-missing@example.com>",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
+    assert response.json()["reasons"] == ["lead_not_found"]
+
+
+def test_mailgun_inbound_webhook_rejects_ambiguous_duplicate_sender(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    duplicate_lead = _lead(
+        lead_id=UUID("40000000-0000-0000-0000-000000000100"),
+        crm_lead_id="crm-duplicate",
+        primary_email="lead@example.com",
+    )
+    lead_repository = cast(FakeLeadRepository, webhook_bundle.lead_repository)
+    lead_repository._store(duplicate_lead)
+
+    with _build_webhook_client(webhook_bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/mailgun/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "sender": "lead@example.com",
+                "from": "Lead Person <lead@example.com>",
+                "recipient": "nurture@inbound.example.com",
+                "subject": "Re: Checking in",
+                "stripped-text": "No thread metadata here.",
+                "body-plain": "No thread metadata here.",
+                "Message-Id": "<mailgun-ambiguous@example.com>",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "rejected"
+    assert body["reasons"] == ["ambiguous_lead_match"]
+
+
+def test_mailgun_inbound_signature_is_required_when_signing_key_is_configured(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    signing_key = "mailgun-signing-key"
+    settings = Settings(mailgun_webhook_signing_key=SecretStr(signing_key))
+    token = "token-123"
+    timestamp = "1234567890"
+    signature = _mailgun_signature(signing_key, token, timestamp)
+    form_data = {
+        "sender": "lead@example.com",
+        "from": "Lead Person <lead@example.com>",
+        "recipient": "nurture@inbound.example.com",
+        "subject": "Re: Checking in",
+        "stripped-text": "Can someone call me today?",
+        "Message-Id": "<mailgun-signed@example.com>",
+        "token": token,
+        "timestamp": timestamp,
+        "signature": signature,
+    }
+
+    with _build_webhook_client(webhook_bundle, settings) as client:
+        good = client.post(
+            f"/api/v1/webhooks/mailgun/inbound-messages/{WORKSPACE_ID}",
+            data=form_data,
+        )
+        bad = client.post(
+            f"/api/v1/webhooks/mailgun/inbound-messages/{WORKSPACE_ID}",
+            data={**form_data, "signature": "bad-signature"},
+        )
+
+    assert good.status_code == 200
+    assert bad.status_code == 401
+
+
+def test_mailgun_inbound_webhook_returns_duplicate_on_replay(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    payload = {
+        "sender": "lead@example.com",
+        "from": "Lead Person <lead@example.com>",
+        "recipient": "nurture@inbound.example.com",
+        "subject": "Re: Checking in",
+        "stripped-text": "Can someone call me today?",
+        "Message-Id": "<mailgun-inbound-dup@example.com>",
+    }
+
+    with _build_webhook_client(webhook_bundle) as client:
+        first = client.post(
+            f"/api/v1/webhooks/mailgun/inbound-messages/{WORKSPACE_ID}",
+            data=payload,
+        )
+        second = client.post(
+            f"/api/v1/webhooks/mailgun/inbound-messages/{WORKSPACE_ID}",
+            data=payload,
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["reasons"] == ["duplicate_event"]
+
+
+def test_sendgrid_inbound_webhook_matches_duplicate_email_lead_from_thread_reference(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    older_lead_id = UUID("40000000-0000-0000-0000-000000000101")
+    older_lead = _lead(
+        lead_id=older_lead_id,
+        crm_lead_id="crm-sendgrid-older",
+        primary_email="lead@example.com",
+    )
+    lead_repository = cast(FakeLeadRepository, webhook_bundle.lead_repository)
+    lead_repository._store(older_lead)
+
+    message_repository = cast(FakeOutboundMessageRepository, webhook_bundle.message_repository)
+    message_repository._store(
+        _outbound_email_message(
+            message_id=UUID("60000000-0000-0000-0000-000000000002"),
+            lead_id=older_lead_id,
+            provider_name="sendgrid",
+            provider_message_id="sendgrid-thread-older@example.com",
+            idempotency_key="email:sendgrid-older-thread",
+        )
+    )
+    thread_message_id = build_outbound_email_message_id(
+        UUID("60000000-0000-0000-0000-000000000002")
+    )
+
+    with _build_webhook_client(webhook_bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/sendgrid/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "headers": (
+                    "From: Lead Person <lead@example.com>\n"
+                    "To: nurture@inbound.example.com\n"
+                    "Subject: Re: Checking in\n"
+                    "Message-ID: <sendgrid-threaded-inbound@example.com>\n"
+                    f"In-Reply-To: <{thread_message_id}>\n"
+                    f"References: <{thread_message_id}>\n"
+                ),
+                "from": "Lead Person <lead@example.com>",
+                "to": "nurture@inbound.example.com",
+                "subject": "Re: Checking in",
+                "text": "Following up on the older SendGrid thread.",
+                "attachments": "0",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "processed"
+    assert body["lead_id"] == str(older_lead_id)
+
+
+def test_sendgrid_inbound_webhook_matches_duplicate_email_lead_from_reply_token(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    older_lead_id = UUID("40000000-0000-0000-0000-000000000104")
+    older_lead = _lead(
+        lead_id=older_lead_id,
+        crm_lead_id="crm-sendgrid-token",
+        primary_email="lead@example.com",
+    )
+    lead_repository = cast(FakeLeadRepository, webhook_bundle.lead_repository)
+    lead_repository._store(older_lead)
+
+    message_repository = cast(FakeOutboundMessageRepository, webhook_bundle.message_repository)
+    message_repository._store(
+        _outbound_email_message(
+            message_id=UUID("60000000-0000-0000-0000-000000000004"),
+            lead_id=older_lead_id,
+            provider_name="sendgrid",
+            provider_message_id="sendgrid-token-older@example.com",
+            idempotency_key="email:sendgrid-token",
+            reply_routing_token="sendgridtoken123",
+        )
+    )
+
+    with _build_webhook_client(webhook_bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/sendgrid/inbound-messages/{WORKSPACE_ID}",
+            data={
+                "headers": (
+                    "From: Lead Person <lead@example.com>\n"
+                    "To: nurture+sendgridtoken123@inbound.example.com\n"
+                    "Subject: Re: Checking in\n"
+                    "Message-ID: <sendgrid-reply-token@example.com>\n"
+                ),
+                "from": "Lead Person <lead@example.com>",
+                "to": "nurture+sendgridtoken123@inbound.example.com",
+                "subject": "Re: Checking in",
+                "text": "Following up using SendGrid reply routing.",
+                "attachments": "0",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "processed"
+    assert body["lead_id"] == str(older_lead_id)

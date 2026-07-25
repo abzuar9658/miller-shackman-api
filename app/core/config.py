@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     crm_provider: str = "follow_up_boss"
     fub_api_key: SecretStr | None = None
     fub_base_url: str = "https://api.followupboss.com/v1"
+    fub_inbox_sync_enabled: bool = False
+    fub_inbox_app_id: str = ""
+    fub_inbox_sender_name: str = "AI Assistant"
 
     llm_provider: str = "openrouter"
     openrouter_api_key: SecretStr | None = None
@@ -55,11 +58,15 @@ class Settings(BaseSettings):
     twilio_auth_token: SecretStr | None = None
     twilio_from_phone: str = ""
 
-    # Valid values: "sendgrid", "mailpit" (dev SMTP inbox), or "sink".
+    # Valid values: "sendgrid", "mailgun", "mailpit" (dev SMTP inbox), or "sink".
     email_provider: str = "sendgrid"
+    email_from_email: str = ""
     sendgrid_api_key: SecretStr | None = None
     sendgrid_event_webhook_public_key: SecretStr | None = None
     sendgrid_from_email: str = ""
+    mailgun_api_key: SecretStr | None = None
+    mailgun_domain: str = ""
+    mailgun_webhook_signing_key: SecretStr | None = None
     mailpit_smtp_host: str = "localhost"
     mailpit_smtp_port: int = 51025
 

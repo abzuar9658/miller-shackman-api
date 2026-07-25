@@ -5,6 +5,7 @@ import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, cast
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -17,6 +18,8 @@ from app.application.ports.crm import (
     CRMAgentDirectoryEntry,
 )
 from app.application.ports.crm_sync import CanonicalLeadSnapshotPage
+from app.domain.campaigns.outbound_message import OutboundMessage
+from app.domain.compliance.contactability import ContactChannel
 from app.domain.crm_sync import CRMSyncLeadSort
 from app.domain.leads import CanonicalLeadRecord
 from app.infrastructure.crm.follow_up_boss.lead_mapper import (
@@ -36,10 +39,21 @@ class FollowUpBossCRMClient:
     _activity_retry_base_delay_seconds: float = 1.0
     _activity_retry_max_delay_seconds: float = 8.0
 
-    def __init__(self, api_key: str, base_url: str = "https://api.followupboss.com/v1") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://api.followupboss.com/v1",
+        *,
+        inbox_sync_enabled: bool = False,
+        inbox_app_id: str | None = None,
+        inbox_sender_name: str = "AI Assistant",
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._auth = httpx.BasicAuth(api_key, "")
         self._client = httpx.AsyncClient(auth=self._auth, base_url=self._base_url)
+        self._inbox_sync_enabled = inbox_sync_enabled
+        self._inbox_app_id = inbox_app_id.strip() if inbox_app_id else None
+        self._inbox_sender_name = inbox_sender_name.strip() or "AI Assistant"
 
     async def validate_connection(self, workspace_id: UUID) -> bool:
         response = await self._client.get("/me")
@@ -242,6 +256,14 @@ class FollowUpBossCRMClient:
         response.raise_for_status()
         return self._map_agent(response.json())
 
+    async def get_lead_url(
+        self,
+        workspace_id: UUID,
+        crm_lead_id: str,
+    ) -> str | None:
+        _ = workspace_id
+        return f"https://app.followupboss.com/2/people/{quote(crm_lead_id, safe='')}"
+
     async def add_note(
         self,
         workspace_id: UUID,
@@ -255,8 +277,49 @@ class FollowUpBossCRMClient:
         response = await self._client.post("/notes", json=payload)
         response.raise_for_status()
 
+    async def publish_outbound_message(
+        self,
+        *,
+        lead: CanonicalLeadRecord,
+        outbound_message: OutboundMessage,
+    ) -> bool:
+        if not self._inbox_sync_enabled or not self._inbox_app_id:
+            return False
+        if outbound_message.channel != ContactChannel.SMS:
+            return False
+
+        person_id = _parse_fub_int_id(lead.crm_lead_id)
+        owner_user_id = _parse_fub_int_id(lead.assigned_agent_crm_id)
+        if person_id is None or owner_user_id is None:
+            return False
+
+        payload: dict[str, object] = {
+            "externalConversationId": _inbox_external_conversation_id(lead, outbound_message),
+            "externalMessageId": str(outbound_message.message_id),
+            "message": outbound_message.body,
+            "isIncoming": False,
+            "sender": {"name": self._inbox_sender_name},
+            "isAutomation": True,
+            "person": {"id": person_id},
+            "owner": {"userId": owner_user_id},
+            "sentAt": (outbound_message.sent_at or outbound_message.updated_at).isoformat(),
+        }
+        if outbound_message.subject:
+            payload["subject"] = outbound_message.subject
+
+        response = await self._client.post(
+            f"/inboxApps/{quote(self._inbox_app_id, safe='')}/message",
+            json=payload,
+        )
+        response.raise_for_status()
+        return True
+
     async def add_tag(self, workspace_id: UUID, crm_lead_id: str, tag: str) -> None:
-        response = await self._client.put(f"/people/{crm_lead_id}/tags", json={"tags": [tag]})
+        response = await self._client.put(
+            f"/people/{crm_lead_id}",
+            params={"mergeTags": "true"},
+            json={"tags": [tag]},
+        )
         response.raise_for_status()
 
     async def remove_tag(self, workspace_id: UUID, crm_lead_id: str, tag: str) -> None:
@@ -551,3 +614,19 @@ class FollowUpBossCRMClient:
             return bool(payload["isIncoming"])
         direction = self._first_non_empty(payload.get("direction"))
         return direction == "inbound"
+
+
+def _parse_fub_int_id(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _inbox_external_conversation_id(
+    lead: CanonicalLeadRecord,
+    outbound_message: OutboundMessage,
+) -> str:
+    return f"lead:{lead.crm_lead_id}:channel:{outbound_message.channel.value}"

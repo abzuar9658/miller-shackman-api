@@ -16,6 +16,10 @@ class EmailMessage(BaseModel):
     html_body: str | None = None
     idempotency_key: str
     from_email: str | None = None
+    message_id: str | None = None
+    reply_to: str | None = None
+    in_reply_to_message_id: str | None = None
+    reference_message_ids: tuple[str, ...] = ()
 
 
 class SMSProvider(Protocol):

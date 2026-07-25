@@ -83,6 +83,40 @@ class PostgresOutboundMessageRepository:
         model = result.scalar_one_or_none()
         return _model_to_message(model) if model else None
 
+    async def get_by_provider_message_id_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        provider_name: str,
+        provider_message_id: str,
+    ) -> OutboundMessage | None:
+        result = await self._session.execute(
+            select(OutboundMessageModel)
+            .where(OutboundMessageModel.workspace_id == workspace_id)
+            .where(OutboundMessageModel.provider_name == provider_name)
+            .where(OutboundMessageModel.provider_message_id == provider_message_id)
+            .order_by(
+                OutboundMessageModel.sent_at.desc().nulls_last(),
+                OutboundMessageModel.created_at.desc(),
+            )
+            .limit(1),
+        )
+        model = result.scalar_one_or_none()
+        return _model_to_message(model) if model else None
+
+    async def get_by_reply_routing_token(
+        self,
+        workspace_id: WorkspaceId,
+        reply_routing_token: str,
+    ) -> OutboundMessage | None:
+        result = await self._session.execute(
+            select(OutboundMessageModel)
+            .where(OutboundMessageModel.workspace_id == workspace_id)
+            .where(OutboundMessageModel.reply_routing_token == reply_routing_token)
+            .limit(1),
+        )
+        model = result.scalar_one_or_none()
+        return _model_to_message(model) if model else None
+
     async def get_by_provider_message_id_for_update(
         self,
         provider_name: str,
@@ -173,6 +207,7 @@ def _message_to_values(message: OutboundMessage) -> dict[str, object]:
         "provider_send_status": message.provider_send_status.value,
         "provider_name": message.provider_name,
         "provider_message_id": message.provider_message_id,
+        "reply_routing_token": message.reply_routing_token,
         "provider_delivery_status": (
             message.provider_delivery_status.value
             if message.provider_delivery_status is not None
@@ -213,6 +248,7 @@ def _model_to_message(model: OutboundMessageModel) -> OutboundMessage:
         provider_send_status=ProviderSendStatus(model.provider_send_status),
         provider_name=model.provider_name,
         provider_message_id=model.provider_message_id,
+        reply_routing_token=model.reply_routing_token,
         provider_delivery_status=(
             ProviderDeliveryStatus(model.provider_delivery_status)
             if model.provider_delivery_status is not None
@@ -241,6 +277,7 @@ def _outbound_message_crm_completion_to_values(
         "workspace_id": record.workspace_id,
         "crm_note_idempotency_key": record.crm_note_idempotency_key,
         "crm_note_written_at": record.crm_note_written_at,
+        "crm_conversation_published_at": record.crm_conversation_published_at,
         "crm_snapshot_updated_at": record.crm_snapshot_updated_at,
         "completed_at": record.completed_at,
         "last_attempted_at": record.last_attempted_at,
@@ -256,6 +293,7 @@ def _model_to_outbound_message_crm_completion(
         workspace_id=model.workspace_id,
         crm_note_idempotency_key=model.crm_note_idempotency_key,
         crm_note_written_at=model.crm_note_written_at,
+        crm_conversation_published_at=model.crm_conversation_published_at,
         crm_snapshot_updated_at=model.crm_snapshot_updated_at,
         completed_at=model.completed_at,
         last_attempted_at=model.last_attempted_at,

@@ -109,7 +109,7 @@ async def test_complete_inbound_message_crm_sync_skips_duplicate_note_after_part
 
 
 async def test_complete_inbound_message_crm_sync_applies_review_tag_without_note_retry() -> None:
-    crm_client = FakeCRMClient()
+    crm_client = FakeCRMClient(lead_tags=("human_handoff_required",))
     repository = FakeInboundMessageCRMCompletionRepository()
 
     result = await complete_inbound_message_crm_sync(
@@ -125,10 +125,15 @@ async def test_complete_inbound_message_crm_sync_applies_review_tag_without_note
         crm_client=crm_client,
         now=NOW,
         write_inbound_note=False,
+        workspace_handoff_config=WorkspaceHandoffConfig(
+            workspace_id=WORKSPACE_ID,
+            crm_handoff_tag="human_handoff_required",
+        ),
     )
 
     assert result.status == CompleteInboundMessageCRMSyncStatus.COMPLETED
-    assert crm_client.calls == ["get_lead", "get_recent_activity", "add_tag"]
+    assert crm_client.calls == ["get_lead", "get_recent_activity", "remove_tag", "add_tag"]
+    assert crm_client.removed_tags == ["human_handoff_required"]
     assert repository.record is not None
     assert repository.record.crm_review_tag_applied_at == NOW
 

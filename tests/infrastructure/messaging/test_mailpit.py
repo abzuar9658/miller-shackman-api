@@ -57,3 +57,49 @@ async def test_send_delivers_message_via_smtp(monkeypatch: pytest.MonkeyPatch) -
     assert sent_message["Message-ID"] == f"<{result}>"
     assert sent_message.get_body(preferencelist=("plain",)) is not None
     assert sent_message.get_body(preferencelist=("html",)) is not None
+
+
+async def test_send_uses_provided_message_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(smtplib, "SMTP", _FakeSMTP)
+    provider = MailpitEmailProvider(
+        smtp_host="localhost",
+        smtp_port=51025,
+        from_email="noreply@example.test",
+    )
+
+    await provider.send(
+        EmailMessage(
+            to_email="lead@example.com",
+            subject="Hello from Mailpit",
+            body="Plain text body",
+            idempotency_key="mailpit-2",
+            message_id="outbound-message.123@example.test",
+        )
+    )
+
+    assert _FakeSMTP.sent_messages
+    sent_message = _FakeSMTP.sent_messages[0]
+    assert sent_message["Message-ID"] == "<outbound-message.123@example.test>"
+
+
+async def test_send_sets_reply_to(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(smtplib, "SMTP", _FakeSMTP)
+    provider = MailpitEmailProvider(
+        smtp_host="localhost",
+        smtp_port=51025,
+        from_email="noreply@example.test",
+    )
+
+    await provider.send(
+        EmailMessage(
+            to_email="lead@example.com",
+            subject="Hello from Mailpit",
+            body="Plain text body",
+            idempotency_key="mailpit-3",
+            reply_to="reply+token@example.test",
+        )
+    )
+
+    assert _FakeSMTP.sent_messages
+    sent_message = _FakeSMTP.sent_messages[0]
+    assert sent_message["Reply-To"] == "reply+token@example.test"

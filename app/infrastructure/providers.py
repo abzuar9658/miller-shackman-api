@@ -29,7 +29,13 @@ def build_crm_client(settings: Settings | None = None) -> CRMClient:
         api_key = _secret(settings.fub_api_key)
         if not api_key:
             raise ValueError("FUB_API_KEY is required")
-        return FollowUpBossCRMClient(api_key=api_key, base_url=settings.fub_base_url)
+        return FollowUpBossCRMClient(
+            api_key=api_key,
+            base_url=settings.fub_base_url,
+            inbox_sync_enabled=settings.fub_inbox_sync_enabled,
+            inbox_app_id=settings.fub_inbox_app_id or None,
+            inbox_sender_name=settings.fub_inbox_sender_name,
+        )
     raise ValueError(f"Unsupported CRM provider: {settings.crm_provider}")
 
 
@@ -76,6 +82,8 @@ def build_sms_provider(settings: Settings | None = None) -> SMSProvider:
 
 def build_email_provider(settings: Settings | None = None) -> EmailProvider:
     settings = settings or get_settings()
+    from_email = settings.email_from_email or settings.sendgrid_from_email
+
     if settings.email_provider == "sendgrid":
         from app.infrastructure.messaging.sendgrid import SendGridEmailProvider
 
@@ -84,17 +92,36 @@ def build_email_provider(settings: Settings | None = None) -> EmailProvider:
             raise ValueError("SENDGRID_API_KEY is required")
         return SendGridEmailProvider(
             api_key=api_key,
-            from_email=settings.sendgrid_from_email,
+            from_email=settings.sendgrid_from_email or settings.email_from_email,
+        )
+    if settings.email_provider == "mailgun":
+        from app.infrastructure.messaging.mailgun import MailgunEmailProvider
+
+        api_key = _secret(settings.mailgun_api_key)
+        if not api_key:
+            raise ValueError("MAILGUN_API_KEY is required")
+        if not settings.mailgun_domain:
+            raise ValueError("MAILGUN_DOMAIN is required")
+        if not from_email:
+            raise ValueError(
+                "EMAIL_FROM_EMAIL or SENDGRID_FROM_EMAIL is required for EMAIL_PROVIDER=mailgun"
+            )
+        return MailgunEmailProvider(
+            api_key=api_key,
+            domain=settings.mailgun_domain,
+            from_email=from_email,
         )
     if settings.email_provider == "mailpit":
         from app.infrastructure.messaging.mailpit import MailpitEmailProvider
 
-        if not settings.sendgrid_from_email:
-            raise ValueError("SENDGRID_FROM_EMAIL is required for EMAIL_PROVIDER=mailpit")
+        if not from_email:
+            raise ValueError(
+                "EMAIL_FROM_EMAIL or SENDGRID_FROM_EMAIL is required for EMAIL_PROVIDER=mailpit"
+            )
         return MailpitEmailProvider(
             smtp_host=settings.mailpit_smtp_host,
             smtp_port=settings.mailpit_smtp_port,
-            from_email=settings.sendgrid_from_email,
+            from_email=from_email,
         )
     if settings.email_provider == "sink":
         from app.infrastructure.messaging.sink import SinkEmailProvider

@@ -4,12 +4,14 @@ from enum import StrEnum
 from uuid import UUID
 
 from app.application.ports.crm import CRMClient
+from app.application.ports.crm_conversation import CRMConversationPublisher
 from app.application.ports.repositories import OutboundMessageCRMCompletionRepository
 from app.application.services.crm_snapshot import build_crm_snapshot_custom_fields
 from app.domain.campaigns.outbound_message import (
     OutboundMessage,
     OutboundMessageCRMCompletionRecord,
 )
+from app.domain.compliance.contactability import ContactChannel
 from app.domain.conversations import WorkspaceHandoffConfig
 from app.domain.leads import CanonicalLeadRecord
 
@@ -34,6 +36,7 @@ async def complete_outbound_message_crm_sync(
     outbound_message: OutboundMessage,
     crm_sync_completion_repository: OutboundMessageCRMCompletionRepository,
     crm_client: CRMClient,
+    crm_conversation_publisher: CRMConversationPublisher | None = None,
     now: datetime,
     summary_text: str | None = None,
     latest_inbound_text: str | None = None,
@@ -59,9 +62,31 @@ async def complete_outbound_message_crm_sync(
     record = await crm_sync_completion_repository.save(
         replace(record, last_attempted_at=now, failure_reason=None),
     )
+    conversation_publisher = crm_conversation_publisher or _conversation_publisher_from_crm_client(
+        crm_client
+    )
 
     try:
-        if record.crm_note_written_at is None:
+        published_to_conversation = False
+        if (
+            _should_publish_to_crm_conversation(outbound_message, conversation_publisher)
+            and record.crm_conversation_published_at is None
+        ):
+            assert conversation_publisher is not None
+            published_to_conversation = await conversation_publisher.publish_outbound_message(
+                lead=lead,
+                outbound_message=outbound_message,
+            )
+        if published_to_conversation:
+            record = await crm_sync_completion_repository.save(
+                replace(
+                    record,
+                    crm_conversation_published_at=now,
+                    last_attempted_at=now,
+                    failure_reason=None,
+                )
+            )
+        if record.crm_note_written_at is None and record.crm_conversation_published_at is None:
             subject, content = _crm_outbound_note(
                 lead=lead,
                 outbound_message=outbound_message,
@@ -126,6 +151,19 @@ async def complete_outbound_message_crm_sync(
 
 def _crm_note_idempotency_key(outbound_message_id: UUID) -> str:
     return f"outbound-message:{outbound_message_id}:crm-note:v1"
+
+
+def _conversation_publisher_from_crm_client(
+    crm_client: CRMClient,
+) -> CRMConversationPublisher | None:
+    return crm_client if isinstance(crm_client, CRMConversationPublisher) else None
+
+
+def _should_publish_to_crm_conversation(
+    outbound_message: OutboundMessage,
+    conversation_publisher: CRMConversationPublisher | None,
+) -> bool:
+    return conversation_publisher is not None and outbound_message.channel == ContactChannel.SMS
 
 
 def _crm_outbound_note(

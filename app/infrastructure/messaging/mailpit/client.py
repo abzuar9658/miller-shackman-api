@@ -22,7 +22,11 @@ class MailpitEmailProvider:
         smtp_message["From"] = message.from_email or self._from_email
         smtp_message["To"] = message.to_email
         smtp_message["Subject"] = message.subject
-        smtp_message["Message-ID"] = make_msgid()
+        smtp_message["Message-ID"] = (
+            f"<{message.message_id}>" if message.message_id is not None else make_msgid()
+        )
+        if message.reply_to is not None:
+            smtp_message["Reply-To"] = message.reply_to
         smtp_message.set_content(message.body)
         if message.html_body is not None:
             smtp_message.add_alternative(message.html_body, subtype="html")

@@ -27,8 +27,46 @@ class ProviderDeliveryStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+_OUTBOUND_EMAIL_MESSAGE_ID_PREFIX = "outbound-message"
+_OUTBOUND_EMAIL_MESSAGE_ID_DOMAIN = "miller-schackman.local"
+
+
 def _empty_string_tuple() -> tuple[str, ...]:
     return ()
+
+
+def build_outbound_email_message_id(message_id: UUID) -> str:
+    return (
+        f"{_OUTBOUND_EMAIL_MESSAGE_ID_PREFIX}.{message_id}"
+        f"@{_OUTBOUND_EMAIL_MESSAGE_ID_DOMAIN}"
+    )
+
+
+def parse_outbound_email_message_id(value: str) -> UUID | None:
+    normalized = value.strip().strip("<>")
+    prefix = f"{_OUTBOUND_EMAIL_MESSAGE_ID_PREFIX}."
+    suffix = f"@{_OUTBOUND_EMAIL_MESSAGE_ID_DOMAIN}"
+    if not normalized.startswith(prefix) or not normalized.endswith(suffix):
+        return None
+    raw_uuid = normalized[len(prefix) : -len(suffix)]
+    try:
+        return UUID(raw_uuid)
+    except ValueError:
+        return None
+
+
+def build_outbound_reply_to_address(
+    inbound_email_address: str,
+    reply_routing_token: str,
+) -> str | None:
+    normalized_inbound = inbound_email_address.strip().lower()
+    local_part, separator, domain = normalized_inbound.partition("@")
+    if not separator or not local_part or not domain:
+        return None
+    normalized_token = reply_routing_token.strip().lower()
+    if not normalized_token:
+        return None
+    return f"{local_part}+{normalized_token}@{domain}"
 
 
 @dataclass(frozen=True)
@@ -53,6 +91,7 @@ class OutboundMessage:
     provider_send_status: ProviderSendStatus = ProviderSendStatus.NOT_ATTEMPTED
     provider_name: str | None = None
     provider_message_id: str | None = None
+    reply_routing_token: str | None = None
     provider_delivery_status: ProviderDeliveryStatus | None = None
     provider_status_updated_at: datetime | None = None
     delivered_at: datetime | None = None
@@ -87,6 +126,7 @@ class OutboundMessageCRMCompletionRecord:
     workspace_id: WorkspaceId
     crm_note_idempotency_key: str
     crm_note_written_at: datetime | None = None
+    crm_conversation_published_at: datetime | None = None
     crm_snapshot_updated_at: datetime | None = None
     completed_at: datetime | None = None
     last_attempted_at: datetime | None = None

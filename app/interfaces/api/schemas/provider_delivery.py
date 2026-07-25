@@ -1,3 +1,4 @@
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -34,6 +35,39 @@ class SendGridEventWebhookPayload(BaseModel):
     reason: str | None = None
     response: str | None = None
     status: str | None = None
+
+
+class MailgunEventWebhookPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    event: str
+    timestamp: float
+    id: str | None = None
+    recipient: str | None = None
+    severity: str | None = None
+    message: dict[str, Any] = Field(default_factory=dict)
+    delivery_status: dict[str, Any] | None = Field(default=None, alias="delivery-status")
+    signature: dict[str, Any] | None = None
+
+    @property
+    def provider_message_id(self) -> str | None:
+        headers = self.message.get("headers") if isinstance(self.message, dict) else {}
+        if not isinstance(headers, dict):
+            return None
+        raw_message_id = headers.get("message-id")
+        if raw_message_id is None:
+            return None
+        return str(raw_message_id).strip().lstrip("<").rstrip(">")
+
+    @property
+    def provider_event_id(self) -> str | None:
+        return self.id
+
+    @property
+    def failure_reason(self) -> str | None:
+        if not isinstance(self.delivery_status, dict):
+            return None
+        return self.delivery_status.get("message") or self.delivery_status.get("description")
 
 
 class ProviderDeliveryWebhookResult(BaseModel):

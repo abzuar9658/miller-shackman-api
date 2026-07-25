@@ -79,6 +79,13 @@ class CRMClient(Protocol):
     ) -> CRMAgent | None:
         raise NotImplementedError
 
+    async def get_lead_url(
+        self,
+        workspace_id: UUID,
+        crm_lead_id: str,
+    ) -> str | None:
+        raise NotImplementedError
+
     async def add_note(
         self,
         workspace_id: UUID,

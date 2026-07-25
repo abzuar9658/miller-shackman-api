@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import pytest
 
 from app.application.ports.messaging import EmailMessage
@@ -26,3 +28,88 @@ async def test_send_returns_message_id(
     )
     result = await provider.send(message)
     assert result == "msg-123"
+
+
+async def test_send_sets_custom_message_id_header(
+    monkeypatch: pytest.MonkeyPatch, provider: SendGridEmailProvider
+) -> None:
+    captured_mail: object | None = None
+
+    def _send(mail: object) -> _FakeResponse:
+        nonlocal captured_mail
+        captured_mail = mail
+        return _FakeResponse()
+
+    monkeypatch.setattr(provider._client, "send", _send)
+    await provider.send(
+        EmailMessage(
+            to_email="lead@example.com",
+            subject="Hello",
+            body="Plain text",
+            idempotency_key="key-2",
+            message_id="outbound-message.123@example.test",
+        )
+    )
+
+    assert captured_mail is not None
+    serialized = cast(dict[str, Any], cast(Any, captured_mail).get())
+    assert serialized["headers"]["Message-ID"] == "<outbound-message.123@example.test>"
+
+
+async def test_send_sets_reply_to(
+    monkeypatch: pytest.MonkeyPatch, provider: SendGridEmailProvider
+) -> None:
+    captured_mail: object | None = None
+
+    def _send(mail: object) -> _FakeResponse:
+        nonlocal captured_mail
+        captured_mail = mail
+        return _FakeResponse()
+
+    monkeypatch.setattr(provider._client, "send", _send)
+    await provider.send(
+        EmailMessage(
+            to_email="lead@example.com",
+            subject="Hello",
+            body="Plain text",
+            idempotency_key="key-3",
+            reply_to="reply+token@example.test",
+        )
+    )
+
+    assert captured_mail is not None
+    serialized = cast(dict[str, Any], cast(Any, captured_mail).get())
+    assert serialized["reply_to"]["email"] == "reply+token@example.test"
+
+
+async def test_send_sets_threading_headers(
+    monkeypatch: pytest.MonkeyPatch, provider: SendGridEmailProvider
+) -> None:
+    captured_mail: object | None = None
+
+    def _send(mail: object) -> _FakeResponse:
+        nonlocal captured_mail
+        captured_mail = mail
+        return _FakeResponse()
+
+    monkeypatch.setattr(provider._client, "send", _send)
+    await provider.send(
+        EmailMessage(
+            to_email="lead@example.com",
+            subject="Re: Hello",
+            body="Plain text",
+            idempotency_key="key-4",
+            in_reply_to_message_id="inbound-message-123@example.test",
+            reference_message_ids=(
+                "thread-root@example.test",
+                "inbound-message-123@example.test",
+            ),
+        )
+    )
+
+    assert captured_mail is not None
+    serialized = cast(dict[str, Any], cast(Any, captured_mail).get())
+    assert serialized["headers"]["In-Reply-To"] == "<inbound-message-123@example.test>"
+    assert serialized["headers"]["References"] == (
+        "<thread-root@example.test> <inbound-message-123@example.test>"
+    )

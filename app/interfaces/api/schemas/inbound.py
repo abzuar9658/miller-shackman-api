@@ -1,3 +1,5 @@
+import json
+import re
 from datetime import datetime
 from email.parser import HeaderParser
 from email.utils import parseaddr
@@ -84,6 +86,94 @@ class SendGridInboundParsePayload(BaseModel):
     def to_email_address(self) -> str | None:
         return _normalized_email_address(self.to_email)
 
+    @property
+    def in_reply_to_message_ids(self) -> tuple[str, ...]:
+        return _message_ids_from_headers(self.headers or self.raw_email, "In-Reply-To")
+
+    @property
+    def reference_message_ids(self) -> tuple[str, ...]:
+        return _message_ids_from_headers(self.headers or self.raw_email, "References")
+
+    @property
+    def thread_message_ids(self) -> tuple[str, ...]:
+        return _combine_unique_message_ids(
+            self.in_reply_to_message_ids,
+            self.reference_message_ids,
+        )
+
+
+class MailgunInboundParsePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    sender: str
+    recipient: str = Field(alias="recipient")
+    from_address: str | None = Field(default=None, alias="from")
+    subject: str | None = None
+    stripped_text: str | None = Field(default=None, alias="stripped-text")
+    body_plain: str | None = Field(default=None, alias="body-plain")
+    stripped_html: str | None = Field(default=None, alias="stripped-html")
+    body_html: str | None = Field(default=None, alias="body-html")
+    attachments: str | None = None
+    message_id: str | None = Field(default=None, alias="Message-Id")
+    in_reply_to: str | None = Field(default=None, alias="In-Reply-To")
+    references: str | None = Field(default=None, alias="References")
+    message_headers: str | None = Field(default=None, alias="message-headers")
+
+    @model_validator(mode="after")
+    def populate_subject_from_message_headers(self) -> "MailgunInboundParsePayload":
+        normalized_subject = (self.subject or "").strip()
+        if normalized_subject:
+            self.subject = normalized_subject
+            return self
+        self.subject = _header_value_from_mailgun_message_headers(
+            self.message_headers,
+            "Subject",
+        )
+        return self
+
+    @property
+    def provider_message_id(self) -> str | None:
+        return _normalized_message_id(self.message_id)
+
+    @property
+    def body(self) -> str:
+        return (self.stripped_text or self.body_plain or "").strip()
+
+    @property
+    def from_email_address(self) -> str | None:
+        return _normalized_email_address(self.from_address or self.sender)
+
+    @property
+    def to_email_address(self) -> str | None:
+        return _normalized_email_address(self.recipient)
+
+    @property
+    def in_reply_to_message_ids(self) -> tuple[str, ...]:
+        return _message_ids_from_header_value(
+            self.in_reply_to
+            or _header_value_from_mailgun_message_headers(
+                self.message_headers,
+                "In-Reply-To",
+            )
+        )
+
+    @property
+    def reference_message_ids(self) -> tuple[str, ...]:
+        return _message_ids_from_header_value(
+            self.references
+            or _header_value_from_mailgun_message_headers(
+                self.message_headers,
+                "References",
+            )
+        )
+
+    @property
+    def thread_message_ids(self) -> tuple[str, ...]:
+        return _combine_unique_message_ids(
+            self.in_reply_to_message_ids,
+            self.reference_message_ids,
+        )
+
 
 def _message_id_from_headers(raw_headers: str | None) -> str | None:
     if raw_headers is None or not raw_headers.strip():
@@ -94,6 +184,80 @@ def _message_id_from_headers(raw_headers: str | None) -> str | None:
         return None
     normalized = " ".join(message_id.split())
     return normalized or None
+
+
+def _message_ids_from_headers(raw_headers: str | None, header_name: str) -> tuple[str, ...]:
+    if raw_headers is None or not raw_headers.strip():
+        return ()
+    headers = HeaderParser().parsestr(raw_headers, headersonly=True)
+    return _message_ids_from_header_value(headers.get(header_name))
+
+
+def _message_ids_from_header_value(raw_value: str | None) -> tuple[str, ...]:
+    if raw_value is None or not raw_value.strip():
+        return ()
+    bracketed_matches = re.findall(r"<([^<>]+)>", raw_value)
+    candidates = bracketed_matches or raw_value.split()
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        message_id = _normalized_message_id(candidate)
+        if message_id is None or message_id in seen:
+            continue
+        seen.add(message_id)
+        normalized.append(message_id)
+    return tuple(normalized)
+
+
+def _normalized_message_id(raw_value: str | None) -> str | None:
+    if raw_value is None:
+        return None
+    normalized = " ".join(raw_value.split()).strip()
+    if not normalized:
+        return None
+    if normalized.lower().startswith("message-id:"):
+        return _message_id_from_headers(normalized)
+    return normalized.strip("<>") or None
+
+
+def _combine_unique_message_ids(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for message_id in group:
+            if message_id in seen:
+                continue
+            seen.add(message_id)
+            ordered.append(message_id)
+    return tuple(ordered)
+
+
+def _header_value_from_mailgun_message_headers(
+    raw_message_headers: str | None,
+    header_name: str,
+) -> str | None:
+    if raw_message_headers is None or not raw_message_headers.strip():
+        return None
+    try:
+        parsed = json.loads(raw_message_headers)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    target = header_name.lower()
+    for entry in parsed:
+        if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+            key, value = entry[0], entry[1]
+        elif isinstance(entry, dict):
+            key = entry.get("name")
+            value = entry.get("value")
+        else:
+            continue
+        if str(key).strip().lower() != target:
+            continue
+        normalized_value = str(value).strip()
+        return normalized_value or None
+    return None
 
 
 def _normalized_email_address(raw_address: str) -> str | None:

@@ -5,6 +5,9 @@ from uuid import UUID
 
 from app.application.ports.crm import CanonicalLead, CRMActivity, CRMClient
 from app.application.ports.repositories import InboundMessageCRMCompletionRepository
+from app.application.services.crm_attention_tag_sync import (
+    remove_conflicting_crm_tag_if_present,
+)
 from app.application.services.crm_snapshot import build_crm_snapshot_custom_fields
 from app.application.services.llm.reply_classification import InboundReplyIntent
 from app.application.use_cases.evaluate_inbound_action import InboundAction
@@ -133,6 +136,19 @@ async def complete_inbound_message_crm_sync(
                     crm_note_written_at=now,
                     last_attempted_at=now,
                     failure_reason=None,
+                ),
+            )
+        if review_tag:
+            await remove_conflicting_crm_tag_if_present(
+                crm_client=crm_client,
+                workspace_id=lead.workspace_id,
+                crm_lead_id=lead.crm_lead_id,
+                existing_tags=refreshed_lead.tags,
+                active_tag=review_tag,
+                conflicting_tag=(
+                    workspace_handoff_config.crm_handoff_tag
+                    if workspace_handoff_config is not None
+                    else None
                 ),
             )
         if review_tag and record.crm_review_tag_applied_at is None:

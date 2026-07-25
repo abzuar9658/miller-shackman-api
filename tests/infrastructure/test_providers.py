@@ -3,6 +3,7 @@ from pydantic import SecretStr
 
 from app.core.config import Settings
 from app.infrastructure.listing_sources.streeteasy import StreetEasyListingSearchClient
+from app.infrastructure.messaging.mailgun import MailgunEmailProvider
 from app.infrastructure.messaging.mailpit import MailpitEmailProvider
 from app.infrastructure.messaging.sink import SinkEmailProvider, SinkSMSProvider
 from app.infrastructure.providers import (
@@ -63,20 +64,65 @@ def test_build_email_provider_returns_sink_adapter() -> None:
 
 
 def test_build_email_provider_requires_from_email_for_mailpit() -> None:
-    settings = Settings(email_provider="mailpit", sendgrid_from_email="")
-    with pytest.raises(ValueError, match="SENDGRID_FROM_EMAIL"):
+    settings = Settings(email_provider="mailpit", email_from_email="", sendgrid_from_email="")
+    with pytest.raises(ValueError, match="EMAIL_FROM_EMAIL or SENDGRID_FROM_EMAIL"):
         build_email_provider(settings)
 
 
 def test_build_email_provider_returns_mailpit_adapter() -> None:
     settings = Settings(
         email_provider="mailpit",
-        sendgrid_from_email="noreply@example.test",
+        email_from_email="noreply@example.test",
         mailpit_smtp_host="localhost",
         mailpit_smtp_port=51025,
     )
     provider = build_email_provider(settings)
     assert isinstance(provider, MailpitEmailProvider)
+
+
+def test_build_email_provider_requires_mailgun_credentials() -> None:
+    settings = Settings(
+        email_provider="mailgun",
+        email_from_email="reply@example.test",
+        mailgun_api_key=SecretStr(""),
+        mailgun_domain="example.test",
+    )
+    with pytest.raises(ValueError, match="MAILGUN_API_KEY"):
+        build_email_provider(settings)
+
+
+def test_build_email_provider_requires_mailgun_domain() -> None:
+    settings = Settings(
+        email_provider="mailgun",
+        email_from_email="reply@example.test",
+        mailgun_api_key=SecretStr("key"),
+        mailgun_domain="",
+    )
+    with pytest.raises(ValueError, match="MAILGUN_DOMAIN"):
+        build_email_provider(settings)
+
+
+def test_build_email_provider_requires_mailgun_from_email() -> None:
+    settings = Settings(
+        email_provider="mailgun",
+        email_from_email="",
+        sendgrid_from_email="",
+        mailgun_api_key=SecretStr("key"),
+        mailgun_domain="example.test",
+    )
+    with pytest.raises(ValueError, match="EMAIL_FROM_EMAIL or SENDGRID_FROM_EMAIL"):
+        build_email_provider(settings)
+
+
+def test_build_email_provider_returns_mailgun_adapter() -> None:
+    settings = Settings(
+        email_provider="mailgun",
+        email_from_email="reply@example.test",
+        mailgun_api_key=SecretStr("key"),
+        mailgun_domain="example.test",
+    )
+    provider = build_email_provider(settings)
+    assert isinstance(provider, MailgunEmailProvider)
 
 
 def test_build_storage_provider_returns_s3_adapter() -> None:

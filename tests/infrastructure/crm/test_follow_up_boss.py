@@ -5,7 +5,11 @@ from typing import Any
 import httpx
 import pytest
 
+from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
+from app.domain.campaigns.pre_send import ProviderSendStatus
+from app.domain.compliance.contactability import ContactChannel
 from app.domain.crm_sync import CRMSyncLeadSort
+from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.infrastructure.crm.follow_up_boss.client import FollowUpBossCRMClient
 
 
@@ -157,6 +161,16 @@ async def test_get_assigned_agent_ignores_team_name_assigned_to_without_user_id(
 
     assert agent is None
     assert request_paths == ["/v1/people/123"]
+
+
+async def test_get_lead_url_returns_follow_up_boss_people_link(
+    workspace_id: uuid.UUID,
+) -> None:
+    client = FollowUpBossCRMClient(api_key="key")
+
+    url = await client.get_lead_url(workspace_id, "123")
+
+    assert url == "https://app.followupboss.com/2/people/123"
 
 
 async def test_list_lead_snapshots_maps_payload_and_pagination_metadata(
@@ -477,6 +491,96 @@ async def test_add_note_includes_subject_when_provided(workspace_id: uuid.UUID) 
     )
 
 
+async def test_publish_outbound_message_posts_to_inbox_app_message_endpoint(
+    workspace_id: uuid.UUID,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["method"] = request.method
+        captured["json"] = request.read().decode("utf-8")
+        return httpx.Response(201, json={})
+
+    client = FollowUpBossCRMClient(
+        api_key="key",
+        inbox_sync_enabled=True,
+        inbox_app_id="published-app-1",
+        inbox_sender_name="Miller Schackman AI",
+    )
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    published = await client.publish_outbound_message(
+        lead=_canonical_lead(),
+        outbound_message=_outbound_sms_message(),
+    )
+
+    assert published is True
+    assert captured == {
+        "path": "/v1/inboxApps/published-app-1/message",
+        "method": "POST",
+        "json": (
+            '{"externalConversationId":"lead:12443:channel:sms",'
+            '"externalMessageId":"00000000-0000-0000-0000-000000000222",'
+            '"message":"AI outbound SMS body",'
+            '"isIncoming":false,'
+            '"sender":{"name":"Miller Schackman AI"},'
+            '"isAutomation":true,'
+            '"person":{"id":12443},'
+            '"owner":{"userId":42},'
+            '"sentAt":"2026-07-20T13:00:00+00:00"}'
+        ),
+    }
+
+
+async def test_publish_outbound_message_returns_false_when_owner_is_missing(
+    workspace_id: uuid.UUID,
+) -> None:
+    client = FollowUpBossCRMClient(
+        api_key="key",
+        inbox_sync_enabled=True,
+        inbox_app_id="published-app-1",
+    )
+
+    published = await client.publish_outbound_message(
+        lead=_canonical_lead(assigned_agent_crm_id=None),
+        outbound_message=_outbound_sms_message(),
+    )
+
+    assert published is False
+
+
+async def test_add_tag_merges_tags_on_person_update(workspace_id: uuid.UUID) -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["query"] = request.url.query.decode("utf-8")
+        captured["method"] = request.method
+        captured["json"] = request.read().decode("utf-8")
+        return httpx.Response(200, json={})
+
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    await client.add_tag(workspace_id, "12443", "human_handoff")
+
+    assert captured == {
+        "path": "/v1/people/12443",
+        "query": "mergeTags=true",
+        "method": "PUT",
+        "json": '{"tags":["human_handoff"]}',
+    }
+
+
 async def test_add_note_raises_for_http_error(workspace_id: uuid.UUID) -> None:
     client = FollowUpBossCRMClient(api_key="key")
     client._client = httpx.AsyncClient(
@@ -681,3 +785,35 @@ async def test_get_recent_activity_uses_exponential_backoff_without_retry_after(
     assert sleep_delays == [1.0, 2.0]
     assert len(activities) == 1
     assert activities[0].crm_activity_id == "99"
+
+
+def _canonical_lead(*, assigned_agent_crm_id: str | None = "42") -> CanonicalLeadRecord:
+    return CanonicalLeadRecord(
+        workspace_id=uuid.UUID("70000000-0000-0000-0000-000000000001"),
+        lead_id=uuid.UUID("70000000-0000-0000-0000-000000000002"),
+        crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+        crm_lead_id="12443",
+        facts_derived_at=datetime(2026, 7, 20, 13, 0, tzinfo=UTC),
+        source_payload_version="test:v1",
+        assigned_agent_crm_id=assigned_agent_crm_id,
+        primary_phone="+15555550123",
+    )
+
+
+def _outbound_sms_message() -> OutboundMessage:
+    now = datetime(2026, 7, 20, 13, 0, tzinfo=UTC)
+    return OutboundMessage(
+        message_id=uuid.UUID("00000000-0000-0000-0000-000000000222"),
+        workspace_id=uuid.UUID("70000000-0000-0000-0000-000000000001"),
+        lead_id=uuid.UUID("70000000-0000-0000-0000-000000000002"),
+        campaign_id=uuid.UUID("70000000-0000-0000-0000-000000000003"),
+        cadence_step_id="cadence:1",
+        channel=ContactChannel.SMS,
+        status=OutboundMessageStatus.SENT,
+        idempotency_key="outbound:test:v1",
+        body="AI outbound SMS body",
+        created_at=now,
+        updated_at=now,
+        sent_at=now,
+        provider_send_status=ProviderSendStatus.ACCEPTED,
+    )

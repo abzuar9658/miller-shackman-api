@@ -1,7 +1,9 @@
 import base64
+import hmac
 import json
 from datetime import UTC, datetime
 from email.utils import parseaddr
+from hashlib import sha256
 from typing import Annotated
 from uuid import UUID
 
@@ -37,9 +39,12 @@ from app.application.use_cases.process_provider_delivery_callback import (
 )
 from app.core.config import Settings, get_settings
 from app.core.database import enable_postgres_service_access, set_postgres_workspace_context
-from app.domain.campaigns.outbound_message import ProviderDeliveryStatus
+from app.domain.campaigns.outbound_message import (
+    ProviderDeliveryStatus,
+    parse_outbound_email_message_id,
+)
 from app.domain.compliance.contactability import ContactChannel
-from app.domain.leads import CRMProvider
+from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.interfaces.api.dependencies.follow_up_boss_webhook import (
     get_follow_up_boss_webhook_event_handler,
 )
@@ -56,10 +61,12 @@ from app.interfaces.api.schemas.inbound import (
     FollowUpBossInboundMessageRequest,
     FollowUpBossWebhookResponse,
     InboundWebhookResponse,
+    MailgunInboundParsePayload,
     SendGridInboundParsePayload,
     TwilioInboundMessagePayload,
 )
 from app.interfaces.api.schemas.provider_delivery import (
+    MailgunEventWebhookPayload,
     ProviderDeliveryWebhookResponse,
     ProviderDeliveryWebhookResult,
     SendGridEventWebhookPayload,
@@ -90,12 +97,14 @@ async def _handle_inbound_message_event(
         workspace_handoff_config_repository=bundle.workspace_handoff_config_repository,
         workspace_llm_config_repository=bundle.workspace_llm_config_repository,
         handoff_completion_repository=bundle.handoff_completion_repository,
+        user_repository=bundle.user_repository,
         lead_workflow_repository=bundle.lead_workflow_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
         llm_client=bundle.llm_client,
         event_bus=bundle.event_bus,
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         default_openrouter_model=bundle.default_openrouter_model,
+        workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
         workspace_repository=bundle.workspace_repository,
         campaign_execution_repository=bundle.campaign_execution_repository,
         workspace_operational_control_repository=bundle.workspace_operational_control_repository,
@@ -130,6 +139,246 @@ async def _handle_inbound_message_event(
         reasons=[reason.value for reason in result.reasons],
         classification_reasons=[reason.value for reason in result.classification_reasons],
     )
+
+
+async def _handle_inbound_email_message(
+    workspace_id: UUID,
+    provider: str,
+    payload: SendGridInboundParsePayload | MailgunInboundParsePayload,
+    payload_redacted: dict[str, object],
+    bundle: InboundServiceBundle,
+) -> InboundWebhookResponse:
+    body = payload.body.strip()
+    from_email_address = payload.from_email_address
+    to_email_address = payload.to_email_address
+    thread_message_ids = payload.thread_message_ids
+    has_reply_routing_token = False
+    if not body:
+        _log_email_inbound_rejected(
+            workspace_id=workspace_id,
+            provider=provider,
+            payload=payload,
+            reason="empty_body",
+            body_length=0,
+            from_email_address=from_email_address,
+            to_email_address=to_email_address,
+            thread_message_ids_count=len(thread_message_ids),
+        )
+        return InboundWebhookResponse(status="rejected", reasons=["empty_body"])
+    if to_email_address is None:
+        _log_email_inbound_rejected(
+            workspace_id=workspace_id,
+            provider=provider,
+            payload=payload,
+            reason="invalid_to_address",
+            body_length=len(body),
+            from_email_address=from_email_address,
+            to_email_address=to_email_address,
+            thread_message_ids_count=len(thread_message_ids),
+        )
+        return InboundWebhookResponse(status="rejected", reasons=["invalid_to_address"])
+    contact_policy = await bundle.workspace_contact_policy_repository.get_by_workspace_id(
+        workspace_id,
+    )
+    configured_inbound_email_address = None
+    reply_routing_token = None
+    if contact_policy is not None and contact_policy.inbound_email_address is not None:
+        configured_inbound_email_address = contact_policy.inbound_email_address.strip().lower()
+    if configured_inbound_email_address is not None:
+        recipient_matches_inbound_address, reply_routing_token = _match_inbound_email_recipient(
+            to_email_address=to_email_address,
+            configured_inbound_email_address=configured_inbound_email_address,
+        )
+        has_reply_routing_token = reply_routing_token is not None
+        if not recipient_matches_inbound_address:
+            _log_email_inbound_rejected(
+                workspace_id=workspace_id,
+                provider=provider,
+                payload=payload,
+                reason="inbound_email_address_mismatch",
+                body_length=len(body),
+                from_email_address=from_email_address,
+                to_email_address=to_email_address,
+                configured_inbound_email_address=configured_inbound_email_address,
+                thread_message_ids_count=len(thread_message_ids),
+                has_reply_routing_token=has_reply_routing_token,
+            )
+            return InboundWebhookResponse(
+                status="rejected",
+                reasons=["inbound_email_address_mismatch"],
+            )
+    if from_email_address is None:
+        _log_email_inbound_rejected(
+            workspace_id=workspace_id,
+            provider=provider,
+            payload=payload,
+            reason="invalid_from_address",
+            body_length=len(body),
+            from_email_address=from_email_address,
+            to_email_address=to_email_address,
+            configured_inbound_email_address=configured_inbound_email_address,
+            thread_message_ids_count=len(thread_message_ids),
+            has_reply_routing_token=has_reply_routing_token,
+        )
+        return InboundWebhookResponse(status="rejected", reasons=["invalid_from_address"])
+    (
+        lead,
+        lead_resolution,
+        matched_thread_message_id,
+        matched_reply_routing_token,
+    ) = await _resolve_inbound_email_lead(
+        workspace_id=workspace_id,
+        provider=provider,
+        payload=payload,
+        reply_routing_token=reply_routing_token,
+        bundle=bundle,
+    )
+    if lead is None:
+        _log_email_inbound_rejected(
+            workspace_id=workspace_id,
+            provider=provider,
+            payload=payload,
+            reason=lead_resolution,
+            body_length=len(body),
+            from_email_address=from_email_address,
+            to_email_address=to_email_address,
+            configured_inbound_email_address=configured_inbound_email_address,
+            thread_message_ids_count=len(thread_message_ids),
+            matched_thread_message_id=matched_thread_message_id,
+            has_reply_routing_token=has_reply_routing_token,
+            matched_reply_routing_token=matched_reply_routing_token,
+        )
+        return InboundWebhookResponse(status="rejected", reasons=[lead_resolution])
+    logger.info(
+        "email_inbound_prechecks_passed",
+        workspace_id=str(workspace_id),
+        provider=provider,
+        provider_message_id=payload.provider_message_id,
+        body_length=len(body),
+        from_address_redacted=_redact_email_address(from_email_address),
+        to_address_redacted=_redact_email_address(to_email_address),
+        configured_inbound_address_redacted=_redact_email_address(
+            configured_inbound_email_address
+        ),
+        lead_found=True,
+        lead_resolution=lead_resolution,
+        thread_message_ids_count=len(thread_message_ids),
+        matched_thread_message_id=matched_thread_message_id,
+        has_reply_routing_token=has_reply_routing_token,
+        matched_reply_routing_token=matched_reply_routing_token,
+    )
+    return await _handle_inbound_message_event(
+        event=InboundMessageEvent(
+            workspace_id=workspace_id,
+            provider=provider,
+            provider_event_id=payload.provider_message_id or "",
+            provider_message_id=payload.provider_message_id or "",
+            crm_lead_id=lead.crm_lead_id,
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+            channel=ContactChannel.EMAIL,
+            body=body,
+            received_at=datetime.now(UTC),
+            email_subject=payload.subject,
+            from_address_redacted=_redact_email_address(from_email_address),
+            to_address_redacted=_redact_email_address(to_email_address),
+            payload_redacted=payload_redacted,
+        ),
+        bundle=bundle,
+        now=datetime.now(UTC),
+    )
+
+
+async def _resolve_inbound_email_lead(
+    *,
+    workspace_id: UUID,
+    provider: str,
+    payload: SendGridInboundParsePayload | MailgunInboundParsePayload,
+    reply_routing_token: str | None,
+    bundle: InboundServiceBundle,
+) -> tuple[CanonicalLeadRecord | None, str, str | None, bool]:
+    from_email_address = payload.from_email_address
+    if reply_routing_token is not None:
+        outbound_message = await bundle.message_repository.get_by_reply_routing_token(
+            workspace_id,
+            reply_routing_token,
+        )
+        if outbound_message is None:
+            return None, "reply_token_not_found", None, False
+        lead = await bundle.lead_repository.get_by_id(workspace_id, outbound_message.lead_id)
+        if lead is None:
+            return None, "lead_not_found", None, True
+        if _normalized_email_value(lead.primary_email) != _normalized_email_value(
+            from_email_address
+        ):
+            return None, "reply_sender_mismatch", None, True
+        return lead, "reply_token", None, True
+
+    for thread_message_id in payload.thread_message_ids:
+        outbound_message_id = parse_outbound_email_message_id(thread_message_id)
+        if outbound_message_id is not None:
+            outbound_message = await bundle.message_repository.get_by_id(
+                workspace_id,
+                outbound_message_id,
+            )
+            if outbound_message is not None:
+                lead = await bundle.lead_repository.get_by_id(
+                    workspace_id,
+                    outbound_message.lead_id,
+                )
+                if lead is not None:
+                    return lead, "thread_reference", thread_message_id, False
+        outbound_message = await bundle.message_repository.get_by_provider_message_id_for_workspace(
+            workspace_id,
+            provider,
+            thread_message_id,
+        )
+        if outbound_message is None:
+            continue
+        lead = await bundle.lead_repository.get_by_id(workspace_id, outbound_message.lead_id)
+        if lead is not None:
+            return lead, "thread_reference", thread_message_id, False
+
+    if from_email_address is None:
+        return None, "invalid_from_address", None, False
+
+    candidates = await bundle.lead_repository.list_by_primary_email(
+        workspace_id,
+        from_email_address,
+    )
+    if len(candidates) == 1:
+        return candidates[0], "sender_email", None, False
+    if len(candidates) > 1:
+        return None, "ambiguous_lead_match", None, False
+    return None, "lead_not_found", None, False
+
+
+def _match_inbound_email_recipient(
+    *,
+    to_email_address: str,
+    configured_inbound_email_address: str,
+) -> tuple[bool, str | None]:
+    actual_local_part, actual_separator, actual_domain = to_email_address.partition("@")
+    configured_local_part, configured_separator, configured_domain = (
+        configured_inbound_email_address.partition("@")
+    )
+    if not actual_separator or not configured_separator:
+        return False, None
+    if actual_domain != configured_domain:
+        return False, None
+    if actual_local_part == configured_local_part:
+        return True, None
+    token_prefix = f"{configured_local_part}+"
+    if not actual_local_part.startswith(token_prefix):
+        return False, None
+    reply_routing_token = actual_local_part[len(token_prefix) :]
+    return (bool(reply_routing_token), reply_routing_token or None)
+
+
+def _normalized_email_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
 
 
 @router.post(
@@ -225,46 +474,73 @@ async def receive_sendgrid_inbound_message(
     )
     form = await request.form()
     payload = _validate_sendgrid_inbound_payload(_string_form_values(form))
-    if not payload.body.strip():
-        return InboundWebhookResponse(status="rejected", reasons=["empty_body"])
-    to_email_address = payload.to_email_address
-    if to_email_address is None:
-        return InboundWebhookResponse(status="rejected", reasons=["invalid_to_address"])
-    contact_policy = await bundle.workspace_contact_policy_repository.get_by_workspace_id(
-        workspace_id,
-    )
-    if contact_policy is not None and contact_policy.inbound_email_address is not None:
-        if to_email_address != contact_policy.inbound_email_address.strip().lower():
-            return InboundWebhookResponse(
-                status="rejected",
-                reasons=["inbound_email_address_mismatch"],
-            )
-    from_email_address = payload.from_email_address
-    if from_email_address is None:
-        return InboundWebhookResponse(status="rejected", reasons=["invalid_from_address"])
-    lead = await bundle.lead_repository.get_by_primary_email(
-        workspace_id,
-        from_email_address,
-    )
-    if lead is None:
-        return InboundWebhookResponse(status="rejected", reasons=["lead_not_found"])
-    return await _handle_inbound_message_event(
-        event=InboundMessageEvent(
-            workspace_id=workspace_id,
-            provider="sendgrid",
-            provider_event_id=payload.provider_message_id or "",
-            provider_message_id=payload.provider_message_id or "",
-            crm_lead_id=lead.crm_lead_id,
-            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
-            channel=ContactChannel.EMAIL,
-            body=payload.body,
-            received_at=datetime.now(UTC),
-            from_address_redacted=_redact_email_address(payload.from_email_address),
-            to_address_redacted=_redact_email_address(payload.to_email_address),
-            payload_redacted=_sendgrid_inbound_payload_redacted(payload),
-        ),
+    return await _handle_inbound_email_message(
+        workspace_id=workspace_id,
+        provider="sendgrid",
+        payload=payload,
+        payload_redacted=_sendgrid_inbound_payload_redacted(payload),
         bundle=bundle,
-        now=datetime.now(UTC),
+    )
+
+
+@router.post(
+    "/mailgun/inbound-messages/{workspace_id}",
+    response_model=InboundWebhookResponse,
+)
+async def receive_mailgun_inbound_message(
+    workspace_id: UUID,
+    request: Request,
+    bundle: Annotated[InboundServiceBundle, Depends(get_inbound_service_bundle)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> InboundWebhookResponse:
+    await set_postgres_workspace_context(bundle.session, str(workspace_id))
+    form = await request.form()
+    form_values = _string_form_values(form)
+    logger.info(
+        "mailgun_inbound_received",
+        workspace_id=str(workspace_id),
+        form_field_names=sorted(form_values.keys()),
+        has_sender=bool(form_values.get("sender")),
+        has_from=bool(form_values.get("from")),
+        has_recipient=bool(form_values.get("recipient")),
+        has_subject=bool(form_values.get("subject")),
+        has_message_id=bool((form_values.get("Message-Id") or "").strip()),
+        has_in_reply_to=bool((form_values.get("In-Reply-To") or "").strip()),
+        has_references=bool((form_values.get("References") or "").strip()),
+        has_stripped_text=bool((form_values.get("stripped-text") or "").strip()),
+        has_body_plain=bool((form_values.get("body-plain") or "").strip()),
+        has_stripped_html=bool((form_values.get("stripped-html") or "").strip()),
+        has_body_html=bool((form_values.get("body-html") or "").strip()),
+        has_signature=bool(form_values.get("signature")),
+        has_timestamp=bool(form_values.get("timestamp")),
+        has_token=bool(form_values.get("token")),
+    )
+    _verify_mailgun_signature_if_configured(
+        settings=settings,
+        form_values=form_values,
+    )
+    payload = _validate_mailgun_inbound_payload(form_values)
+    logger.info(
+        "mailgun_inbound_payload_parsed",
+        workspace_id=str(workspace_id),
+        provider_message_id=payload.provider_message_id,
+        body_length=len(payload.body.strip()),
+        subject_present=payload.subject is not None,
+        attachments=payload.attachments,
+        thread_message_ids_count=len(payload.thread_message_ids),
+        has_stripped_text=bool((payload.stripped_text or "").strip()),
+        has_body_plain=bool((payload.body_plain or "").strip()),
+        has_stripped_html=bool((payload.stripped_html or "").strip()),
+        has_body_html=bool((payload.body_html or "").strip()),
+        from_address_redacted=_redact_email_address(payload.from_email_address),
+        to_address_redacted=_redact_email_address(payload.to_email_address),
+    )
+    return await _handle_inbound_email_message(
+        workspace_id=workspace_id,
+        provider="mailgun",
+        payload=payload,
+        payload_redacted=_mailgun_inbound_payload_redacted(payload),
+        bundle=bundle,
     )
 
 
@@ -492,6 +768,66 @@ async def receive_sendgrid_message_events(
                 now=now,
             )
         )
+    await bundle.session.commit()
+    return _provider_delivery_response(results)
+
+
+@router.post(
+    "/mailgun/message-events/{workspace_id}",
+    response_model=ProviderDeliveryWebhookResponse,
+)
+async def receive_mailgun_message_events(
+    workspace_id: UUID,
+    request: Request,
+    bundle: Annotated[
+        ProviderDeliveryServiceBundle,
+        Depends(get_provider_delivery_service_bundle),
+    ],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ProviderDeliveryWebhookResponse:
+    await enable_postgres_service_access(bundle.session)
+    body = await request.body()
+    payload = _validate_mailgun_payload(body)
+    _verify_mailgun_delivery_signature_if_configured(
+        settings=settings,
+        payload=payload,
+    )
+    results: list[ProviderDeliveryWebhookResult | ProcessProviderDeliveryCallbackResult] = []
+    if payload.event not in {"delivered", "failed", "bounced", "rejected", "complained"}:
+        results.append(
+            ProviderDeliveryWebhookResult(
+                status=ProcessProviderDeliveryCallbackStatus.IGNORED.value,
+                reasons=[f"unsupported_event_type:{payload.event}"],
+            )
+        )
+    else:
+        provider_message_id = payload.provider_message_id
+        if provider_message_id is None:
+            results.append(
+                ProviderDeliveryWebhookResult(
+                    status=ProcessProviderDeliveryCallbackStatus.IGNORED.value,
+                    reasons=["provider_message_id_missing"],
+                )
+            )
+        else:
+            results.append(
+                await process_provider_delivery_callback(
+                    callback=ProviderDeliveryCallback(
+                        provider="mailgun",
+                        provider_event_id=_mailgun_provider_event_id(payload, provider_message_id),
+                        provider_message_id=provider_message_id,
+                        event_type=payload.event,
+                        status=_map_mailgun_delivery_status(payload.event, payload.severity),
+                        occurred_at=datetime.fromtimestamp(payload.timestamp, UTC),
+                        failure_reason=payload.failure_reason,
+                        payload_redacted=_mailgun_payload_redacted(payload, provider_message_id),
+                    ),
+                    message_repository=bundle.message_repository,
+                    provider_message_event_repository=bundle.provider_message_event_repository,
+                    event_bus=bundle.event_bus,
+                    now=datetime.now(UTC),
+                )
+            )
     await bundle.session.commit()
     return _provider_delivery_response(results)
 
@@ -757,4 +1093,168 @@ def _provider_delivery_response(
         duplicate_count=duplicate_count,
         ignored_count=ignored_count,
         results=serialized,
+    )
+
+
+def _validate_mailgun_inbound_payload(
+    form_values: dict[str, str],
+) -> MailgunInboundParsePayload:
+    try:
+        return MailgunInboundParsePayload.model_validate(form_values)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+
+def _validate_mailgun_payload(body: bytes) -> MailgunEventWebhookPayload:
+    try:
+        raw_payload = json.loads(body)
+        return TypeAdapter(MailgunEventWebhookPayload).validate_python(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid_json_payload",
+        ) from exc
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+
+def _verify_mailgun_signature_if_configured(
+    *,
+    settings: Settings,
+    form_values: dict[str, str],
+) -> None:
+    signing_key = settings.mailgun_webhook_signing_key
+    if signing_key is None:
+        return
+    token = form_values.get("token")
+    timestamp = form_values.get("timestamp")
+    signature = form_values.get("signature")
+    if not token or not timestamp or not signature:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="missing_mailgun_signature"
+        )
+    expected = hmac.new(
+        signing_key.get_secret_value().encode(),
+        f"{timestamp}{token}".encode(),
+        sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_mailgun_signature"
+        )
+
+
+def _verify_mailgun_delivery_signature_if_configured(
+    *,
+    settings: Settings,
+    payload: MailgunEventWebhookPayload,
+) -> None:
+    signing_key = settings.mailgun_webhook_signing_key
+    if signing_key is None:
+        return
+    signature = payload.signature
+    if not isinstance(signature, dict):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="missing_mailgun_signature"
+        )
+    token = signature.get("token")
+    timestamp = signature.get("timestamp")
+    signature_value = signature.get("signature")
+    if not token or not timestamp or not signature_value:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="missing_mailgun_signature"
+        )
+    expected = hmac.new(
+        signing_key.get_secret_value().encode(),
+        f"{timestamp}{token}".encode(),
+        sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, str(signature_value)):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_mailgun_signature"
+        )
+
+
+def _mailgun_provider_event_id(
+    payload: MailgunEventWebhookPayload,
+    provider_message_id: str,
+) -> str:
+    if payload.id:
+        return payload.id
+    return f"{provider_message_id}:{payload.event}:{payload.timestamp}"
+
+
+def _map_mailgun_delivery_status(event: str, severity: str | None) -> ProviderDeliveryStatus:
+    normalized = event.strip().lower()
+    if normalized in {"accepted", "stored"}:
+        return ProviderDeliveryStatus.ACCEPTED
+    if normalized == "delivered":
+        return ProviderDeliveryStatus.DELIVERED
+    if normalized == "failed":
+        if severity and severity.strip().lower() == "temporary":
+            return ProviderDeliveryStatus.DEFERRED
+        return ProviderDeliveryStatus.FAILED
+    if normalized == "bounced":
+        return ProviderDeliveryStatus.BOUNCED
+    if normalized == "rejected":
+        return ProviderDeliveryStatus.DROPPED
+    if normalized == "complained":
+        return ProviderDeliveryStatus.FAILED
+    return ProviderDeliveryStatus.UNKNOWN
+
+
+def _mailgun_inbound_payload_redacted(
+    payload: MailgunInboundParsePayload,
+) -> dict[str, object]:
+    return {
+        "provider_message_id": payload.provider_message_id,
+        "subject_present": payload.subject is not None,
+        "attachments": payload.attachments,
+    }
+
+
+def _mailgun_payload_redacted(
+    payload: MailgunEventWebhookPayload,
+    provider_message_id: str,
+) -> dict[str, object]:
+    return {
+        "event": payload.event,
+        "provider_message_id": provider_message_id,
+        "severity": payload.severity,
+        "recipient": payload.recipient,
+    }
+
+
+def _log_email_inbound_rejected(
+    *,
+    workspace_id: UUID,
+    provider: str,
+    payload: SendGridInboundParsePayload | MailgunInboundParsePayload,
+    reason: str,
+    body_length: int,
+    from_email_address: str | None,
+    to_email_address: str | None,
+    configured_inbound_email_address: str | None = None,
+    thread_message_ids_count: int = 0,
+    matched_thread_message_id: str | None = None,
+    has_reply_routing_token: bool = False,
+    matched_reply_routing_token: bool = False,
+) -> None:
+    logger.warning(
+        "email_inbound_rejected",
+        workspace_id=str(workspace_id),
+        provider=provider,
+        reason=reason,
+        provider_message_id=payload.provider_message_id,
+        body_length=body_length,
+        subject_present=payload.subject is not None,
+        from_address_redacted=_redact_email_address(from_email_address),
+        to_address_redacted=_redact_email_address(to_email_address),
+        configured_inbound_address_redacted=_redact_email_address(
+            configured_inbound_email_address
+        ),
+        thread_message_ids_count=thread_message_ids_count,
+        matched_thread_message_id=matched_thread_message_id,
+        has_reply_routing_token=has_reply_routing_token,
+        matched_reply_routing_token=matched_reply_routing_token,
     )
