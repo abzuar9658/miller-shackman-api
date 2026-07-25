@@ -13,6 +13,7 @@ from app.domain.conversations.models import (
     InboundMessageCRMCompletionRecord,
     WorkspaceHandoffConfig,
     default_workspace_handoff_config,
+    is_open_handoff,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "InboundMessageClassificationStatus",
     "WorkspaceHandoffConfig",
     "default_workspace_handoff_config",
+    "is_open_handoff",
 ]

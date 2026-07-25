@@ -103,6 +103,31 @@ def test_pause_transition_clears_pending_time_but_preserves_current_step() -> No
     assert result.workflow.pause_reason == "manual_pause"
 
 
+@pytest.mark.parametrize(
+    ("to_state", "reason_code"),
+    [
+        (WorkflowState.SUPPRESSED, WorkflowTransitionReasonCode.OPT_OUT_DETECTED),
+        (WorkflowState.COMPLETED, WorkflowTransitionReasonCode.LEAD_NOT_INTERESTED),
+    ],
+)
+def test_inbound_terminal_transition_clears_pending_action(
+    to_state: WorkflowState,
+    reason_code: WorkflowTransitionReasonCode,
+) -> None:
+    result = transition_workflow(
+        workflow=_workflow(WorkflowState.WAITING_FOR_RESPONSE),
+        to_state=to_state,
+        reason_code=reason_code,
+        transition_id=TRANSITION_ID,
+        now=NOW,
+        pause_reason=reason_code.value,
+    )
+
+    assert result.workflow.state == to_state
+    assert result.workflow.current_step_id is None
+    assert result.workflow.next_action_at is None
+
+
 def test_terminal_workflow_cannot_transition_from_inbound_reply() -> None:
     with pytest.raises(WorkflowTransitionError):
         transition_workflow(

@@ -1,5 +1,6 @@
+from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
-from typing import cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from app.application.services.llm.outbound_query_extraction import (
@@ -18,6 +19,8 @@ from app.application.use_cases.process_inbound_message_event import (
 )
 from app.domain.campaigns import CampaignStatus, CampaignVersionStatus
 from app.domain.campaigns.execution import CampaignCadenceStep, CampaignExecutionConfig
+from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
+from app.domain.campaigns.pre_send import ProviderSendStatus
 from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
@@ -328,6 +331,76 @@ async def test_execute_campaign_cadence_step_pauses_when_planning_is_blocked() -
     assert "Planning blocked: channel destination missing." in explanation
 
 
+async def test_execute_campaign_cadence_step_retries_failed_outbound_with_new_version() -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    message_repository = FakeOutboundMessageRepository()
+    send_now = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
+    await workflow_repository.save(
+        replace(
+            _workflow(),
+            state=WorkflowState.ACTIVE_NURTURE,
+            current_step_id=STEP_ONE_ID,
+            next_action_at=send_now,
+        )
+    )
+    await message_repository.save(
+        OutboundMessage(
+            message_id=UUID("00000000-0000-0000-0000-000000000099"),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            campaign_id=CAMPAIGN_ID,
+            cadence_step_id=str(STEP_ONE_ID),
+            channel=ContactChannel.EMAIL,
+            status=OutboundMessageStatus.FAILED,
+            idempotency_key=(
+                f"outbound:{WORKSPACE_ID}:{CAMPAIGN_ID}:{LEAD_ID}:{STEP_ONE_ID}:email:v1"
+            ),
+            body="Failed first attempt",
+            subject="Quick check-in",
+            created_at=NOW,
+            updated_at=NOW,
+            planned_at=NOW,
+            scheduled_for=send_now,
+            message_version=1,
+            provider_send_status=ProviderSendStatus.NOT_ATTEMPTED,
+            provider_name="mailgun",
+            failure_reason="HTTP 400",
+        )
+    )
+
+    email_provider = FakeEmailProvider("email-456")
+    result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=STEP_ONE_ID,
+        scheduled_for=send_now,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        message_repository=message_repository,
+        llm_client=FakeLLMClient(),
+        sms_provider=FakeSMSProvider(),
+        email_provider=email_provider,
+        now=send_now,
+    )
+
+    assert result.status == CadenceStepExecutionStatus.SENT
+    assert result.workflow is not None
+    assert result.workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+    assert len(email_provider.messages) == 1
+    assert email_provider.messages[0].idempotency_key.endswith(":email:v2")
+    assert message_repository.saved[-1].message_version == 2
+    assert message_repository.saved[-1].status == OutboundMessageStatus.SENT
+    assert message_repository.saved[-1].provider_message_id == "email-456"
+
+
 async def test_execute_campaign_cadence_step_persists_rich_draft_rejection_details() -> None:
     workflow_repository = FakeLeadWorkflowRepository()
     transition_repository = FakeWorkflowTransitionRepository()
@@ -618,8 +691,8 @@ async def test_execute_campaign_cadence_step_rejects_when_inbound_opt_out_arrive
     assert email_provider.messages == []
     final_workflow = await workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID)
     assert final_workflow is not None
-    assert final_workflow.state == WorkflowState.PAUSED
-    assert final_workflow.current_step_id == STEP_TWO_ID
+    assert final_workflow.state == WorkflowState.SUPPRESSED
+    assert final_workflow.current_step_id is None
     assert final_workflow.pause_reason == "opt_out_detected"
 
 
@@ -804,7 +877,7 @@ def _step(
 
 
 
-def _draft_requests(llm_client: FakeLLMClient) -> list:
+def _draft_requests(llm_client: FakeLLMClient) -> list[Any]:
     return [
         request
         for request in llm_client.requests

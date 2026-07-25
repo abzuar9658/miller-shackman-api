@@ -98,6 +98,12 @@ class WorkspaceHandoffConfigResponse(BaseModel):
     crm_handoff_tag: str | None = None
     crm_review_tag: str | None = None
     crm_custom_fields: dict[str, str]
+    lead_acknowledgment_sms_enabled: bool = False
+    lead_acknowledgment_sms_body: str | None = None
+    lead_acknowledgment_email_enabled: bool = False
+    lead_acknowledgment_email_subject: str | None = None
+    lead_acknowledgment_email_body: str | None = None
+    lead_acknowledgment_prompt_text: str | None = None
     crm_snapshot_summary_field: str | None = None
     crm_snapshot_status_field: str | None = None
     crm_snapshot_latest_inbound_field: str | None = None
@@ -175,6 +181,12 @@ class UpdateWorkspaceHandoffConfigRequest(BaseModel):
     crm_handoff_tag: str | None = Field(default=None, max_length=255)
     crm_review_tag: str | None = Field(default=None, max_length=255)
     crm_custom_fields: dict[str, str] = Field(default_factory=dict)
+    lead_acknowledgment_sms_enabled: bool = False
+    lead_acknowledgment_sms_body: str | None = Field(default=None, max_length=4000)
+    lead_acknowledgment_email_enabled: bool = False
+    lead_acknowledgment_email_subject: str | None = Field(default=None, max_length=255)
+    lead_acknowledgment_email_body: str | None = Field(default=None, max_length=4000)
+    lead_acknowledgment_prompt_text: str | None = Field(default=None, max_length=12000)
     crm_snapshot_summary_field: str | None = Field(default=None, max_length=255)
     crm_snapshot_status_field: str | None = Field(default=None, max_length=255)
     crm_snapshot_latest_inbound_field: str | None = Field(default=None, max_length=255)

@@ -24,6 +24,7 @@ from app.application.ports.repositories import (
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
     TemporalSignalOutboxRepository,
+    UserRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
     WorkspaceHandoffConfigRepository,
@@ -53,6 +54,7 @@ from app.infrastructure.persistence.postgres.crm_sync_repository import (
     PostgresExternalEventRepository,
 )
 from app.infrastructure.persistence.postgres.identity_repository import (
+    PostgresUserRepository,
     PostgresWorkspaceRepository,
 )
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
@@ -133,6 +135,7 @@ class InboundServiceBundle:
     message_repository: OutboundMessageRepository
     sms_provider: SMSProvider
     email_provider: EmailProvider
+    user_repository: UserRepository | None = None
 
 
 async def get_inbound_service_bundle(
@@ -148,6 +151,7 @@ async def get_inbound_service_bundle(
         conversation_summary_repository=PostgresConversationSummaryRepository(session),
         handoff_repository=PostgresHandoffRepository(session),
         handoff_completion_repository=PostgresHandoffCompletionRepository(session),
+        user_repository=PostgresUserRepository(session),
         inbound_message_crm_completion_repository=PostgresInboundMessageCRMCompletionRepository(
             session
         ),

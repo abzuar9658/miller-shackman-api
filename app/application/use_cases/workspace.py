@@ -876,6 +876,12 @@ async def update_workspace_handoff_config(
     crm_handoff_tag: str | None,
     crm_review_tag: str | None,
     crm_custom_fields: dict[str, str],
+    lead_acknowledgment_sms_enabled: bool,
+    lead_acknowledgment_sms_body: str | None,
+    lead_acknowledgment_email_enabled: bool,
+    lead_acknowledgment_email_subject: str | None,
+    lead_acknowledgment_email_body: str | None,
+    lead_acknowledgment_prompt_text: str | None,
     crm_snapshot_summary_field: str | None,
     crm_snapshot_status_field: str | None,
     crm_snapshot_latest_inbound_field: str | None,
@@ -920,6 +926,12 @@ async def update_workspace_handoff_config(
     normalized_tag = _normalize_optional_text(crm_handoff_tag)
     normalized_review_tag = _normalize_optional_text(crm_review_tag)
     normalized_custom_fields = _normalize_custom_fields(crm_custom_fields)
+    normalized_sms_body = _normalize_optional_text(lead_acknowledgment_sms_body)
+    normalized_email_subject = _normalize_optional_text(lead_acknowledgment_email_subject)
+    normalized_email_body = _normalize_optional_text(lead_acknowledgment_email_body)
+    normalized_acknowledgment_prompt_text = _normalize_optional_text(
+        lead_acknowledgment_prompt_text
+    )
     normalized_snapshot_summary_field = _normalize_optional_text(crm_snapshot_summary_field)
     normalized_snapshot_status_field = _normalize_optional_text(crm_snapshot_status_field)
     normalized_snapshot_latest_inbound_field = _normalize_optional_text(
@@ -939,6 +951,15 @@ async def update_workspace_handoff_config(
         and current_config.crm_handoff_tag == normalized_tag
         and current_config.crm_review_tag == normalized_review_tag
         and dict(current_config.crm_custom_fields) == normalized_custom_fields
+        and current_config.lead_acknowledgment_sms_enabled
+        == lead_acknowledgment_sms_enabled
+        and current_config.lead_acknowledgment_sms_body == normalized_sms_body
+        and current_config.lead_acknowledgment_email_enabled
+        == lead_acknowledgment_email_enabled
+        and current_config.lead_acknowledgment_email_subject == normalized_email_subject
+        and current_config.lead_acknowledgment_email_body == normalized_email_body
+        and current_config.lead_acknowledgment_prompt_text
+        == normalized_acknowledgment_prompt_text
         and current_config.crm_snapshot_summary_field == normalized_snapshot_summary_field
         and current_config.crm_snapshot_status_field == normalized_snapshot_status_field
         and current_config.crm_snapshot_latest_inbound_field
@@ -959,6 +980,12 @@ async def update_workspace_handoff_config(
         crm_handoff_tag=normalized_tag,
         crm_review_tag=normalized_review_tag,
         crm_custom_fields=normalized_custom_fields,
+        lead_acknowledgment_sms_enabled=lead_acknowledgment_sms_enabled,
+        lead_acknowledgment_sms_body=normalized_sms_body,
+        lead_acknowledgment_email_enabled=lead_acknowledgment_email_enabled,
+        lead_acknowledgment_email_subject=normalized_email_subject,
+        lead_acknowledgment_email_body=normalized_email_body,
+        lead_acknowledgment_prompt_text=normalized_acknowledgment_prompt_text,
         crm_snapshot_summary_field=normalized_snapshot_summary_field,
         crm_snapshot_status_field=normalized_snapshot_status_field,
         crm_snapshot_latest_inbound_field=normalized_snapshot_latest_inbound_field,
@@ -977,6 +1004,24 @@ async def update_workspace_handoff_config(
                 "crm_handoff_tag": saved_config.crm_handoff_tag or "",
                 "crm_review_tag": saved_config.crm_review_tag or "",
                 "crm_custom_fields": str(dict(saved_config.crm_custom_fields)),
+                "lead_acknowledgment_sms_enabled": str(
+                    saved_config.lead_acknowledgment_sms_enabled
+                ).lower(),
+                "lead_acknowledgment_sms_body_length": str(
+                    len(saved_config.lead_acknowledgment_sms_body or "")
+                ),
+                "lead_acknowledgment_email_enabled": str(
+                    saved_config.lead_acknowledgment_email_enabled
+                ).lower(),
+                "lead_acknowledgment_email_subject_length": str(
+                    len(saved_config.lead_acknowledgment_email_subject or "")
+                ),
+                "lead_acknowledgment_email_body_length": str(
+                    len(saved_config.lead_acknowledgment_email_body or "")
+                ),
+                "lead_acknowledgment_prompt_text_length": str(
+                    len(saved_config.lead_acknowledgment_prompt_text or "")
+                ),
                 "crm_snapshot_summary_field": saved_config.crm_snapshot_summary_field or "",
                 "crm_snapshot_status_field": saved_config.crm_snapshot_status_field or "",
                 "crm_snapshot_latest_inbound_field": (

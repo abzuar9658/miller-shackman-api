@@ -40,14 +40,16 @@ class HandoffNotification:
     lead_id: LeadId
     recipient_id: str
     recipient_destination: str
+    assigned_user_name: str | None
     lead_display_name: str
     lead_primary_email: str | None
     lead_primary_phone: str | None
+    crm_lead_id: str
+    crm_lead_url: str | None
     handoff_reason: HandoffReasonCode
     latest_inbound_text: str
     summary: str
     preferences: dict[str, str]
-    assigned_agent_name: str | None
     recommended_next_action: str
     idempotency_key: str
 

@@ -58,6 +58,12 @@ class WorkspaceHandoffConfig:
     crm_handoff_tag: str | None = None
     crm_review_tag: str | None = None
     crm_custom_fields: Mapping[str, str] = field(default_factory=_empty_string_mapping)
+    lead_acknowledgment_sms_enabled: bool = False
+    lead_acknowledgment_sms_body: str | None = None
+    lead_acknowledgment_email_enabled: bool = False
+    lead_acknowledgment_email_subject: str | None = None
+    lead_acknowledgment_email_body: str | None = None
+    lead_acknowledgment_prompt_text: str | None = None
     crm_snapshot_summary_field: str | None = None
     crm_snapshot_status_field: str | None = None
     crm_snapshot_latest_inbound_field: str | None = None
@@ -170,6 +176,10 @@ class Handoff:
     status: HandoffStatus = HandoffStatus.CREATED
     notified_at: datetime | None = None
     acknowledged_at: datetime | None = None
+
+
+def is_open_handoff(handoff: Handoff) -> bool:
+    return handoff.status not in {HandoffStatus.RESOLVED, HandoffStatus.CANCELLED}
 
 
 @dataclass(frozen=True)

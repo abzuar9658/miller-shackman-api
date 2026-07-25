@@ -76,11 +76,16 @@ def _render_handoff_body(notification: HandoffNotification) -> str:
     if notification.lead_primary_phone:
         lead_contacts.append(f"phone: {notification.lead_primary_phone}")
     contacts_text = ", ".join(lead_contacts) if lead_contacts else "no direct contact found"
-    assigned_agent_line = notification.assigned_agent_name or notification.recipient_id
+    assigned_user_line = notification.assigned_user_name or notification.recipient_id
+    crm_lead_lines = [f"CRM lead ID: {notification.crm_lead_id}"]
+    if notification.crm_lead_url:
+        crm_lead_lines.append(f"CRM lead link: {notification.crm_lead_url}")
+    crm_lead_text = "\n".join(crm_lead_lines)
     return (
         f"Lead handoff required for {notification.lead_display_name}.\n"
-        f"Assigned agent: {assigned_agent_line}\n"
+        f"Assigned user: {assigned_user_line}\n"
         f"Contact details: {contacts_text}\n"
+        f"{crm_lead_text}\n"
         f"Reason: {notification.handoff_reason.value}\n"
         f"Latest inbound: {notification.latest_inbound_text}\n\n"
         f"Conversation summary:\n{notification.summary}\n\n"

@@ -1,7 +1,7 @@
 import json
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from typing import TypedDict
 from uuid import UUID
 
@@ -24,7 +24,11 @@ from app.domain.campaigns.execution import (
     CampaignExecutionConfig,
     CampaignVersionStatus,
 )
-from app.domain.campaigns.outbound_message import OutboundMessageCRMCompletionRecord
+from app.domain.campaigns.outbound_message import (
+    OutboundMessage,
+    OutboundMessageCRMCompletionRecord,
+    OutboundMessageStatus,
+)
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance import SmsComplianceState, WorkspaceContactPolicy
@@ -34,12 +38,16 @@ from app.domain.conversations import (
     ConversationStatus,
     ConversationSummary,
     Handoff,
+    HandoffCompletionRecord,
+    HandoffReasonCode,
+    HandoffStatus,
     InboundMessage,
+    InboundMessageClassificationStatus,
     WorkspaceHandoffConfig,
 )
 from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
 from app.domain.events import DomainEvent, DomainEventType
-from app.domain.identity import Workspace, WorkspaceStatus
+from app.domain.identity import User, UserStatus, Workspace, WorkspaceStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.llm import WorkspaceLLMConfig
 from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
@@ -60,6 +68,7 @@ from tests.application.use_cases._campaign_cadence_fakes import (
 from tests.application.use_cases._campaign_enrollment_fakes import (
     FakeTemporalSignalOutboxRepository,
 )
+from tests.application.use_cases._lead_read_fakes import FakeUserRepository
 from tests.application.use_cases.test_complete_handoff import (
     FakeHandoffCompletionRepository,
     FakeNotificationProvider,
@@ -109,6 +118,19 @@ class FakeLeadRepository:
             return self.lead
         return None
 
+    async def list_by_assigned_agent_crm_id(
+        self,
+        workspace_id: WorkspaceId,
+        assigned_agent_crm_id: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        if (
+            self.lead is None
+            or self.lead.workspace_id != workspace_id
+            or self.lead.assigned_agent_crm_id != assigned_agent_crm_id
+        ):
+            return ()
+        return (self.lead,)
+
     async def get_by_primary_phone(
         self,
         workspace_id: WorkspaceId,
@@ -138,19 +160,29 @@ class FakeLeadRepository:
         workspace_id: WorkspaceId,
         email_address: str,
     ) -> CanonicalLeadRecord | None:
+        matches = await self.list_by_primary_email(workspace_id, email_address)
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
+    async def list_by_primary_email(
+        self,
+        workspace_id: WorkspaceId,
+        email_address: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
         if (
             self.lead is None
             or self.lead.workspace_id != workspace_id
             or self.lead.primary_email is None
         ):
-            return None
+            return ()
         requested = email_address.strip().lower()
         stored = self.lead.primary_email.strip().lower()
         if not requested or not stored:
-            return None
+            return ()
         if requested == stored:
-            return self.lead
-        return None
+            return (self.lead,)
+        return ()
 
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         self.lead = record
@@ -202,17 +234,58 @@ class FakeConversationRepository:
 class FakeInboundMessageRepository:
     def __init__(self) -> None:
         self.messages: dict[tuple[WorkspaceId, str, str], InboundMessage] = {}
+        self.messages_by_id: dict[tuple[WorkspaceId, UUID], InboundMessage] = {}
+
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        inbound_message_id: UUID,
+    ) -> InboundMessage | None:
+        return self.messages_by_id.get((workspace_id, inbound_message_id))
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[InboundMessage, ...]:
+        matches = tuple(
+            sorted(
+                (
+                    message
+                    for message in self.messages_by_id.values()
+                    if message.workspace_id == workspace_id and message.lead_id == lead_id
+                ),
+                key=lambda message: message.received_at,
+                reverse=True,
+            )
+        )
+        return matches[:limit]
 
     async def save(self, message: InboundMessage) -> InboundMessage:
         self.messages[(message.workspace_id, message.provider, message.provider_message_id)] = (
             message
         )
+        self.messages_by_id[(message.workspace_id, message.inbound_message_id)] = message
         return message
 
 
 class FakeConversationSummaryRepository:
     def __init__(self) -> None:
         self.saved: list[ConversationSummary] = []
+
+    async def get_latest_for_conversation(
+        self,
+        workspace_id: WorkspaceId,
+        conversation_id: UUID,
+    ) -> ConversationSummary | None:
+        matches = [
+            summary
+            for summary in self.saved
+            if summary.workspace_id == workspace_id and summary.conversation_id == conversation_id
+        ]
+        return max(matches, key=lambda summary: summary.created_at) if matches else None
 
     async def save(self, summary: ConversationSummary) -> ConversationSummary:
         self.saved.append(summary)
@@ -275,6 +348,20 @@ class FakeHandoffRepository:
     def __init__(self) -> None:
         self.saved: list[Handoff] = []
 
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[Handoff, ...]:
+        handoffs = tuple(
+            handoff
+            for handoff in self.saved
+            if handoff.workspace_id == workspace_id and handoff.lead_id == lead_id
+        )
+        return handoffs[:limit]
+
     async def list_handoffs(
         self,
         workspace_id: WorkspaceId,
@@ -308,14 +395,15 @@ class FakeEventBus:
 
 
 class FakeLLMClient:
-    def __init__(self, text: str) -> None:
-        self.text = text
+    def __init__(self, *texts: str) -> None:
+        self.texts = list(texts) or [""]
         self.requests: list[LLMCompletionRequest] = []
 
     async def complete(self, request: LLMCompletionRequest) -> LLMResult:
         self.requests.append(request)
+        index = min(len(self.requests) - 1, len(self.texts) - 1)
         return LLMResult(
-            text=self.text,
+            text=self.texts[index],
             model="openai/gpt-4o-mini",
             prompt_version=request.prompt_version,
             latency_ms=13,
@@ -349,15 +437,18 @@ class FakeCRMClient:
         lead_updated_at: datetime | None = None,
         activity_timestamps: tuple[datetime, ...] = (),
         assigned_agent: CRMAgent | None = None,
+        lead_tags: tuple[str, ...] = (),
     ) -> None:
         self.calls: list[str] = []
         self.notes: list[str] = []
         self.note_subjects: list[str | None] = []
         self.tags: list[str] = []
+        self.removed_tags: list[str] = []
         self.custom_field_updates: list[dict[str, str]] = []
         self._lead_updated_at = lead_updated_at
         self._activity_timestamps = activity_timestamps
         self._assigned_agent = assigned_agent
+        self._lead_tags = list(lead_tags)
 
     async def validate_connection(self, workspace_id: WorkspaceId) -> bool:
         return True
@@ -371,6 +462,7 @@ class FakeCRMClient:
             last_name="Lead",
             email="lead@example.com",
             phone="+15555550123",
+            tags=list(self._lead_tags),
             updated_at=self._lead_updated_at,
         )
 
@@ -405,6 +497,9 @@ class FakeCRMClient:
         self.calls.append("get_assigned_agent")
         return self._assigned_agent
 
+    async def get_lead_url(self, workspace_id: WorkspaceId, crm_lead_id: str) -> str | None:
+        return f"https://app.followupboss.com/2/people/{crm_lead_id}"
+
     async def add_note(
         self,
         workspace_id: WorkspaceId,
@@ -419,9 +514,13 @@ class FakeCRMClient:
     async def add_tag(self, workspace_id: WorkspaceId, crm_lead_id: str, tag: str) -> None:
         self.calls.append("add_tag")
         self.tags.append(tag)
+        if tag not in self._lead_tags:
+            self._lead_tags.append(tag)
 
     async def remove_tag(self, workspace_id: WorkspaceId, crm_lead_id: str, tag: str) -> None:
-        return None
+        self.calls.append("remove_tag")
+        self.removed_tags.append(tag)
+        self._lead_tags = [existing_tag for existing_tag in self._lead_tags if existing_tag != tag]
 
     async def update_custom_fields(
         self,
@@ -448,7 +547,7 @@ def _normalized_phone(phone_number: str | None) -> str | None:
     return digits_only or None
 
 
-def _lead() -> CanonicalLeadRecord:
+def _lead(*, assigned_agent_user_id: UUID | None = None) -> CanonicalLeadRecord:
     return CanonicalLeadRecord(
         workspace_id=WORKSPACE_ID,
         lead_id=LEAD_ID,
@@ -459,6 +558,7 @@ def _lead() -> CanonicalLeadRecord:
         lead_source="website",
         lead_stage="long_term_nurture",
         assigned_agent_crm_id="agent-99",
+        assigned_agent_user_id=assigned_agent_user_id,
         has_accountable_owner=True,
         primary_phone="+15555550123",
         has_phone=True,
@@ -467,10 +567,24 @@ def _lead() -> CanonicalLeadRecord:
     )
 
 
+def _assigned_user() -> User:
+    return User(
+        user_id=UUID("00000000-0000-0000-0000-000000000011"),
+        email="assigned@example.com",
+        email_normalized="assigned@example.com",
+        full_name="Avery Demo Agent",
+        status=UserStatus.ACTIVE,
+        email_verified_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
 def _event(
     payload_redacted: Mapping[str, object] | None = None,
     body: str = "Can an agent call me today?",
     channel: ContactChannel = ContactChannel.SMS,
+    email_subject: str | None = None,
 ) -> InboundMessageEvent:
     return InboundMessageEvent(
         workspace_id=WORKSPACE_ID,
@@ -481,6 +595,7 @@ def _event(
         channel=channel,
         body=body,
         received_at=NOW,
+        email_subject=email_subject,
         payload_redacted=payload_redacted or {"event": "redacted"},
     )
 
@@ -545,6 +660,7 @@ def _classification_json(
     opt_out_detected: bool = False,
     confidence: float = 0.91,
     summary_text: str = "Lead asked for a human callback.",
+    preferences: Mapping[str, str] | None = None,
 ) -> str:
     if asks_for_human is None:
         asks_for_human = intent == "human_requested"
@@ -562,7 +678,7 @@ def _classification_json(
             "asks_property_or_advice": asks_property_or_advice,
             "opt_out_detected": opt_out_detected,
             "summary_text": summary_text,
-            "preferences": {"timeline": "today"},
+            "preferences": dict(preferences or {"timeline": "today"}),
         },
     )
 
@@ -576,6 +692,23 @@ def _draft_json(*, body: str = "Thanks for your question! Your agent will follow
             "personalization_notes": ["Acknowledged the lead's question."],
             "safety_flags": [],
         },
+    )
+
+
+def _acknowledgment_json(
+    *,
+    body: str,
+    subject: str | None = None,
+    confidence: float = 0.92,
+    safety_flags: tuple[str, ...] = (),
+) -> str:
+    return json.dumps(
+        {
+            "body": body,
+            "subject": subject,
+            "confidence": confidence,
+            "safety_flags": list(safety_flags),
+        }
     )
 
 
@@ -913,7 +1046,61 @@ async def test_processes_opt_out_without_handoff() -> None:
     assert result.opt_out_detected is True
     assert result.handoff_id is None
     assert handoffs.saved == []
-    assert conversations.by_id[CONVERSATION_ID].status.value == "paused"
+    assert conversations.by_id[CONVERSATION_ID].status == ConversationStatus.CLOSED
+
+
+async def test_not_interested_completes_workflow_and_closes_conversation() -> None:
+    conversations = FakeConversationRepository()
+    crm_client = FakeCRMClient()
+    workflow_repository = _workflow_repository(_workflow())
+    transition_repository = FakeWorkflowTransitionRepository()
+
+    result = await process_inbound_message_event(
+        event=_event(body="No thanks, not interested anymore."),
+        lead_repository=FakeLeadRepository(_lead()),
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=conversations,
+        inbound_message_repository=FakeInboundMessageRepository(),
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        llm_client=FakeLLMClient(
+            _classification_json(
+                intent="not_interested",
+                summary_text="Lead clearly said they are not interested.",
+            )
+        ),
+        crm_client=crm_client,
+        inbound_message_crm_completion_repository=FakeInboundMessageCRMCompletionRepository(),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            _workspace_handoff_config_with_snapshot_fields()
+        ),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        now=NOW,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.inbound_action == InboundAction.COMPLETE_AUTOMATION
+    assert result.inbound_action_reason == InboundActionReasonCode.NOT_INTERESTED
+    assert result.continue_ai_status is None
+    assert (
+        workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)].state
+        == WorkflowState.COMPLETED
+    )
+    assert conversations.by_id[CONVERSATION_ID].status == ConversationStatus.CLOSED
+    assert len(transition_repository.transitions) == 1
+    transition = next(iter(transition_repository.transitions.values()))
+    assert transition.reason_code.value == "lead_not_interested"
+    assert crm_client.custom_field_updates == [
+        {
+            "ai_summary": "Lead clearly said they are not interested.",
+            "ai_status": "completed_no_interest",
+            "ai_latest_inbound": "No thanks, not interested anymore.",
+            "ai_last_activity_at": NOW.isoformat(),
+        }
+    ]
 
 
 async def test_returns_processed_with_classification_rejection_reason() -> None:
@@ -1048,7 +1235,7 @@ async def test_follow_up_boss_sourced_inbound_updates_snapshot_without_duplicate
 
 
 async def test_follow_up_boss_sourced_unclear_inbound_applies_review_tag_in_crm() -> None:
-    crm_client = FakeCRMClient()
+    crm_client = FakeCRMClient(lead_tags=("human_handoff_required",))
 
     result = await process_inbound_message_event(
         event=_event(),
@@ -1076,7 +1263,8 @@ async def test_follow_up_boss_sourced_unclear_inbound_applies_review_tag_in_crm(
     assert result.inbound_action == InboundAction.PAUSE_FOR_REVIEW
     assert result.inbound_action_reason == InboundActionReasonCode.UNCLEAR_INTENT
     assert result.review_tag_applied is True
-    assert crm_client.calls == ["get_lead", "get_recent_activity", "add_tag"]
+    assert crm_client.calls == ["get_lead", "get_recent_activity", "remove_tag", "add_tag"]
+    assert crm_client.removed_tags == ["human_handoff_required"]
     assert crm_client.tags == ["needs_agent_review"]
 
 
@@ -1430,6 +1618,68 @@ async def test_continue_ai_sends_outbound_sms_and_returns_to_waiting_for_respons
     assert "AI OUTBOUND · SMS" in crm_client.notes[0]
 
 
+async def test_continue_ai_preserves_prior_context_for_generic_follow_up_reply() -> None:
+    workflow = _workflow()
+    dependencies = _continue_ai_dependencies(workflow=workflow)
+    conversation_repository = dependencies["conversation_repository"]
+    summary_repository = dependencies["conversation_summary_repository"]
+    await conversation_repository.save(_conversation())
+    await summary_repository.save(
+        ConversationSummary(
+            summary_id=UUID("00000000-0000-0000-0000-000000000111"),
+            workspace_id=WORKSPACE_ID,
+            conversation_id=CONVERSATION_ID,
+            lead_id=LEAD_ID,
+            summary_text="Lead is searching for a home in Manhattan under $500k.",
+            preferences={
+                "location": "Manhattan",
+                "max_price": "500000",
+                "search_type": "sale",
+            },
+            prompt_version="test:v1",
+            model="openai/gpt-4o-mini",
+            created_at=NOW - timedelta(minutes=5),
+            confidence=0.92,
+        )
+    )
+    llm = _FakeLLMClientForContinuation(
+        classification_text=_classification_json(
+            intent="general_reply",
+            summary_text="Lead asked for more details about the earlier options.",
+            preferences={},
+        ),
+        draft_text=_draft_json(
+            body="Absolutely — I can share more detail on options in Manhattan under $500k."
+        ),
+    )
+
+    result = await process_inbound_message_event(
+        event=_event(body="tell me more"),
+        llm_client=llm,
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        summary_id_factory=lambda: SUMMARY_ID,
+        **dependencies,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.inbound_action == InboundAction.CONTINUE_AI
+    assert result.continue_ai_status == ContinueAIStatus.SENT
+    merged_summary = summary_repository.saved[-1]
+    assert "Manhattan" in merged_summary.summary_text
+    assert merged_summary.preferences["location"] == "Manhattan"
+    assert merged_summary.preferences["max_price"] == "500000"
+    draft_request = next(
+        request
+        for request in llm.requests
+        if "draft_outbound_real_estate_lead_follow_up" in request.prompt
+    )
+    assert '"location": "Manhattan"' in draft_request.prompt
+    assert '"max_price": "500000"' in draft_request.prompt
+
+
 async def test_continue_ai_sends_outbound_email_and_returns_to_waiting_for_response() -> None:
     workflow = _workflow()
     dependencies = _continue_ai_dependencies(workflow=workflow, channel=ContactChannel.EMAIL)
@@ -1452,6 +1702,7 @@ async def test_continue_ai_sends_outbound_email_and_returns_to_waiting_for_respo
         event=_event(
             body="How much are your services?",
             channel=ContactChannel.EMAIL,
+            email_subject="Re: Downtown condo inquiry",
         ),
         llm_client=_FakeLLMClientForContinuation(
             classification_text=_classification_json(
@@ -1474,6 +1725,9 @@ async def test_continue_ai_sends_outbound_email_and_returns_to_waiting_for_respo
     assert result.continue_ai_provider_message_id == "msg-123"
     assert len(sms_provider.messages) == 0
     assert len(email_provider.messages) == 1
+    assert email_provider.messages[0].subject == "Re: Downtown condo inquiry"
+    assert email_provider.messages[0].in_reply_to_message_id == "msg-1"
+    assert email_provider.messages[0].reference_message_ids == ("msg-1",)
     assert len(workflow_transition_repository.transitions) == 2
     final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     final_conversation = conversation_repository.by_id[CONVERSATION_ID]
@@ -1737,7 +1991,8 @@ async def test_processing_audit_persisted_for_continue_ai_blocked_at_turn_cap() 
 async def test_processing_audit_persisted_for_pause_for_review() -> None:
     external_events = FakeExternalEventRepository()
     crm_client = FakeCRMClient(
-        assigned_agent=CRMAgent(crm_agent_id="agent-99", email="agent@example.com", name="Agent")
+        assigned_agent=CRMAgent(crm_agent_id="agent-99", email="agent@example.com", name="Agent"),
+        lead_tags=("needs_agent_review",),
     )
     workspace_handoff_config = _workspace_handoff_config()
     lead_workflow_repository = _workflow_repository(_workflow())
@@ -1792,8 +2047,10 @@ async def test_processing_audit_persisted_for_pause_for_review() -> None:
 async def test_processing_audit_persisted_for_handoff_with_completion() -> None:
     external_events = FakeExternalEventRepository()
     workspace_handoff_config = _workspace_handoff_config()
+    assigned_user = _assigned_user()
     crm_client = FakeCRMClient(
-        assigned_agent=CRMAgent(crm_agent_id="agent-99", email="agent@example.com", name="Agent")
+        assigned_agent=CRMAgent(crm_agent_id="agent-99", email="agent@example.com", name="Agent"),
+        lead_tags=("needs_agent_review",),
     )
     handoff_repository = FakeHandoffRepository()
     handoff_completion_repository = FakeHandoffCompletionRepository()
@@ -1803,7 +2060,9 @@ async def test_processing_audit_persisted_for_handoff_with_completion() -> None:
 
     result = await process_inbound_message_event(
         event=_event(),
-        lead_repository=FakeLeadRepository(_lead()),
+        lead_repository=FakeLeadRepository(
+            _lead(assigned_agent_user_id=assigned_user.user_id)
+        ),
         external_event_repository=external_events,
         conversation_repository=FakeConversationRepository(),
         inbound_message_repository=FakeInboundMessageRepository(),
@@ -1816,6 +2075,7 @@ async def test_processing_audit_persisted_for_handoff_with_completion() -> None:
             workspace_handoff_config
         ),
         handoff_completion_repository=handoff_completion_repository,
+        user_repository=FakeUserRepository({assigned_user.user_id: assigned_user}),
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
         now=NOW,
@@ -1842,6 +2102,685 @@ async def test_processing_audit_persisted_for_handoff_with_completion() -> None:
     assert audit["handoff"]["handoff_id"] == str(HANDOFF_ID)
     assert audit["handoff"]["completion_status"] == "completed"
     assert audit["review_notification"]["sent"] is False
+    assert notification_provider.notifications[0].recipient_destination == "assigned@example.com"
+    assert notification_provider.notifications[0].crm_lead_url == (
+        "https://app.followupboss.com/2/people/crm-123"
+    )
+
+
+async def test_new_handoff_sends_configured_lead_acknowledgments() -> None:
+    lead = replace(
+        _lead(),
+        primary_email="lead@example.com",
+        has_email=True,
+        email_count=1,
+    )
+    conversations = FakeConversationRepository()
+    await conversations.save(_conversation())
+    inbound_messages = FakeInboundMessageRepository()
+    await inbound_messages.save(
+        InboundMessage(
+            inbound_message_id=UUID("00000000-0000-0000-0000-000000000031"),
+            workspace_id=WORKSPACE_ID,
+            conversation_id=CONVERSATION_ID,
+            lead_id=LEAD_ID,
+            channel=ContactChannel.SMS,
+            provider=CRMProvider.FOLLOW_UP_BOSS.value,
+            provider_message_id="msg-prior-inbound",
+            body="We are thinking about moving in October.",
+            received_at=NOW.replace(hour=11),
+            classification_status=InboundMessageClassificationStatus.CLASSIFIED,
+            created_at=NOW.replace(hour=11),
+        )
+    )
+    message_repository = FakeOutboundMessageRepository()
+    await message_repository.save(
+        OutboundMessage(
+            message_id=UUID("00000000-0000-0000-0000-000000000032"),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            campaign_id=CAMPAIGN_ID,
+            cadence_step_id="step-1",
+            channel=ContactChannel.SMS,
+            status=OutboundMessageStatus.SENT,
+            idempotency_key="prior-outbound",
+            body="Thanks for reaching out about your move. What timeline are you considering?",
+            created_at=NOW.replace(hour=11),
+            updated_at=NOW.replace(hour=11),
+            sent_at=NOW.replace(hour=11),
+        )
+    )
+    sms_provider = FakeSMSProvider("SMACK")
+    email_provider = FakeEmailProvider("EMACK")
+    llm = FakeLLMClient(
+        _classification_json(
+            intent="human_requested",
+            summary_text="Lead wants to speak with an agent about moving in October.",
+        ),
+        _acknowledgment_json(body="Thanks for reaching out — our team is on it."),
+        _acknowledgment_json(
+            body="Thanks for your message. A team member will follow up shortly.",
+            subject="We received your message",
+        ),
+    )
+
+    result = await process_inbound_message_event(
+        event=_event(),
+        lead_repository=FakeLeadRepository(lead),
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=conversations,
+        inbound_message_repository=inbound_messages,
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        llm_client=llm,
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            replace(
+                _workspace_handoff_config(),
+                lead_acknowledgment_sms_enabled=True,
+                lead_acknowledgment_sms_body="Thanks — our team will get back to you soon.",
+                lead_acknowledgment_email_enabled=True,
+                lead_acknowledgment_email_subject="We received your request",
+                lead_acknowledgment_email_body=(
+                    "Thanks for reaching out. Our team will get back to you soon."
+                ),
+                lead_acknowledgment_prompt_text="Keep it warm and confirm a human follow-up.",
+            )
+        ),
+        lead_workflow_repository=_workflow_repository(_workflow()),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _campaign_execution_config()
+        ),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
+        message_repository=message_repository,
+        sms_provider=sms_provider,
+        email_provider=email_provider,
+        now=NOW,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        handoff_id_factory=lambda: HANDOFF_ID,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.handoff_id == HANDOFF_ID
+    assert [message.body for message in sms_provider.messages] == [
+        "Thanks for reaching out — our team is on it."
+    ]
+    assert {
+        (
+            WORKSPACE_ID,
+            f"handoff:{HANDOFF_ID}:inbound:{INBOUND_MESSAGE_ID}:lead-acknowledgment:sms:v1",
+        )
+    }.issubset(set(message_repository.messages_by_idempotency_key))
+    assert email_provider.messages == []
+    assert "Lead wants to speak with an agent about moving in October." in llm.requests[1].prompt
+    assert "lead [sms]: We are thinking about moving in October." in llm.requests[1].prompt
+    assert (
+        "brokerage [sms]: Thanks for reaching out about your move. "
+        "What timeline are you considering?"
+        in llm.requests[1].prompt
+    )
+
+
+async def test_new_email_handoff_threads_lead_acknowledgment_to_inbound_email() -> None:
+    lead = replace(
+        _lead(),
+        primary_email="lead@example.com",
+        has_email=True,
+        email_count=1,
+    )
+    inbound_messages = FakeInboundMessageRepository()
+    email_provider = FakeEmailProvider("EMACK")
+
+    result = await process_inbound_message_event(
+        event=_event(
+            channel=ContactChannel.EMAIL,
+            email_subject="Re: Downtown condo inquiry",
+        ),
+        lead_repository=FakeLeadRepository(lead),
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=FakeConversationRepository(),
+        inbound_message_repository=inbound_messages,
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        llm_client=FakeLLMClient(
+            _classification_json(intent="human_requested"),
+            _acknowledgment_json(
+                body="Thanks for your note. An agent will follow up shortly.",
+                subject="This subject should be ignored",
+            ),
+        ),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            replace(
+                _workspace_handoff_config(),
+                lead_acknowledgment_email_enabled=True,
+                lead_acknowledgment_email_subject="Configured fallback subject",
+                lead_acknowledgment_email_body=(
+                    "Thanks for reaching out. Our team will get back to you soon."
+                ),
+                lead_acknowledgment_prompt_text="Acknowledge the email and say a human will reply.",
+            )
+        ),
+        lead_workflow_repository=_workflow_repository(_workflow()),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _campaign_execution_config(channel=ContactChannel.EMAIL)
+        ),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
+        message_repository=FakeOutboundMessageRepository(),
+        sms_provider=FakeSMSProvider(),
+        email_provider=email_provider,
+        now=NOW,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        handoff_id_factory=lambda: HANDOFF_ID,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.handoff_id == HANDOFF_ID
+    assert len(email_provider.messages) == 1
+    assert email_provider.messages[0].subject == "Re: Downtown condo inquiry"
+    assert (
+        email_provider.messages[0].body
+        == "Thanks for your note. An agent will follow up shortly."
+    )
+    assert email_provider.messages[0].in_reply_to_message_id == "msg-1"
+    assert email_provider.messages[0].reference_message_ids == ("msg-1",)
+
+
+async def test_new_handoff_uses_llm_acknowledgment_when_low_confidence_is_only_issue() -> None:
+    lead = replace(
+        _lead(),
+        primary_email="lead@example.com",
+        has_email=True,
+        email_count=1,
+    )
+    conversations = FakeConversationRepository()
+    await conversations.save(_conversation())
+    inbound_messages = FakeInboundMessageRepository()
+    await inbound_messages.save(
+        InboundMessage(
+            inbound_message_id=UUID("00000000-0000-0000-0000-000000000041"),
+            workspace_id=WORKSPACE_ID,
+            conversation_id=CONVERSATION_ID,
+            lead_id=LEAD_ID,
+            channel=ContactChannel.SMS,
+            provider=CRMProvider.FOLLOW_UP_BOSS.value,
+            provider_message_id="msg-prior-inbound-low-confidence",
+            body="We are planning a move and want to talk to someone.",
+            received_at=NOW.replace(hour=11),
+            classification_status=InboundMessageClassificationStatus.CLASSIFIED,
+            created_at=NOW.replace(hour=11),
+        )
+    )
+    message_repository = FakeOutboundMessageRepository()
+    await message_repository.save(
+        OutboundMessage(
+            message_id=UUID("00000000-0000-0000-0000-000000000042"),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            campaign_id=CAMPAIGN_ID,
+            cadence_step_id="step-1",
+            channel=ContactChannel.SMS,
+            status=OutboundMessageStatus.SENT,
+            idempotency_key="prior-outbound-low-confidence",
+            body="Thanks for reaching out. What timing are you considering for the move?",
+            created_at=NOW.replace(hour=11),
+            updated_at=NOW.replace(hour=11),
+            sent_at=NOW.replace(hour=11),
+        )
+    )
+    sms_provider = FakeSMSProvider("SMACK")
+    llm = FakeLLMClient(
+        _classification_json(
+            intent="human_requested",
+            summary_text="Lead wants to talk with an agent about their move.",
+        ),
+        _acknowledgment_json(
+            body=(
+                "Hi there! Thanks for your message and for your strong interest. "
+                "A member of our team will be in touch soon to assist you further."
+            ),
+            confidence=0.0,
+        ),
+    )
+
+    result = await process_inbound_message_event(
+        event=_event(),
+        lead_repository=FakeLeadRepository(lead),
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=conversations,
+        inbound_message_repository=inbound_messages,
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        llm_client=llm,
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            replace(
+                _workspace_handoff_config(),
+                lead_acknowledgment_sms_enabled=True,
+                lead_acknowledgment_sms_body="Thanks — our team will get back to you soon.",
+                lead_acknowledgment_prompt_text="Keep it warm and confirm a human follow-up.",
+            )
+        ),
+        lead_workflow_repository=_workflow_repository(_workflow()),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _campaign_execution_config()
+        ),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
+        message_repository=message_repository,
+        sms_provider=sms_provider,
+        email_provider=FakeEmailProvider("EMACK"),
+        now=NOW,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        handoff_id_factory=lambda: HANDOFF_ID,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.handoff_id == HANDOFF_ID
+    assert [message.body for message in sms_provider.messages] == [
+        (
+            "Hi there! Thanks for your message and for your strong interest. "
+            "A member of our team will be in touch soon to assist you further."
+        )
+    ]
+
+
+async def test_existing_open_handoff_sends_acknowledgments_again_for_new_qualifying_reply() -> None:
+    lead = replace(
+        _lead(),
+        primary_email="lead@example.com",
+        has_email=True,
+        email_count=1,
+    )
+    external_events = FakeExternalEventRepository()
+    conversation_repository = FakeConversationRepository()
+    handoff_repository = FakeHandoffRepository()
+    existing_handoff = Handoff(
+        handoff_id=HANDOFF_ID,
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        conversation_id=CONVERSATION_ID,
+        inbound_message_id=UUID("00000000-0000-0000-0000-000000000011"),
+        assigned_agent_crm_id="agent-99",
+        reason_code=HandoffReasonCode.HUMAN_REQUESTED,
+        summary="Lead asked for a callback.",
+        latest_inbound_text="Can an agent call me?",
+        created_at=NOW,
+        status=HandoffStatus.NOTIFIED,
+        notified_at=NOW,
+    )
+    handoff_repository.saved.append(existing_handoff)
+    await conversation_repository.save(
+        replace(_conversation(), status=ConversationStatus.HUMAN_HANDOFF)
+    )
+    inbound_messages = FakeInboundMessageRepository()
+    message_repository = FakeOutboundMessageRepository()
+    sms_provider = FakeSMSProvider("SMACK")
+    email_provider = FakeEmailProvider("EMACK")
+
+    result = await process_inbound_message_event(
+        event=replace(
+            _event(
+                body="Yes i am interested, please share more details.",
+                channel=ContactChannel.EMAIL,
+                email_subject="Re: Downtown condo inquiry",
+            ),
+            provider="mailgun",
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+        ),
+        lead_repository=FakeLeadRepository(lead),
+        external_event_repository=external_events,
+        conversation_repository=conversation_repository,
+        inbound_message_repository=inbound_messages,
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=handoff_repository,
+        llm_client=FakeLLMClient(
+            _classification_json(intent="human_requested"),
+            _acknowledgment_json(
+                body="Thanks for the follow-up. An agent will review this thread and reply.",
+                subject="Ignored because threading keeps the original subject",
+            ),
+        ),
+        crm_client=FakeCRMClient(
+            assigned_agent=CRMAgent(
+                crm_agent_id="agent-99",
+                email="agent@example.com",
+                name="Agent",
+            )
+        ),
+        notification_provider=FakeNotificationProvider(),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            replace(
+                _workspace_handoff_config(),
+                lead_acknowledgment_sms_enabled=True,
+                lead_acknowledgment_sms_body="Thanks — our team will get back to you soon.",
+                lead_acknowledgment_email_enabled=True,
+                lead_acknowledgment_email_subject="Configured fallback subject",
+                lead_acknowledgment_email_body=(
+                    "Thanks for reaching out. Our team will get back to you soon."
+                ),
+                lead_acknowledgment_prompt_text=(
+                    "Keep the follow-up acknowledgment warm and concise."
+                ),
+            )
+        ),
+        handoff_completion_repository=FakeHandoffCompletionRepository(),
+        inbound_message_crm_completion_repository=FakeInboundMessageCRMCompletionRepository(),
+        lead_workflow_repository=_workflow_repository(
+            replace(_workflow(), state=WorkflowState.HUMAN_HANDOFF)
+        ),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _campaign_execution_config(channel=ContactChannel.EMAIL)
+        ),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
+        message_repository=message_repository,
+        sms_provider=sms_provider,
+        email_provider=email_provider,
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        handoff_id_factory=lambda: UUID("00000000-0000-0000-0000-000000000012"),
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.handoff_required is True
+    assert result.handoff_id == HANDOFF_ID
+    assert sms_provider.messages == []
+    assert len(email_provider.messages) == 1
+    assert email_provider.messages[0].subject == "Re: Downtown condo inquiry"
+    assert (
+        email_provider.messages[0].body
+        == "Thanks for the follow-up. An agent will review this thread and reply."
+    )
+    assert email_provider.messages[0].in_reply_to_message_id == "msg-1"
+    assert email_provider.messages[0].reference_message_ids == ("msg-1",)
+    assert set(message_repository.messages_by_idempotency_key) == {
+        (
+            WORKSPACE_ID,
+            f"handoff:{HANDOFF_ID}:inbound:{INBOUND_MESSAGE_ID}:lead-acknowledgment:email:v1",
+        ),
+    }
+
+
+async def test_handoff_acknowledgment_falls_back_to_static_body_when_draft_is_invalid() -> None:
+    sms_provider = FakeSMSProvider("SMACK")
+
+    result = await process_inbound_message_event(
+        event=_event(),
+        lead_repository=FakeLeadRepository(_lead()),
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=FakeConversationRepository(),
+        inbound_message_repository=FakeInboundMessageRepository(),
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        llm_client=FakeLLMClient(
+            _classification_json(intent="human_requested"),
+            '{"not_body": "missing fields"}',
+        ),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            replace(
+                _workspace_handoff_config(),
+                lead_acknowledgment_sms_enabled=True,
+                lead_acknowledgment_sms_body="Thanks — our team will get back to you soon.",
+                lead_acknowledgment_prompt_text="Keep it warm and human.",
+            )
+        ),
+        lead_workflow_repository=_workflow_repository(_workflow()),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        campaign_execution_repository=FakeCampaignExecutionRepository(_campaign_execution_config()),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
+        message_repository=FakeOutboundMessageRepository(),
+        sms_provider=sms_provider,
+        email_provider=FakeEmailProvider(),
+        now=NOW,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        handoff_id_factory=lambda: HANDOFF_ID,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert [message.body for message in sms_provider.messages] == [
+        "Thanks — our team will get back to you soon."
+    ]
+
+
+async def test_handoff_notification_exception_does_not_abort_inbound_processing() -> None:
+    external_events = FakeExternalEventRepository()
+    inbound_messages = FakeInboundMessageRepository()
+    workspace_handoff_config = _workspace_handoff_config()
+    crm_client = FakeCRMClient(
+        assigned_agent=CRMAgent(crm_agent_id="agent-99", email="agent@example.com", name="Agent")
+    )
+    handoff_completion_repository = FakeHandoffCompletionRepository()
+    notification_provider = FakeNotificationProvider()
+    notification_provider.handoff_exception = RuntimeError("mailgun rejected notification")
+
+    result = await process_inbound_message_event(
+        event=replace(
+            _event(channel=ContactChannel.EMAIL),
+            provider="mailgun",
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        external_event_repository=external_events,
+        conversation_repository=FakeConversationRepository(),
+        inbound_message_repository=inbound_messages,
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        llm_client=FakeLLMClient(_classification_json(intent="human_requested")),
+        crm_client=crm_client,
+        notification_provider=notification_provider,
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            workspace_handoff_config
+        ),
+        handoff_completion_repository=handoff_completion_repository,
+        inbound_message_crm_completion_repository=FakeInboundMessageCRMCompletionRepository(),
+        lead_workflow_repository=_workflow_repository(_workflow()),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        handoff_id_factory=lambda: HANDOFF_ID,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.inbound_message_id == INBOUND_MESSAGE_ID
+    assert result.handoff_completion_status is not None
+    assert result.handoff_completion_status.value == "retryable_failure"
+    assert result.handoff_completion_failure_reason == "notification_exception:RuntimeError"
+    assert result.crm_sync_status == CompleteInboundMessageCRMSyncStatus.COMPLETED
+    assert len(inbound_messages.messages) == 1
+    assert crm_client.calls.count("add_note") == 2
+    assert "human_handoff_required" in crm_client.tags
+    assert handoff_completion_repository.record is not None
+    assert handoff_completion_repository.record.crm_note_written_at == NOW
+    saved_event = external_events.events[(WORKSPACE_ID, "mailgun", "evt-1")]
+    audit = saved_event.payload_redacted["processing_audit"]
+    assert audit["handoff"]["completion_status"] == "retryable_failure"
+    assert (
+        audit["handoff"]["completion_failure_reason"]
+        == "notification_exception:RuntimeError"
+    )
+
+
+async def test_second_handoff_worthy_reply_reuses_existing_open_handoff() -> None:
+    external_events = FakeExternalEventRepository()
+    conversation_repository = FakeConversationRepository()
+    handoff_repository = FakeHandoffRepository()
+    existing_handoff = Handoff(
+        handoff_id=HANDOFF_ID,
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        conversation_id=CONVERSATION_ID,
+        inbound_message_id=UUID("00000000-0000-0000-0000-000000000011"),
+        assigned_agent_crm_id="agent-99",
+        reason_code=HandoffReasonCode.HUMAN_REQUESTED,
+        summary="Lead asked for a callback.",
+        latest_inbound_text="Can an agent call me?",
+        created_at=NOW,
+        status=HandoffStatus.NOTIFIED,
+        notified_at=NOW,
+    )
+    handoff_repository.saved.append(existing_handoff)
+    await conversation_repository.save(
+        replace(_conversation(), status=ConversationStatus.HUMAN_HANDOFF)
+    )
+    workflow_repository = _workflow_repository(
+        replace(_workflow(), state=WorkflowState.HUMAN_HANDOFF)
+    )
+    workflow_transition_repository = FakeWorkflowTransitionRepository()
+    crm_client = FakeCRMClient(
+        assigned_agent=CRMAgent(crm_agent_id="agent-99", email="agent@example.com", name="Agent"),
+        lead_tags=("needs_agent_review",),
+    )
+    notification_provider = FakeNotificationProvider()
+    event_bus = FakeEventBus()
+
+    result = await process_inbound_message_event(
+        event=replace(
+            _event(body="Yes i am interested, please share more details."),
+            provider="mailgun",
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        external_event_repository=external_events,
+        conversation_repository=conversation_repository,
+        inbound_message_repository=FakeInboundMessageRepository(),
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=handoff_repository,
+        llm_client=FakeLLMClient(_classification_json(intent="human_requested")),
+        crm_client=crm_client,
+        notification_provider=notification_provider,
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            _workspace_handoff_config()
+        ),
+        handoff_completion_repository=FakeHandoffCompletionRepository(),
+        inbound_message_crm_completion_repository=FakeInboundMessageCRMCompletionRepository(),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        handoff_id_factory=lambda: UUID("00000000-0000-0000-0000-000000000012"),
+        event_bus=event_bus,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.handoff_required is True
+    assert result.handoff_id == HANDOFF_ID
+    assert len(handoff_repository.saved) == 1
+    assert notification_provider.notifications == []
+    assert crm_client.calls.count("add_note") == 1
+    assert crm_client.calls.count("remove_tag") == 1
+    assert crm_client.calls.count("add_tag") == 1
+    assert crm_client.removed_tags == ["needs_agent_review"]
+    assert crm_client.tags == ["human_handoff_required"]
+    assert [event.event_type for event in event_bus.events] == [
+        DomainEventType.MESSAGE_RECEIVED,
+        DomainEventType.WORKFLOW_TRANSITIONED,
+    ]
+    saved_event = external_events.events[(WORKSPACE_ID, "mailgun", "evt-1")]
+    audit = saved_event.payload_redacted["processing_audit"]
+    assert audit["handoff"]["handoff_id"] == str(HANDOFF_ID)
+    assert audit["handoff"]["reused_existing_handoff"] is True
+    assert audit["handoff"]["completion_status"] is None
+
+
+async def test_reused_handoff_reapplies_tag_even_if_already_recorded_as_applied() -> None:
+    external_events = FakeExternalEventRepository()
+    conversation_repository = FakeConversationRepository()
+    handoff_repository = FakeHandoffRepository()
+    existing_handoff = Handoff(
+        handoff_id=HANDOFF_ID,
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        conversation_id=CONVERSATION_ID,
+        inbound_message_id=UUID("00000000-0000-0000-0000-000000000011"),
+        assigned_agent_crm_id="agent-99",
+        reason_code=HandoffReasonCode.HUMAN_REQUESTED,
+        summary="Lead asked for a callback.",
+        latest_inbound_text="Can an agent call me?",
+        created_at=NOW,
+        status=HandoffStatus.NOTIFIED,
+        notified_at=NOW,
+    )
+    handoff_repository.saved.append(existing_handoff)
+    await conversation_repository.save(
+        replace(_conversation(), status=ConversationStatus.HUMAN_HANDOFF)
+    )
+    workflow_repository = _workflow_repository(
+        replace(_workflow(), state=WorkflowState.HUMAN_HANDOFF)
+    )
+    crm_client = FakeCRMClient(
+        assigned_agent=CRMAgent(crm_agent_id="agent-99", email="agent@example.com", name="Agent"),
+        lead_tags=("needs_agent_review",),
+    )
+    handoff_completion_repository = FakeHandoffCompletionRepository(
+        HandoffCompletionRecord(
+            handoff_id=HANDOFF_ID,
+            workspace_id=WORKSPACE_ID,
+            notification_idempotency_key="handoff:existing:agent-notification:v1",
+            crm_tag_applied_at=NOW,
+            last_attempted_at=NOW,
+        )
+    )
+
+    await process_inbound_message_event(
+        event=replace(
+            _event(body="Yes i am interested, please share more details."),
+            provider="mailgun",
+            crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        external_event_repository=external_events,
+        conversation_repository=conversation_repository,
+        inbound_message_repository=FakeInboundMessageRepository(),
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=handoff_repository,
+        llm_client=FakeLLMClient(_classification_json(intent="human_requested")),
+        crm_client=crm_client,
+        notification_provider=FakeNotificationProvider(),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            _workspace_handoff_config()
+        ),
+        handoff_completion_repository=handoff_completion_repository,
+        inbound_message_crm_completion_repository=FakeInboundMessageCRMCompletionRepository(),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        handoff_id_factory=lambda: UUID("00000000-0000-0000-0000-000000000012"),
+    )
+
+    assert crm_client.calls.count("remove_tag") == 1
+    assert crm_client.calls.count("add_tag") == 1
+    assert crm_client.removed_tags == ["needs_agent_review"]
+    assert crm_client.tags == ["human_handoff_required"]
 
 
 async def test_processing_audit_persisted_for_classification_rejected() -> None:

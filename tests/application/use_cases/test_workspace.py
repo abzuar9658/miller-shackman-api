@@ -643,6 +643,12 @@ def test_update_workspace_handoff_config_normalizes_values() -> None:
             crm_handoff_tag=" human_handoff_required ",
             crm_review_tag=" needs_agent_review ",
             crm_custom_fields={" handoff_status ": " required ", "": "skip"},
+            lead_acknowledgment_sms_enabled=True,
+            lead_acknowledgment_sms_body=" Thanks — we will get back to you soon. ",
+            lead_acknowledgment_email_enabled=True,
+            lead_acknowledgment_email_subject=" We received your message ",
+            lead_acknowledgment_email_body=" Thanks. We will get back to you soon. ",
+            lead_acknowledgment_prompt_text=" Keep it warm and confirm a human follow-up. ",
             crm_snapshot_summary_field=" ai_summary ",
             crm_snapshot_status_field=" ai_status ",
             crm_snapshot_latest_inbound_field=" ai_latest_inbound ",
@@ -662,6 +668,21 @@ def test_update_workspace_handoff_config_normalizes_values() -> None:
     assert result.handoff_config.crm_handoff_tag == "human_handoff_required"
     assert result.handoff_config.crm_review_tag == "needs_agent_review"
     assert dict(result.handoff_config.crm_custom_fields) == {"handoff_status": "required"}
+    assert result.handoff_config.lead_acknowledgment_sms_enabled is True
+    assert (
+        result.handoff_config.lead_acknowledgment_sms_body
+        == "Thanks — we will get back to you soon."
+    )
+    assert result.handoff_config.lead_acknowledgment_email_enabled is True
+    assert result.handoff_config.lead_acknowledgment_email_subject == "We received your message"
+    assert (
+        result.handoff_config.lead_acknowledgment_email_body
+        == "Thanks. We will get back to you soon."
+    )
+    assert (
+        result.handoff_config.lead_acknowledgment_prompt_text
+        == "Keep it warm and confirm a human follow-up."
+    )
     assert result.handoff_config.crm_snapshot_summary_field == "ai_summary"
     assert result.handoff_config.crm_snapshot_status_field == "ai_status"
     assert result.handoff_config.crm_snapshot_latest_inbound_field == "ai_latest_inbound"

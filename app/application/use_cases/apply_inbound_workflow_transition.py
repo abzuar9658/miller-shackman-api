@@ -35,9 +35,8 @@ async def apply_inbound_workflow_transition(
     *,
     workspace_id: WorkspaceId,
     lead_id: LeadId,
-    handoff_required: bool,
-    opt_out_detected: bool,
-    classification_rejected: bool,
+    action: InboundAction,
+    decision_reason: InboundActionReasonCode,
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
     now: datetime,
@@ -46,8 +45,6 @@ async def apply_inbound_workflow_transition(
     inbound_message_id: UUID | None = None,
     handoff_id: UUID | None = None,
     intent: InboundReplyIntent | None = None,
-    action: InboundAction | None = None,
-    decision_reason: InboundActionReasonCode | None = None,
     classification_reasons: tuple[str, ...] = (),
     transition_id_factory: Callable[[], UUID] | None = None,
 ) -> InboundWorkflowTransitionOutcome:
@@ -55,12 +52,8 @@ async def apply_inbound_workflow_transition(
     if workflow is None:
         return InboundWorkflowTransitionOutcome(status=InboundWorkflowTransitionStatus.NO_WORKFLOW)
 
-    reason_code = _reason_code(
-        handoff_required=handoff_required,
-        opt_out_detected=opt_out_detected,
-        classification_rejected=classification_rejected,
-    )
-    to_state = WorkflowState.HUMAN_HANDOFF if handoff_required else WorkflowState.PAUSED
+    to_state = _to_state(action)
+    reason_code = _reason_code(action=action, decision_reason=decision_reason)
     metadata = _metadata(
         conversation_id=conversation_id,
         inbound_message_id=inbound_message_id,
@@ -99,17 +92,30 @@ async def apply_inbound_workflow_transition(
 
 def _reason_code(
     *,
-    handoff_required: bool,
-    opt_out_detected: bool,
-    classification_rejected: bool,
+    action: InboundAction,
+    decision_reason: InboundActionReasonCode,
 ) -> WorkflowTransitionReasonCode:
-    if handoff_required:
+    if action == InboundAction.HUMAN_HANDOFF:
         return WorkflowTransitionReasonCode.HUMAN_HANDOFF_REQUIRED
-    if opt_out_detected:
+    if action == InboundAction.SUPPRESS:
         return WorkflowTransitionReasonCode.OPT_OUT_DETECTED
-    if classification_rejected:
+    if action == InboundAction.COMPLETE_AUTOMATION:
+        return WorkflowTransitionReasonCode.LEAD_NOT_INTERESTED
+    if decision_reason == InboundActionReasonCode.CLASSIFICATION_REJECTED:
         return WorkflowTransitionReasonCode.REPLY_CLASSIFICATION_REJECTED
+    if action == InboundAction.PAUSE_FOR_REVIEW:
+        return WorkflowTransitionReasonCode.INBOUND_REVIEW_REQUIRED
     return WorkflowTransitionReasonCode.INBOUND_REPLY_RECEIVED
+
+
+def _to_state(action: InboundAction) -> WorkflowState:
+    if action == InboundAction.HUMAN_HANDOFF:
+        return WorkflowState.HUMAN_HANDOFF
+    if action == InboundAction.SUPPRESS:
+        return WorkflowState.SUPPRESSED
+    if action == InboundAction.COMPLETE_AUTOMATION:
+        return WorkflowState.COMPLETED
+    return WorkflowState.PAUSED
 
 
 def _metadata(

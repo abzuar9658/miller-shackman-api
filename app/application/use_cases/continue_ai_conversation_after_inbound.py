@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
@@ -10,6 +10,7 @@ from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.repositories import (
     CampaignExecutionRepository,
     ConversationRepository,
+    InboundMessageRepository,
     LeadRepository,
     LeadWorkflowRepository,
     OutboundMessageCRMCompletionRepository,
@@ -21,6 +22,7 @@ from app.application.ports.repositories import (
     WorkspaceOutboundDraftingConfigRepository,
     WorkspaceRepository,
 )
+from app.application.services.email_threading import resolve_reply_email_subject
 from app.application.use_cases.apply_workflow_state_transition import (
     WorkflowStateTransitionStatus,
     apply_workflow_state_transition,
@@ -106,6 +108,7 @@ async def continue_ai_conversation_after_inbound(
     campaign_id: CampaignId,
     inbound_channel: ContactChannel,
     inbound_body: str,
+    inbound_email_subject: str | None = None,
     conversation: Conversation,
     latest_summary: ConversationSummary | None,
     conversation_repository: ConversationRepository,
@@ -119,6 +122,7 @@ async def continue_ai_conversation_after_inbound(
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
     message_repository: OutboundMessageRepository,
+    inbound_message_repository: InboundMessageRepository | None,
     sms_provider: SMSProvider,
     email_provider: EmailProvider,
     llm_client: LLMClient,
@@ -313,23 +317,40 @@ async def continue_ai_conversation_after_inbound(
             ),
         )
 
+    message = plan_result.message
+    assert message is not None
+
+    if plan_result.status == PlanOutboundMessageStatus.PLANNED:
+        resolved_subject = resolve_reply_email_subject(
+            inbound_channel=inbound_channel,
+            inbound_email_subject=inbound_email_subject,
+            drafted_subject=message.subject,
+        )
+        if resolved_subject != message.subject:
+            updated_message = await message_repository.save(
+                replace(message, subject=resolved_subject, updated_at=now)
+            )
+            message = updated_message
+
     send_context = OutboundSendContext(
         campaign_status=config.campaign_status,
         workflow_state=WorkflowState.RESPONSE_PROCESSING,
         enabled_channels=(inbound_channel,),
         workspace_contact_policy=workspace_contact_policy,
-        current_message_version=plan_result.message.message_version,
+        current_message_version=message.message_version,
         pre_send_policy=_pre_send_policy(workspace_contact_policy, workspace.default_timezone),
     )
     send_result = await send_outbound_message(
         workspace_id=workspace_id,
-        idempotency_key=plan_result.message.idempotency_key,
+        idempotency_key=message.idempotency_key,
         context=send_context,
         lead_repository=lead_repository,
         message_repository=message_repository,
         sms_provider=sms_provider,
         email_provider=email_provider,
         workspace_operational_control_repository=workspace_operational_control_repository,
+        inbound_message_repository=inbound_message_repository,
+        email_thread_anchor_inbound_message_id=inbound_message_id,
         now=now,
     )
 

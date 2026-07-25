@@ -21,6 +21,7 @@ from app.application.use_cases.crm_sync import (
     RunFollowUpBossLeadSyncStatus,
     run_follow_up_boss_lead_snapshot_sync,
 )
+from app.application.use_cases.evaluate_inbound_action import InboundAction
 from app.application.use_cases.process_inbound_message_event import (
     InboundMessageEvent,
     ProcessInboundMessageEventStatus,
@@ -247,17 +248,58 @@ class FakeConversationRepository:
 class FakeInboundMessageRepository:
     def __init__(self) -> None:
         self.messages: dict[tuple[WorkspaceId, str, str], InboundMessage] = {}
+        self.messages_by_id: dict[tuple[WorkspaceId, UUID], InboundMessage] = {}
+
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        inbound_message_id: UUID,
+    ) -> InboundMessage | None:
+        return self.messages_by_id.get((workspace_id, inbound_message_id))
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> tuple[InboundMessage, ...]:
+        matches = tuple(
+            sorted(
+                (
+                    message
+                    for message in self.messages_by_id.values()
+                    if message.workspace_id == workspace_id and message.lead_id == lead_id
+                ),
+                key=lambda message: message.received_at,
+                reverse=True,
+            )
+        )
+        return matches[:limit]
 
     async def save(self, message: InboundMessage) -> InboundMessage:
         self.messages[(message.workspace_id, message.provider, message.provider_message_id)] = (
             message
         )
+        self.messages_by_id[(message.workspace_id, message.inbound_message_id)] = message
         return message
 
 
 class FakeConversationSummaryRepository:
     def __init__(self) -> None:
         self.saved: list[ConversationSummary] = []
+
+    async def get_latest_for_conversation(
+        self,
+        workspace_id: WorkspaceId,
+        conversation_id: UUID,
+    ) -> ConversationSummary | None:
+        matches = [
+            summary
+            for summary in self.saved
+            if summary.workspace_id == workspace_id and summary.conversation_id == conversation_id
+        ]
+        return max(matches, key=lambda summary: summary.created_at) if matches else None
 
     async def save(self, summary: ConversationSummary) -> ConversationSummary:
         self.saved.append(summary)
@@ -268,6 +310,20 @@ class FakeHandoffRepository:
     def __init__(self) -> None:
         self.saved: list[Handoff] = []
         self.by_id: dict[UUID, Handoff] = {}
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[Handoff, ...]:
+        handoffs = tuple(
+            handoff
+            for handoff in self.saved
+            if handoff.workspace_id == workspace_id and handoff.lead_id == lead_id
+        )
+        return handoffs[:limit]
 
     async def list_handoffs(
         self,
@@ -374,6 +430,9 @@ class FakeCRMClient:
         self, workspace_id: WorkspaceId, crm_lead_id: str
     ) -> CRMAgent | None:
         return CRMAgent(crm_agent_id="agent-99", name="Agent Smith", email="agent@example.com")
+
+    async def get_lead_url(self, workspace_id: WorkspaceId, crm_lead_id: str) -> str | None:
+        return f"https://app.followupboss.com/2/people/{crm_lead_id}"
 
     async def add_note(
         self,
@@ -740,7 +799,48 @@ async def test_business_flow_harness_runs_sync_to_suppress_path() -> None:
     assert prepared.lead_repository.lead is not None
     assert prepared.lead_repository.lead.email_unsubscribed is True
     final_workflow = prepared.lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
-    assert final_workflow.state == WorkflowState.PAUSED
+    assert final_workflow.state == WorkflowState.SUPPRESSED
+    assert prepared.conversations.by_id[CONVERSATION_ID].status.value == "closed"
+    assert handoffs.saved == []
+
+
+async def test_business_flow_harness_runs_sync_to_not_interested_completion_path() -> None:
+    prepared = await _prepare_business_flow_until_waiting_for_response()
+    handoffs = FakeHandoffRepository()
+
+    inbound_result = await process_inbound_message_event(
+        event=_event(
+            provider_event_id="evt-not-interested-1",
+            provider_message_id="msg-not-interested-1",
+            body="No thanks, I am not interested anymore.",
+        ),
+        lead_repository=prepared.lead_repository,
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=prepared.conversations,
+        inbound_message_repository=prepared.inbound_messages,
+        conversation_summary_repository=prepared.summaries,
+        handoff_repository=handoffs,
+        llm_client=FakeInboundLLMClient(
+            _classification_json(
+                intent="not_interested",
+                asks_for_human=False,
+                summary_text="Lead is no longer interested in continuing.",
+            )
+        ),
+        now=NOW,
+        lead_workflow_repository=prepared.lead_workflow_repository,
+        workflow_transition_repository=prepared.workflow_transition_repository,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        summary_id_factory=lambda: SUMMARY_ID,
+    )
+
+    assert inbound_result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert inbound_result.inbound_action == InboundAction.COMPLETE_AUTOMATION
+    final_workflow = prepared.lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert final_workflow.state == WorkflowState.COMPLETED
+    assert prepared.conversations.by_id[CONVERSATION_ID].status.value == "closed"
     assert handoffs.saved == []
 
 

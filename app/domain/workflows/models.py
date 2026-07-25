@@ -25,9 +25,11 @@ class WorkflowTransitionReasonCode(StrEnum):
     CAMPAIGN_ENROLLMENT_STARTED = "campaign_enrollment_started"
     CADENCE_STEP_STARTED = "cadence_step_started"
     INBOUND_REPLY_RECEIVED = "inbound_reply_received"
+    INBOUND_REVIEW_REQUIRED = "inbound_review_required"
     CRM_HUMAN_ACTIVITY_DETECTED = "crm_human_activity_detected"
     CRM_OWNERSHIP_CHANGED = "crm_ownership_changed"
     CONTACT_SUPPRESSION_DETECTED = "contact_suppression_detected"
+    LEAD_NOT_INTERESTED = "lead_not_interested"
     REPLY_CLASSIFICATION_REJECTED = "reply_classification_rejected"
     HUMAN_HANDOFF_REQUIRED = "human_handoff_required"
     OPT_OUT_DETECTED = "opt_out_detected"
@@ -139,7 +141,13 @@ def _validate_transition(from_state: WorkflowState, to_state: WorkflowState) -> 
         )
     if from_state == WorkflowState.HUMAN_OWNED and to_state != WorkflowState.ACTIVE_NURTURE:
         raise WorkflowTransitionError("Human-owned workflows require explicit authorized resume.")
-    if to_state in {WorkflowState.PAUSED, WorkflowState.HUMAN_HANDOFF, WorkflowState.SUPPRESSED}:
+    if to_state in {
+        WorkflowState.PAUSED,
+        WorkflowState.HUMAN_HANDOFF,
+        WorkflowState.SUPPRESSED,
+        WorkflowState.COMPLETED,
+        WorkflowState.CLOSED,
+    }:
         return
     if from_state == WorkflowState.QUEUED and to_state == WorkflowState.ACTIVE_NURTURE:
         return

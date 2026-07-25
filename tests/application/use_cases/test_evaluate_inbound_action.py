@@ -83,6 +83,20 @@ def test_general_reply_is_marked_for_future_ai_continuation() -> None:
     assert decision.reason_code == InboundActionReasonCode.GENERAL_REPLY
 
 
+def test_not_interested_stops_automation_without_suppression() -> None:
+    decision = evaluate_inbound_action(
+        ReplyClassificationResult(
+            status=ReplyClassificationStatus.CLASSIFIED,
+            prompt_version="test:v1",
+            intent=InboundReplyIntent.NOT_INTERESTED,
+            summary_text="Lead said they are not interested right now.",
+        )
+    )
+
+    assert decision.action == InboundAction.COMPLETE_AUTOMATION
+    assert decision.reason_code == InboundActionReasonCode.NOT_INTERESTED
+
+
 def test_property_or_advice_evidence_forces_handoff_even_when_intent_is_general_reply() -> None:
     decision = evaluate_inbound_action(
         ReplyClassificationResult(

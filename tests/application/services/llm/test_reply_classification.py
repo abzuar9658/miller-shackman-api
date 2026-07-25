@@ -2,6 +2,8 @@ import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import pytest
+
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
 from app.application.services.llm.reply_classification import (
     INBOUND_REPLY_CLASSIFICATION_PROMPT_VERSION,
@@ -97,6 +99,71 @@ async def test_classifies_human_request_and_builds_versioned_prompt() -> None:
     assert result.summary_text == "Lead asked to speak with an agent."
     assert llm.requests[0].prompt_version == INBOUND_REPLY_CLASSIFICATION_PROMPT_VERSION
     assert "Can someone call me today?" in llm.requests[0].prompt
+
+
+@pytest.mark.parametrize(
+    ("intent", "evidence", "inbound_text", "opt_out_detected"),
+    [
+        (
+            "high_interest",
+            InboundReplyRuleEvidence(shows_buying_interest=True),
+            "I want to tour homes this weekend.",
+            False,
+        ),
+        (
+            "seller_interest",
+            InboundReplyRuleEvidence(shows_selling_interest=True),
+            "I need help selling my house.",
+            False,
+        ),
+        (
+            "opt_out",
+            InboundReplyRuleEvidence(),
+            "Stop texting me.",
+            True,
+        ),
+        (
+            "general_reply",
+            InboundReplyRuleEvidence(),
+            "Tell me more about those options.",
+            False,
+        ),
+        (
+            "not_interested",
+            InboundReplyRuleEvidence(),
+            "No thanks, I am not interested.",
+            False,
+        ),
+        (
+            "unclear",
+            InboundReplyRuleEvidence(),
+            "Maybe, I am not sure what I want yet.",
+            False,
+        ),
+    ],
+)
+async def test_classifies_each_supported_intent_shape(
+    intent: str,
+    evidence: InboundReplyRuleEvidence,
+    inbound_text: str,
+    opt_out_detected: bool,
+) -> None:
+    result = await classify_inbound_reply(
+        lead=_lead(),
+        inbound_text=inbound_text,
+        llm_client=FakeLLMClient(
+            _classification_json(
+                intent=intent,
+                opt_out_detected=opt_out_detected,
+                summary_text=f"Classifier recognized {intent}.",
+            )
+        ),
+    )
+
+    assert result.status == ReplyClassificationStatus.CLASSIFIED
+    assert result.intent == InboundReplyIntent(intent)
+    assert result.evidence == evidence
+    assert result.opt_out_detected is opt_out_detected
 
 
 async def test_rejects_invalid_json_response() -> None:

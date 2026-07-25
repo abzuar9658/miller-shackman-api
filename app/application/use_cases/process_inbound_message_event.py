@@ -2,7 +2,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
+from typing import cast
 from uuid import UUID, uuid4
+
+import structlog
 
 from app.application.ports.crm import CRMClient
 from app.application.ports.event_bus import EventBus
@@ -23,6 +26,7 @@ from app.application.ports.repositories import (
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
     TemporalSignalOutboxRepository,
+    UserRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
     WorkspaceHandoffConfigRepository,
@@ -31,7 +35,19 @@ from app.application.ports.repositories import (
     WorkspaceOutboundDraftingConfigRepository,
     WorkspaceRepository,
 )
+from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
+from app.application.services.crm_attention_tag_sync import (
+    remove_conflicting_crm_tag_if_present,
+)
 from app.application.services.crm_snapshot import has_crm_snapshot_fields
+from app.application.services.email_threading import (
+    resolve_lead_email_threading_headers,
+    resolve_reply_email_subject,
+)
+from app.application.services.llm.handoff_acknowledgment_drafting import (
+    draft_handoff_acknowledgment,
+    resolve_lead_acknowledgment_prompt_text,
+)
 from app.application.services.llm.reply_classification import (
     InboundReplyIntent,
     InboundReplyRuleEvidence,
@@ -52,6 +68,7 @@ from app.application.use_cases.complete_handoff import (
     HandoffCompletionResult,
     HandoffCompletionStatus,
     complete_handoff,
+    handoff_notification_idempotency_key,
 )
 from app.application.use_cases.complete_inbound_message_crm_sync import (
     CompleteInboundMessageCRMSyncResult,
@@ -72,22 +89,46 @@ from app.application.use_cases.evaluate_inbound_action import (
 from app.application.use_cases.process_contact_suppression_event import (
     apply_contact_suppression_to_lead,
 )
+from app.application.use_cases.send_outbound_message import (
+    OutboundSendContext,
+    send_outbound_message,
+)
+from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
+from app.domain.campaigns.pre_send import PreSendPolicy
 from app.domain.common.ids import LeadId, WorkspaceId
-from app.domain.compliance.contactability import ContactChannel, ContactSuppressionKind
+from app.domain.compliance.contactability import (
+    ContactChannel,
+    ContactSuppressionKind,
+    WorkspaceContactPolicy,
+    default_workspace_contact_policy,
+    evaluate_contactability,
+)
 from app.domain.conversations import (
     Conversation,
     ConversationStatus,
     ConversationSummary,
     Handoff,
+    HandoffCompletionRecord,
     InboundMessage,
     InboundMessageClassificationStatus,
     WorkspaceHandoffConfig,
     default_workspace_handoff_config,
+    is_open_handoff,
 )
 from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
-from app.domain.workflows import LeadWorkflow, TemporalSignalName, TemporalSignalOutboxEntry
+from app.domain.workflows import (
+    LeadWorkflow,
+    TemporalSignalName,
+    TemporalSignalOutboxEntry,
+    WorkflowState,
+)
+
+logger = structlog.get_logger(__name__)
+
+_HANDOFF_ACKNOWLEDGMENT_RECENT_MESSAGE_FETCH_LIMIT = 12
+_HANDOFF_ACKNOWLEDGMENT_RECENT_TRANSCRIPT_LIMIT = 6
 
 
 class ProcessInboundMessageEventStatus(StrEnum):
@@ -105,6 +146,15 @@ class ProcessInboundMessageEventReasonCode(StrEnum):
 
 _SMS_OPT_OUT_KEYWORDS = frozenset({"stop", "stopall", "unsubscribe", "cancel", "end", "quit"})
 _EMAIL_OPT_OUT_KEYWORDS = frozenset({"unsubscribe"})
+_MAX_CONVERSATION_SUMMARY_CHARS = 600
+_DEFAULT_LEAD_ACKNOWLEDGMENT_SMS_BODY = (
+    "Thanks for reaching out — our team will get back to you as soon as possible."
+)
+_DEFAULT_LEAD_ACKNOWLEDGMENT_EMAIL_SUBJECT = "We received your request"
+_DEFAULT_LEAD_ACKNOWLEDGMENT_EMAIL_BODY = (
+    "Thanks for reaching out. Our team will review your message and get back to you as soon "
+    "as possible."
+)
 
 
 def _empty_payload() -> Mapping[str, object]:
@@ -123,6 +173,7 @@ class InboundMessageEvent:
     received_at: datetime
     crm_provider: CRMProvider | None = None
     event_type: str = "inbound_message.received"
+    email_subject: str | None = None
     from_address_redacted: str | None = None
     to_address_redacted: str | None = None
     payload_redacted: Mapping[str, object] = field(default_factory=_empty_payload)
@@ -187,6 +238,7 @@ async def process_inbound_message_event(
     workspace_handoff_config_repository: WorkspaceHandoffConfigRepository | None = None,
     workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
     handoff_completion_repository: HandoffCompletionRepository | None = None,
+    user_repository: UserRepository | None = None,
     now: datetime,
     default_openrouter_model: str = "openai/gpt-4o-mini",
     lead_workflow_repository: LeadWorkflowRepository | None = None,
@@ -360,9 +412,8 @@ async def process_inbound_message_event(
         workflow_transition = await _apply_workflow_transition_if_configured(
             workspace_id=event.workspace_id,
             lead_id=lead.lead_id,
-            handoff_required=False,
-            opt_out_detected=False,
-            classification_rejected=True,
+            action=inbound_decision.action,
+            decision_reason=inbound_decision.reason_code,
             lead_workflow_repository=lead_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
             now=now,
@@ -370,8 +421,6 @@ async def process_inbound_message_event(
             conversation_id=conversation.conversation_id,
             inbound_message_id=inbound_message.inbound_message_id,
             intent=None,
-            action=inbound_decision.action,
-            decision_reason=inbound_decision.reason_code,
             classification_reasons=tuple(reason.value for reason in classification.reasons),
             transition_id_factory=workflow_transition_id_factory,
         )
@@ -451,6 +500,7 @@ async def process_inbound_message_event(
             review_notification=rejected_review_notification,
             handoff_completion_result=None,
             handoff=None,
+            existing_handoff_reused=False,
             signal_queued=signal_queued,
         )
         await external_event_repository.save(
@@ -515,10 +565,24 @@ async def process_inbound_message_event(
         llm_client=llm_client,
     )
 
-    conversation_status = ConversationStatus.PAUSED
-    if handoff_required:
-        conversation_status = ConversationStatus.HUMAN_HANDOFF
-    elif continue_ai_workflow is not None:
+    existing_open_handoff = (
+        await _latest_open_handoff_for_lead(
+            workspace_id=event.workspace_id,
+            lead_id=lead.lead_id,
+            handoff_repository=handoff_repository,
+        )
+        if handoff_required
+        else None
+    )
+
+    current_conversation_status = conversation.status
+    conversation_status = _conversation_status_after_inbound(
+        current_status=current_conversation_status,
+        inbound_action=inbound_decision.action,
+        continue_ai_result=None,
+        existing_open_handoff=existing_open_handoff,
+    )
+    if continue_ai_workflow is not None:
         conversation_status = ConversationStatus.ACTIVE_AI
     conversation = await conversation_repository.save(
         replace(conversation, status=conversation_status, updated_at=now),
@@ -539,14 +603,24 @@ async def process_inbound_message_event(
             occurred_at=event.received_at,
             lead_repository=lead_repository,
         )
+    previous_summary = await conversation_summary_repository.get_latest_for_conversation(
+        event.workspace_id,
+        conversation.conversation_id,
+    )
     saved_summary = await conversation_summary_repository.save(
         ConversationSummary(
             summary_id=(summary_id_factory or uuid4)(),
             workspace_id=event.workspace_id,
             conversation_id=conversation.conversation_id,
             lead_id=lead.lead_id,
-            summary_text=classification.summary_text or event.body,
-            preferences=classification.preferences,
+            summary_text=_merged_conversation_summary_text(
+                previous_summary=previous_summary,
+                current_summary_text=classification.summary_text or event.body,
+            ),
+            preferences=_merged_conversation_preferences(
+                previous_summary=previous_summary,
+                current_preferences=classification.preferences,
+            ),
             prompt_version=classification.prompt_version,
             model=classification.model or "unknown",
             confidence=classification.confidence,
@@ -554,7 +628,8 @@ async def process_inbound_message_event(
         ),
     )
 
-    handoff: Handoff | None = None
+    handoff: Handoff | None = existing_open_handoff
+    created_handoff: Handoff | None = None
     pending_handoff_id = ((handoff_id_factory or uuid4)() if handoff_required else None)
     continue_ai_result: ContinueAIResult | None = None
     if continue_ai_workflow is not None:
@@ -574,6 +649,7 @@ async def process_inbound_message_event(
             campaign_id=continue_ai_workflow.campaign_id,
             inbound_channel=event.channel,
             inbound_body=event.body,
+            inbound_email_subject=event.email_subject,
             conversation=conversation,
             latest_summary=saved_summary,
             conversation_repository=conversation_repository,
@@ -587,6 +663,7 @@ async def process_inbound_message_event(
             lead_workflow_repository=lead_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
             message_repository=message_repository,
+            inbound_message_repository=inbound_message_repository,
             sms_provider=sms_provider,
             email_provider=email_provider,
             llm_client=llm_client,
@@ -617,19 +694,20 @@ async def process_inbound_message_event(
         workflow_transition = await _apply_workflow_transition_if_configured(
             workspace_id=event.workspace_id,
             lead_id=lead.lead_id,
-            handoff_required=handoff_required,
-            opt_out_detected=classification.opt_out_detected,
-            classification_rejected=False,
+            action=inbound_decision.action,
+            decision_reason=inbound_decision.reason_code,
             lead_workflow_repository=lead_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
             now=now,
             external_event_id=saved_event.external_event_id,
             conversation_id=conversation.conversation_id,
             inbound_message_id=inbound_message.inbound_message_id,
-            handoff_id=pending_handoff_id,
+            handoff_id=(
+                existing_open_handoff.handoff_id
+                if existing_open_handoff is not None
+                else pending_handoff_id
+            ),
             intent=classification.intent,
-            action=inbound_decision.action,
-            decision_reason=inbound_decision.reason_code,
             transition_id_factory=workflow_transition_id_factory,
         )
     if workflow_transition.workflow is not None:
@@ -637,15 +715,21 @@ async def process_inbound_message_event(
             replace(
                 conversation,
                 status=_conversation_status_after_inbound(
-                    handoff_required=handoff_required,
+                    current_status=current_conversation_status,
+                    inbound_action=inbound_decision.action,
                     continue_ai_result=continue_ai_result,
+                    existing_open_handoff=existing_open_handoff,
                 ),
                 campaign_id=workflow_transition.workflow.campaign_id,
                 workflow_id=workflow_transition.workflow.workflow_id,
                 updated_at=now,
             ),
         )
-    if handoff_required and inbound_decision.handoff_reason is not None:
+    if (
+        handoff_required
+        and inbound_decision.handoff_reason is not None
+        and existing_open_handoff is None
+    ):
         handoff = await handoff_repository.save(
             Handoff(
                 handoff_id=pending_handoff_id or (handoff_id_factory or uuid4)(),
@@ -667,6 +751,7 @@ async def process_inbound_message_event(
                 created_at=now,
             ),
         )
+        created_handoff = handoff
         handoff_completion_result = None
         if (
             crm_client is not None
@@ -683,10 +768,43 @@ async def process_inbound_message_event(
                 lead_repository=lead_repository,
                 crm_client=crm_client,
                 notification_provider=notification_provider,
+                user_repository=user_repository,
                 now=now,
             )
     else:
         handoff_completion_result = None
+
+    if handoff_required and existing_open_handoff is not None and created_handoff is None:
+        await _ensure_handoff_tag_for_existing_handoff(
+            workspace_id=event.workspace_id,
+            lead=lead,
+            handoff=existing_open_handoff,
+            crm_client=crm_client,
+            workspace_handoff_config=workspace_handoff_config,
+            handoff_completion_repository=handoff_completion_repository,
+            now=now,
+        )
+
+    if handoff_required and inbound_decision.handoff_reason is not None and handoff is not None:
+        await _send_lead_handoff_acknowledgments_if_configured(
+            handoff=handoff,
+            inbound_event=event,
+            inbound_message=inbound_message,
+            workspace_handoff_config=workspace_handoff_config,
+            llm_client=llm_client,
+            openrouter_model=openrouter_model,
+            workspace_contact_policy_repository=workspace_contact_policy_repository,
+            workspace_repository=workspace_repository,
+            campaign_execution_repository=campaign_execution_repository,
+            inbound_message_repository=inbound_message_repository,
+            lead_repository=lead_repository,
+            message_repository=message_repository,
+            sms_provider=sms_provider,
+            email_provider=email_provider,
+            event_bus=event_bus,
+            workspace_operational_control_repository=workspace_operational_control_repository,
+            now=now,
+        )
 
     crm_sync_result = await _sync_inbound_message_to_crm_if_configured(
         event=event,
@@ -726,7 +844,7 @@ async def process_inbound_message_event(
         event=event,
         inbound_message=inbound_message,
         workflow_transition=workflow_transition,
-        handoff=handoff,
+        handoff=created_handoff,
         opt_out_detected=classification.opt_out_detected,
         now=now,
     )
@@ -770,6 +888,7 @@ async def process_inbound_message_event(
         review_notification=review_notification,
         handoff_completion_result=handoff_completion_result,
         handoff=handoff,
+        existing_handoff_reused=existing_open_handoff is not None and created_handoff is None,
         signal_queued=signal_queued,
     )
     await external_event_repository.save(
@@ -940,6 +1059,557 @@ async def _load_workspace_handoff_config(
     return await workspace_handoff_config_repository.get_by_workspace_id(workspace_id)
 
 
+async def _ensure_handoff_tag_for_existing_handoff(
+    *,
+    workspace_id: WorkspaceId,
+    lead: CanonicalLeadRecord,
+    handoff: Handoff,
+    crm_client: CRMClient | None,
+    workspace_handoff_config: WorkspaceHandoffConfig | None,
+    handoff_completion_repository: HandoffCompletionRepository | None,
+    now: datetime,
+) -> None:
+    handoff_tag = (
+        workspace_handoff_config.crm_handoff_tag if workspace_handoff_config is not None else None
+    )
+    review_tag = (
+        workspace_handoff_config.crm_review_tag if workspace_handoff_config is not None else None
+    )
+    if crm_client is None or not handoff_tag:
+        return
+
+    record = None
+    if handoff_completion_repository is not None:
+        record = await handoff_completion_repository.get_by_handoff_id(
+            workspace_id,
+            handoff.handoff_id,
+        )
+
+    try:
+        crm_lead = await crm_client.get_lead(workspace_id, lead.crm_lead_id)
+        await remove_conflicting_crm_tag_if_present(
+            crm_client=crm_client,
+            workspace_id=workspace_id,
+            crm_lead_id=lead.crm_lead_id,
+            existing_tags=(crm_lead.tags if crm_lead is not None else None),
+            active_tag=handoff_tag,
+            conflicting_tag=review_tag,
+        )
+        await crm_client.add_tag(workspace_id, lead.crm_lead_id, handoff_tag)
+    except Exception as exc:
+        if handoff_completion_repository is None:
+            return
+        ensured_record = record or HandoffCompletionRecord(
+            handoff_id=handoff.handoff_id,
+            workspace_id=workspace_id,
+            notification_idempotency_key=handoff_notification_idempotency_key(
+                handoff.handoff_id,
+            ),
+        )
+        await handoff_completion_repository.save(
+            replace(
+                ensured_record,
+                last_attempted_at=now,
+                failure_reason=f"crm_handoff_tag_reuse:{exc.__class__.__name__}",
+            )
+        )
+        return
+
+    if handoff_completion_repository is None:
+        return
+    ensured_record = record or HandoffCompletionRecord(
+        handoff_id=handoff.handoff_id,
+        workspace_id=workspace_id,
+        notification_idempotency_key=handoff_notification_idempotency_key(
+            handoff.handoff_id,
+        ),
+    )
+    await handoff_completion_repository.save(
+        replace(
+            ensured_record,
+            crm_tag_applied_at=now,
+            last_attempted_at=now,
+            failure_reason=None,
+        )
+    )
+
+
+async def _send_lead_handoff_acknowledgments_if_configured(
+    *,
+    handoff: Handoff,
+    inbound_event: InboundMessageEvent,
+    inbound_message: InboundMessage,
+    workspace_handoff_config: WorkspaceHandoffConfig | None,
+    llm_client: LLMClient,
+    openrouter_model: str,
+    workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None,
+    workspace_repository: WorkspaceRepository | None,
+    campaign_execution_repository: CampaignExecutionRepository | None,
+    inbound_message_repository: InboundMessageRepository,
+    lead_repository: LeadRepository,
+    message_repository: OutboundMessageRepository | None,
+    sms_provider: SMSProvider | None,
+    email_provider: EmailProvider | None,
+    event_bus: EventBus | None,
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
+    now: datetime,
+) -> None:
+    config = workspace_handoff_config or default_workspace_handoff_config(handoff.workspace_id)
+    if message_repository is None or campaign_execution_repository is None:
+        logger.info(
+            "lead_handoff_acknowledgment_skipped",
+            workspace_id=str(handoff.workspace_id),
+            handoff_id=str(handoff.handoff_id),
+            reason="missing_message_or_campaign_repository",
+        )
+        return
+    if handoff.campaign_id is None:
+        logger.info(
+            "lead_handoff_acknowledgment_skipped",
+            workspace_id=str(handoff.workspace_id),
+            handoff_id=str(handoff.handoff_id),
+            reason="handoff_campaign_missing",
+        )
+        return
+
+    campaign_config = await campaign_execution_repository.get_active_for_campaign(
+        handoff.workspace_id,
+        handoff.campaign_id,
+    )
+    if campaign_config is None:
+        logger.info(
+            "lead_handoff_acknowledgment_skipped",
+            workspace_id=str(handoff.workspace_id),
+            handoff_id=str(handoff.handoff_id),
+            campaign_id=str(handoff.campaign_id),
+            reason="campaign_not_active",
+        )
+        return
+
+    lead = await lead_repository.get_by_id(handoff.workspace_id, handoff.lead_id)
+    if lead is None:
+        logger.info(
+            "lead_handoff_acknowledgment_skipped",
+            workspace_id=str(handoff.workspace_id),
+            handoff_id=str(handoff.handoff_id),
+            lead_id=str(handoff.lead_id),
+            reason="lead_not_found",
+        )
+        return
+
+    policy_from_repository = (
+        await workspace_contact_policy_repository.get_by_workspace_id(handoff.workspace_id)
+        if workspace_contact_policy_repository is not None
+        else None
+    )
+    policy = policy_from_repository or default_workspace_contact_policy(handoff.workspace_id)
+    workspace = (
+        await workspace_repository.get_by_id(handoff.workspace_id)
+        if workspace_repository is not None
+        else None
+    )
+    timezone = workspace.default_timezone if workspace is not None else campaign_config.timezone
+    pre_send_policy = _handoff_acknowledgment_pre_send_policy(policy, timezone)
+    logger.info(
+        "lead_handoff_acknowledgment_policy_loaded",
+        workspace_id=str(handoff.workspace_id),
+        handoff_id=str(handoff.handoff_id),
+        lead_id=str(handoff.lead_id),
+        policy_source="repository" if policy_from_repository is not None else "default",
+        sms_compliance_state=policy.sms_compliance_state.value,
+        quiet_hours_enabled=policy.quiet_hours_enabled,
+        quiet_hours_start=(
+            policy.quiet_hours_start.isoformat() if policy.quiet_hours_start is not None else None
+        ),
+        quiet_hours_end=(
+            policy.quiet_hours_end.isoformat() if policy.quiet_hours_end is not None else None
+        ),
+        inbound_email_address=policy.inbound_email_address,
+        pre_send_allowed_start_hour=pre_send_policy.allowed_send_start_hour,
+        pre_send_allowed_end_hour=pre_send_policy.allowed_send_end_hour,
+        pre_send_timezone=pre_send_policy.timezone,
+    )
+    email_threading_headers = await resolve_lead_email_threading_headers(
+        workspace_id=handoff.workspace_id,
+        lead_id=handoff.lead_id,
+        inbound_message_repository=inbound_message_repository,
+        message_repository=message_repository,
+        anchor_inbound_message_id=inbound_message.inbound_message_id,
+    )
+    acknowledgment_prompt_text = resolve_lead_acknowledgment_prompt_text(
+        config.lead_acknowledgment_prompt_text
+    )
+    recent_conversation_context = await _recent_handoff_acknowledgment_conversation_context(
+        handoff=handoff,
+        inbound_message=inbound_message,
+        inbound_message_repository=inbound_message_repository,
+        message_repository=message_repository,
+    )
+
+    for channel, fallback_body, fallback_subject in _lead_acknowledgment_templates(
+        config,
+        inbound_event.channel,
+    ):
+        if channel == ContactChannel.SMS and sms_provider is None:
+            logger.info(
+                "lead_handoff_acknowledgment_skipped",
+                workspace_id=str(handoff.workspace_id),
+                handoff_id=str(handoff.handoff_id),
+                lead_id=str(handoff.lead_id),
+                channel=channel.value,
+                reason="sms_provider_unavailable",
+            )
+            continue
+        if channel == ContactChannel.EMAIL and email_provider is None:
+            logger.info(
+                "lead_handoff_acknowledgment_skipped",
+                workspace_id=str(handoff.workspace_id),
+                handoff_id=str(handoff.handoff_id),
+                lead_id=str(handoff.lead_id),
+                channel=channel.value,
+                reason="email_provider_unavailable",
+            )
+            continue
+
+        contactability_facts = contactability_facts_from_canonical_lead(lead)
+        contactability_decision = evaluate_contactability(contactability_facts, policy, channel)
+        logger.info(
+            "lead_handoff_acknowledgment_contactability",
+            workspace_id=str(handoff.workspace_id),
+            handoff_id=str(handoff.handoff_id),
+            lead_id=str(handoff.lead_id),
+            channel=channel.value,
+            do_not_contact=contactability_facts.do_not_contact,
+            has_sms_destination=contactability_facts.has_sms_destination,
+            has_email_destination=contactability_facts.has_email_destination,
+            sms_consent_status=(
+                contactability_facts.sms_consent_status.value
+                if contactability_facts.sms_consent_status is not None
+                else None
+            ),
+            email_permission_status=(
+                contactability_facts.email_permission_status.value
+                if contactability_facts.email_permission_status is not None
+                else None
+            ),
+            suppressions=[suppression.value for suppression in contactability_facts.suppressions],
+            contactability_allowed=contactability_decision.allowed,
+            contactability_reasons=[reason.value for reason in contactability_decision.reasons],
+        )
+
+        drafted_body = fallback_body
+        drafted_subject = fallback_subject
+        draft_source = "fallback"
+        try:
+            draft_result = await draft_handoff_acknowledgment(
+                lead=lead,
+                channel=channel,
+                inbound_text=inbound_event.body,
+                inbound_email_subject=inbound_event.email_subject,
+                handoff_reason_code=handoff.reason_code.value,
+                handoff_summary=handoff.summary,
+                recent_conversation_context=recent_conversation_context,
+                brokerage_name=workspace.name if workspace is not None else None,
+                assigned_agent_name=None,
+                admin_prompt_text=acknowledgment_prompt_text,
+                reply_in_existing_email_thread=(
+                    channel == ContactChannel.EMAIL and email_threading_headers.has_thread
+                ),
+                llm_client=llm_client,
+                model=openrouter_model,
+            )
+        except Exception as exc:
+            draft_result = None
+            logger.warning(
+                "lead_handoff_acknowledgment_draft_failed",
+                workspace_id=str(handoff.workspace_id),
+                handoff_id=str(handoff.handoff_id),
+                lead_id=str(handoff.lead_id),
+                channel=channel.value,
+                error=str(exc),
+            )
+
+        if draft_result is not None and draft_result.status.value == "drafted":
+            drafted_body = draft_result.body or fallback_body
+            if draft_result.subject is not None:
+                drafted_subject = draft_result.subject
+            draft_source = "llm"
+        elif draft_result is not None:
+            logger.info(
+                "lead_handoff_acknowledgment_draft_fallback",
+                workspace_id=str(handoff.workspace_id),
+                handoff_id=str(handoff.handoff_id),
+                lead_id=str(handoff.lead_id),
+                channel=channel.value,
+                draft_status=draft_result.status.value,
+                draft_reasons=[reason.value for reason in draft_result.reasons],
+                safety_flags=list(draft_result.safety_flags),
+                confidence=draft_result.confidence,
+                validation_error=draft_result.validation_error,
+                raw_llm_response_text=draft_result.raw_llm_response_text,
+            )
+
+        subject = _lead_acknowledgment_subject(
+            channel=channel,
+            configured_subject=drafted_subject,
+            inbound_event=inbound_event,
+        )
+
+        idempotency_key = lead_handoff_acknowledgment_idempotency_key(
+            handoff.handoff_id,
+            inbound_message.inbound_message_id,
+            channel,
+        )
+        message = await message_repository.get_by_idempotency_key(
+            handoff.workspace_id,
+            idempotency_key,
+        )
+        if message is None:
+            message = await message_repository.save(
+                OutboundMessage(
+                    message_id=uuid4(),
+                    workspace_id=handoff.workspace_id,
+                    lead_id=handoff.lead_id,
+                    campaign_id=handoff.campaign_id,
+                    cadence_step_id=f"handoff_acknowledgment_{channel.value}",
+                    channel=channel,
+                    status=OutboundMessageStatus.PENDING,
+                    idempotency_key=idempotency_key,
+                    body=drafted_body,
+                    subject=subject,
+                    scheduled_for=now,
+                    planned_at=now,
+                    created_at=now,
+                    updated_at=now,
+                    message_version=1,
+                )
+            )
+        elif message.body != drafted_body or message.subject != subject:
+            message = await message_repository.save(
+                replace(
+                    message,
+                    body=drafted_body,
+                    subject=subject,
+                    updated_at=now,
+                )
+            )
+
+        send_result = await send_outbound_message(
+            workspace_id=handoff.workspace_id,
+            idempotency_key=message.idempotency_key,
+            context=OutboundSendContext(
+                campaign_status=campaign_config.campaign_status,
+                workflow_state=WorkflowState.HUMAN_HANDOFF,
+                enabled_channels=(channel,),
+                workspace_contact_policy=policy,
+                current_message_version=message.message_version,
+                pre_send_policy=_handoff_acknowledgment_pre_send_policy(policy, timezone),
+            ),
+            lead_repository=lead_repository,
+            message_repository=message_repository,
+            sms_provider=cast(SMSProvider, sms_provider),
+            email_provider=cast(EmailProvider, email_provider),
+            event_bus=event_bus,
+            workspace_operational_control_repository=workspace_operational_control_repository,
+            now=now,
+            email_in_reply_to_message_id=(
+                email_threading_headers.in_reply_to_message_id
+                if channel == ContactChannel.EMAIL
+                else None
+            ),
+            email_reference_message_ids=(
+                email_threading_headers.reference_message_ids
+                if channel == ContactChannel.EMAIL
+                else ()
+            ),
+        )
+        logger.info(
+            "lead_handoff_acknowledgment_send_result",
+            workspace_id=str(handoff.workspace_id),
+            handoff_id=str(handoff.handoff_id),
+            lead_id=str(handoff.lead_id),
+            inbound_message_id=str(inbound_message.inbound_message_id),
+            outbound_message_id=str(message.message_id),
+            campaign_id=str(handoff.campaign_id),
+            channel=channel.value,
+            draft_source=draft_source,
+            send_status=send_result.status.value,
+            send_reasons=[reason.value for reason in send_result.reasons],
+            pre_send_reasons=(
+                [reason.value for reason in send_result.pre_send_decision.reasons]
+                if send_result.pre_send_decision is not None
+                else []
+            ),
+            persisted_message_status=(
+                send_result.message.status.value
+                if send_result.message is not None
+                else message.status.value
+            ),
+            provider_send_status=(
+                send_result.message.provider_send_status.value
+                if send_result.message is not None
+                else message.provider_send_status.value
+            ),
+            provider_name=(
+                send_result.message.provider_name
+                if send_result.message is not None
+                else message.provider_name
+            ),
+            provider_message_id=(
+                send_result.message.provider_message_id
+                if send_result.message is not None
+                else message.provider_message_id
+            ),
+        )
+
+
+def lead_handoff_acknowledgment_idempotency_key(
+    handoff_id: UUID,
+    inbound_message_id: UUID,
+    channel: ContactChannel,
+) -> str:
+    return (
+        f"handoff:{handoff_id}:inbound:{inbound_message_id}:"
+        f"lead-acknowledgment:{channel.value}:v1"
+    )
+
+
+def _lead_acknowledgment_templates(
+    config: WorkspaceHandoffConfig,
+    inbound_channel: ContactChannel,
+) -> tuple[tuple[ContactChannel, str, str | None], ...]:
+    templates: list[tuple[ContactChannel, str, str | None]] = []
+    if inbound_channel == ContactChannel.SMS and config.lead_acknowledgment_sms_enabled:
+        templates.append(
+            (
+                ContactChannel.SMS,
+                config.lead_acknowledgment_sms_body or _DEFAULT_LEAD_ACKNOWLEDGMENT_SMS_BODY,
+                None,
+            )
+        )
+    if inbound_channel == ContactChannel.EMAIL and config.lead_acknowledgment_email_enabled:
+        templates.append(
+            (
+                ContactChannel.EMAIL,
+                config.lead_acknowledgment_email_body or _DEFAULT_LEAD_ACKNOWLEDGMENT_EMAIL_BODY,
+                config.lead_acknowledgment_email_subject
+                or _DEFAULT_LEAD_ACKNOWLEDGMENT_EMAIL_SUBJECT,
+            )
+        )
+    return tuple(templates)
+
+
+def _lead_acknowledgment_subject(
+    *,
+    channel: ContactChannel,
+    configured_subject: str | None,
+    inbound_event: InboundMessageEvent,
+) -> str | None:
+    if channel != ContactChannel.EMAIL:
+        return configured_subject
+    return resolve_reply_email_subject(
+        inbound_channel=inbound_event.channel,
+        inbound_email_subject=inbound_event.email_subject,
+        drafted_subject=configured_subject,
+    )
+
+
+@dataclass(frozen=True)
+class _AcknowledgmentConversationContextLine:
+    occurred_at: datetime
+    text: str
+
+
+async def _recent_handoff_acknowledgment_conversation_context(
+    *,
+    handoff: Handoff,
+    inbound_message: InboundMessage,
+    inbound_message_repository: InboundMessageRepository,
+    message_repository: OutboundMessageRepository,
+) -> str | None:
+    inbound_messages = await inbound_message_repository.list_for_lead(
+        handoff.workspace_id,
+        handoff.lead_id,
+        limit=_HANDOFF_ACKNOWLEDGMENT_RECENT_MESSAGE_FETCH_LIMIT,
+    )
+    outbound_messages = await message_repository.list_for_lead(
+        handoff.workspace_id,
+        handoff.lead_id,
+        limit=_HANDOFF_ACKNOWLEDGMENT_RECENT_MESSAGE_FETCH_LIMIT,
+    )
+
+    lines: list[_AcknowledgmentConversationContextLine] = []
+    for message in inbound_messages:
+        if message.conversation_id != inbound_message.conversation_id:
+            continue
+        formatted = _format_inbound_message_for_acknowledgment_context(message)
+        if formatted is None:
+            continue
+        lines.append(
+            _AcknowledgmentConversationContextLine(
+                occurred_at=message.received_at,
+                text=formatted,
+            )
+        )
+
+    for message in outbound_messages:
+        if message.campaign_id != handoff.campaign_id:
+            continue
+        if message.status != OutboundMessageStatus.SENT:
+            continue
+        formatted = _format_outbound_message_for_acknowledgment_context(message)
+        if formatted is None:
+            continue
+        lines.append(
+            _AcknowledgmentConversationContextLine(
+                occurred_at=(message.sent_at or message.created_at),
+                text=formatted,
+            )
+        )
+
+    recent_lines = sorted(lines, key=lambda item: item.occurred_at)[
+        -_HANDOFF_ACKNOWLEDGMENT_RECENT_TRANSCRIPT_LIMIT :
+    ]
+    if not recent_lines:
+        return None
+    return "\n".join(item.text for item in recent_lines)
+
+
+def _format_inbound_message_for_acknowledgment_context(message: InboundMessage) -> str | None:
+    body = message.body.strip()
+    if not body:
+        return None
+    return f"lead [{message.channel.value}]: {body}"
+
+
+def _format_outbound_message_for_acknowledgment_context(message: OutboundMessage) -> str | None:
+    body = message.body.strip()
+    if not body:
+        return None
+    return f"brokerage [{message.channel.value}]: {body}"
+
+
+def _handoff_acknowledgment_pre_send_policy(
+    policy: WorkspaceContactPolicy,
+    timezone: str | None,
+) -> PreSendPolicy:
+    if not policy.quiet_hours_enabled:
+        return PreSendPolicy(
+            sendable_workflow_states=frozenset({WorkflowState.HUMAN_HANDOFF}),
+            allowed_send_start_hour=0,
+            allowed_send_end_hour=24,
+            allow_simultaneous_channels=True,
+            timezone=timezone,
+        )
+    return PreSendPolicy(
+        sendable_workflow_states=frozenset({WorkflowState.HUMAN_HANDOFF}),
+        allowed_send_start_hour=(policy.quiet_hours_start.hour if policy.quiet_hours_start else 10),
+        allowed_send_end_hour=(policy.quiet_hours_end.hour if policy.quiet_hours_end else 17),
+        allow_simultaneous_channels=True,
+        timezone=timezone,
+    )
+
+
 def _crm_snapshot_status_for_inbound(
     *,
     inbound_action: InboundAction,
@@ -954,6 +1624,8 @@ def _crm_snapshot_status_for_inbound(
         return "paused_for_review"
     if handoff_required or inbound_action == InboundAction.HUMAN_HANDOFF:
         return "human_handoff_required"
+    if inbound_action == InboundAction.COMPLETE_AUTOMATION:
+        return "completed_no_interest"
     if continue_ai_result is not None and continue_ai_result.status in {
         ContinueAIStatus.SENT,
         ContinueAIStatus.ALREADY_SENT,
@@ -968,9 +1640,8 @@ async def _apply_workflow_transition_if_configured(
     *,
     workspace_id: WorkspaceId,
     lead_id: LeadId,
-    handoff_required: bool,
-    opt_out_detected: bool,
-    classification_rejected: bool,
+    action: InboundAction,
+    decision_reason: InboundActionReasonCode,
     lead_workflow_repository: LeadWorkflowRepository | None,
     workflow_transition_repository: WorkflowTransitionRepository | None,
     now: datetime,
@@ -979,8 +1650,6 @@ async def _apply_workflow_transition_if_configured(
     inbound_message_id: UUID | None,
     handoff_id: UUID | None = None,
     intent: InboundReplyIntent | None = None,
-    action: InboundAction | None = None,
-    decision_reason: InboundActionReasonCode | None = None,
     classification_reasons: tuple[str, ...] = (),
     transition_id_factory: Callable[[], UUID] | None = None,
 ) -> InboundWorkflowTransitionOutcome:
@@ -989,9 +1658,8 @@ async def _apply_workflow_transition_if_configured(
     return await apply_inbound_workflow_transition(
         workspace_id=workspace_id,
         lead_id=lead_id,
-        handoff_required=handoff_required,
-        opt_out_detected=opt_out_detected,
-        classification_rejected=classification_rejected,
+        action=action,
+        decision_reason=decision_reason,
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
         now=now,
@@ -1000,8 +1668,6 @@ async def _apply_workflow_transition_if_configured(
         inbound_message_id=inbound_message_id,
         handoff_id=handoff_id,
         intent=intent,
-        action=action,
-        decision_reason=decision_reason,
         classification_reasons=classification_reasons,
         transition_id_factory=transition_id_factory,
     )
@@ -1320,16 +1986,87 @@ def _workflow_transition_outcome_from_continue_ai_result(
 
 def _conversation_status_after_inbound(
     *,
-    handoff_required: bool,
+    current_status: ConversationStatus,
+    inbound_action: InboundAction,
     continue_ai_result: ContinueAIResult | None,
+    existing_open_handoff: Handoff | None,
 ) -> ConversationStatus:
-    if handoff_required:
+    if inbound_action == InboundAction.HUMAN_HANDOFF:
+        if existing_open_handoff is not None and current_status == ConversationStatus.HUMAN_OWNED:
+            return ConversationStatus.HUMAN_OWNED
         return ConversationStatus.HUMAN_HANDOFF
+    if inbound_action in {InboundAction.SUPPRESS, InboundAction.COMPLETE_AUTOMATION}:
+        return ConversationStatus.CLOSED
     if continue_ai_result is None:
         return ConversationStatus.PAUSED
     if continue_ai_result.status in {ContinueAIStatus.SENT, ContinueAIStatus.ALREADY_SENT}:
         return ConversationStatus.ACTIVE_AI
     return ConversationStatus.PAUSED
+
+
+def _merged_conversation_summary_text(
+    *,
+    previous_summary: ConversationSummary | None,
+    current_summary_text: str | None,
+) -> str:
+    current = _normalized_summary_text(current_summary_text)
+    previous = _normalized_summary_text(
+        previous_summary.summary_text if previous_summary is not None else None
+    )
+    if previous is None:
+        return current or "Lead replied."
+    if current is None:
+        return previous
+    previous_folded = previous.casefold()
+    current_folded = current.casefold()
+    if current_folded in previous_folded:
+        return previous
+    if previous_folded in current_folded:
+        return _truncate_summary_text(current)
+    prefix = "Earlier context: "
+    connector = " Latest reply: "
+    previous_budget = max(
+        80,
+        _MAX_CONVERSATION_SUMMARY_CHARS - len(prefix) - len(connector) - len(current),
+    )
+    trimmed_previous = _truncate_summary_text(previous, limit=previous_budget)
+    return _truncate_summary_text(f"{prefix}{trimmed_previous}{connector}{current}")
+
+
+def _merged_conversation_preferences(
+    *,
+    previous_summary: ConversationSummary | None,
+    current_preferences: Mapping[str, str],
+) -> Mapping[str, str]:
+    merged: dict[str, str] = {}
+    if previous_summary is not None:
+        merged.update(_clean_preference_mapping(previous_summary.preferences))
+    merged.update(_clean_preference_mapping(current_preferences))
+    return merged
+
+
+def _clean_preference_mapping(preferences: Mapping[str, str]) -> dict[str, str]:
+    cleaned: dict[str, str] = {}
+    for key, value in preferences.items():
+        normalized_key = key.strip()
+        normalized_value = value.strip()
+        if normalized_key and normalized_value:
+            cleaned[normalized_key] = normalized_value
+    return cleaned
+
+
+def _normalized_summary_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(value.split())
+    return normalized or None
+
+
+def _truncate_summary_text(value: str, *, limit: int = _MAX_CONVERSATION_SUMMARY_CHARS) -> str:
+    if len(value) <= limit:
+        return value
+    truncated = value[: max(limit - 1, 0)].rstrip()
+    return f"{truncated}…"
 
 
 def _build_inbound_processing_audit(
@@ -1345,6 +2082,7 @@ def _build_inbound_processing_audit(
     review_notification: ReviewNotificationResult,
     handoff_completion_result: HandoffCompletionResult | None,
     handoff: Handoff | None,
+    existing_handoff_reused: bool,
     signal_queued: bool,
 ) -> dict[str, object]:
     return {
@@ -1455,6 +2193,7 @@ def _build_inbound_processing_audit(
             "handoff_id": (
                 str(handoff.handoff_id) if handoff is not None else None
             ),
+            "reused_existing_handoff": existing_handoff_reused,
             "completion_status": (
                 handoff_completion_result.status.value
                 if handoff_completion_result is not None
@@ -1468,3 +2207,15 @@ def _build_inbound_processing_audit(
         },
         "signal_queued": signal_queued,
     }
+
+
+async def _latest_open_handoff_for_lead(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    handoff_repository: HandoffRepository,
+) -> Handoff | None:
+    for handoff in await handoff_repository.list_for_lead(workspace_id, lead_id, limit=10):
+        if is_open_handoff(handoff):
+            return handoff
+    return None

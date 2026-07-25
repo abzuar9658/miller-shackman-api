@@ -13,6 +13,7 @@ class InboundAction(StrEnum):
     SUPPRESS = "suppress"
     HUMAN_HANDOFF = "human_handoff"
     PAUSE_FOR_REVIEW = "pause_for_review"
+    COMPLETE_AUTOMATION = "complete_automation"
     CONTINUE_AI = "continue_ai"
 
 
@@ -66,7 +67,7 @@ def evaluate_inbound_action(
 
     if classification.intent == InboundReplyIntent.NOT_INTERESTED:
         return InboundActionDecision(
-            action=InboundAction.CONTINUE_AI,
+            action=InboundAction.COMPLETE_AUTOMATION,
             reason_code=InboundActionReasonCode.NOT_INTERESTED,
         )
 
