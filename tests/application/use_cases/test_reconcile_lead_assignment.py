@@ -15,12 +15,7 @@ from app.domain.leads import (
     CRMProvider,
     EffectiveOwnerSource,
 )
-from app.domain.workflows import (
-    LeadWorkflow,
-    TemporalSignalName,
-    WorkflowState,
-    WorkflowTransitionReasonCode,
-)
+from app.domain.workflows import LeadWorkflow, WorkflowState
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeLeadWorkflowRepository,
     FakeOutboundMessageRepository,
@@ -46,7 +41,7 @@ class FakeEventBus:
         self.events.append(event)
 
 
-async def test_reconcile_lead_assignment_pauses_workflow_and_cancels_pending_messages() -> None:
+async def test_reconcile_lead_assignment_keeps_workflow_and_messages_unchanged() -> None:
     workflows = FakeLeadWorkflowRepository()
     transitions = FakeWorkflowTransitionRepository()
     outbox = FakeTemporalSignalOutboxRepository()
@@ -68,18 +63,15 @@ async def test_reconcile_lead_assignment_pauses_workflow_and_cancels_pending_mes
 
     assert result.status == LeadAssignmentReconciliationStatus.RECONCILED
     assert result.ownership_changed is True
-    assert result.pause_requested is True
-    assert result.signal_queued is True
-    assert result.cancelled_message_count == 1
+    assert result.pause_requested is False
+    assert result.signal_queued is False
+    assert result.cancelled_message_count == 0
     workflow = workflows.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
-    assert workflow.state == WorkflowState.PAUSED
-    transition = next(iter(transitions.transitions.values()))
-    assert transition.reason_code == WorkflowTransitionReasonCode.CRM_OWNERSHIP_CHANGED
-    signal = next(iter(outbox.entries.values()))
-    assert signal.signal_name == TemporalSignalName.PAUSE_REQUESTED
-    assert messages.saved[-1].status == OutboundMessageStatus.CANCELLED
+    assert workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+    assert transitions.transitions == {}
+    assert outbox.entries == {}
+    assert messages.saved == [_pending_message()]
     assert [event.event_type for event in event_bus.events] == [
-        DomainEventType.WORKFLOW_TRANSITIONED,
         DomainEventType.LEAD_ASSIGNMENT_RECONCILED,
     ]
 

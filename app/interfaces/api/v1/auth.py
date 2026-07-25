@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
@@ -134,6 +134,14 @@ def _require_active_workspace_id(actor: AuthenticatedActor) -> UUID:
     return actor.active_workspace_id
 
 
+def _access_token_ttl(bundle: AuthServiceBundle) -> timedelta:
+    return timedelta(minutes=bundle.settings.auth_access_token_ttl_minutes)
+
+
+def _refresh_token_ttl(bundle: AuthServiceBundle) -> timedelta:
+    return timedelta(days=bundle.settings.auth_refresh_token_ttl_days)
+
+
 @router.post(
     "/invitations/accept",
     response_model=CompleteInvitedSignupResponse,
@@ -163,6 +171,8 @@ async def complete_signup(
         access_token_service=bundle.access_token_service,
         opaque_token_service=bundle.opaque_token_service,
         now=datetime.now(UTC),
+        access_token_ttl=_access_token_ttl(bundle),
+        refresh_token_ttl=_refresh_token_ttl(bundle),
     )
     await _commit_bundle_session(bundle)
     if result.status == CompleteInvitedSignupStatus.REJECTED:
@@ -194,6 +204,8 @@ async def signin(
         access_token_service=bundle.access_token_service,
         opaque_token_service=bundle.opaque_token_service,
         now=datetime.now(UTC),
+        access_token_ttl=_access_token_ttl(bundle),
+        refresh_token_ttl=_refresh_token_ttl(bundle),
     )
     await _commit_bundle_session(bundle)
     if result.status == SignInStatus.REJECTED:
@@ -220,6 +232,8 @@ async def refresh(
         access_token_service=bundle.access_token_service,
         opaque_token_service=bundle.opaque_token_service,
         now=datetime.now(UTC),
+        access_token_ttl=_access_token_ttl(bundle),
+        refresh_token_ttl=_refresh_token_ttl(bundle),
     )
     await _commit_bundle_session(bundle)
     if result.status == RefreshAuthenticationStatus.REJECTED:
@@ -350,6 +364,7 @@ async def switch_workspace(
         membership_repository=bundle.membership_repository,
         access_token_service=bundle.access_token_service,
         now=datetime.now(UTC),
+        access_token_ttl=_access_token_ttl(bundle),
     )
     if result.status == SwitchWorkspaceStatus.REJECTED:
         _raise_for_reasons(result.reasons)

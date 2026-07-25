@@ -4,7 +4,7 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.domain.identity import (
     AuthenticatedActor,
     RefreshSession,
@@ -45,10 +45,12 @@ class AuthTestClient:
         client: TestClient,
         deps: _Dependencies,
         session: "_FakeCommitSession",
+        bundle: AuthServiceBundle,
     ) -> None:
         self.client = client
         self.deps = deps
         self.session = session
+        self.bundle = bundle
 
 
 class _FakeCommitSession:
@@ -119,10 +121,15 @@ def auth_client() -> AuthTestClient:
     app.dependency_overrides[get_auth_service_bundle] = override_get_auth_service_bundle
     app.dependency_overrides[get_current_actor] = override_get_current_actor
 
-    return AuthTestClient(TestClient(app), deps, session)
+    return AuthTestClient(TestClient(app), deps, session, bundle)
 
 
 def test_complete_signup_returns_201(auth_client: AuthTestClient) -> None:
+    auth_client.bundle.settings = Settings(
+        auth_jwt_secret="test-secret",
+        auth_access_token_ttl_minutes=6,
+        auth_refresh_token_ttl_days=4,
+    )
     auth_client.deps.users[USER_ID] = _user(status=UserStatus.PENDING_VERIFICATION)
     auth_client.deps.memberships[MEMBERSHIP_ID] = _membership(
         status=WorkspaceMembershipStatus.INVITED,
@@ -144,6 +151,10 @@ def test_complete_signup_returns_201(auth_client: AuthTestClient) -> None:
     body = response.json()
     assert body["status"] == "completed"
     assert body["tokens"]["access_token"] is not None
+    issued = auth_client.deps.access_token_service.decode_token(body["tokens"]["access_token"])
+    assert issued.expires_at - issued.issued_at == timedelta(minutes=6)
+    refresh_session = next(iter(auth_client.deps.refresh_sessions.values()))
+    assert refresh_session.expires_at - refresh_session.created_at == timedelta(days=4)
     assert auth_client.session.commit_count == 1
 
 
@@ -173,6 +184,11 @@ def test_complete_signup_accepts_invitation_alias_route(auth_client: AuthTestCli
 
 
 def test_signin_returns_200(auth_client: AuthTestClient) -> None:
+    auth_client.bundle.settings = Settings(
+        auth_jwt_secret="test-secret",
+        auth_access_token_ttl_minutes=5,
+        auth_refresh_token_ttl_days=2,
+    )
     auth_client.deps.credentials[ADMIN_ID] = _credential(password_hash="hashed::correct-password")
 
     response = auth_client.client.post(
@@ -188,6 +204,10 @@ def test_signin_returns_200(auth_client: AuthTestClient) -> None:
     body = response.json()
     assert body["status"] == "authenticated"
     assert body["tokens"]["access_token"] is not None
+    issued = auth_client.deps.access_token_service.decode_token(body["tokens"]["access_token"])
+    assert issued.expires_at - issued.issued_at == timedelta(minutes=5)
+    refresh_session = next(iter(auth_client.deps.refresh_sessions.values()))
+    assert refresh_session.expires_at - refresh_session.created_at == timedelta(days=2)
     assert auth_client.session.commit_count == 1
 
 
@@ -208,6 +228,11 @@ def test_signin_wrong_password_returns_401(auth_client: AuthTestClient) -> None:
 
 
 def test_refresh_returns_200(auth_client: AuthTestClient) -> None:
+    auth_client.bundle.settings = Settings(
+        auth_jwt_secret="test-secret",
+        auth_access_token_ttl_minutes=7,
+        auth_refresh_token_ttl_days=3,
+    )
     auth_client.deps.refresh_sessions[SESSION_ID] = _admin_refresh_session(
         token_hash="hash::refresh-token",
     )
@@ -221,6 +246,14 @@ def test_refresh_returns_200(auth_client: AuthTestClient) -> None:
     body = response.json()
     assert body["status"] == "refreshed"
     assert body["tokens"]["access_token"] is not None
+    issued = auth_client.deps.access_token_service.decode_token(body["tokens"]["access_token"])
+    assert issued.expires_at - issued.issued_at == timedelta(minutes=7)
+    replacement_session = next(
+        session
+        for session_id, session in auth_client.deps.refresh_sessions.items()
+        if session_id != SESSION_ID
+    )
+    assert replacement_session.expires_at - replacement_session.created_at == timedelta(days=3)
     assert auth_client.session.commit_count == 1
 
 
@@ -244,6 +277,10 @@ def test_me_missing_token_returns_401(auth_client: AuthTestClient) -> None:
 
 
 def test_switch_workspace_returns_200(auth_client: AuthTestClient) -> None:
+    auth_client.bundle.settings = Settings(
+        auth_jwt_secret="test-secret",
+        auth_access_token_ttl_minutes=9,
+    )
     auth_client.deps.workspaces[SECOND_WORKSPACE_ID] = _workspace(workspace_id=SECOND_WORKSPACE_ID)
     auth_client.deps.memberships[SECOND_MEMBERSHIP_ID] = _membership(
         membership_id=SECOND_MEMBERSHIP_ID,
@@ -261,6 +298,8 @@ def test_switch_workspace_returns_200(auth_client: AuthTestClient) -> None:
     assert body["status"] == "switched"
     assert body["workspace"]["workspace_id"] == str(SECOND_WORKSPACE_ID)
     assert body["access_token"] is not None
+    issued = auth_client.deps.access_token_service.decode_token(body["access_token"])
+    assert issued.expires_at - issued.issued_at == timedelta(minutes=9)
 
 
 def test_logout_returns_200(auth_client: AuthTestClient) -> None:

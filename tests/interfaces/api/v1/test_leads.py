@@ -163,6 +163,32 @@ class LeadRouteCRMClient(FakeCRMClient):
 
 
 class FakeCRMAgentRepository:
+    async def get_by_record_id(self, workspace_id: UUID, agent_record_id: UUID) -> CRMAgent | None:
+        return next(
+            (
+                agent
+                for agent in await self.list_for_workspace(workspace_id)
+                if agent.agent_record_id == agent_record_id
+            ),
+            None,
+        )
+
+    async def get_by_external_id(
+        self,
+        workspace_id: UUID,
+        crm_provider: CRMProvider,
+        external_agent_id: str,
+    ) -> CRMAgent | None:
+        return next(
+            (
+                agent
+                for agent in await self.list_for_workspace(workspace_id)
+                if agent.crm_provider == crm_provider
+                and agent.external_agent_id == external_agent_id
+            ),
+            None,
+        )
+
     async def list_for_workspace(self, workspace_id: UUID) -> tuple[CRMAgent, ...]:
         return (
             CRMAgent(
@@ -181,6 +207,9 @@ class FakeCRMAgentRepository:
                 updated_at=NOW,
             ),
         )
+
+    async def save(self, agent: CRMAgent) -> CRMAgent:
+        return agent
 
 
 class FakeWorkspaceAgentCRMMappingRepository:
@@ -257,11 +286,24 @@ def test_lead_routes_return_list_and_detail() -> None:
     assert list_response.status_code == 200
     list_payload = list_response.json()["leads"][0]
     assert list_payload["lead"]["display_name"] == "Jordan Seller"
+    assert list_payload["ownership"]["crm_assigned_agent"] == {
+        "external_agent_id": "agent-1",
+        "name": "Jordan Agent",
+        "email": "agent@example.com",
+    }
+    assert list_payload["ownership"]["mapped_app_user"]["user_id"] == str(USER_ID)
     assert list_payload["has_activity"] is True
     assert list_payload["activity_count"] == 3
     assert list_payload["inbound_message_count"] == 1
     assert list_payload["latest_activity_preview"] is not None
     assert detail_response.status_code == 200
+    assert detail_response.json()["ownership"]["crm_assigned_agent"] == {
+        "external_agent_id": "agent-1",
+        "name": "Jordan Agent",
+        "email": "agent@example.com",
+    }
+    assert detail_response.json()["ownership"]["mapped_app_user"]["user_id"] == str(USER_ID)
+    assert detail_response.json()["ownership"]["mapped_app_user"]["email"] == "agent@example.com"
     assert len(detail_response.json()["workflow_transitions"]) == 1
     assert detail_response.json()["workflow_transitions"][0]["metadata"]["draft_reasons"] == [
         "safety_flags_present"
@@ -269,6 +311,8 @@ def test_lead_routes_return_list_and_detail() -> None:
     assert len(detail_response.json()["rejected_draft_reviews"]) == 1
     assert len(detail_response.json()["activity_log"]) == 3
     assert len(detail_response.json()["inbound_messages"]) == 1
+    assert detail_response.json()["inbound_messages"][0]["from_address_redacted"] is None
+    assert detail_response.json()["inbound_messages"][0]["to_address_redacted"] is None
 
 
 def test_admin_can_approve_rejected_draft_review() -> None:
@@ -551,6 +595,7 @@ def _client_for_role(
                 )
             }
         ),
+        crm_agent_repository=FakeCRMAgentRepository(),
         workspace_contact_policy_repository=policy_repository,
     )
     resume_read_bundle = LeadResumeReadBundle(

@@ -208,6 +208,18 @@ class FakeLeadRepository:
     ) -> CanonicalLeadRecord | None:
         return self.by_crm_id.get((workspace_id, crm_provider, crm_lead_id))
 
+    async def list_by_assigned_agent_crm_id(
+        self,
+        workspace_id: WorkspaceId,
+        assigned_agent_crm_id: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        return tuple(
+            lead
+            for (lead_workspace_id, _), lead in self.by_id.items()
+            if lead_workspace_id == workspace_id
+            and lead.assigned_agent_crm_id == assigned_agent_crm_id
+        )
+
     async def get_by_primary_phone(
         self,
         workspace_id: WorkspaceId,
@@ -237,9 +249,19 @@ class FakeLeadRepository:
         workspace_id: WorkspaceId,
         email_address: str,
     ) -> CanonicalLeadRecord | None:
+        matches = await self.list_by_primary_email(workspace_id, email_address)
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
+    async def list_by_primary_email(
+        self,
+        workspace_id: WorkspaceId,
+        email_address: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
         normalized = _normalized_email(email_address)
         if normalized is None:
-            return None
+            return ()
         matches = [
             lead
             for (lead_workspace_id, _), lead in self.by_id.items()
@@ -247,9 +269,7 @@ class FakeLeadRepository:
             and lead.primary_email is not None
             and _normalized_email(lead.primary_email) == normalized
         ]
-        if len(matches) != 1:
-            return None
-        return matches[0]
+        return tuple(matches)
 
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         self.saved.append(record)
@@ -367,6 +387,9 @@ class FakeOutboundMessageRepository:
         self.messages_by_idempotency_key: dict[tuple[WorkspaceId, str], OutboundMessage] = {}
         self.saved: list[OutboundMessage] = []
 
+    def _store(self, message: OutboundMessage) -> None:
+        self.messages_by_idempotency_key[(message.workspace_id, message.idempotency_key)] = message
+
     async def list_for_lead(
         self,
         workspace_id: WorkspaceId,
@@ -403,9 +426,37 @@ class FakeOutboundMessageRepository:
     ) -> OutboundMessage | None:
         return await self.get_by_idempotency_key(workspace_id, idempotency_key)
 
+    async def get_by_provider_message_id_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        provider_name: str,
+        provider_message_id: str,
+    ) -> OutboundMessage | None:
+        for message in self.messages_by_idempotency_key.values():
+            if (
+                message.workspace_id == workspace_id
+                and message.provider_name == provider_name
+                and message.provider_message_id == provider_message_id
+            ):
+                return message
+        return None
+
+    async def get_by_reply_routing_token(
+        self,
+        workspace_id: WorkspaceId,
+        reply_routing_token: str,
+    ) -> OutboundMessage | None:
+        for message in self.messages_by_idempotency_key.values():
+            if (
+                message.workspace_id == workspace_id
+                and message.reply_routing_token == reply_routing_token
+            ):
+                return message
+        return None
+
     async def save(self, message: OutboundMessage) -> OutboundMessage:
         self.saved.append(message)
-        self.messages_by_idempotency_key[(message.workspace_id, message.idempotency_key)] = message
+        self._store(message)
         return message
 
 

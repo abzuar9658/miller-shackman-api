@@ -230,6 +230,9 @@ class FakeCRMClient:
     ) -> CRMAgent | None:
         return CRMAgent(crm_agent_id="agent-99", name="Agent Smith", email="agent@example.com")
 
+    async def get_lead_url(self, workspace_id: WorkspaceId, crm_lead_id: str) -> str | None:
+        return f"https://app.followupboss.com/2/people/{crm_lead_id}"
+
     async def add_note(
         self,
         workspace_id: WorkspaceId,

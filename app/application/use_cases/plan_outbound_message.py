@@ -2,6 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from secrets import token_hex
 from uuid import UUID, uuid4
 
 from app.application.ports.llm import LLMClient
@@ -238,7 +239,7 @@ async def plan_outbound_message_for_lead_record(
         lead_id=lead_id,
         cadence_step_id=context.cadence_step_id,
         channel=selected.channel,
-        message_version=context.message_version,
+        message_version=selected.message_version,
     )
     message = OutboundMessage(
         message_id=(message_id_factory or uuid4)(),
@@ -255,7 +256,8 @@ async def plan_outbound_message_for_lead_record(
         planned_at=now,
         created_at=now,
         updated_at=now,
-        message_version=context.message_version,
+        message_version=selected.message_version,
+        reply_routing_token=(token_hex(16) if selected.channel == ContactChannel.EMAIL else None),
         draft_prompt_version=draft_result.prompt_version,
         draft_model=draft_result.model,
         draft_latency_ms=draft_result.latency_ms,
@@ -279,6 +281,7 @@ async def plan_outbound_message_for_lead_record(
 @dataclass(frozen=True)
 class _ChannelSelection:
     channel: ContactChannel | None
+    message_version: int = 1
     pre_send_decision: PreSendDecision | None = None
     duplicate_message: OutboundMessage | None = None
     reasons: tuple[PlanOutboundMessageReasonCode, ...] = ()
@@ -297,6 +300,7 @@ async def _select_channel(
     rejection_reasons: list[PlanOutboundMessageReasonCode] = []
     evaluations: list[ChannelEvaluation] = []
     contactability_facts = contactability_facts_from_canonical_lead(lead)
+    existing_messages = await message_repository.list_for_lead(workspace_id, lead.lead_id)
     for channel in context.enabled_channels:
         if not _has_destination_for_channel(lead, channel):
             rejection_reasons.append(PlanOutboundMessageReasonCode.CHANNEL_DESTINATION_MISSING)
@@ -314,6 +318,13 @@ async def _select_channel(
             context.workspace_contact_policy,
             channel,
         )
+        message_version = _message_version_for_channel(
+            campaign_id=campaign_id,
+            cadence_step_id=context.cadence_step_id,
+            channel=channel,
+            requested_message_version=context.message_version,
+            existing_messages=existing_messages,
+        )
         pre_send_decision = evaluate_pre_send_safety(
             PreSendFacts(
                 channel=channel,
@@ -321,8 +332,8 @@ async def _select_channel(
                 workflow_state=context.workflow_state,
                 message_status=ScheduledMessageStatus.PENDING,
                 provider_send_status=ProviderSendStatus.NOT_ATTEMPTED,
-                scheduled_message_version=context.message_version,
-                current_message_version=context.message_version,
+                scheduled_message_version=message_version,
+                current_message_version=message_version,
                 channel_enabled=True,
                 contactability_decision=contactability_decision,
                 preflight_vetoed=context.preflight_vetoed,
@@ -368,12 +379,13 @@ async def _select_channel(
             lead_id=lead.lead_id,
             cadence_step_id=context.cadence_step_id,
             channel=channel,
-            message_version=context.message_version,
+            message_version=message_version,
         )
         existing = await message_repository.get_by_idempotency_key(workspace_id, idempotency_key)
         if existing is not None:
             return _ChannelSelection(
                 channel=channel,
+                message_version=message_version,
                 pre_send_decision=pre_send_decision,
                 duplicate_message=existing,
                 evaluations=tuple(
@@ -389,6 +401,7 @@ async def _select_channel(
             )
         return _ChannelSelection(
             channel=channel,
+            message_version=message_version,
             pre_send_decision=pre_send_decision,
             evaluations=tuple(
                 [
@@ -415,6 +428,33 @@ def _has_destination_for_channel(
     if channel == ContactChannel.SMS:
         return lead.has_sms_capable_phone and lead.primary_phone is not None
     return lead.has_email and lead.primary_email is not None
+
+
+def _message_version_for_channel(
+    *,
+    campaign_id: CampaignId,
+    cadence_step_id: str,
+    channel: ContactChannel,
+    requested_message_version: int,
+    existing_messages: tuple[OutboundMessage, ...],
+) -> int:
+    relevant_messages = tuple(
+        message
+        for message in existing_messages
+        if message.campaign_id == campaign_id
+        and message.cadence_step_id == cadence_step_id
+        and message.channel == channel
+    )
+    if not relevant_messages:
+        return requested_message_version
+
+    latest_message = max(
+        relevant_messages,
+        key=lambda message: (message.message_version, message.updated_at, message.created_at),
+    )
+    if latest_message.status == OutboundMessageStatus.FAILED:
+        return max(requested_message_version, latest_message.message_version + 1)
+    return max(requested_message_version, latest_message.message_version)
 
 
 def _outbound_idempotency_key(

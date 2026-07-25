@@ -12,6 +12,7 @@ from app.application.ports.lead_activity import (
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.infrastructure.persistence.postgres.models import (
     CrmConversationEventModel,
+    ExternalEventModel,
     HandoffModel,
     InboundMessageModel,
     OutboundMessageModel,
@@ -99,9 +100,17 @@ def _activity_union(workspace_id: WorkspaceId, lead_ids: tuple[LeadId, ...]) -> 
             InboundMessageModel.body.label("content"),
             InboundMessageModel.channel.label("channel"),
             literal("inbound").label("direction"),
-            InboundMessageModel.classification_status.label("status"),
+            _inbound_activity_status().label("status"),
             InboundMessageModel.provider.label("actor_name"),
             literal("Inbound message").label("activity_type"),
+        )
+        .select_from(InboundMessageModel)
+        .outerjoin(
+            ExternalEventModel,
+            and_(
+                ExternalEventModel.external_event_id == InboundMessageModel.external_event_id,
+                ExternalEventModel.workspace_id == InboundMessageModel.workspace_id,
+            ),
         )
         .where(InboundMessageModel.workspace_id == workspace_id)
         .where(InboundMessageModel.lead_id.in_(lead_ids)),
@@ -156,6 +165,28 @@ def _activity_union(workspace_id: WorkspaceId, lead_ids: tuple[LeadId, ...]) -> 
         .where(HandoffModel.workspace_id == workspace_id)
         .where(HandoffModel.lead_id.in_(lead_ids)),
     ).subquery()
+
+
+def _inbound_activity_status() -> Any:
+    inbound_action = cast(
+        ExternalEventModel.payload_redacted["processing_audit"]["decision"]["inbound_action"].astext,
+        String,
+    )
+    workflow_to_state = cast(
+        ExternalEventModel.payload_redacted["processing_audit"]["workflow"]["to_state"].astext,
+        String,
+    )
+    return case(
+        (inbound_action == "pause_for_review", literal("pause_for_review")),
+        (inbound_action == "human_handoff", literal("human_handoff")),
+        (inbound_action == "suppress", literal("suppressed")),
+        (
+            and_(inbound_action == "continue_ai", workflow_to_state.is_not(None)),
+            workflow_to_state,
+        ),
+        (inbound_action == "continue_ai", literal("continue_ai")),
+        else_=InboundMessageModel.classification_status,
+    )
 
 
 def _kind_count(activity: Any, kind: LeadActivityKind) -> Any:

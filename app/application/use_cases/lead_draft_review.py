@@ -2,6 +2,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
+from secrets import token_hex
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -51,6 +52,7 @@ from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessa
 from app.domain.campaigns.pre_send import ProviderSendStatus, WorkflowState
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReviewStatus
 from app.domain.common.ids import LeadId, WorkspaceId
+from app.domain.compliance.contactability import ContactChannel
 from app.domain.identity import AuthenticatedActor
 from app.domain.workflows import TemporalSignalName, TemporalSignalOutboxEntry
 
@@ -192,6 +194,9 @@ async def approve_rejected_draft_review_and_send(
             created_at=now,
             updated_at=now,
             message_version=review.message_version,
+            reply_routing_token=(
+                token_hex(16) if review.channel == ContactChannel.EMAIL else None
+            ),
             draft_prompt_version=review.draft_prompt_version,
             draft_model=review.draft_model,
             draft_latency_ms=review.draft_latency_ms,

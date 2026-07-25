@@ -66,6 +66,19 @@ class FakeLeadRepository:
     ) -> CanonicalLeadRecord | None:
         return None
 
+    async def list_by_assigned_agent_crm_id(
+        self,
+        workspace_id: WorkspaceId,
+        assigned_agent_crm_id: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        if (
+            self.lead
+            and self.lead.workspace_id == workspace_id
+            and self.lead.assigned_agent_crm_id == assigned_agent_crm_id
+        ):
+            return (self.lead,)
+        return ()
+
     async def get_by_id_for_update(
         self,
         workspace_id: WorkspaceId,
@@ -89,11 +102,24 @@ class FakeLeadRepository:
         workspace_id: WorkspaceId,
         email_address: str,
     ) -> CanonicalLeadRecord | None:
-        if self.lead is None or self.lead.workspace_id != workspace_id:
-            return None
-        if self.lead.primary_email == email_address:
-            return self.lead
+        matches = await self.list_by_primary_email(workspace_id, email_address)
+        if len(matches) == 1:
+            return matches[0]
         return None
+
+    async def list_by_primary_email(
+        self,
+        workspace_id: WorkspaceId,
+        email_address: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        if (
+            self.lead
+            and self.lead.workspace_id == workspace_id
+            and self.lead.primary_email is not None
+            and self.lead.primary_email.strip().lower() == email_address.strip().lower()
+        ):
+            return (self.lead,)
+        return ()
 
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         self.lead = record
@@ -128,6 +154,34 @@ class FakeOutboundMessageRepository:
         idempotency_key: str,
     ) -> OutboundMessage | None:
         return await self.get_by_idempotency_key(workspace_id, idempotency_key)
+
+    async def get_by_provider_message_id_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        provider_name: str,
+        provider_message_id: str,
+    ) -> OutboundMessage | None:
+        for message in self.messages_by_idempotency_key.values():
+            if (
+                message.workspace_id == workspace_id
+                and message.provider_name == provider_name
+                and message.provider_message_id == provider_message_id
+            ):
+                return message
+        return None
+
+    async def get_by_reply_routing_token(
+        self,
+        workspace_id: WorkspaceId,
+        reply_routing_token: str,
+    ) -> OutboundMessage | None:
+        for message in self.messages_by_idempotency_key.values():
+            if (
+                message.workspace_id == workspace_id
+                and message.reply_routing_token == reply_routing_token
+            ):
+                return message
+        return None
 
     async def save(self, message: OutboundMessage) -> OutboundMessage:
         self.saved.append(message)

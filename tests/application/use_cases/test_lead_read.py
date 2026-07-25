@@ -22,6 +22,7 @@ from app.domain.conversations import (
     InboundMessage,
     InboundMessageClassificationStatus,
 )
+from app.domain.crm_agent_mapping import CRMAgent
 from app.domain.identity import (
     AuthenticatedActor,
     User,
@@ -38,6 +39,7 @@ from app.domain.workflows import (
     WorkflowTransitionReasonCode,
 )
 from tests.application.use_cases._lead_read_fakes import (
+    FakeCRMAgentRepository,
     FakeHandoffRepository,
     FakeInboundMessageRepository,
     FakeLeadActivityRepository,
@@ -74,11 +76,16 @@ def test_list_lead_views_returns_owner_and_workflow() -> None:
             inbound_message_repository=FakeInboundMessageRepository((_inbound_message(),)),
             handoff_repository=FakeHandoffRepository((_handoff(),)),
             user_repository=FakeUserRepository({USER_ID: _user()}),
+            crm_agent_repository=FakeCRMAgentRepository((_crm_agent(),)),
         )
     )
 
     assert result.status == LeadReadStatus.OK
     assert result.views[0].assigned_agent_name == "Jordan Agent"
+    assert result.views[0].ownership.crm_assigned_agent is not None
+    assert result.views[0].ownership.crm_assigned_agent.name == "Jordan CRM Agent"
+    assert result.views[0].ownership.mapped_app_user is not None
+    assert result.views[0].ownership.mapped_app_user.full_name == "Jordan Agent"
     assert result.views[0].latest_workflow is not None
     assert result.views[0].activity_summary is not None
     assert result.views[0].activity_summary.activity_count == 3
@@ -101,6 +108,7 @@ def test_get_lead_detail_view_returns_messages_and_transitions() -> None:
             outbound_message_repository=FakeOutboundMessageRepository((_outbound_message(),)),
             handoff_repository=FakeHandoffRepository((_handoff(),)),
             user_repository=FakeUserRepository({USER_ID: _user()}),
+            crm_agent_repository=FakeCRMAgentRepository((_crm_agent(),)),
         )
     )
 
@@ -111,6 +119,10 @@ def test_get_lead_detail_view_returns_messages_and_transitions() -> None:
     assert len(result.view.inbound_messages) == 1
     assert len(result.view.outbound_messages) == 1
     assert len(result.view.handoffs) == 1
+    assert result.view.lead.ownership.crm_assigned_agent is not None
+    assert result.view.lead.ownership.crm_assigned_agent.name == "Jordan CRM Agent"
+    assert result.view.lead.ownership.mapped_app_user is not None
+    assert result.view.lead.ownership.mapped_app_user.email == "agent@example.com"
 
 
 def test_assigned_agent_list_lead_views_returns_only_owned_leads() -> None:
@@ -125,6 +137,7 @@ def test_assigned_agent_list_lead_views_returns_only_owned_leads() -> None:
             inbound_message_repository=FakeInboundMessageRepository((_inbound_message(),)),
             handoff_repository=FakeHandoffRepository((_handoff(),)),
             user_repository=FakeUserRepository({USER_ID: _user()}),
+            crm_agent_repository=FakeCRMAgentRepository((_crm_agent(),)),
         )
     )
 
@@ -148,6 +161,7 @@ def test_assigned_agent_get_lead_detail_view_rejects_unowned_lead() -> None:
             outbound_message_repository=FakeOutboundMessageRepository(()),
             handoff_repository=FakeHandoffRepository(()),
             user_repository=FakeUserRepository({USER_ID: _user()}),
+            crm_agent_repository=FakeCRMAgentRepository(()),
         )
     )
 
@@ -163,6 +177,7 @@ def _lead() -> CanonicalLeadRecord:
         crm_lead_id="crm-1",
         facts_derived_at=NOW,
         source_payload_version="test:v1",
+        assigned_agent_crm_id="agent-1",
         assigned_agent_user_id=USER_ID,
         effective_owner_user_id=USER_ID,
         primary_email="lead@example.com",
@@ -184,6 +199,24 @@ def _other_lead() -> CanonicalLeadRecord:
         primary_email="other@example.com",
         primary_phone="+15555550124",
         mapped_custom_fields={"display_name": "Casey Unowned"},
+    )
+
+
+def _crm_agent() -> CRMAgent:
+    return CRMAgent(
+        agent_record_id=UUID("00000000-0000-0000-0000-000000000012"),
+        workspace_id=WORKSPACE_ID,
+        crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+        external_agent_id="agent-1",
+        name="Jordan CRM Agent",
+        email="crm.agent@example.com",
+        email_normalized="crm.agent@example.com",
+        phone="+15555550155",
+        is_active=True,
+        last_seen_at=NOW,
+        raw_payload={"id": "agent-1"},
+        created_at=NOW,
+        updated_at=NOW,
     )
 
 

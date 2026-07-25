@@ -274,12 +274,6 @@ def _meaningful_human_activity_kind(
         return CRMHumanActivityKind.NOTE_ADDED
     if event_type in {"activity_created", "manual_activity_created"}:
         return CRMHumanActivityKind.ACTIVITY_CREATED
-    if event_type in {
-        "lead_reassigned",
-        "assignment_changed",
-        "lead_assignment_changed",
-    } or changed_field in {"assigned_agent_id", "assigned_to", "assignee", "assigned_user_id"}:
-        return CRMHumanActivityKind.LEAD_REASSIGNED
     if event_type in {"stage_changed", "lead_stage_changed"} or changed_field in {
         "stage",
         "lead_stage",

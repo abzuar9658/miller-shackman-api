@@ -58,6 +58,23 @@ class LeadResponse(BaseModel):
     last_agent_activity_at: datetime | None
 
 
+class LeadAssignedCRMAgentResponse(BaseModel):
+    external_agent_id: str
+    name: str | None = None
+    email: str | None = None
+
+
+class LeadMappedAppUserResponse(BaseModel):
+    user_id: UUID
+    full_name: str
+    email: str
+
+
+class LeadOwnershipResponse(BaseModel):
+    crm_assigned_agent: LeadAssignedCRMAgentResponse | None = None
+    mapped_app_user: LeadMappedAppUserResponse | None = None
+
+
 class LeadWorkflowResponse(BaseModel):
     workflow_id: UUID
     campaign_id: UUID
@@ -88,6 +105,8 @@ class InboundMessageResponse(BaseModel):
     channel: str
     provider: str
     provider_message_id: str
+    from_address_redacted: str | None
+    to_address_redacted: str | None
     body: str
     received_at: datetime
     processed_at: datetime | None
@@ -157,6 +176,7 @@ class RejectedDraftReviewResponse(BaseModel):
 
 class LeadListItemResponse(BaseModel):
     lead: LeadResponse
+    ownership: LeadOwnershipResponse
     latest_workflow: LeadWorkflowResponse | None = None
     latest_handoff: HandoffResponse | None = None
     has_activity: bool = False
@@ -181,6 +201,7 @@ class LeadListResponse(BaseModel):
 class LeadDetailResponse(BaseModel):
     status: str
     lead: LeadResponse
+    ownership: LeadOwnershipResponse
     latest_workflow: LeadWorkflowResponse | None = None
     latest_handoff: HandoffResponse | None = None
     workflow_transitions: list[WorkflowTransitionResponse]

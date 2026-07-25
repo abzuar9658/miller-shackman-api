@@ -16,18 +16,22 @@ from app.application.ports.lead_read import (
     LeadReadWorkflowTransitionRepository,
 )
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
+from app.application.ports.repositories import CRMAgentRepository
 from app.application.services.lead_assignment import (
     is_actor_assigned_to_lead,
+    lead_assigned_agent_user_id,
     lead_effective_owner_user_id,
 )
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
 from app.domain.common.ids import LeadId, UserId, WorkspaceId
 from app.domain.conversations import Handoff, InboundMessage
+from app.domain.crm_agent_mapping import CRMAgent
 from app.domain.identity import (
     AuthenticatedActor,
     PermissionCapability,
     PermissionContext,
+    User,
     WorkspaceMembershipRole,
     evaluate_permission,
 )
@@ -47,9 +51,16 @@ class LeadReadReasonCode(StrEnum):
 
 
 @dataclass(frozen=True)
+class LeadOwnershipView:
+    crm_assigned_agent: CRMAgent | None = None
+    mapped_app_user: User | None = None
+
+
+@dataclass(frozen=True)
 class LeadReadView:
     lead: CanonicalLeadRecord
     assigned_agent_name: str | None
+    ownership: LeadOwnershipView
     latest_workflow: LeadWorkflow | None
     latest_handoff: Handoff | None
     activity_summary: LeadActivitySummary | None = None
@@ -91,6 +102,7 @@ async def list_lead_views(
     inbound_message_repository: LeadReadInboundMessageRepository,
     handoff_repository: LeadReadHandoffRepository,
     user_repository: LeadReadUserRepository,
+    crm_agent_repository: CRMAgentRepository,
     limit: int = 100,
 ) -> LeadListResult:
     scoped_actor: AuthenticatedActor | None
@@ -127,10 +139,19 @@ async def list_lead_views(
         )
     }
     user_name_cache: dict[UserId, str | None] = {}
+    user_cache: dict[UserId, User | None] = {}
+    crm_agent_cache: dict[tuple[str, str], CRMAgent | None] = {}
     views = [
         LeadReadView(
             lead=lead,
             assigned_agent_name=await _assigned_agent_name(lead, user_repository, user_name_cache),
+            ownership=await _lead_ownership_view(
+                lead,
+                user_repository,
+                crm_agent_repository,
+                user_cache,
+                crm_agent_cache,
+            ),
             latest_workflow=latest_workflows.get(lead.lead_id),
             latest_handoff=latest_handoffs.get(lead.lead_id),
             activity_summary=activity_summaries.get(lead.lead_id),
@@ -154,6 +175,7 @@ async def get_lead_detail_view(
     outbound_message_repository: LeadReadOutboundMessageRepository,
     handoff_repository: LeadReadHandoffRepository,
     user_repository: LeadReadUserRepository,
+    crm_agent_repository: CRMAgentRepository,
 ) -> LeadDetailResult:
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
     if lead is None:
@@ -179,9 +201,18 @@ async def get_lead_detail_view(
     handoffs = await handoff_repository.list_for_lead(workspace_id, lead_id)
     activity_summaries = await activity_repository.list_summaries(workspace_id, (lead_id,))
     user_name_cache: dict[UserId, str | None] = {}
+    user_cache: dict[UserId, User | None] = {}
+    crm_agent_cache: dict[tuple[str, str], CRMAgent | None] = {}
     lead_view = LeadReadView(
         lead=lead,
         assigned_agent_name=await _assigned_agent_name(lead, user_repository, user_name_cache),
+        ownership=await _lead_ownership_view(
+            lead,
+            user_repository,
+            crm_agent_repository,
+            user_cache,
+            crm_agent_cache,
+        ),
         latest_workflow=latest_workflow,
         latest_handoff=handoffs[0] if handoffs else None,
         activity_summary=activity_summaries[0] if activity_summaries else None,
@@ -216,6 +247,53 @@ async def _assigned_agent_name(
         user = await user_repository.get_by_id(user_id)
         user_name_cache[user_id] = user.full_name if user is not None else None
     return user_name_cache[user_id]
+
+
+async def _mapped_app_user(
+    lead: CanonicalLeadRecord,
+    user_repository: LeadReadUserRepository,
+    user_cache: dict[UserId, User | None],
+) -> User | None:
+    user_id = lead_assigned_agent_user_id(lead)
+    if user_id is None:
+        return None
+    if user_id not in user_cache:
+        user_cache[user_id] = await user_repository.get_by_id(user_id)
+    return user_cache[user_id]
+
+
+async def _crm_assigned_agent(
+    lead: CanonicalLeadRecord,
+    crm_agent_repository: CRMAgentRepository,
+    crm_agent_cache: dict[tuple[str, str], CRMAgent | None],
+) -> CRMAgent | None:
+    if lead.assigned_agent_crm_id is None:
+        return None
+    cache_key = (lead.crm_provider.value, lead.assigned_agent_crm_id)
+    if cache_key not in crm_agent_cache:
+        crm_agent_cache[cache_key] = await crm_agent_repository.get_by_external_id(
+            lead.workspace_id,
+            lead.crm_provider,
+            lead.assigned_agent_crm_id,
+        )
+    return crm_agent_cache[cache_key]
+
+
+async def _lead_ownership_view(
+    lead: CanonicalLeadRecord,
+    user_repository: LeadReadUserRepository,
+    crm_agent_repository: CRMAgentRepository,
+    user_cache: dict[UserId, User | None],
+    crm_agent_cache: dict[tuple[str, str], CRMAgent | None],
+) -> LeadOwnershipView:
+    return LeadOwnershipView(
+        crm_assigned_agent=await _crm_assigned_agent(
+            lead,
+            crm_agent_repository,
+            crm_agent_cache,
+        ),
+        mapped_app_user=await _mapped_app_user(lead, user_repository, user_cache),
+    )
 
 
 def _can_view_workspace_leads(actor: AuthenticatedActor) -> bool:

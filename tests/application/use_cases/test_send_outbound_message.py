@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID
@@ -18,7 +19,11 @@ from app.application.use_cases.send_outbound_message import (
     SendOutboundMessageStatus,
     send_outbound_message,
 )
-from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
+from app.domain.campaigns.outbound_message import (
+    OutboundMessage,
+    OutboundMessageStatus,
+    build_outbound_email_message_id,
+)
 from app.domain.campaigns.pre_send import ProviderSendStatus, WorkflowState
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import LeadId, WorkspaceId
@@ -29,7 +34,12 @@ from app.domain.compliance.contactability import (
     WorkspaceContactPolicy,
 )
 from app.domain.events import DomainEvent, DomainEventType
-from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.leads import (
+    AssignmentResolutionStatus,
+    CanonicalLeadRecord,
+    CRMProvider,
+    EffectiveOwnerSource,
+)
 from app.infrastructure.messaging.sink import SinkEmailProvider, SinkSMSProvider
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
@@ -69,6 +79,19 @@ class FakeLeadRepository:
     ) -> CanonicalLeadRecord | None:
         return None
 
+    async def list_by_assigned_agent_crm_id(
+        self,
+        workspace_id: WorkspaceId,
+        assigned_agent_crm_id: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        if (
+            self.lead
+            and self.lead.workspace_id == workspace_id
+            and self.lead.assigned_agent_crm_id == assigned_agent_crm_id
+        ):
+            return (self.lead,)
+        return ()
+
     async def get_by_primary_phone(
         self,
         workspace_id: WorkspaceId,
@@ -87,13 +110,24 @@ class FakeLeadRepository:
         workspace_id: WorkspaceId,
         email_address: str,
     ) -> CanonicalLeadRecord | None:
+        matches = await self.list_by_primary_email(workspace_id, email_address)
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
+    async def list_by_primary_email(
+        self,
+        workspace_id: WorkspaceId,
+        email_address: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
         if (
             self.lead
             and self.lead.workspace_id == workspace_id
-            and self.lead.primary_email == email_address
+            and self.lead.primary_email is not None
+            and self.lead.primary_email.strip().lower() == email_address.strip().lower()
         ):
-            return self.lead
-        return None
+            return (self.lead,)
+        return ()
 
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         self.lead = record
@@ -144,6 +178,34 @@ class FakeOutboundMessageRepository:
         self.message = message
         self.saved.append(message)
         return message
+
+    async def get_by_provider_message_id_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        provider_name: str,
+        provider_message_id: str,
+    ) -> OutboundMessage | None:
+        if (
+            self.message
+            and self.message.workspace_id == workspace_id
+            and self.message.provider_name == provider_name
+            and self.message.provider_message_id == provider_message_id
+        ):
+            return self.message
+        return None
+
+    async def get_by_reply_routing_token(
+        self,
+        workspace_id: WorkspaceId,
+        reply_routing_token: str,
+    ) -> OutboundMessage | None:
+        if (
+            self.message
+            and self.message.workspace_id == workspace_id
+            and self.message.reply_routing_token == reply_routing_token
+        ):
+            return self.message
+        return None
 
     async def list_for_lead(
         self,
@@ -331,6 +393,7 @@ def _send_context(
     workflow_state: WorkflowState = WorkflowState.ACTIVE_NURTURE,
     current_message_version: int | None = None,
     sms_compliance_state: SmsComplianceState = SmsComplianceState.APPROVED,
+    inbound_email_address: str | None = None,
 ) -> OutboundSendContext:
     return OutboundSendContext(
         campaign_status=campaign_status,
@@ -339,6 +402,7 @@ def _send_context(
         workspace_contact_policy=WorkspaceContactPolicy(
             workspace_id=WORKSPACE_ID,
             sms_compliance_state=sms_compliance_state,
+            inbound_email_address=inbound_email_address,
         ),
         current_message_version=current_message_version,
     )
@@ -422,6 +486,46 @@ async def test_sends_message_after_successful_pre_send_crm_refresh() -> None:
     assert sms_provider.messages
 
 
+async def test_sends_message_after_pre_send_crm_refresh_detects_ownership_change() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    original_lead = replace(
+        _lead(),
+        assigned_agent_user_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        effective_owner_user_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        effective_owner_source=EffectiveOwnerSource.CRM_MAPPING,
+        assignment_resolution_status=AssignmentResolutionStatus.RESOLVED,
+        assignment_last_resolved_at=NOW - timedelta(hours=1),
+        has_accountable_owner=True,
+    )
+    refreshed_lead = replace(
+        _lead(),
+        assigned_agent_user_id=UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+        effective_owner_user_id=UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+        effective_owner_source=EffectiveOwnerSource.CRM_MAPPING,
+        assignment_resolution_status=AssignmentResolutionStatus.RESOLVED,
+        assignment_last_resolved_at=NOW,
+        has_accountable_owner=True,
+    )
+    lead_repository = FakeLeadRepository(original_lead)
+    sms_provider = FakeSMSProvider("SM123")
+
+    assert message_repository.message is not None
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=lead_repository,
+        message_repository=message_repository,
+        sms_provider=sms_provider,
+        email_provider=FakeEmailProvider(),
+        crm_refresh_context=_crm_refresh_context(lead=refreshed_lead),
+        now=NOW,
+    )
+
+    assert result.status == SendOutboundMessageStatus.SENT
+    assert sms_provider.messages
+
+
 async def test_rejects_when_pre_send_crm_refresh_cannot_find_lead() -> None:
     message_repository = FakeOutboundMessageRepository(_message())
     lead_repository = FakeLeadRepository(_lead())
@@ -493,16 +597,17 @@ async def test_sends_pending_email_message_with_subject() -> None:
     message_repository = FakeOutboundMessageRepository(
         _message(channel=ContactChannel.EMAIL, subject="Quick check-in"),
     )
+    email_provider = FakeEmailProvider("msg-123")
 
     assert message_repository.message is not None
     result = await send_outbound_message(
         workspace_id=WORKSPACE_ID,
         idempotency_key=message_repository.message.idempotency_key,
-        context=_send_context(),
+        context=_send_context(inbound_email_address="nurture@inbound.example.com"),
         lead_repository=FakeLeadRepository(_lead()),
         message_repository=message_repository,
         sms_provider=FakeSMSProvider(),
-        email_provider=FakeEmailProvider("msg-123"),
+        email_provider=email_provider,
         now=NOW,
     )
 
@@ -511,6 +616,34 @@ async def test_sends_pending_email_message_with_subject() -> None:
     assert result.message.channel == ContactChannel.EMAIL
     assert result.message.provider_name == "sendgrid"
     assert result.message.provider_message_id == "msg-123"
+    assert result.message.reply_routing_token is not None
+    assert len(email_provider.messages) == 1
+    assert email_provider.messages[0].reply_to == (
+        f"nurture+{result.message.reply_routing_token}@inbound.example.com"
+    )
+
+
+async def test_sends_pending_email_message_with_deterministic_message_id() -> None:
+    message_repository = FakeOutboundMessageRepository(
+        _message(channel=ContactChannel.EMAIL, subject="Quick check-in"),
+    )
+    email_provider = FakeEmailProvider("msg-123")
+
+    assert message_repository.message is not None
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(inbound_email_address="nurture@inbound.example.com"),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=FakeSMSProvider(),
+        email_provider=email_provider,
+        now=NOW,
+    )
+
+    assert result.status == SendOutboundMessageStatus.SENT
+    assert len(email_provider.messages) == 1
+    assert email_provider.messages[0].message_id == build_outbound_email_message_id(MESSAGE_ID)
 
 
 async def test_returns_existing_sent_message_without_resending() -> None:

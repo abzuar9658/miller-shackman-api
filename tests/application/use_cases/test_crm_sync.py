@@ -56,9 +56,7 @@ from app.domain.leads import (
 )
 from app.domain.workflows import (
     LeadWorkflow,
-    TemporalSignalName,
     WorkflowState,
-    WorkflowTransitionReasonCode,
 )
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCampaignExecutionRepository,
@@ -115,6 +113,18 @@ class FakeLeadRepository:
     ) -> CanonicalLeadRecord | None:
         return self.by_crm_id.get((workspace_id, crm_provider, crm_lead_id))
 
+    async def list_by_assigned_agent_crm_id(
+        self,
+        workspace_id: UUID,
+        assigned_agent_crm_id: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        return tuple(
+            lead
+            for lead in self.by_crm_id.values()
+            if lead.workspace_id == workspace_id
+            and lead.assigned_agent_crm_id == assigned_agent_crm_id
+        )
+
     async def get_by_primary_phone(
         self,
         workspace_id: UUID,
@@ -128,8 +138,26 @@ class FakeLeadRepository:
         workspace_id: UUID,
         email_address: str,
     ) -> CanonicalLeadRecord | None:
-        _ = (workspace_id, email_address)
-        return None
+        matches = await self.list_by_primary_email(workspace_id, email_address)
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
+    async def list_by_primary_email(
+        self,
+        workspace_id: UUID,
+        email_address: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        requested = email_address.strip().lower()
+        if not requested:
+            return ()
+        return tuple(
+            lead
+            for lead in self.by_crm_id.values()
+            if lead.workspace_id == workspace_id
+            and lead.primary_email is not None
+            and lead.primary_email.strip().lower() == requested
+        )
 
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         if record.crm_lead_id in self.failing_crm_lead_ids:
@@ -880,7 +908,7 @@ async def test_sync_routes_unmapped_assignment_to_fallback_manager() -> None:
     assert saved_lead.assignment_resolution_status == AssignmentResolutionStatus.UNMAPPED_CRM_AGENT
 
 
-async def test_sync_reconciles_ownership_change_by_pausing_workflow_and_cancelling_pending_messages(
+async def test_sync_reconciles_ownership_change_without_pausing_workflow_or_cancelling_messages(
 ) -> None:
     source = FakeLeadSnapshotSource(
         pages=(
@@ -939,19 +967,12 @@ async def test_sync_reconciles_ownership_change_by_pausing_workflow_and_cancelli
 
     assert result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
     workflow = workflows.latest_by_lead[(WORKSPACE_ID, existing_lead.lead_id)]
-    assert workflow.state == WorkflowState.PAUSED
-    transition = next(iter(transitions.transitions.values()))
-    assert transition.reason_code == WorkflowTransitionReasonCode.CRM_OWNERSHIP_CHANGED
-    assert transition.metadata["previous_assigned_agent_user_id"] == str(
-        UUID("88888888-8888-8888-8888-888888888888"),
-    )
-    assert len(outbox.entries) == 1
-    signal = next(iter(outbox.entries.values()))
-    assert signal.signal_name == TemporalSignalName.PAUSE_REQUESTED
-    assert messages.saved[-1].status == OutboundMessageStatus.CANCELLED
-    assert messages.saved[-1].failure_reason == "lead_assignment_reconciled"
-    assert event_bus.events[0].event_type == DomainEventType.WORKFLOW_TRANSITIONED
-    assert event_bus.events[1].event_type == DomainEventType.LEAD_ASSIGNMENT_RECONCILED
+    assert workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+    assert transitions.transitions == {}
+    assert outbox.entries == {}
+    assert messages.saved == [_pending_message()]
+    assert len(event_bus.events) == 1
+    assert event_bus.events[0].event_type == DomainEventType.LEAD_ASSIGNMENT_RECONCILED
 
 
 async def test_incremental_sync_uses_latest_completed_cursor_finished_at() -> None:

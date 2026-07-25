@@ -9,8 +9,9 @@ from app.application.ports.lead_read import LeadReadConversationSummary
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
 from app.domain.conversations import CrmConversationEvent, Handoff, InboundMessage
+from app.domain.crm_agent_mapping import CRMAgent
 from app.domain.identity import User, WorkspaceMembershipRole
-from app.domain.leads import CanonicalLeadRecord
+from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransition
 
 
@@ -24,6 +25,41 @@ class FakeLeadRepository:
         lead_id: UUID,
     ) -> CanonicalLeadRecord | None:
         return self._leads.get((workspace_id, lead_id))
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: UUID,
+        lead_id: UUID,
+    ) -> CanonicalLeadRecord | None:
+        return await self.get_by_id(workspace_id, lead_id)
+
+    async def get_by_crm_id(
+        self,
+        workspace_id: UUID,
+        crm_provider: CRMProvider,
+        crm_lead_id: str,
+    ) -> CanonicalLeadRecord | None:
+        return next(
+            (
+                lead
+                for (wid, _), lead in self._leads.items()
+                if wid == workspace_id
+                and lead.crm_provider == crm_provider
+                and lead.crm_lead_id == crm_lead_id
+            ),
+            None,
+        )
+
+    async def list_by_assigned_agent_crm_id(
+        self,
+        workspace_id: UUID,
+        assigned_agent_crm_id: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        return tuple(
+            lead
+            for (wid, _), lead in self._leads.items()
+            if wid == workspace_id and lead.assigned_agent_crm_id == assigned_agent_crm_id
+        )
 
     async def list_for_workspace(
         self,
@@ -55,15 +91,71 @@ class FakeLeadRepository:
         workspace_id: UUID,
         email_address: str,
     ) -> CanonicalLeadRecord | None:
+        matches = await self.list_by_primary_email(workspace_id, email_address)
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    async def list_by_primary_email(
+        self,
+        workspace_id: UUID,
+        email_address: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
         normalized = _normalized_email(email_address)
         if normalized is None:
-            return None
-        for (wid, _), lead in self._leads.items():
-            if wid != workspace_id or lead.primary_email is None:
-                continue
-            if _normalized_email(lead.primary_email) == normalized:
-                return lead
-        return None
+            return ()
+        return tuple(
+            lead
+            for (wid, _), lead in self._leads.items()
+            if wid == workspace_id
+            and lead.primary_email is not None
+            and _normalized_email(lead.primary_email) == normalized
+        )
+
+    async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
+        self._leads[(record.workspace_id, record.lead_id)] = record
+        return record
+
+
+class FakeCRMAgentRepository:
+    def __init__(self, agents: tuple[CRMAgent, ...]) -> None:
+        self._agents = agents
+
+    async def get_by_external_id(
+        self,
+        workspace_id: UUID,
+        crm_provider: CRMProvider,
+        external_agent_id: str,
+    ) -> CRMAgent | None:
+        return next(
+            (
+                agent
+                for agent in self._agents
+                if agent.workspace_id == workspace_id
+                and agent.crm_provider == crm_provider
+                and agent.external_agent_id == external_agent_id
+            ),
+            None,
+        )
+
+    async def get_by_record_id(self, workspace_id: UUID, agent_record_id: UUID) -> CRMAgent | None:
+        return next(
+            (
+                agent
+                for agent in self._agents
+                if agent.workspace_id == workspace_id and agent.agent_record_id == agent_record_id
+            ),
+            None,
+        )
+
+    async def list_for_workspace(self, workspace_id: UUID) -> tuple[CRMAgent, ...]:
+        return tuple(agent for agent in self._agents if agent.workspace_id == workspace_id)
+
+    async def save(self, agent: CRMAgent) -> CRMAgent:
+        self._agents = tuple(
+            item for item in self._agents if item.agent_record_id != agent.agent_record_id
+        ) + (agent,)
+        return agent
 
 
 class FakeLeadWorkflowRepository:

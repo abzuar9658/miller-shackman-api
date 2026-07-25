@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
+from secrets import token_hex
 from typing import Protocol
+from uuid import UUID
 
 from app.application.ports.crm import CRMActivity
 from app.application.ports.crm_sync import CanonicalLeadRefreshSource
@@ -9,6 +11,7 @@ from app.application.ports.event_bus import EventBus
 from app.application.ports.messaging import EmailMessage, EmailProvider, SMSMessage, SMSProvider
 from app.application.ports.repositories import (
     CRMAgentRepository,
+    InboundMessageRepository,
     LeadRepository,
     LeadWorkflowRepository,
     OutboundMessageRepository,
@@ -21,6 +24,10 @@ from app.application.ports.repositories import (
     WorkspaceOperationalControlRepository,
 )
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
+from app.application.services.email_threading import (
+    EmailThreadingHeaders,
+    resolve_lead_email_threading_headers,
+)
 from app.application.services.lead_assignment_resolution import (
     apply_lead_assignment_resolution,
     load_workspace_lead_assignment_context,
@@ -33,7 +40,12 @@ from app.application.use_cases.reconcile_lead_assignment import (
     LeadAssignmentMessageRepository,
     reconcile_lead_assignment_change,
 )
-from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
+from app.domain.campaigns.outbound_message import (
+    OutboundMessage,
+    OutboundMessageStatus,
+    build_outbound_email_message_id,
+    build_outbound_reply_to_address,
+)
 from app.domain.campaigns.pre_send import (
     PreSendDecision,
     PreSendFacts,
@@ -44,7 +56,7 @@ from app.domain.campaigns.pre_send import (
     evaluate_pre_send_safety,
 )
 from app.domain.campaigns.start_queue import CampaignStatus
-from app.domain.common.ids import WorkspaceId
+from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import (
     ContactChannel,
     WorkspaceContactPolicy,
@@ -155,6 +167,10 @@ async def send_outbound_message(
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     crm_refresh_context: PreSendCRMRefreshContext | None = None,
+    email_in_reply_to_message_id: str | None = None,
+    email_reference_message_ids: tuple[str, ...] = (),
+    inbound_message_repository: InboundMessageRepository | None = None,
+    email_thread_anchor_inbound_message_id: UUID | None = None,
 ) -> SendOutboundMessageResult:
     message = await message_repository.get_by_idempotency_key_for_update(
         workspace_id,
@@ -326,11 +342,35 @@ async def send_outbound_message(
                 pre_send_decision=pre_send_decision,
                 reasons=(SendOutboundMessageReasonCode.EMAIL_SUBJECT_MISSING,),
             )
+        if message.reply_routing_token is None:
+            message = await message_repository.save(
+                replace(
+                    message,
+                    reply_routing_token=token_hex(16),
+                    updated_at=now,
+                )
+            )
+        email_threading_headers = await _resolve_email_threading_headers(
+            workspace_id=workspace_id,
+            lead_id=message.lead_id,
+            message_repository=message_repository,
+            inbound_message_repository=inbound_message_repository,
+            current_outbound_message_id=message.message_id,
+            anchor_inbound_message_id=email_thread_anchor_inbound_message_id,
+            explicit_in_reply_to_message_id=email_in_reply_to_message_id,
+            explicit_reference_message_ids=email_reference_message_ids,
+        )
         try:
             provider_message_id = await _send_email(
                 provider=email_provider,
                 message=message,
                 to_email=destination,
+                reply_to_address=build_outbound_reply_to_address(
+                    effective_context.workspace_contact_policy.inbound_email_address or "",
+                    message.reply_routing_token or "",
+                ),
+                in_reply_to_message_id=email_threading_headers.in_reply_to_message_id,
+                reference_message_ids=email_threading_headers.reference_message_ids,
             )
         except _ProviderSendFailed as exc:
             return await _failed_send_result(
@@ -499,6 +539,9 @@ async def _send_email(
     provider: EmailProvider,
     message: OutboundMessage,
     to_email: str,
+    reply_to_address: str | None,
+    in_reply_to_message_id: str | None,
+    reference_message_ids: tuple[str, ...],
 ) -> str:
     assert message.subject is not None
     try:
@@ -510,11 +553,41 @@ async def _send_email(
                     body=message.body,
                     html_body=message.html_body,
                     idempotency_key=message.idempotency_key,
+                    message_id=build_outbound_email_message_id(message.message_id),
+                    reply_to=reply_to_address,
+                    in_reply_to_message_id=in_reply_to_message_id,
+                    reference_message_ids=reference_message_ids,
                 ),
             )
         ).strip()
     except Exception as exc:
         raise _ProviderSendFailed(str(exc) or exc.__class__.__name__) from exc
+
+
+async def _resolve_email_threading_headers(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    message_repository: OutboundMessageRepository,
+    inbound_message_repository: InboundMessageRepository | None,
+    current_outbound_message_id: UUID,
+    anchor_inbound_message_id: UUID | None,
+    explicit_in_reply_to_message_id: str | None,
+    explicit_reference_message_ids: tuple[str, ...],
+) -> EmailThreadingHeaders:
+    if explicit_in_reply_to_message_id is not None or explicit_reference_message_ids:
+        return EmailThreadingHeaders(
+            in_reply_to_message_id=explicit_in_reply_to_message_id,
+            reference_message_ids=explicit_reference_message_ids,
+        )
+    return await resolve_lead_email_threading_headers(
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        inbound_message_repository=inbound_message_repository,
+        message_repository=message_repository,
+        anchor_inbound_message_id=anchor_inbound_message_id,
+        current_outbound_message_id=current_outbound_message_id,
+    )
 
 
 def _scheduled_message_status(message: OutboundMessage) -> ScheduledMessageStatus:

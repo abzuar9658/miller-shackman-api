@@ -117,7 +117,7 @@ async def test_ignores_non_meaningful_activity() -> None:
     assert result.reasons == (ProcessCRMHumanActivityEventReasonCode.NOT_MEANINGFUL_HUMAN_ACTIVITY,)
 
 
-async def test_records_processed_event_when_no_workflow_exists() -> None:
+async def test_ignores_lead_reassigned_event() -> None:
     result = await process_crm_human_activity_event(
         event=_event(event_type="lead_reassigned"),
         lead_repository=FakeLeadRepository(_lead()),
@@ -129,10 +129,12 @@ async def test_records_processed_event_when_no_workflow_exists() -> None:
         external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
     )
 
-    assert result.status == ProcessCRMHumanActivityEventStatus.PROCESSED
+    assert result.status == ProcessCRMHumanActivityEventStatus.IGNORED
     assert result.pause_requested is False
     assert result.signal_queued is False
-    assert result.reasons == (ProcessCRMHumanActivityEventReasonCode.NO_WORKFLOW,)
+    assert result.reasons == (
+        ProcessCRMHumanActivityEventReasonCode.NOT_MEANINGFUL_HUMAN_ACTIVITY,
+    )
 
 
 async def test_does_not_create_duplicate_outbox_row_for_duplicate_event() -> None:

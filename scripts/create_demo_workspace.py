@@ -329,6 +329,10 @@ class DemoCRMClient:
             email=f"agent@{DEMO_EMAIL_DOMAIN}",
         )
 
+    async def get_lead_url(self, workspace_id: UUID, crm_lead_id: str) -> str | None:
+        _ = workspace_id
+        return f"https://demo.followupboss.test/lead/{crm_lead_id}"
+
     async def add_note(
         self,
         workspace_id: UUID,

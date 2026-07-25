@@ -4,11 +4,25 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from app.application.ports.crm import CRMAgentDirectorySource
+from app.application.ports.event_bus import EventBus
 from app.application.ports.repositories import (
     CRMAgentRepository,
+    LeadRepository,
+    LeadWorkflowRepository,
+    OutboundMessageRepository,
+    TemporalSignalOutboxRepository,
     UserRepository,
+    WorkflowTransitionRepository,
     WorkspaceAgentCRMMappingRepository,
+    WorkspaceAgentMappingConfigRepository,
     WorkspaceMembershipRepository,
+)
+from app.application.services.lead_assignment_resolution import (
+    apply_lead_assignment_resolution,
+    load_workspace_lead_assignment_context,
+)
+from app.application.use_cases.reconcile_lead_assignment import (
+    reconcile_lead_assignment_change,
 )
 from app.application.use_cases.sync_crm_agents import (
     SyncCRMAgentsResult,
@@ -28,6 +42,7 @@ from app.domain.identity import (
     WorkspaceMembershipStatus,
     evaluate_permission,
 )
+from app.domain.leads import CanonicalLeadRecord
 
 
 class CRMAgentMappingAdminStatus(StrEnum):
@@ -136,6 +151,13 @@ async def upsert_crm_agent_mapping_by_admin(
     mapping_repository: WorkspaceAgentCRMMappingRepository,
     user_repository: UserRepository,
     membership_repository: WorkspaceMembershipRepository,
+    lead_repository: LeadRepository | None = None,
+    workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository | None = None,
+    lead_workflow_repository: LeadWorkflowRepository | None = None,
+    workflow_transition_repository: WorkflowTransitionRepository | None = None,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
+    outbound_message_repository: OutboundMessageRepository | None = None,
+    event_bus: EventBus | None = None,
     now: datetime,
 ) -> CRMAgentMappingAdminMutationResult:
     rejection = _management_rejection(actor, workspace_id)
@@ -181,6 +203,22 @@ async def upsert_crm_agent_mapping_by_admin(
         updated_at=now,
     )
     saved = await mapping_repository.save(mapping)
+    await _reconcile_affected_leads_for_crm_agent_mapping_change(
+        workspace_id=workspace_id,
+        crm_agent=agent,
+        crm_agent_repository=crm_agent_repository,
+        mapping_repository=mapping_repository,
+        user_repository=user_repository,
+        membership_repository=membership_repository,
+        lead_repository=lead_repository,
+        workspace_agent_mapping_config_repository=workspace_agent_mapping_config_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        temporal_signal_outbox_repository=temporal_signal_outbox_repository,
+        outbound_message_repository=outbound_message_repository,
+        event_bus=event_bus,
+        now=now,
+    )
     return CRMAgentMappingAdminMutationResult(
         status=CRMAgentMappingAdminStatus.UPDATED,
         mapping=saved,
@@ -193,6 +231,16 @@ async def unlink_crm_agent_mapping_by_admin(
     workspace_id: UUID,
     mapping_id: UUID,
     mapping_repository: WorkspaceAgentCRMMappingRepository,
+    crm_agent_repository: CRMAgentRepository | None = None,
+    user_repository: UserRepository | None = None,
+    membership_repository: WorkspaceMembershipRepository | None = None,
+    lead_repository: LeadRepository | None = None,
+    workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository | None = None,
+    lead_workflow_repository: LeadWorkflowRepository | None = None,
+    workflow_transition_repository: WorkflowTransitionRepository | None = None,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
+    outbound_message_repository: OutboundMessageRepository | None = None,
+    event_bus: EventBus | None = None,
     now: datetime,
 ) -> CRMAgentMappingAdminMutationResult:
     rejection = _management_rejection(actor, workspace_id)
@@ -218,6 +266,34 @@ async def unlink_crm_agent_mapping_by_admin(
             updated_at=now,
         )
     )
+    if (
+        crm_agent_repository is not None
+        and user_repository is not None
+        and membership_repository is not None
+    ):
+        crm_agent = await crm_agent_repository.get_by_record_id(
+            workspace_id,
+            mapping.crm_agent_record_id,
+        )
+        if crm_agent is not None:
+            await _reconcile_affected_leads_for_crm_agent_mapping_change(
+                workspace_id=workspace_id,
+                crm_agent=crm_agent,
+                crm_agent_repository=crm_agent_repository,
+                mapping_repository=mapping_repository,
+                user_repository=user_repository,
+                membership_repository=membership_repository,
+                lead_repository=lead_repository,
+                workspace_agent_mapping_config_repository=(
+                    workspace_agent_mapping_config_repository
+                ),
+                lead_workflow_repository=lead_workflow_repository,
+                workflow_transition_repository=workflow_transition_repository,
+                temporal_signal_outbox_repository=temporal_signal_outbox_repository,
+                outbound_message_repository=outbound_message_repository,
+                event_bus=event_bus,
+                now=now,
+            )
     return CRMAgentMappingAdminMutationResult(
         status=CRMAgentMappingAdminStatus.DELETED,
         mapping=saved,
@@ -327,4 +403,71 @@ def _summary(
         disputed_count=mapped_statuses.count(CRMAgentMappingStatus.DISPUTED),
         unmapped_count=explicit_unmapped + unmapped_agent_count,
         last_agent_seen_at=max(seen_times) if seen_times else None,
+    )
+
+
+async def _reconcile_affected_leads_for_crm_agent_mapping_change(
+    *,
+    workspace_id: UUID,
+    crm_agent: CRMAgent,
+    crm_agent_repository: CRMAgentRepository,
+    mapping_repository: WorkspaceAgentCRMMappingRepository,
+    user_repository: UserRepository,
+    membership_repository: WorkspaceMembershipRepository,
+    lead_repository: LeadRepository | None,
+    workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository | None,
+    lead_workflow_repository: LeadWorkflowRepository | None,
+    workflow_transition_repository: WorkflowTransitionRepository | None,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None,
+    outbound_message_repository: OutboundMessageRepository | None,
+    event_bus: EventBus | None,
+    now: datetime,
+) -> None:
+    if lead_repository is None or workspace_agent_mapping_config_repository is None:
+        return
+    affected_leads = await lead_repository.list_by_assigned_agent_crm_id(
+        workspace_id,
+        crm_agent.external_agent_id,
+    )
+    if not affected_leads:
+        return
+    assignment_context = await load_workspace_lead_assignment_context(
+        workspace_id=workspace_id,
+        crm_agent_repository=crm_agent_repository,
+        workspace_agent_crm_mapping_repository=mapping_repository,
+        workspace_agent_mapping_config_repository=workspace_agent_mapping_config_repository,
+        workspace_membership_repository=membership_repository,
+        user_repository=user_repository,
+        crm_provider=crm_agent.crm_provider,
+    )
+    for lead in affected_leads:
+        resolved_lead = apply_lead_assignment_resolution(
+            lead,
+            context=assignment_context,
+            now=now,
+        )
+        if not _assignment_snapshot_changed(lead, resolved_lead):
+            continue
+        saved_lead = await lead_repository.upsert(resolved_lead)
+        await reconcile_lead_assignment_change(
+            previous_lead=lead,
+            current_lead=saved_lead,
+            lead_workflow_repository=lead_workflow_repository,
+            workflow_transition_repository=workflow_transition_repository,
+            temporal_signal_outbox_repository=temporal_signal_outbox_repository,
+            outbound_message_repository=outbound_message_repository,
+            event_bus=event_bus,
+            now=now,
+        )
+
+
+def _assignment_snapshot_changed(
+    previous_lead: CanonicalLeadRecord,
+    current_lead: CanonicalLeadRecord,
+) -> bool:
+    return (
+        previous_lead.assigned_agent_user_id != current_lead.assigned_agent_user_id
+        or previous_lead.effective_owner_user_id != current_lead.effective_owner_user_id
+        or previous_lead.effective_owner_source != current_lead.effective_owner_source
+        or previous_lead.assignment_resolution_status != current_lead.assignment_resolution_status
     )

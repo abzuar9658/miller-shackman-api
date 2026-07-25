@@ -69,6 +69,20 @@ class PostgresInboundMessageRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        inbound_message_id: UUID,
+    ) -> InboundMessage | None:
+        result = await self._session.execute(
+            select(InboundMessageModel).where(
+                InboundMessageModel.workspace_id == workspace_id,
+                InboundMessageModel.inbound_message_id == inbound_message_id,
+            )
+        )
+        model = result.scalar_one_or_none()
+        return _model_to_inbound_message(model) if model else None
+
     async def list_lead_summaries(
         self,
         workspace_id: WorkspaceId,
@@ -171,6 +185,24 @@ class PostgresInboundMessageRepository:
 class PostgresConversationSummaryRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def get_latest_for_conversation(
+        self,
+        workspace_id: WorkspaceId,
+        conversation_id: UUID,
+    ) -> ConversationSummary | None:
+        result = await self._session.execute(
+            select(ConversationSummaryModel)
+            .where(ConversationSummaryModel.workspace_id == workspace_id)
+            .where(ConversationSummaryModel.conversation_id == conversation_id)
+            .order_by(
+                ConversationSummaryModel.created_at.desc(),
+                ConversationSummaryModel.summary_id.desc(),
+            )
+            .limit(1)
+        )
+        model = result.scalar_one_or_none()
+        return _model_to_conversation_summary(model) if model is not None else None
 
     async def save(self, summary: ConversationSummary) -> ConversationSummary:
         values = _conversation_summary_to_values(summary)

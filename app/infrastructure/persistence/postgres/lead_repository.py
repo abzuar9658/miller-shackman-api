@@ -85,6 +85,24 @@ class PostgresLeadRepository:
         model = result.scalar_one_or_none()
         return _model_to_record(model) if model else None
 
+    async def list_by_assigned_agent_crm_id(
+        self,
+        workspace_id: WorkspaceId,
+        assigned_agent_crm_id: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        normalized_agent_id = assigned_agent_crm_id.strip()
+        if not normalized_agent_id:
+            return ()
+        result = await self._session.execute(
+            select(LeadModel)
+            .where(
+                LeadModel.workspace_id == workspace_id,
+                LeadModel.assigned_agent_crm_id == normalized_agent_id,
+            )
+            .order_by(LeadModel.updated_at.desc()),
+        )
+        return tuple(_model_to_record(model) for model in result.scalars().all())
+
     async def get_by_primary_phone(
         self,
         workspace_id: WorkspaceId,
@@ -126,6 +144,23 @@ class PostgresLeadRepository:
         if len(models) != 1:
             return None
         return _model_to_record(models[0])
+
+    async def list_by_primary_email(
+        self,
+        workspace_id: WorkspaceId,
+        email_address: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        normalized_email = _normalized_email(email_address)
+        if normalized_email is None:
+            return ()
+        normalized_primary_email = func.lower(func.btrim(LeadModel.primary_email))
+        result = await self._session.execute(
+            select(LeadModel)
+            .where(LeadModel.workspace_id == workspace_id)
+            .where(LeadModel.primary_email.is_not(None))
+            .where(normalized_primary_email == normalized_email),
+        )
+        return tuple(_model_to_record(model) for model in result.scalars().all())
 
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         now = datetime.now(UTC)

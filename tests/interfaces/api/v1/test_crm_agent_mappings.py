@@ -14,6 +14,14 @@ from app.interfaces.api.dependencies.crm_agent_mappings import (
 )
 from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.main import create_app
+from tests.application.use_cases._campaign_cadence_fakes import (
+    FakeLeadWorkflowRepository,
+    FakeOutboundMessageRepository,
+    FakeWorkflowTransitionRepository,
+)
+from tests.application.use_cases._campaign_enrollment_fakes import (
+    FakeTemporalSignalOutboxRepository,
+)
 from tests.application.use_cases.test_authentication import _actor, _user
 from tests.application.use_cases.test_crm_agent_mapping_admin import (
     ADMIN_ID,
@@ -23,10 +31,14 @@ from tests.application.use_cases.test_crm_agent_mapping_admin import (
     WORKSPACE_ID,
     FakeCRMAgentRepository,
     FakeDirectorySource,
+    FakeEventBus,
+    FakeLeadRepository,
     FakeMappingRepository,
     FakeMembershipRepository,
     FakeUserRepository,
+    FakeWorkspaceAgentMappingConfigRepository,
     _agent,
+    _lead_record,
     _mapping,
     _membership_for,
 )
@@ -139,6 +151,15 @@ def _client_for_role(
         mapping_repository=mapping_repository,
         user_repository=user_repository,
         membership_repository=membership_repository,
+        lead_repository=FakeLeadRepository((_lead_record(owner_user_id=USER_ID),)),
+        workspace_agent_mapping_config_repository=FakeWorkspaceAgentMappingConfigRepository(
+            None
+        ),
+        lead_workflow_repository=FakeLeadWorkflowRepository(),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        temporal_signal_outbox_repository=FakeTemporalSignalOutboxRepository(),
+        outbound_message_repository=FakeOutboundMessageRepository(),
+        event_bus=FakeEventBus(),
     )
     sync_bundle = CRMAgentDirectorySyncBundle(
         session=session,
@@ -146,6 +167,15 @@ def _client_for_role(
         mapping_repository=FakeMappingRepository(()),
         user_repository=user_repository,
         membership_repository=membership_repository,
+        lead_repository=FakeLeadRepository(()),
+        workspace_agent_mapping_config_repository=FakeWorkspaceAgentMappingConfigRepository(
+            None
+        ),
+        lead_workflow_repository=FakeLeadWorkflowRepository(),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        temporal_signal_outbox_repository=FakeTemporalSignalOutboxRepository(),
+        outbound_message_repository=FakeOutboundMessageRepository(),
+        event_bus=FakeEventBus(),
         crm_agent_directory_source=FakeDirectorySource(directory_agents),
     )
 

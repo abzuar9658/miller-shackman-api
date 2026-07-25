@@ -204,8 +204,6 @@ def _human_control_reasons(facts: PreSendFacts) -> list[PreSendReasonCode]:
         reasons.append(PreSendReasonCode.LEAD_REPLIED_SINCE_SCHEDULED)
     if facts.recent_human_activity:
         reasons.append(PreSendReasonCode.RECENT_HUMAN_ACTIVITY)
-    if facts.ownership_changed:
-        reasons.append(PreSendReasonCode.OWNERSHIP_CHANGED)
 
     return reasons
 

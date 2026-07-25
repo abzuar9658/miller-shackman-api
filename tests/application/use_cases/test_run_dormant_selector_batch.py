@@ -76,6 +76,9 @@ class FakeCRMClient(CRMClient):
     ) -> CRMAgent | None:
         return self.agent
 
+    async def get_lead_url(self, workspace_id: UUID, crm_lead_id: str) -> str | None:
+        return None
+
     async def validate_connection(self, workspace_id: UUID) -> bool:
         return True
 

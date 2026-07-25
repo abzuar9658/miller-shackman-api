@@ -5,7 +5,7 @@ from uuid import UUID
 from app.application.ports.repositories import HandoffRepository, LeadRepository, UserRepository
 from app.application.services.lead_assignment import lead_effective_owner_user_id
 from app.domain.common.ids import UserId, WorkspaceId
-from app.domain.conversations import Handoff, HandoffStatus
+from app.domain.conversations import Handoff, is_open_handoff
 from app.domain.identity import (
     AuthenticatedActor,
     PermissionCapability,
@@ -159,7 +159,7 @@ async def _build_views(
 ) -> tuple[HandoffReadView, ...]:
     views: list[HandoffReadView] = []
     for handoff in handoffs:
-        if not _is_open_handoff(handoff):
+        if not is_open_handoff(handoff):
             continue
         lead = await lead_repository.get_by_id(workspace_id, handoff.lead_id)
         if lead is None:
@@ -243,12 +243,6 @@ def _acts_on_assigned_lead(
 
 def _can_view_workspace_handoffs(actor: AuthenticatedActor) -> bool:
     return bool(evaluate_permission(actor, PermissionCapability.VIEW_WORKSPACE_REPORTING).allowed)
-
-
-def _is_open_handoff(handoff: Handoff) -> bool:
-    return handoff.status not in {HandoffStatus.RESOLVED, HandoffStatus.CANCELLED}
-
-
 def _lead_display_name(lead: CanonicalLeadRecord) -> str:
     return str(
         lead.mapped_custom_fields.get("display_name")

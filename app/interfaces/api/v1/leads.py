@@ -18,6 +18,7 @@ from app.application.use_cases.lead_manual_enrollment import (
 )
 from app.application.use_cases.lead_read import (
     LeadDetailView,
+    LeadOwnershipView,
     LeadReadStatus,
     LeadReadView,
     get_lead_detail_view,
@@ -38,7 +39,8 @@ from app.domain.compliance import (
     evaluate_contactability,
 )
 from app.domain.conversations import InboundMessage
-from app.domain.identity import AuthenticatedActor
+from app.domain.crm_agent_mapping import CRMAgent
+from app.domain.identity import AuthenticatedActor, User
 from app.domain.leads import CanonicalLeadRecord
 from app.domain.workflows import LeadWorkflow, WorkflowTransition
 from app.interfaces.api.dependencies.lead_draft_review import (
@@ -62,6 +64,7 @@ from app.interfaces.api.schemas.leads import (
     ApproveRejectedDraftReviewResponse,
     InboundMessageResponse,
     LeadActivityItemResponse,
+    LeadAssignedCRMAgentResponse,
     LeadChannelContactabilityResponse,
     LeadChannelSendabilityResponse,
     LeadContactabilityResponse,
@@ -70,6 +73,8 @@ from app.interfaces.api.schemas.leads import (
     LeadListResponse,
     LeadManualEnrollmentOptionResponse,
     LeadManualEnrollmentOptionsResponse,
+    LeadMappedAppUserResponse,
+    LeadOwnershipResponse,
     LeadResponse,
     LeadResumeEligibilityResponse,
     LeadSendabilityResponse,
@@ -99,10 +104,11 @@ async def list_leads_route(
         lead_repository=bundle.lead_repository,
         workflow_repository=bundle.workflow_repository,
         activity_repository=bundle.activity_repository,
-            rejected_draft_review_repository=bundle.rejected_draft_review_repository,
+        rejected_draft_review_repository=bundle.rejected_draft_review_repository,
         inbound_message_repository=bundle.inbound_message_repository,
         handoff_repository=bundle.handoff_repository,
         user_repository=bundle.user_repository,
+        crm_agent_repository=bundle.crm_agent_repository,
     )
     if result.status == LeadReadStatus.REJECTED:
         raise HTTPException(
@@ -144,6 +150,7 @@ async def get_lead_route(
         outbound_message_repository=bundle.outbound_message_repository,
         handoff_repository=bundle.handoff_repository,
         user_repository=bundle.user_repository,
+        crm_agent_repository=bundle.crm_agent_repository,
     )
     if result.status == LeadReadStatus.REJECTED:
         raise HTTPException(
@@ -409,6 +416,7 @@ def _lead_list_item_response(
     activity_summary = view.activity_summary
     return LeadListItemResponse(
         lead=_lead_response(view.lead, view.assigned_agent_name, contact_policy),
+        ownership=_lead_ownership_response(view.ownership),
         latest_workflow=_workflow_response(view.latest_workflow),
         latest_handoff=handoff_response(view.latest_handoff) if view.latest_handoff else None,
         has_activity=activity_summary is not None and activity_summary.activity_count > 0,
@@ -448,6 +456,7 @@ def _lead_detail_response(
             view.lead.assigned_agent_name,
             contact_policy,
         ),
+        ownership=_lead_ownership_response(view.lead.ownership),
         latest_workflow=_workflow_response(view.lead.latest_workflow),
         latest_handoff=handoff_response(view.lead.latest_handoff)
         if view.lead.latest_handoff
@@ -460,6 +469,33 @@ def _lead_detail_response(
         inbound_messages=[_inbound_message_response(item) for item in view.inbound_messages],
         outbound_messages=[_outbound_message_response(item) for item in view.outbound_messages],
         handoffs=[handoff_response(item) for item in view.handoffs],
+    )
+
+
+def _lead_ownership_response(ownership: LeadOwnershipView) -> LeadOwnershipResponse:
+    return LeadOwnershipResponse(
+        crm_assigned_agent=_crm_assigned_agent_response(ownership.crm_assigned_agent),
+        mapped_app_user=_mapped_app_user_response(ownership.mapped_app_user),
+    )
+
+
+def _crm_assigned_agent_response(agent: CRMAgent | None) -> LeadAssignedCRMAgentResponse | None:
+    if agent is None:
+        return None
+    return LeadAssignedCRMAgentResponse(
+        external_agent_id=agent.external_agent_id,
+        name=agent.name,
+        email=agent.email,
+    )
+
+
+def _mapped_app_user_response(user: User | None) -> LeadMappedAppUserResponse | None:
+    if user is None:
+        return None
+    return LeadMappedAppUserResponse(
+        user_id=user.user_id,
+        full_name=user.full_name,
+        email=user.email,
     )
 
 
@@ -647,6 +683,8 @@ def _inbound_message_response(message: InboundMessage) -> InboundMessageResponse
         channel=message.channel.value,
         provider=message.provider,
         provider_message_id=message.provider_message_id,
+        from_address_redacted=message.from_address_redacted,
+        to_address_redacted=message.to_address_redacted,
         body=message.body,
         received_at=message.received_at,
         processed_at=message.processed_at,

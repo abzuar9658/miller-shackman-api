@@ -223,7 +223,6 @@ def test_human_control_conditions_block_send() -> None:
         PreSendReasonCode.HUMAN_OWNED,
         PreSendReasonCode.LEAD_REPLIED_SINCE_SCHEDULED,
         PreSendReasonCode.RECENT_HUMAN_ACTIVITY,
-        PreSendReasonCode.OWNERSHIP_CHANGED,
     )
 
 

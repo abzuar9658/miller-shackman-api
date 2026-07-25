@@ -7,6 +7,25 @@ class FakeHandoffRepository:
     def __init__(self) -> None:
         self.handoffs: dict[object, Handoff] = {}
 
+    async def list_for_lead(
+        self,
+        workspace_id: object,
+        lead_id: object,
+        *,
+        limit: int = 100,
+    ) -> tuple[Handoff, ...]:
+        handoffs = [
+            handoff
+            for handoff in self.handoffs.values()
+            if handoff.workspace_id == workspace_id and handoff.lead_id == lead_id
+        ]
+        ordered = sorted(
+            handoffs,
+            key=lambda handoff: (handoff.created_at, handoff.handoff_id),
+            reverse=True,
+        )
+        return tuple(ordered[:limit])
+
     async def list_handoffs(self, workspace_id: object, *, limit: int = 100) -> tuple[Handoff, ...]:
         handoffs = [
             handoff for handoff in self.handoffs.values() if handoff.workspace_id == workspace_id
@@ -56,6 +75,18 @@ class FakeLeadRepository:
                 return lead
         return None
 
+    async def list_by_assigned_agent_crm_id(
+        self,
+        workspace_id: object,
+        assigned_agent_crm_id: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        return tuple(
+            lead
+            for lead in self.leads.values()
+            if lead.workspace_id == workspace_id
+            and lead.assigned_agent_crm_id == assigned_agent_crm_id
+        )
+
     async def get_by_primary_phone(
         self,
         workspace_id: object,
@@ -85,6 +116,22 @@ class FakeLeadRepository:
             if _normalized_email(lead.primary_email) == normalized:
                 return lead
         return None
+
+    async def list_by_primary_email(
+        self,
+        workspace_id: object,
+        email_address: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        normalized = _normalized_email(email_address)
+        if normalized is None:
+            return ()
+        return tuple(
+            lead
+            for lead in self.leads.values()
+            if lead.workspace_id == workspace_id
+            and lead.primary_email is not None
+            and _normalized_email(lead.primary_email) == normalized
+        )
 
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         self.leads[record.lead_id] = record

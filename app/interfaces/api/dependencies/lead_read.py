@@ -16,12 +16,18 @@ from app.application.ports.lead_read import (
     LeadReadWorkflowTransitionRepository,
 )
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
-from app.application.ports.repositories import WorkspaceContactPolicyRepository
+from app.application.ports.repositories import (
+    CRMAgentRepository,
+    WorkspaceContactPolicyRepository,
+)
 from app.core.database import get_session
 from app.infrastructure.persistence.postgres.conversation_repository import (
     PostgresCrmConversationEventRepository,
     PostgresHandoffRepository,
     PostgresInboundMessageRepository,
+)
+from app.infrastructure.persistence.postgres.crm_agent_mapping_repository import (
+    PostgresCRMAgentRepository,
 )
 from app.infrastructure.persistence.postgres.identity_repository import PostgresUserRepository
 from app.infrastructure.persistence.postgres.lead_activity_repository import (
@@ -55,6 +61,7 @@ class LeadReadBundle:
     crm_conversation_event_repository: LeadReadCrmConversationEventRepository
     handoff_repository: LeadReadHandoffRepository
     user_repository: LeadReadUserRepository
+    crm_agent_repository: CRMAgentRepository
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository
 
 
@@ -72,5 +79,6 @@ async def get_lead_read_bundle(
         crm_conversation_event_repository=PostgresCrmConversationEventRepository(session),
         handoff_repository=PostgresHandoffRepository(session),
         user_repository=PostgresUserRepository(session),
+        crm_agent_repository=PostgresCRMAgentRepository(session),
         workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
     )

@@ -10,12 +10,17 @@ from app.application.use_cases.crm_agent_mapping_admin import (
     unlink_crm_agent_mapping_by_admin,
     upsert_crm_agent_mapping_by_admin,
 )
+from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
+from app.domain.campaigns.pre_send import ProviderSendStatus
+from app.domain.compliance.contactability import ContactChannel
 from app.domain.crm_agent_mapping import (
     CRMAgent,
     CRMAgentMappingResolutionSource,
     CRMAgentMappingStatus,
     WorkspaceAgentCRMMapping,
+    WorkspaceAgentMappingConfig,
 )
+from app.domain.events import DomainEvent
 from app.domain.identity import (
     AuthenticatedActor,
     User,
@@ -24,16 +29,33 @@ from app.domain.identity import (
     WorkspaceMembershipRole,
     WorkspaceMembershipStatus,
 )
-from app.domain.leads import CRMProvider
+from app.domain.lead_assignment import EffectiveOwnerSource
+from app.domain.leads import AssignmentResolutionStatus, CanonicalLeadRecord, CRMProvider
+from app.domain.workflows import LeadWorkflow, WorkflowState
+from tests.application.use_cases._campaign_cadence_fakes import (
+    FakeLeadWorkflowRepository,
+    FakeOutboundMessageRepository,
+    FakeWorkflowTransitionRepository,
+)
+from tests.application.use_cases._campaign_enrollment_fakes import (
+    FakeTemporalSignalOutboxRepository,
+)
 from tests.application.use_cases.test_authentication import _actor, _membership, _user
 
 NOW = datetime(2026, 7, 21, 14, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("55555555-5555-5555-5555-555555555501")
 ADMIN_ID = UUID("55555555-5555-5555-5555-555555555502")
 USER_ID = UUID("55555555-5555-5555-5555-555555555503")
+SECOND_USER_ID = UUID("55555555-5555-5555-5555-555555555504")
 AGENT_ID = UUID("55555555-5555-5555-5555-555555555505")
 SECOND_AGENT_ID = UUID("55555555-5555-5555-5555-555555555506")
 MAPPING_ID = UUID("55555555-5555-5555-5555-555555555507")
+FALLBACK_MANAGER_ID = UUID("55555555-5555-5555-5555-555555555508")
+LEAD_ID = UUID("55555555-5555-5555-5555-555555555509")
+WORKFLOW_ID = UUID("55555555-5555-5555-5555-555555555510")
+CAMPAIGN_ENROLLMENT_ID = UUID("55555555-5555-5555-5555-555555555511")
+CAMPAIGN_ID = UUID("55555555-5555-5555-5555-555555555512")
+MESSAGE_ID = UUID("55555555-5555-5555-5555-555555555513")
 
 
 async def test_list_crm_agent_mapping_admin_view_returns_summary_and_rows() -> None:
@@ -127,6 +149,95 @@ async def test_unlink_crm_agent_mapping_marks_system_unlinked() -> None:
     assert result.mapping.app_user_id is None
     assert result.mapping.mapping_status == CRMAgentMappingStatus.UNMAPPED
     assert result.mapping.resolution_source == CRMAgentMappingResolutionSource.SYSTEM_UNLINKED
+
+
+async def test_upsert_crm_agent_mapping_reconciles_affected_leads() -> None:
+    lead_repository = FakeLeadRepository((_lead_record(owner_user_id=USER_ID),))
+    mapping_repository = FakeMappingRepository(
+        (_mapping(app_user_id=USER_ID, status=CRMAgentMappingStatus.VERIFIED),)
+    )
+    workflows = FakeLeadWorkflowRepository()
+    transitions = FakeWorkflowTransitionRepository()
+    outbox = FakeTemporalSignalOutboxRepository()
+    messages = FakeOutboundMessageRepository()
+    event_bus = FakeEventBus()
+    await workflows.save(_workflow())
+    await messages.save(_pending_message())
+
+    result = await upsert_crm_agent_mapping_by_admin(
+        actor=_admin_actor(),
+        workspace_id=WORKSPACE_ID,
+        crm_agent_record_id=AGENT_ID,
+        app_user_id=SECOND_USER_ID,
+        crm_agent_repository=FakeCRMAgentRepository((_agent(),)),
+        mapping_repository=mapping_repository,
+        user_repository=FakeUserRepository(
+            (_user(user_id=USER_ID), _user(user_id=SECOND_USER_ID))
+        ),
+        membership_repository=FakeMembershipRepository(
+            (_membership_for(USER_ID), _membership_for(SECOND_USER_ID))
+        ),
+        lead_repository=lead_repository,
+        workspace_agent_mapping_config_repository=FakeWorkspaceAgentMappingConfigRepository(None),
+        lead_workflow_repository=workflows,
+        workflow_transition_repository=transitions,
+        temporal_signal_outbox_repository=outbox,
+        outbound_message_repository=messages,
+        event_bus=event_bus,
+        now=NOW,
+    )
+
+    assert result.status == CRMAgentMappingAdminStatus.UPDATED
+    updated_lead = lead_repository.by_id[(WORKSPACE_ID, LEAD_ID)]
+    assert updated_lead.assigned_agent_user_id == SECOND_USER_ID
+    assert updated_lead.effective_owner_user_id == SECOND_USER_ID
+    assert updated_lead.effective_owner_source == EffectiveOwnerSource.CRM_MAPPING
+    assert updated_lead.assignment_resolution_status == AssignmentResolutionStatus.RESOLVED
+    assert (
+        workflows.latest_by_lead[(WORKSPACE_ID, LEAD_ID)].state
+        == WorkflowState.WAITING_FOR_RESPONSE
+    )
+    assert messages.saved == [_pending_message()]
+    assert outbox.entries == {}
+    assert [event.event_type.value for event in event_bus.events] == [
+        "lead.assignment_reconciled",
+    ]
+
+
+async def test_unlink_crm_agent_mapping_reconciles_affected_leads_to_fallback_manager() -> None:
+    lead_repository = FakeLeadRepository((_lead_record(owner_user_id=USER_ID),))
+    mapping_repository = FakeMappingRepository(
+        (_mapping(app_user_id=USER_ID, status=CRMAgentMappingStatus.VERIFIED),)
+    )
+
+    result = await unlink_crm_agent_mapping_by_admin(
+        actor=_admin_actor(),
+        workspace_id=WORKSPACE_ID,
+        mapping_id=MAPPING_ID,
+        mapping_repository=mapping_repository,
+        crm_agent_repository=FakeCRMAgentRepository((_agent(),)),
+        user_repository=FakeUserRepository(
+            (_user(user_id=USER_ID), _user(user_id=FALLBACK_MANAGER_ID))
+        ),
+        membership_repository=FakeMembershipRepository(
+            (_manager_membership_for(FALLBACK_MANAGER_ID),)
+        ),
+        lead_repository=lead_repository,
+        workspace_agent_mapping_config_repository=FakeWorkspaceAgentMappingConfigRepository(
+            _mapping_config(FALLBACK_MANAGER_ID)
+        ),
+        now=NOW,
+    )
+
+    assert result.status == CRMAgentMappingAdminStatus.DELETED
+    updated_lead = lead_repository.by_id[(WORKSPACE_ID, LEAD_ID)]
+    assert updated_lead.assigned_agent_user_id is None
+    assert updated_lead.effective_owner_user_id == FALLBACK_MANAGER_ID
+    assert updated_lead.effective_owner_source == EffectiveOwnerSource.WORKSPACE_MANAGER_FALLBACK
+    assert (
+        updated_lead.assignment_resolution_status
+        == AssignmentResolutionStatus.UNMAPPED_CRM_AGENT
+    )
 
 
 async def test_manager_cannot_manage_crm_agent_mappings() -> None:
@@ -333,6 +444,119 @@ class FakeMembershipRepository:
         return membership
 
 
+class FakeWorkspaceAgentMappingConfigRepository:
+    def __init__(self, config: WorkspaceAgentMappingConfig | None) -> None:
+        self.config = config
+
+    async def get_by_workspace_id(self, workspace_id: UUID) -> WorkspaceAgentMappingConfig | None:
+        if self.config is None or self.config.workspace_id != workspace_id:
+            return None
+        return self.config
+
+    async def save(self, config: WorkspaceAgentMappingConfig) -> WorkspaceAgentMappingConfig:
+        self.config = config
+        return config
+
+
+class FakeLeadRepository:
+    def __init__(self, leads: tuple[CanonicalLeadRecord, ...]) -> None:
+        self.by_id = {(lead.workspace_id, lead.lead_id): lead for lead in leads}
+        self.saved: list[CanonicalLeadRecord] = []
+
+    async def get_by_id(self, workspace_id: UUID, lead_id: UUID) -> CanonicalLeadRecord | None:
+        lead = self.by_id.get((workspace_id, lead_id))
+        return lead
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: UUID,
+        lead_id: UUID,
+    ) -> CanonicalLeadRecord | None:
+        return await self.get_by_id(workspace_id, lead_id)
+
+    async def get_by_crm_id(
+        self,
+        workspace_id: UUID,
+        crm_provider: CRMProvider,
+        crm_lead_id: str,
+    ) -> CanonicalLeadRecord | None:
+        return next(
+            (
+                lead
+                for (lead_workspace_id, _), lead in self.by_id.items()
+                if lead_workspace_id == workspace_id
+                and lead.crm_provider == crm_provider
+                and lead.crm_lead_id == crm_lead_id
+            ),
+            None,
+        )
+
+    async def list_by_assigned_agent_crm_id(
+        self,
+        workspace_id: UUID,
+        assigned_agent_crm_id: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        return tuple(
+            lead
+            for (lead_workspace_id, _), lead in self.by_id.items()
+            if lead_workspace_id == workspace_id
+            and lead.assigned_agent_crm_id == assigned_agent_crm_id
+        )
+
+    async def get_by_primary_phone(
+        self,
+        workspace_id: UUID,
+        phone_number: str,
+    ) -> CanonicalLeadRecord | None:
+        return next(
+            (
+                lead
+                for (lead_workspace_id, _), lead in self.by_id.items()
+                if lead_workspace_id == workspace_id and lead.primary_phone == phone_number
+            ),
+            None,
+        )
+
+    async def get_by_primary_email(
+        self,
+        workspace_id: UUID,
+        email_address: str,
+    ) -> CanonicalLeadRecord | None:
+        matches = await self.list_by_primary_email(workspace_id, email_address)
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
+    async def list_by_primary_email(
+        self,
+        workspace_id: UUID,
+        email_address: str,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        requested = email_address.strip().lower()
+        if not requested:
+            return ()
+        return tuple(
+            lead
+            for (lead_workspace_id, _), lead in self.by_id.items()
+            if lead_workspace_id == workspace_id
+            and lead.primary_email is not None
+            and lead.primary_email.strip().lower() == requested
+        )
+
+    async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
+        self.by_id[(record.workspace_id, record.lead_id)] = record
+        self.saved.append(record)
+        return record
+
+
+class FakeEventBus:
+    def __init__(self) -> None:
+        self.events: list[DomainEvent] = []
+
+    async def publish(self, event: DomainEvent) -> None:
+        self.events.append(event)
+
+
 def _admin_actor() -> AuthenticatedActor:
     return _actor(
         user_id=ADMIN_ID,
@@ -346,6 +570,15 @@ def _membership_for(user_id: UUID) -> WorkspaceMembership:
         workspace_id=WORKSPACE_ID,
         user_id=user_id,
         role=WorkspaceMembershipRole.ASSIGNED_AGENT,
+        status=WorkspaceMembershipStatus.ACTIVE,
+    )
+
+
+def _manager_membership_for(user_id: UUID) -> WorkspaceMembership:
+    return _membership(
+        workspace_id=WORKSPACE_ID,
+        user_id=user_id,
+        role=WorkspaceMembershipRole.MANAGER,
         status=WorkspaceMembershipStatus.ACTIVE,
     )
 
@@ -384,4 +617,64 @@ def _mapping(
         resolved_at=NOW if app_user_id is not None else None,
         created_at=NOW,
         updated_at=NOW,
+    )
+
+
+def _mapping_config(user_id: UUID | None) -> WorkspaceAgentMappingConfig:
+    return WorkspaceAgentMappingConfig(
+        workspace_id=WORKSPACE_ID,
+        unmapped_assignment_fallback_user_id=user_id,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _lead_record(*, owner_user_id: UUID) -> CanonicalLeadRecord:
+    return CanonicalLeadRecord(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+        crm_lead_id="crm-lead-1",
+        facts_derived_at=NOW,
+        source_payload_version="test:v1",
+        assigned_agent_crm_id=_agent().external_agent_id,
+        assigned_agent_user_id=owner_user_id,
+        effective_owner_user_id=owner_user_id,
+        effective_owner_source=EffectiveOwnerSource.CRM_MAPPING,
+        assignment_resolution_status=AssignmentResolutionStatus.RESOLVED,
+        assignment_last_resolved_at=NOW,
+        has_accountable_owner=True,
+    )
+
+
+def _workflow() -> LeadWorkflow:
+    return LeadWorkflow(
+        workflow_id=WORKFLOW_ID,
+        temporal_workflow_id="workflow-123",
+        workspace_id=WORKSPACE_ID,
+        campaign_enrollment_id=CAMPAIGN_ENROLLMENT_ID,
+        campaign_id=CAMPAIGN_ID,
+        lead_id=LEAD_ID,
+        state=WorkflowState.WAITING_FOR_RESPONSE,
+        last_transition_at=NOW,
+        state_version=2,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _pending_message() -> OutboundMessage:
+    return OutboundMessage(
+        message_id=MESSAGE_ID,
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        cadence_step_id="step-1",
+        channel=ContactChannel.SMS,
+        status=OutboundMessageStatus.PENDING,
+        idempotency_key="pending-1",
+        body="hello",
+        created_at=NOW,
+        updated_at=NOW,
+        provider_send_status=ProviderSendStatus.NOT_ATTEMPTED,
     )

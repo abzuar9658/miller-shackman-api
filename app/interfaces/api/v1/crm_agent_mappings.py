@@ -113,6 +113,13 @@ async def upsert_crm_agent_mapping_route(
         mapping_repository=bundle.mapping_repository,
         user_repository=bundle.user_repository,
         membership_repository=bundle.membership_repository,
+        lead_repository=bundle.lead_repository,
+        workspace_agent_mapping_config_repository=bundle.workspace_agent_mapping_config_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        outbound_message_repository=bundle.outbound_message_repository,
+        event_bus=bundle.event_bus,
         now=datetime.now(UTC),
     )
     await bundle.session.commit()
@@ -149,6 +156,13 @@ async def patch_crm_agent_mapping_route(
         mapping_repository=bundle.mapping_repository,
         user_repository=bundle.user_repository,
         membership_repository=bundle.membership_repository,
+        lead_repository=bundle.lead_repository,
+        workspace_agent_mapping_config_repository=bundle.workspace_agent_mapping_config_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        outbound_message_repository=bundle.outbound_message_repository,
+        event_bus=bundle.event_bus,
         now=datetime.now(UTC),
     )
     await bundle.session.commit()
@@ -174,6 +188,16 @@ async def unlink_crm_agent_mapping_route(
         workspace_id=workspace_id,
         mapping_id=mapping_id,
         mapping_repository=bundle.mapping_repository,
+        crm_agent_repository=bundle.crm_agent_repository,
+        user_repository=bundle.user_repository,
+        membership_repository=bundle.membership_repository,
+        lead_repository=bundle.lead_repository,
+        workspace_agent_mapping_config_repository=bundle.workspace_agent_mapping_config_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        outbound_message_repository=bundle.outbound_message_repository,
+        event_bus=bundle.event_bus,
         now=datetime.now(UTC),
     )
     await bundle.session.commit()
