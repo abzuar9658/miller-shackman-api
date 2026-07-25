@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,9 @@ from app.infrastructure.persistence.postgres.models import (
     ListingSearchScopeModel,
     ListingSnapshotModel,
     ListingSourceModel,
+)
+from app.infrastructure.persistence.postgres.partial_index_predicates import (
+    PENDING_RUNNING_STATUS_INDEX_WHERE_SQL,
 )
 
 _ACTIVE_CRAWL_RUN_STATUSES = (
@@ -213,7 +216,7 @@ class PostgresListingCrawlRunRepository:
             .values(**_crawl_run_to_values(crawl_run))
             .on_conflict_do_nothing(
                 index_elements=["workspace_id", "source_id"],
-                index_where=ListingCrawlRunModel.status.in_(_ACTIVE_CRAWL_RUN_STATUSES),
+                index_where=text(PENDING_RUNNING_STATUS_INDEX_WHERE_SQL),
             )
             .returning(ListingCrawlRunModel)
         )

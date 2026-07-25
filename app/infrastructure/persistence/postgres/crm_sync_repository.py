@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select
@@ -17,6 +17,9 @@ from app.domain.crm_sync import (
 from app.infrastructure.persistence.postgres.models import (
     CRMSyncJobModel,
     ExternalEventModel,
+)
+from app.infrastructure.persistence.postgres.partial_index_predicates import (
+    PENDING_RUNNING_STATUS_INDEX_WHERE_SQL,
 )
 
 
@@ -97,7 +100,7 @@ class PostgresCRMSyncJobRepository:
             .values(**_sync_job_to_values(job))
             .on_conflict_do_nothing(
                 index_elements=["workspace_id", "crm_provider"],
-                index_where=CRMSyncJobModel.status.in_(_ACTIVE_SYNC_JOB_STATUSES),
+                index_where=text(PENDING_RUNNING_STATUS_INDEX_WHERE_SQL),
             )
             .returning(CRMSyncJobModel)
         )

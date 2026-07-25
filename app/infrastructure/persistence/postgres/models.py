@@ -22,6 +22,9 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.domain.lead_assignment import AssignmentResolutionStatus
+from app.infrastructure.persistence.postgres.partial_index_predicates import (
+    PENDING_RUNNING_STATUS_INDEX_WHERE_SQL,
+)
 
 
 class Base(DeclarativeBase):
@@ -198,7 +201,7 @@ class ListingCrawlRunModel(Base):
             "workspace_id",
             "source_id",
             unique=True,
-            postgresql_where=text("status IN ('pending', 'running')"),
+            postgresql_where=text(PENDING_RUNNING_STATUS_INDEX_WHERE_SQL),
         ),
         Index(
             "ix_listing_crawl_runs_workspace_source_started",
@@ -325,8 +328,14 @@ class OutboundMessageModel(Base):
             "idempotency_key",
             name="uq_outbound_messages_workspace_idempotency_key",
         ),
+        UniqueConstraint(
+            "workspace_id",
+            "reply_routing_token",
+            name="uq_outbound_messages_workspace_reply_routing_token",
+        ),
         Index("ix_outbound_messages_workspace_lead", "workspace_id", "lead_id"),
         Index("ix_outbound_messages_provider_message", "provider_name", "provider_message_id"),
+        Index("ix_outbound_messages_workspace_reply_token", "workspace_id", "reply_routing_token"),
         Index("ix_outbound_messages_workspace_status", "workspace_id", "status"),
     )
 
@@ -348,6 +357,7 @@ class OutboundMessageModel(Base):
     provider_send_status: Mapped[str] = mapped_column(String(50), nullable=False)
     provider_name: Mapped[str | None] = mapped_column(String(50))
     provider_message_id: Mapped[str | None] = mapped_column(String(255))
+    reply_routing_token: Mapped[str | None] = mapped_column(String(64))
     provider_delivery_status: Mapped[str | None] = mapped_column(String(50))
     provider_status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -519,7 +529,27 @@ class CampaignAdminAuditLogModel(Base):
 
 class CRMSyncJobModel(Base):
     __tablename__ = "crm_sync_jobs"
-    __table_args__ = (Index("ix_crm_sync_jobs_workspace_created", "workspace_id", "created_at"),)
+    __table_args__ = (
+        Index(
+            "ix_crm_sync_jobs_workspace_provider_created",
+            "workspace_id",
+            "crm_provider",
+            "created_at",
+        ),
+        Index(
+            "ix_crm_sync_jobs_workspace_status_created",
+            "workspace_id",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "uq_crm_sync_jobs_one_active_workspace_provider",
+            "workspace_id",
+            "crm_provider",
+            unique=True,
+            postgresql_where=text(PENDING_RUNNING_STATUS_INDEX_WHERE_SQL),
+        ),
+    )
 
     sync_job_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4
@@ -1106,6 +1136,9 @@ class OutboundMessageCRMCompletionModel(Base):
     )
     crm_note_idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False)
     crm_note_written_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    crm_conversation_published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     crm_snapshot_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -1170,6 +1203,16 @@ class WorkspaceHandoffConfigModel(Base):
     crm_handoff_tag: Mapped[str | None] = mapped_column(String(255))
     crm_review_tag: Mapped[str | None] = mapped_column(String(255))
     crm_custom_fields: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, default=dict)
+    lead_acknowledgment_sms_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    lead_acknowledgment_sms_body: Mapped[str | None] = mapped_column(String(4000))
+    lead_acknowledgment_email_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    lead_acknowledgment_email_subject: Mapped[str | None] = mapped_column(String(255))
+    lead_acknowledgment_email_body: Mapped[str | None] = mapped_column(String(4000))
+    lead_acknowledgment_prompt_text: Mapped[str | None] = mapped_column(String(12000))
     crm_snapshot_summary_field: Mapped[str | None] = mapped_column(String(255))
     crm_snapshot_status_field: Mapped[str | None] = mapped_column(String(255))
     crm_snapshot_latest_inbound_field: Mapped[str | None] = mapped_column(String(255))
