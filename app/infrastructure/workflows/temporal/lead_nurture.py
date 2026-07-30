@@ -96,6 +96,16 @@ class InboundProcessedWorkflowSignal:
 
 
 @dataclass(frozen=True)
+class RescheduleWorkflowSignal:
+    workspace_id: UUID
+    lead_id: UUID
+    occurred_at: str
+    reason: str
+    actor_user_id: UUID | None = None
+    external_event_id: UUID | None = None
+
+
+@dataclass(frozen=True)
 class LeadNurtureWorkflowSnapshot:
     workspace_id: UUID
     lead_id: UUID
@@ -118,6 +128,7 @@ class LeadNurtureWorkflow:
         self._snapshot: LeadNurtureWorkflowSnapshot | None = None
         self._closed = False
         self._send_blocked = False
+        self._reschedule_requested = False
 
     @workflow.run
     async def run(self, input_: LeadNurtureWorkflowInput) -> LeadNurtureWorkflowSnapshot:
@@ -142,10 +153,16 @@ class LeadNurtureWorkflow:
 
             delay = schedule_result.scheduled_for - workflow.now()
             if delay > timedelta():
-                await workflow.sleep(delay)
+                await self._wait_until_due_or_interrupted(delay)
+            if self._closed:
+                return self._snapshot
             if self._send_blocked:
                 await workflow.wait_condition(lambda: self._closed or not self._send_blocked)
-            if self._closed or schedule_result.cadence_step_id is None:
+            if self._closed:
+                return self._snapshot
+            if self._consume_reschedule_request():
+                continue
+            if schedule_result.cadence_step_id is None:
                 return self._snapshot
 
             execute_result = await self._execute_cadence_activity(
@@ -167,7 +184,7 @@ class LeadNurtureWorkflow:
                     return self._snapshot
                 continue
 
-            if execute_result.status == "deferred":
+            if execute_result.status in {"deferred", "skipped"}:
                 continue
 
             if execute_result.status not in {"sent", "already_sent"}:
@@ -182,6 +199,7 @@ class LeadNurtureWorkflow:
     @workflow.signal(name="pause-requested")
     def pause_requested(self, signal: PauseWorkflowSignal) -> None:
         self._send_blocked = True
+        self._reschedule_requested = True
         assert self._snapshot is not None
         self._snapshot = replace(
             self._snapshot,
@@ -194,6 +212,7 @@ class LeadNurtureWorkflow:
     @workflow.signal(name="resume-requested")
     def resume_requested(self, signal: ResumeWorkflowSignal) -> None:
         self._send_blocked = False
+        self._reschedule_requested = True
         assert self._snapshot is not None
         self._snapshot = replace(
             self._snapshot,
@@ -206,6 +225,7 @@ class LeadNurtureWorkflow:
     @workflow.signal(name="blocked-review-completed")
     def blocked_review_completed(self, signal: UnblockWorkflowSignal) -> None:
         self._send_blocked = False
+        self._reschedule_requested = True
         assert self._snapshot is not None
         self._snapshot = replace(
             self._snapshot,
@@ -218,12 +238,25 @@ class LeadNurtureWorkflow:
     @workflow.signal(name="inbound-processed")
     def inbound_processed(self, signal: InboundProcessedWorkflowSignal) -> None:
         self._send_blocked = True
+        self._reschedule_requested = True
         if self._snapshot is not None:
             self._snapshot = replace(
                 self._snapshot,
                 last_signal="inbound_processed",
                 last_activity="inbound_processed",
                 last_activity_status="blocked",
+                skip_reason=signal.reason,
+            )
+
+    @workflow.signal(name="reschedule-requested")
+    def reschedule_requested(self, signal: RescheduleWorkflowSignal) -> None:
+        self._reschedule_requested = True
+        if self._snapshot is not None:
+            self._snapshot = replace(
+                self._snapshot,
+                last_signal="reschedule_requested",
+                last_activity="reschedule_requested",
+                last_activity_status="updated",
                 skip_reason=signal.reason,
             )
 
@@ -234,6 +267,22 @@ class LeadNurtureWorkflow:
     @workflow.query(name="snapshot")
     def snapshot(self) -> LeadNurtureWorkflowSnapshot | None:
         return self._snapshot
+
+    async def _wait_until_due_or_interrupted(self, delay: timedelta) -> None:
+        try:
+            await workflow.wait_condition(
+                lambda: self._closed or self._send_blocked or self._reschedule_requested,
+                timeout=delay,
+                timeout_summary="lead-nurture-next-action",
+            )
+        except TimeoutError:
+            return
+
+    def _consume_reschedule_request(self) -> bool:
+        if not self._reschedule_requested:
+            return False
+        self._reschedule_requested = False
+        return True
 
     async def _execute_schedule_activity(
         self,

@@ -7,9 +7,18 @@ from app.domain.campaigns.outbound_message import (
     OutboundMessage,
     OutboundMessageCRMCompletionRecord,
 )
+from app.domain.campaigns.paused_search_tracks import (
+    PausedSearchReasonMapping,
+    PausedSearchTrack,
+    PausedSearchTrackAdminAuditLog,
+    PausedSearchTrackStep,
+    PausedSearchTrackVersion,
+)
 from app.domain.common.ids import (
     CRMAgentRecordId,
     LeadId,
+    PausedSearchTrackId,
+    PausedSearchTrackVersionId,
     RefreshSessionId,
     UserId,
     UserInvitationId,
@@ -25,6 +34,7 @@ from app.domain.crm_agent_mapping import (
 )
 from app.domain.crm_sync import (
     CRMSyncJob,
+    CRMSyncWindowState,
     ExternalEvent,
     WorkspaceCRMSyncConfig,
     WorkspaceCRMSyncScheduleTarget,
@@ -40,10 +50,21 @@ from app.domain.identity import (
     WorkspaceMembership,
     WorkspaceMembershipRole,
 )
-from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.leads import (
+    CanonicalLeadRecord,
+    CRMProvider,
+    LeadClassificationArtifact,
+    LeadPausedSearchHistoryEntry,
+    LeadRoutingReview,
+    PausedSearchReasonCode,
+)
 from app.domain.llm import WorkspaceLLMConfig
 from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
-from app.domain.workflows import TemporalSignalOutboxEntry
+from app.domain.workflows import (
+    LeadWorkflow,
+    LeadWorkflowOverrideAuditLog,
+    TemporalSignalOutboxEntry,
+)
 from app.domain.workspace_automation import WorkspaceOperationalControl
 
 
@@ -102,6 +123,23 @@ class LeadRepository(Protocol):
         raise NotImplementedError
 
 
+class LeadPausedSearchHistoryRepository(Protocol):
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadPausedSearchHistoryEntry, ...]:
+        raise NotImplementedError
+
+    async def append(
+        self,
+        entry: LeadPausedSearchHistoryEntry,
+    ) -> LeadPausedSearchHistoryEntry:
+        raise NotImplementedError
+
+
 class CrmConversationEventRepository(Protocol):
     async def list_for_lead(
         self,
@@ -113,6 +151,66 @@ class CrmConversationEventRepository(Protocol):
         raise NotImplementedError
 
     async def save(self, event: CrmConversationEvent) -> CrmConversationEvent:
+        raise NotImplementedError
+
+
+class LeadClassificationArtifactRepository(Protocol):
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        artifact_id: UUID,
+    ) -> LeadClassificationArtifact | None:
+        raise NotImplementedError
+
+    async def save(
+        self,
+        artifact: LeadClassificationArtifact,
+    ) -> LeadClassificationArtifact:
+        raise NotImplementedError
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadClassificationArtifact, ...]:
+        raise NotImplementedError
+
+
+class LeadRoutingReviewRepository(Protocol):
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        review_id: UUID,
+    ) -> LeadRoutingReview | None:
+        raise NotImplementedError
+
+    async def get_by_artifact_id(
+        self,
+        workspace_id: WorkspaceId,
+        artifact_id: UUID,
+    ) -> LeadRoutingReview | None:
+        raise NotImplementedError
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 20,
+    ) -> tuple[LeadRoutingReview, ...]:
+        raise NotImplementedError
+
+    async def list_pending_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadRoutingReview, ...]:
+        raise NotImplementedError
+
+    async def save(self, review: LeadRoutingReview) -> LeadRoutingReview:
         raise NotImplementedError
 
 
@@ -474,6 +572,21 @@ class WorkspaceCRMSyncConfigRepository(Protocol):
         raise NotImplementedError
 
 
+class CRMSyncWindowStateRepository(Protocol):
+    async def get_by_workspace_provider(
+        self,
+        workspace_id: WorkspaceId,
+        crm_provider: str,
+    ) -> CRMSyncWindowState | None:
+        raise NotImplementedError
+
+    async def save(self, state: CRMSyncWindowState) -> CRMSyncWindowState:
+        raise NotImplementedError
+
+    async def delete(self, workspace_id: WorkspaceId, crm_provider: str) -> None:
+        raise NotImplementedError
+
+
 class WorkspaceAgentMappingConfigRepository(Protocol):
     async def get_by_workspace_id(
         self,
@@ -557,6 +670,149 @@ class AttentionAcknowledgementRepository(Protocol):
 
 class CampaignAdminAuditLogRepository(Protocol):
     async def append(self, audit_log: Any) -> Any:
+        raise NotImplementedError
+
+
+class PausedSearchTrackAdminAuditLogRepository(Protocol):
+    async def append(
+        self,
+        audit_log: PausedSearchTrackAdminAuditLog,
+    ) -> PausedSearchTrackAdminAuditLog:
+        raise NotImplementedError
+
+
+class PausedSearchTrackMappingRepository(Protocol):
+    async def get_version(
+        self,
+        workspace_id: WorkspaceId,
+        track_version_id: PausedSearchTrackVersionId,
+    ) -> PausedSearchTrackVersion | None:
+        raise NotImplementedError
+
+    async def get_steps(
+        self,
+        workspace_id: WorkspaceId,
+        track_version_id: PausedSearchTrackVersionId,
+    ) -> tuple[PausedSearchTrackStep, ...]:
+        raise NotImplementedError
+
+    async def get_reason_mapping(
+        self,
+        workspace_id: WorkspaceId,
+        reason_code: PausedSearchReasonCode,
+    ) -> PausedSearchReasonMapping | None:
+        raise NotImplementedError
+
+
+class PausedSearchTrackAdminRepository(Protocol):
+    async def list_tracks(self, workspace_id: WorkspaceId) -> tuple[PausedSearchTrack, ...]:
+        raise NotImplementedError
+
+    async def get_track(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+    ) -> PausedSearchTrack | None:
+        raise NotImplementedError
+
+    async def get_track_by_key(
+        self,
+        workspace_id: WorkspaceId,
+        track_key: str,
+    ) -> PausedSearchTrack | None:
+        raise NotImplementedError
+
+    async def save_track(self, track: PausedSearchTrack) -> PausedSearchTrack:
+        raise NotImplementedError
+
+    async def get_version(
+        self,
+        workspace_id: WorkspaceId,
+        track_version_id: PausedSearchTrackVersionId,
+    ) -> PausedSearchTrackVersion | None:
+        raise NotImplementedError
+
+    async def get_latest_draft_version(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+    ) -> PausedSearchTrackVersion | None:
+        raise NotImplementedError
+
+    async def get_latest_version(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+    ) -> PausedSearchTrackVersion | None:
+        raise NotImplementedError
+
+    async def get_latest_version_number(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+    ) -> int:
+        raise NotImplementedError
+
+    async def save_version(
+        self,
+        version: PausedSearchTrackVersion,
+    ) -> PausedSearchTrackVersion:
+        raise NotImplementedError
+
+    async def get_steps(
+        self,
+        workspace_id: WorkspaceId,
+        track_version_id: PausedSearchTrackVersionId,
+    ) -> tuple[PausedSearchTrackStep, ...]:
+        raise NotImplementedError
+
+    async def replace_steps(
+        self,
+        workspace_id: WorkspaceId,
+        track_version_id: PausedSearchTrackVersionId,
+        steps: tuple[PausedSearchTrackStep, ...],
+    ) -> tuple[PausedSearchTrackStep, ...]:
+        raise NotImplementedError
+
+    async def retire_published_versions(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+        except_version_id: PausedSearchTrackVersionId | None,
+    ) -> None:
+        raise NotImplementedError
+
+    async def replace_reason_mappings(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+        track_version_id: PausedSearchTrackVersionId,
+        reason_codes: tuple[PausedSearchReasonCode, ...],
+        actor_user_id: UserId,
+        now: datetime,
+    ) -> tuple[PausedSearchReasonMapping, ...]:
+        raise NotImplementedError
+
+    async def clear_reason_mappings_for_track(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+    ) -> None:
+        raise NotImplementedError
+
+    async def list_reason_mappings_for_version(
+        self,
+        workspace_id: WorkspaceId,
+        track_version_id: PausedSearchTrackVersionId,
+    ) -> tuple[PausedSearchReasonMapping, ...]:
+        raise NotImplementedError
+
+    async def get_reason_mapping(
+        self,
+        workspace_id: WorkspaceId,
+        reason_code: PausedSearchReasonCode,
+    ) -> PausedSearchReasonMapping | None:
         raise NotImplementedError
 
 
@@ -660,7 +916,7 @@ class LeadWorkflowRepository(Protocol):
         self,
         workspace_id: WorkspaceId,
         lead_id: LeadId,
-    ) -> Any | None:
+    ) -> LeadWorkflow | None:
         raise NotImplementedError
 
     async def list_paused_for_workspace(
@@ -668,10 +924,10 @@ class LeadWorkflowRepository(Protocol):
         workspace_id: WorkspaceId,
         *,
         limit: int = 100,
-    ) -> tuple[Any, ...]:
+    ) -> tuple[LeadWorkflow, ...]:
         raise NotImplementedError
 
-    async def save(self, workflow: Any) -> Any:
+    async def save(self, workflow: LeadWorkflow) -> LeadWorkflow:
         raise NotImplementedError
 
 
@@ -685,6 +941,23 @@ class WorkflowTransitionRepository(Protocol):
         workflow_id: UUID,
         limit: int = 100,
     ) -> tuple[Any, ...]:
+        raise NotImplementedError
+
+
+class LeadWorkflowOverrideAuditLogRepository(Protocol):
+    async def append(
+        self,
+        audit_log: LeadWorkflowOverrideAuditLog,
+    ) -> LeadWorkflowOverrideAuditLog:
+        raise NotImplementedError
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadWorkflowOverrideAuditLog, ...]:
         raise NotImplementedError
 
 
@@ -814,6 +1087,27 @@ class CRMSyncJobRepository(Protocol):
         *,
         now: datetime,
     ) -> CRMSyncJob | None:
+        raise NotImplementedError
+
+    async def fail_stale_active_jobs(
+        self,
+        *,
+        now: datetime,
+        pending_timeout_seconds: int,
+        running_timeout_seconds: int,
+    ) -> int:
+        raise NotImplementedError
+
+    async def touch_running_heartbeat(
+        self,
+        workspace_id: WorkspaceId,
+        sync_job_id: UUID,
+        *,
+        now: datetime,
+    ) -> CRMSyncJob | None:
+        raise NotImplementedError
+
+    async def save_if_running(self, job: CRMSyncJob) -> CRMSyncJob | None:
         raise NotImplementedError
 
     async def save(self, job: CRMSyncJob) -> CRMSyncJob:

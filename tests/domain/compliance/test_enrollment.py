@@ -131,6 +131,23 @@ def test_uncertain_activity_data_blocks_dormant_selector() -> None:
     assert decision.reasons == (EnrollmentReasonCode.ACTIVITY_DATA_INCOMPLETE,)
 
 
+def test_missing_last_meaningful_communication_blocks_dormant_selector() -> None:
+    facts = CampaignEnrollmentFacts(
+        enrollment_sources=frozenset({EnrollmentSource.DORMANT_SELECTOR}),
+        last_meaningful_communication_at=None,
+        activity_data_complete=True,
+        enabled_channels=frozenset({ContactChannel.SMS}),
+        channel_contactability={
+            ContactChannel.SMS: _sms_contactability_decision(allowed=True),
+        },
+    )
+
+    decision = evaluate_campaign_enrollment(facts, _base_policy(), NOW)
+
+    assert decision.eligible is False
+    assert decision.reasons == (EnrollmentReasonCode.ACTIVITY_DATA_INCOMPLETE,)
+
+
 def test_no_contactable_enabled_channels_blocks_enrollment() -> None:
     facts = CampaignEnrollmentFacts(
         enrollment_sources=frozenset({EnrollmentSource.CRM_TAG}),

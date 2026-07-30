@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from app.application.ports.crm_webhook import FollowUpBossWebhookEventBundle
@@ -65,6 +66,46 @@ async def handle_notes_created(
     return processed, len(notes) - processed
 
 
+async def handle_text_messages_created(
+    workspace_id: UUID,
+    event_id: str,
+    occurred_at: datetime,
+    uri: str,
+    bundle: FollowUpBossWebhookEventBundle,
+) -> tuple[int, int]:
+    return await _handle_outbound_communication_created(
+        workspace_id=workspace_id,
+        event_id=event_id,
+        occurred_at=occurred_at,
+        uri=uri,
+        bundle=bundle,
+        collection_key="textMessages",
+        activity_type="text_message",
+        crm_activity_prefix="text_message",
+        timestamp_fields=("created", "sent", "updated"),
+    )
+
+
+async def handle_calls_created(
+    workspace_id: UUID,
+    event_id: str,
+    occurred_at: datetime,
+    uri: str,
+    bundle: FollowUpBossWebhookEventBundle,
+) -> tuple[int, int]:
+    return await _handle_outbound_communication_created(
+        workspace_id=workspace_id,
+        event_id=event_id,
+        occurred_at=occurred_at,
+        uri=uri,
+        bundle=bundle,
+        collection_key="calls",
+        activity_type="call",
+        crm_activity_prefix="call",
+        timestamp_fields=("created", "called", "updated"),
+    )
+
+
 async def handle_em_events_unsubscribed(
     workspace_id: UUID,
     event_id: str,
@@ -106,3 +147,74 @@ async def handle_em_events_unsubscribed(
         )
         processed += 1
     return processed, len(events) - processed
+
+
+async def _handle_outbound_communication_created(
+    *,
+    workspace_id: UUID,
+    event_id: str,
+    occurred_at: datetime,
+    uri: str,
+    bundle: FollowUpBossWebhookEventBundle,
+    collection_key: str,
+    activity_type: str,
+    crm_activity_prefix: str,
+    timestamp_fields: tuple[str, ...],
+) -> tuple[int, int]:
+    raw = await bundle.crm_client.fetch_resource_by_uri(workspace_id, uri)
+    if raw is None:
+        return 0, 1
+    resources = extract_collection(raw, collection_key, fallback_id_key="id")
+    processed = 0
+    for resource in resources:
+        crm_lead_id = str(resource.get("personId", ""))
+        resource_id = str(resource.get("id", ""))
+        if not crm_lead_id or not resource_id or not _is_explicitly_outbound(resource):
+            continue
+        activity_at = _parse_first_timestamp(resource, timestamp_fields) or occurred_at
+        await process_crm_human_activity_event(
+            event=CRMHumanActivityEvent(
+                workspace_id=workspace_id,
+                provider=_PROVIDER,
+                provider_event_id=f"{event_id}:{resource_id}",
+                crm_lead_id=crm_lead_id,
+                occurred_at=activity_at,
+                event_type="activity_created",
+                activity_type=activity_type,
+                crm_activity_id=f"{crm_activity_prefix}:{resource_id}",
+                actor_agent_id=str(resource.get("userId", "")) or None,
+                changed_field=None,
+                previous_value_redacted=None,
+                new_value_redacted=None,
+                payload_redacted={"fub_event_id": event_id, "resource_id": resource_id},
+            ),
+            lead_repository=bundle.lead_repository,
+            external_event_repository=bundle.external_event_repository,
+            lead_workflow_repository=bundle.lead_workflow_repository,
+            workflow_transition_repository=bundle.workflow_transition_repository,
+            temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+            now=activity_at,
+        )
+        processed += 1
+    return processed, len(resources) - processed
+
+
+def _is_explicitly_outbound(payload: dict[str, Any]) -> bool:
+    if isinstance(payload.get("isIncoming"), bool):
+        return not bool(payload["isIncoming"])
+    direction = str(payload.get("direction", "")).strip().lower()
+    return direction == "outbound"
+
+
+def _parse_first_timestamp(
+    payload: dict[str, Any],
+    candidate_fields: tuple[str, ...],
+) -> datetime | None:
+    for field_name in candidate_fields:
+        value = payload.get(field_name)
+        if value is None:
+            continue
+        parsed = parse_iso(str(value))
+        if parsed is not None:
+            return parsed
+    return None

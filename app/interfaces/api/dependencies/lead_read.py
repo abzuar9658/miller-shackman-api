@@ -6,18 +6,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.ports.lead_activity import LeadActivityRepository
 from app.application.ports.lead_read import (
+    LeadReadClassificationArtifactRepository,
     LeadReadCrmConversationEventRepository,
     LeadReadHandoffRepository,
     LeadReadInboundMessageRepository,
     LeadReadLeadRepository,
     LeadReadOutboundMessageRepository,
+    LeadReadPausedSearchHistoryRepository,
+    LeadReadPausedSearchTrackRepository,
     LeadReadUserRepository,
+    LeadReadWorkflowOverrideAuditRepository,
     LeadReadWorkflowRepository,
     LeadReadWorkflowTransitionRepository,
 )
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
     CRMAgentRepository,
+    LeadRoutingReviewRepository,
     WorkspaceContactPolicyRepository,
 )
 from app.core.database import get_session
@@ -33,14 +38,24 @@ from app.infrastructure.persistence.postgres.identity_repository import Postgres
 from app.infrastructure.persistence.postgres.lead_activity_repository import (
     PostgresLeadActivityRepository,
 )
+from app.infrastructure.persistence.postgres.lead_classification_artifact_repository import (
+    PostgresLeadClassificationArtifactRepository,
+)
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
+from app.infrastructure.persistence.postgres.lead_routing_review_repository import (
+    PostgresLeadRoutingReviewRepository,
+)
 from app.infrastructure.persistence.postgres.outbound_message_repository import (
     PostgresOutboundMessageRepository,
+)
+from app.infrastructure.persistence.postgres.paused_search_track_repository import (
+    PostgresPausedSearchTrackAdminRepository,
 )
 from app.infrastructure.persistence.postgres.rejected_draft_review_repository import (
     PostgresRejectedDraftReviewRepository,
 )
 from app.infrastructure.persistence.postgres.workflow_repository import (
+    PostgresLeadWorkflowOverrideAuditLogRepository,
     PostgresLeadWorkflowRepository,
     PostgresWorkflowTransitionRepository,
 )
@@ -52,8 +67,12 @@ from app.infrastructure.persistence.postgres.workspace_contact_policy_repository
 @dataclass
 class LeadReadBundle:
     lead_repository: LeadReadLeadRepository
+    paused_search_history_repository: LeadReadPausedSearchHistoryRepository
+    classification_artifact_repository: LeadReadClassificationArtifactRepository
     workflow_repository: LeadReadWorkflowRepository
+    workflow_override_audit_repository: LeadReadWorkflowOverrideAuditRepository
     workflow_transition_repository: LeadReadWorkflowTransitionRepository
+    paused_search_track_repository: LeadReadPausedSearchTrackRepository
     activity_repository: LeadActivityRepository
     rejected_draft_review_repository: RejectedDraftReviewRepository
     inbound_message_repository: LeadReadInboundMessageRepository
@@ -62,6 +81,7 @@ class LeadReadBundle:
     handoff_repository: LeadReadHandoffRepository
     user_repository: LeadReadUserRepository
     crm_agent_repository: CRMAgentRepository
+    routing_review_repository: LeadRoutingReviewRepository
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository
 
 
@@ -70,8 +90,12 @@ async def get_lead_read_bundle(
 ) -> LeadReadBundle:
     return LeadReadBundle(
         lead_repository=PostgresLeadRepository(session),
+        paused_search_history_repository=PostgresLeadRepository(session),
+        classification_artifact_repository=PostgresLeadClassificationArtifactRepository(session),
         workflow_repository=PostgresLeadWorkflowRepository(session),
+        workflow_override_audit_repository=PostgresLeadWorkflowOverrideAuditLogRepository(session),
         workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
+        paused_search_track_repository=PostgresPausedSearchTrackAdminRepository(session),
         activity_repository=PostgresLeadActivityRepository(session),
         rejected_draft_review_repository=PostgresRejectedDraftReviewRepository(session),
         inbound_message_repository=PostgresInboundMessageRepository(session),
@@ -80,5 +104,6 @@ async def get_lead_read_bundle(
         handoff_repository=PostgresHandoffRepository(session),
         user_repository=PostgresUserRepository(session),
         crm_agent_repository=PostgresCRMAgentRepository(session),
+        routing_review_repository=PostgresLeadRoutingReviewRepository(session),
         workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
     )

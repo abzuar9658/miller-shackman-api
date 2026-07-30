@@ -16,7 +16,7 @@ from app.application.services.llm.outbound_message_drafting import (
 )
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
-from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
+from app.domain.outbound_drafting import OutboundJourneyKind, WorkspaceOutboundDraftingConfig
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
 
@@ -98,6 +98,7 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
                 "Just checking whether Riverdale is still the right area for you.",
             ),
         ),
+        journey_kind=OutboundJourneyKind.DORMANT,
         llm_client=llm,
     )
 
@@ -105,9 +106,13 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
     assert result.body == "Hi there,\n\nare you still thinking about making a move this year?"
     assert result.model == "openai/gpt-4o-mini"
     assert result.usage_tokens == 42
-    assert llm.requests[0].prompt_version == "outbound_message_draft:v9:r1"
+    assert llm.requests[0].prompt_version == "outbound_message_draft:v10:r1"
     assert "Austin" in llm.requests[0].prompt
+    assert '"journey_kind": "dormant"' in llm.requests[0].prompt
     assert "Do not invent listings" in llm.requests[0].prompt
+    assert "For dormant outreach, treat the lead as quiet for an unknown reason" in (
+        llm.requests[0].prompt
+    )
     assert (
         "generate ONLY the natural-language message content that should be inserted into or "
         "appended to the final template as the message body" in llm.requests[0].prompt
@@ -186,6 +191,7 @@ def test_builds_safe_listing_relevance_brief_from_listing_context() -> None:
             "the lead's stated budget."
         ),
         safe_cta="Ask whether they want their assigned agent to send a few current options.",
+        listing_context_source=None,
     )
 
 

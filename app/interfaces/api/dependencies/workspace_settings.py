@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Annotated, Protocol
 
 from fastapi import Depends
@@ -95,6 +96,7 @@ class WorkspaceOutboundDraftingPreviewBundle:
     listing_snapshot_repository: ListingSnapshotRepository
     llm_client: LLMClient
     listing_search_client: ListingSearchClient
+    listing_cache_ttl: timedelta
     default_openrouter_model: str
 
 
@@ -141,5 +143,6 @@ async def get_workspace_outbound_drafting_preview_bundle(
         listing_snapshot_repository=PostgresListingSnapshotRepository(session),
         llm_client=build_llm_client(settings),
         listing_search_client=build_listing_search_client(settings),
+        listing_cache_ttl=timedelta(minutes=settings.listing_context_enrichment_cache_ttl_minutes),
         default_openrouter_model=settings.openrouter_model,
     )

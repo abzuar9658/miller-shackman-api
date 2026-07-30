@@ -705,6 +705,7 @@ def test_update_workspace_crm_sync_config_persists_values() -> None:
             workspace_id=WORKSPACE_ID,
             crm_sync_enabled=False,
             crm_sync_interval_seconds=900,
+            max_leads_per_sync_cycle=250,
             workspace_repository=deps.workspace_repository,
             membership_repository=deps.membership_repository,
             crm_sync_config_repository=deps.workspace_crm_sync_config_repository,
@@ -717,6 +718,7 @@ def test_update_workspace_crm_sync_config_persists_values() -> None:
     assert result.crm_sync_config is not None
     assert result.crm_sync_config.crm_sync_enabled is False
     assert result.crm_sync_config.crm_sync_interval_seconds == 900
+    assert result.crm_sync_config.max_leads_per_sync_cycle == 250
     assert deps.audit_log_repository.logs[-1].event_type == (
         AuthAuditEventType.WORKSPACE_CRM_SYNC_CONFIG_UPDATED
     )
@@ -884,6 +886,7 @@ def test_update_workspace_operational_control_persists_values() -> None:
             workspace_id=WORKSPACE_ID,
             automation_status=WorkspaceAutomationStatus.PAUSED,
             pause_reason="Brokerage requested a temporary pause.",
+            recurring_paused_search_enabled=True,
             workspace_repository=deps.workspace_repository,
             membership_repository=deps.membership_repository,
             workspace_operational_control_repository=deps.workspace_operational_control_repository,
@@ -896,6 +899,7 @@ def test_update_workspace_operational_control_persists_values() -> None:
     assert result.operational_control is not None
     assert result.operational_control.automation_status == WorkspaceAutomationStatus.PAUSED
     assert result.operational_control.pause_reason == "Brokerage requested a temporary pause."
+    assert result.operational_control.recurring_paused_search_enabled is True
     assert deps.audit_log_repository.logs[-1].event_type == (
         AuthAuditEventType.WORKSPACE_OPERATIONAL_CONTROL_UPDATED
     )

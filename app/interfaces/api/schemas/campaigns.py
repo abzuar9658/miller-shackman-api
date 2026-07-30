@@ -203,6 +203,7 @@ class RunDormantSelectorResponse(BaseModel):
     selected_count: int
     held_back_count: int
     started_count: int
+    paused_search_started_count: int
     veto_window_expires_at: datetime | None
     reason: str | None
 
@@ -218,6 +219,6 @@ class RecordPreflightVetoResponse(BaseModel):
     lead_id: UUID
     recorded: bool
     recorded_at: datetime | None
-    actor_id: UUID
+    actor_id: str
     duplicate: bool
     reasons: list[str]

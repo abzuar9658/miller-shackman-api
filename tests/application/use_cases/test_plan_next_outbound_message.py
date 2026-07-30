@@ -36,6 +36,7 @@ from app.domain.listing_sources import (
     ListingSourceType,
 )
 from app.domain.llm import WorkspaceLLMConfig
+from app.domain.outbound_drafting import OutboundJourneyKind
 from tests.application.use_cases._campaign_cadence_fakes import FakeCrmConversationEventRepository
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
@@ -396,6 +397,7 @@ def _planning_context(
         brokerage_name="Miller Schackman",
         cadence_step_id="step-1",
         assigned_agent_name="Alex Agent",
+        journey_kind=OutboundJourneyKind.DORMANT,
         extracted_preferences=extracted_preferences or {},
         allowed_mapped_custom_field_keys=("preferred_location",),
         activity_items=activity_items,
@@ -508,6 +510,7 @@ async def test_plans_message_using_safe_context_assembled_from_canonical_lead() 
     draft_requests = _draft_requests(llm)
     assert len(draft_requests) == 1
     assert "No meaningful communication recorded for 90 days." in draft_requests[0].prompt
+    assert '"journey_kind": "dormant"' in draft_requests[0].prompt
     assert "the lead inquired about a property" in draft_requests[0].prompt
     assert "Bronx" in draft_requests[0].prompt
     assert "Austin" not in draft_requests[0].prompt

@@ -7,10 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.workflows import (
     LeadWorkflow,
+    LeadWorkflowOverrideAction,
+    LeadWorkflowOverrideAuditLog,
     WorkflowState,
     WorkflowTransition,
     WorkflowTransitionReasonCode,
 )
+from app.infrastructure.persistence.postgres.models import LeadWorkflowOverrideAuditLogModel
 from app.infrastructure.persistence.postgres.workflow_models import (
     LeadWorkflowModel,
     WorkflowTransitionModel,
@@ -116,6 +119,38 @@ class PostgresWorkflowTransitionRepository:
         return tuple(_model_to_transition(model) for model in result.scalars().all())
 
 
+class PostgresLeadWorkflowOverrideAuditLogRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def append(
+        self,
+        audit_log: LeadWorkflowOverrideAuditLog,
+    ) -> LeadWorkflowOverrideAuditLog:
+        result = await self._session.execute(
+            insert(LeadWorkflowOverrideAuditLogModel)
+            .values(_override_audit_to_values(audit_log))
+            .returning(LeadWorkflowOverrideAuditLogModel),
+        )
+        return _model_to_override_audit(result.scalar_one())
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadWorkflowOverrideAuditLog, ...]:
+        result = await self._session.execute(
+            select(LeadWorkflowOverrideAuditLogModel)
+            .where(LeadWorkflowOverrideAuditLogModel.workspace_id == workspace_id)
+            .where(LeadWorkflowOverrideAuditLogModel.lead_id == lead_id)
+            .order_by(LeadWorkflowOverrideAuditLogModel.created_at.desc())
+            .limit(limit),
+        )
+        return tuple(_model_to_override_audit(model) for model in result.scalars().all())
+
+
 def _latest_for_lead_statement(
     workspace_id: WorkspaceId,
     lead_id: LeadId,
@@ -142,6 +177,8 @@ def _workflow_to_values(workflow: LeadWorkflow) -> dict[str, object]:
         "lead_id": workflow.lead_id,
         "state": workflow.state.value,
         "current_step_id": workflow.current_step_id,
+        "paused_search_track_version_id": workflow.paused_search_track_version_id,
+        "paused_search_track_step_id": workflow.paused_search_track_step_id,
         "next_action_at": workflow.next_action_at,
         "last_transition_at": workflow.last_transition_at,
         "pause_reason": workflow.pause_reason,
@@ -162,6 +199,8 @@ def _model_to_workflow(model: LeadWorkflowModel) -> LeadWorkflow:
         lead_id=model.lead_id,
         state=WorkflowState(model.state),
         current_step_id=model.current_step_id,
+        paused_search_track_version_id=model.paused_search_track_version_id,
+        paused_search_track_step_id=model.paused_search_track_step_id,
         next_action_at=model.next_action_at,
         last_transition_at=model.last_transition_at,
         pause_reason=model.pause_reason,
@@ -205,4 +244,36 @@ def _model_to_transition(model: WorkflowTransitionModel) -> WorkflowTransition:
         external_event_id=model.external_event_id,
         created_at=model.created_at,
         metadata=model.metadata_,
+    )
+
+
+def _override_audit_to_values(
+    audit_log: LeadWorkflowOverrideAuditLog,
+) -> dict[object, object]:
+    return {
+        LeadWorkflowOverrideAuditLogModel.audit_log_id: audit_log.audit_log_id,
+        LeadWorkflowOverrideAuditLogModel.workspace_id: audit_log.workspace_id,
+        LeadWorkflowOverrideAuditLogModel.lead_id: audit_log.lead_id,
+        LeadWorkflowOverrideAuditLogModel.workflow_id: audit_log.workflow_id,
+        LeadWorkflowOverrideAuditLogModel.actor_user_id: audit_log.actor_user_id,
+        LeadWorkflowOverrideAuditLogModel.action: audit_log.action.value,
+        LeadWorkflowOverrideAuditLogModel.reason: audit_log.reason,
+        LeadWorkflowOverrideAuditLogModel.details: dict(audit_log.details),
+        LeadWorkflowOverrideAuditLogModel.created_at: audit_log.created_at,
+    }
+
+
+def _model_to_override_audit(
+    model: LeadWorkflowOverrideAuditLogModel,
+) -> LeadWorkflowOverrideAuditLog:
+    return LeadWorkflowOverrideAuditLog(
+        audit_log_id=model.audit_log_id,
+        workspace_id=model.workspace_id,
+        lead_id=model.lead_id,
+        workflow_id=model.workflow_id,
+        actor_user_id=model.actor_user_id,
+        action=LeadWorkflowOverrideAction(model.action),
+        reason=model.reason,
+        details=dict(model.details),
+        created_at=model.created_at,
     )

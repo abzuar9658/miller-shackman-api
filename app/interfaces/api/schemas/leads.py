@@ -1,8 +1,9 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from app.domain.leads import PausedSearchReasonCode
 from app.interfaces.api.schemas.handoffs import HandoffResponse
 
 
@@ -30,6 +31,128 @@ class LeadSendabilityResponse(BaseModel):
     blocked_reasons: list[str] = Field(default_factory=list)
 
 
+class LeadPausedSearchProfileResponse(BaseModel):
+    paused_search_active: bool
+    pause_reason_code: str | None = None
+    pause_reason_note: str | None = None
+    reengagement_not_before: datetime | None = None
+    reengagement_window_label: str | None = None
+    paused_search_source: str | None = None
+    paused_search_recorded_at: datetime | None = None
+    paused_search_recorded_by_user_id: UUID | None = None
+    paused_search_last_confirmed_at: datetime | None = None
+
+
+class LeadPausedSearchHistoryEntryResponse(BaseModel):
+    history_id: UUID
+    action: str
+    actor_user_id: UUID | None
+    actor_name: str | None = None
+    created_at: datetime
+    previous_profile: LeadPausedSearchProfileResponse | None = None
+    current_profile: LeadPausedSearchProfileResponse | None = None
+
+
+
+class LeadClassificationTraceResponse(BaseModel):
+    prompt_text: str | None = None
+    input_context: dict[str, object] = Field(default_factory=dict)
+    raw_response_text: str | None = None
+    parsed_response: dict[str, object] = Field(default_factory=dict)
+
+
+class LeadClassificationArtifactResponse(BaseModel):
+    artifact_id: UUID
+    source: str
+    outcome: str
+    pause_reason_code: str | None = None
+    reengagement_not_before: datetime | None = None
+    reengagement_window_label: str | None = None
+    confidence: float | None = None
+    evidence: list[str] = Field(default_factory=list)
+    summary: str | None = None
+    model: str | None = None
+    prompt_version: str | None = None
+    latency_ms: int
+    usage_tokens: int | None = None
+    applied_status: str
+    applied_at: datetime | None = None
+    created_at: datetime
+    llm_trace: LeadClassificationTraceResponse | None = None
+
+
+class LeadRoutingReviewResponse(BaseModel):
+    review_id: UUID
+    artifact_id: UUID
+    status: str
+    reason_codes: list[str] = Field(default_factory=list)
+    resolution: str | None = None
+    reviewed_by_user_id: UUID | None = None
+    reviewed_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class LeadPausedSearchTrackPlanResponse(BaseModel):
+    track_id: UUID
+    track_key: str
+    display_name: str
+    track_version_id: UUID
+    version_number: int
+    track_family: str
+    current_step_id: UUID | None = None
+    current_step_order: int | None = None
+    current_phase: str | None = None
+    current_channel: str | None = None
+    current_message_goal: str | None = None
+    next_action_at: datetime | None = None
+
+
+class LeadQualificationPlanResponse(BaseModel):
+    classification_artifact: LeadClassificationArtifactResponse | None = None
+    paused_search_plan: LeadPausedSearchTrackPlanResponse | None = None
+
+
+class LeadDecisionTreeNodeResponse(BaseModel):
+    node_id: str
+    kind: str
+    label: str
+    row: int
+    column: int
+    status: str
+    description: str | None = None
+    chips: list[str] = Field(default_factory=list)
+
+
+class LeadDecisionTreeEdgeResponse(BaseModel):
+    edge_id: str
+    from_node_id: str
+    to_node_id: str
+    status: str
+    label: str | None = None
+    description: str | None = None
+    detail_lines: list[str] = Field(default_factory=list)
+
+
+class LeadDecisionTreeResponse(BaseModel):
+    title: str
+    subtitle: str
+    nodes: list[LeadDecisionTreeNodeResponse] = Field(default_factory=list)
+    edges: list[LeadDecisionTreeEdgeResponse] = Field(default_factory=list)
+
+
+class ClassifyLeadResponse(BaseModel):
+    status: str
+    lead_id: UUID
+    outcome: str | None = None
+    confidence: float | None = None
+    applied_status: str | None = None
+    artifact: LeadClassificationArtifactResponse | None = None
+    paused_search: LeadPausedSearchProfileResponse | None = None
+    history_entry: LeadPausedSearchHistoryEntryResponse | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+
 class LeadResponse(BaseModel):
     lead_id: UUID
     crm_provider: str
@@ -52,6 +175,7 @@ class LeadResponse(BaseModel):
     suppression_types: list[str]
     contactability: LeadContactabilityResponse
     sendability: LeadSendabilityResponse
+    paused_search: LeadPausedSearchProfileResponse | None = None
     facts_derived_at: datetime
     last_activity_at: datetime | None
     last_meaningful_communication_at: datetime | None
@@ -81,9 +205,22 @@ class LeadWorkflowResponse(BaseModel):
     state: str
     current_step_id: str | None
     next_action_at: datetime | None
+    paused_search_track_version_id: UUID | None = None
+    paused_search_track_step_id: UUID | None = None
     last_transition_at: datetime
     pause_reason: str | None
     resume_reason: str | None
+
+
+class LeadWorkflowOverrideAuditLogResponse(BaseModel):
+    audit_log_id: UUID
+    workflow_id: UUID
+    action: str
+    reason: str
+    actor_user_id: UUID
+    actor_name: str | None = None
+    details: dict[str, object] = Field(default_factory=dict)
+    created_at: datetime
 
 
 class WorkflowTransitionResponse(BaseModel):
@@ -138,10 +275,13 @@ class LeadActivityItemResponse(BaseModel):
     occurred_at: datetime
     title: str
     preview: str
+    content: str | None = None
     channel: str | None = None
     direction: str | None = None
     status: str | None = None
     actor_name: str | None = None
+    details: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+    transcript_segments: list[dict[str, str | None]] = Field(default_factory=list)
 
 
 class RejectedDraftReviewResponse(BaseModel):
@@ -198,18 +338,68 @@ class LeadListResponse(BaseModel):
     leads: list[LeadListItemResponse]
 
 
+class PendingRoutingReviewItemResponse(BaseModel):
+    review: LeadRoutingReviewResponse
+    lead: LeadResponse
+    artifact: LeadClassificationArtifactResponse
+
+
+class PendingRoutingReviewListResponse(BaseModel):
+    status: str
+    items: list[PendingRoutingReviewItemResponse]
+
+
 class LeadDetailResponse(BaseModel):
     status: str
     lead: LeadResponse
     ownership: LeadOwnershipResponse
     latest_workflow: LeadWorkflowResponse | None = None
     latest_handoff: HandoffResponse | None = None
+    qualification_plan: LeadQualificationPlanResponse | None = None
+    decision_tree: LeadDecisionTreeResponse
     workflow_transitions: list[WorkflowTransitionResponse]
+    workflow_override_audits: list[LeadWorkflowOverrideAuditLogResponse] = Field(
+        default_factory=list
+    )
+    paused_search_history: list[LeadPausedSearchHistoryEntryResponse] = Field(default_factory=list)
+    routing_reviews: list[LeadRoutingReviewResponse] = Field(default_factory=list)
     rejected_draft_reviews: list[RejectedDraftReviewResponse]
     activity_log: list[LeadActivityItemResponse]
     inbound_messages: list[InboundMessageResponse]
     outbound_messages: list[OutboundMessageResponse]
     handoffs: list[HandoffResponse]
+
+
+class UpdateLeadPausedSearchRequest(BaseModel):
+    active: bool
+    reason_code: PausedSearchReasonCode | None = None
+    reason_note: str | None = Field(default=None, max_length=1000)
+    reengagement_not_before: datetime | None = None
+    reengagement_window_label: str | None = Field(default=None, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> "UpdateLeadPausedSearchRequest":
+        if self.active and self.reason_code is None:
+            raise ValueError("reason_code is required when active is true")
+        if not self.active and any(
+            value is not None
+            for value in (
+                self.reason_code,
+                self.reason_note,
+                self.reengagement_not_before,
+                self.reengagement_window_label,
+            )
+        ):
+            raise ValueError("clear requests cannot include paused-search profile fields")
+        return self
+
+
+class UpdateLeadPausedSearchResponse(BaseModel):
+    status: str
+    lead_id: UUID | None = None
+    paused_search: LeadPausedSearchProfileResponse | None = None
+    history_entry: LeadPausedSearchHistoryEntryResponse | None = None
+    reasons: list[str] = Field(default_factory=list)
 
 
 class LeadResumeEligibilityResponse(BaseModel):
@@ -251,6 +441,49 @@ class StartLeadManualEnrollmentResponse(BaseModel):
     campaign_enrollment_id: UUID | None = None
     workflow_id: UUID | None = None
     temporal_workflow_id: str | None = None
+    route: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class ResolveLeadReviewHoldRequest(BaseModel):
+    resolution: str
+    campaign_id: UUID
+    pause_reason_code: PausedSearchReasonCode | None = None
+    pause_reason_note: str | None = Field(default=None, max_length=1000)
+    reengagement_not_before: datetime | None = None
+    reengagement_window_label: str | None = Field(default=None, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> "ResolveLeadReviewHoldRequest":
+        if self.resolution == "paused_search" and self.pause_reason_code is None:
+            raise ValueError("pause_reason_code is required for paused_search resolution")
+        if self.resolution != "paused_search" and any(
+            value is not None
+            for value in (
+                self.pause_reason_code,
+                self.pause_reason_note,
+                self.reengagement_not_before,
+                self.reengagement_window_label,
+            )
+        ):
+            raise ValueError(
+                "paused-search fields are only allowed for paused_search resolution"
+            )
+        return self
+
+
+class ResolveLeadReviewHoldResponse(BaseModel):
+    status: str
+    resolution: str | None = None
+    lead_id: UUID | None = None
+    campaign_id: UUID | None = None
+    artifact: LeadClassificationArtifactResponse | None = None
+    paused_search: LeadPausedSearchProfileResponse | None = None
+    history_entry: LeadPausedSearchHistoryEntryResponse | None = None
+    campaign_enrollment_id: UUID | None = None
+    workflow_id: str | None = None
+    temporal_workflow_id: str | None = None
     reasons: list[str] = Field(default_factory=list)
     error: str | None = None
 
@@ -265,6 +498,60 @@ class ResumeLeadWorkflowResponse(BaseModel):
     workflow_state: str | None = None
     reasons: list[str] = Field(default_factory=list)
     signal_queued: bool = False
+
+
+class PauseLeadWorkflowRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class PauseLeadWorkflowResponse(BaseModel):
+    status: str
+    workflow_id: UUID | None = None
+    workflow_state: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+    signal_queued: bool = False
+
+
+class OverridePausedSearchTimingRequest(BaseModel):
+    reengagement_not_before: datetime | None = None
+    reengagement_window_label: str | None = Field(default=None, max_length=100)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class OverridePausedSearchTimingResponse(BaseModel):
+    status: str
+    lead_id: UUID | None = None
+    workflow_id: UUID | None = None
+    paused_search: LeadPausedSearchProfileResponse | None = None
+    next_action_at: datetime | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+
+class MigratePausedSearchTrackRequest(BaseModel):
+    target_track_version_id: UUID
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class MigratePausedSearchTrackResponse(BaseModel):
+    status: str
+    lead_id: UUID | None = None
+    workflow_id: UUID | None = None
+    target_track_version_id: UUID | None = None
+    next_action_at: datetime | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+
+class SkipPausedSearchNextTouchRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class SkipPausedSearchNextTouchResponse(BaseModel):
+    status: str
+    lead_id: UUID | None = None
+    workflow_id: UUID | None = None
+    skipped_step_id: UUID | None = None
+    next_action_at: datetime | None = None
+    reasons: list[str] = Field(default_factory=list)
 
 
 class ApproveRejectedDraftReviewRequest(BaseModel):

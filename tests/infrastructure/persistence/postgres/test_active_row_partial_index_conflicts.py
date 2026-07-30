@@ -118,6 +118,7 @@ def _pending_sync_job(*, sync_job_id: UUID | None = None) -> CRMSyncJob:
         total_upserted=0,
         total_failed=0,
         failure_reason=None,
+        last_heartbeat_at=None,
         created_by_user_id=None,
         created_at=NOW,
         updated_at=NOW,

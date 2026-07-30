@@ -38,6 +38,8 @@ async def list_preflight_digests_route(
         actor=actor,
         workspace_id=workspace_id,
         repository=bundle.repository,
+        crm_agent_repository=bundle.crm_agent_repository,
+        workspace_agent_crm_mapping_repository=bundle.workspace_agent_crm_mapping_repository,
         now=datetime.now(UTC),
     )
     if result.status == PreflightReadStatus.REJECTED:
@@ -66,6 +68,8 @@ async def get_preflight_digest_route(
         workspace_id=workspace_id,
         digest_id=str(digest_id),
         repository=bundle.repository,
+        crm_agent_repository=bundle.crm_agent_repository,
+        workspace_agent_crm_mapping_repository=bundle.workspace_agent_crm_mapping_repository,
         now=datetime.now(UTC),
     )
     if result.status == PreflightReadStatus.REJECTED:

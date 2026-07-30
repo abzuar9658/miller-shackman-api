@@ -83,6 +83,7 @@ async def preview_workspace_outbound_drafting(
     listing_source_repository: ListingSourceRepository | None,
     listing_snapshot_repository: ListingSnapshotRepository | None,
     listing_search_client: ListingSearchClient | None,
+    listing_cache_ttl: timedelta = timedelta(hours=1),
     now: datetime,
     default_openrouter_model: str = "openai/gpt-4o-mini",
 ) -> OutboundDraftingPreviewResult:
@@ -151,12 +152,11 @@ async def preview_workspace_outbound_drafting(
         lead_context=lead_context,
         now=now,
         enrichment_enabled=True,
-        cache_ttl=timedelta(0),
+        cache_ttl=listing_cache_ttl,
         max_results=3,
         source_repository=listing_source_repository,
         snapshot_repository=listing_snapshot_repository,
         listing_search_client=listing_search_client,
-        bypass_cache=True,
     )
     sms_result, email_result = await asyncio.gather(
         draft_outbound_message(

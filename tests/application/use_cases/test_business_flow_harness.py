@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, time
 from typing import NamedTuple, cast
 from uuid import UUID
@@ -22,17 +23,35 @@ from app.application.use_cases.crm_sync import (
     run_follow_up_boss_lead_snapshot_sync,
 )
 from app.application.use_cases.evaluate_inbound_action import InboundAction
+from app.application.use_cases.process_crm_tag_campaign_enrollment import (
+    CRMTagCampaignEnrollmentStatus,
+    process_crm_tag_campaign_enrollment,
+)
 from app.application.use_cases.process_inbound_message_event import (
     InboundMessageEvent,
     ProcessInboundMessageEventStatus,
     process_inbound_message_event,
 )
 from app.application.use_cases.start_selected_campaign_batch import start_selected_campaign_batch
-from app.domain.campaigns import CampaignStatus, CampaignVersionStatus
+from app.domain.campaigns import (
+    CampaignStatus,
+    CampaignVersionStatus,
+    PausedSearchFallbackTimingPolicy,
+    PausedSearchReasonMapping,
+    PausedSearchTrackFamily,
+    PausedSearchTrackStep,
+    PausedSearchTrackStepPhase,
+    PausedSearchTrackVersion,
+)
 from app.domain.campaigns.enrollment import CampaignEnrollmentSource
 from app.domain.campaigns.execution import CampaignCadenceStep, CampaignExecutionConfig
 from app.domain.common.ids import LeadId, WorkspaceId
-from app.domain.compliance.contactability import ContactChannel, ContactPermissionStatus
+from app.domain.compliance.contactability import (
+    ContactChannel,
+    ContactPermissionStatus,
+    SmsComplianceState,
+    WorkspaceContactPolicy,
+)
 from app.domain.conversations import (
     Conversation,
     ConversationSummary,
@@ -49,11 +68,19 @@ from app.domain.crm_sync import (
     ExternalEvent,
 )
 from app.domain.identity import Workspace, WorkspaceStatus
-from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.leads import (
+    CanonicalLeadRecord,
+    CRMProvider,
+    PausedSearchReasonCode,
+)
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
+from tests.application.use_cases._campaign_admin_fakes import FakeEventBus
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCampaignExecutionRepository,
+    FakeClassificationLLMClient,
+    FakeCrmConversationEventRepository,
     FakeEmailProvider,
+    FakeLeadClassificationArtifactRepository,
     FakeLeadRepository,
     FakeLeadWorkflowRepository,
     FakeLLMClient,
@@ -61,16 +88,22 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeSMSProvider,
     FakeWorkflowTransitionRepository,
     FakeWorkspaceContactPolicyRepository,
+    FakeWorkspaceLLMConfigRepository,
+    FakeWorkspaceOperationalControlRepository,
     FakeWorkspaceRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
     FakeCampaignEnrollmentRepository,
     FakeTemporalWorkflowStarter,
 )
+from tests.application.use_cases._paused_search_track_fakes import (
+    FakePausedSearchTrackAdminRepository,
+)
 from tests.application.use_cases.test_process_inbound_message_event import (
     FakeInboundMessageCRMCompletionRepository,
     _draft_json,
     _FakeLLMClientForContinuation,
+    _lead_state_classification_json,
 )
 from tests.application.use_cases.test_process_inbound_message_event import (
     FakeLLMClient as FakeInboundLLMClient,
@@ -89,6 +122,8 @@ INBOUND_MESSAGE_ID = UUID("00000000-0000-0000-0000-000000000009")
 SUMMARY_ID = UUID("00000000-0000-0000-0000-000000000010")
 HANDOFF_ID = UUID("00000000-0000-0000-0000-000000000011")
 ACTOR_ID = UUID("00000000-0000-0000-0000-000000000012")
+PAUSED_SEARCH_TRACK_VERSION_ID = UUID("00000000-0000-0000-0000-000000000013")
+PAUSED_SEARCH_STEP_ID = UUID("00000000-0000-0000-0000-000000000014")
 
 
 class _PreparedBusinessFlow(NamedTuple):
@@ -109,7 +144,7 @@ class FakeCRMSyncJobRepository:
         self.latest_completed_job: CRMSyncJob | None = None
 
     async def get_by_id(self, workspace_id: WorkspaceId, sync_job_id: UUID) -> CRMSyncJob | None:
-        return next((job for job in self.saved if job.sync_job_id == sync_job_id), None)
+        return next((job for job in reversed(self.saved) if job.sync_job_id == sync_job_id), None)
 
     async def list_recent(
         self,
@@ -157,17 +192,71 @@ class FakeCRMSyncJobRepository:
         *,
         now: datetime,
     ) -> CRMSyncJob | None:
-        _ = now
         pending = next(
             (
                 job
                 for job in self.saved
-                if job.workspace_id == workspace_id and job.sync_job_id == sync_job_id
+                if job.workspace_id == workspace_id
+                and job.sync_job_id == sync_job_id
+                and job.status == CRMSyncJobStatus.PENDING
             ),
             None,
         )
-        self.active_job = pending
-        return pending
+        if pending is None:
+            return None
+        claimed = replace(
+            pending,
+            status=CRMSyncJobStatus.RUNNING,
+            started_at=now,
+            last_heartbeat_at=now,
+            updated_at=now,
+        )
+        self.active_job = claimed
+        self.latest_job = claimed
+        self.saved.append(claimed)
+        return claimed
+
+    async def fail_stale_active_jobs(
+        self,
+        *,
+        now: datetime,
+        pending_timeout_seconds: int,
+        running_timeout_seconds: int,
+    ) -> int:
+        _ = (now, pending_timeout_seconds, running_timeout_seconds)
+        return 0
+
+    async def touch_running_heartbeat(
+        self,
+        workspace_id: WorkspaceId,
+        sync_job_id: UUID,
+        *,
+        now: datetime,
+    ) -> CRMSyncJob | None:
+        running = next(
+            (
+                job
+                for job in reversed(self.saved)
+                if job.workspace_id == workspace_id
+                and job.sync_job_id == sync_job_id
+                and job.status == CRMSyncJobStatus.RUNNING
+            ),
+            None,
+        )
+        if running is None:
+            return None
+        touched = replace(running, last_heartbeat_at=now, updated_at=now)
+        self.active_job = touched
+        self.latest_job = touched
+        self.saved.append(touched)
+        return touched
+
+    async def save_if_running(self, job: CRMSyncJob) -> CRMSyncJob | None:
+        if self.active_job is None or self.active_job.sync_job_id != job.sync_job_id:
+            return None
+        if self.active_job.status != CRMSyncJobStatus.RUNNING:
+            return None
+        return await self.save(job)
 
     async def save(self, job: CRMSyncJob) -> CRMSyncJob:
         self.saved.append(job)
@@ -584,7 +673,7 @@ async def test_business_flow_harness_runs_sync_to_handoff_path() -> None:
         scheduled_for=NOW,
         campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
         workspace_repository=FakeWorkspaceRepository(_workspace()),
-        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(None),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(_contact_policy()),
         lead_repository=lead_repository,
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
@@ -651,6 +740,151 @@ async def test_business_flow_harness_runs_sync_to_handoff_path() -> None:
     assert summaries.saved[0].summary_id == SUMMARY_ID
     assert len(notification_provider.notifications) == 1
     assert crm_client.tags == [(WORKSPACE_ID, "crm-123", "human_handoff_required")]
+
+
+async def test_business_flow_harness_runs_crm_tag_to_paused_search_send_to_handoff() -> None:
+    lead_repository = FakeLeadRepository(None)
+    enrollments = FakeCampaignEnrollmentRepository()
+    workflow_repository = FakeLeadWorkflowRepository()
+    workflow_transitions = FakeWorkflowTransitionRepository()
+    temporal_workflow_starter = FakeTemporalWorkflowStarter()
+    message_repository = FakeOutboundMessageRepository()
+    email_provider = FakeEmailProvider("paused-email-123")
+    conversations = FakeConversationRepository()
+    inbound_messages = FakeInboundMessageRepository()
+    summaries = FakeConversationSummaryRepository()
+    handoffs = FakeHandoffRepository()
+    crm_client = FakeCRMClient()
+    notification_provider = FakeNotificationProvider()
+
+    tagged_lead = _lead(tags=("configured_tag",))
+    await lead_repository.upsert(tagged_lead)
+
+    enrollment_result = await process_crm_tag_campaign_enrollment(
+        workspace_id=WORKSPACE_ID,
+        lead=tagged_lead,
+        observed_at=NOW,
+        now=NOW,
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _config(crm_enrollment_tag="configured_tag")
+        ),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(_contact_policy()),
+        campaign_enrollment_repository=enrollments,
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=workflow_transitions,
+        temporal_workflow_starter=temporal_workflow_starter,
+        lead_repository=lead_repository,
+        paused_search_history_repository=lead_repository,
+        paused_search_track_repository=_paused_search_track_repository(),
+        artifact_repository=FakeLeadClassificationArtifactRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
+        llm_client=FakeClassificationLLMClient(
+            outcome="paused_search",
+            pause_reason_code="waiting_for_rates",
+            summary="Lead wants to wait for better mortgage rates.",
+        ),
+        event_bus=FakeEventBus(),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(None),
+    )
+
+    assert enrollment_result.status == CRMTagCampaignEnrollmentStatus.STARTED
+    assert enrollment_result.route == "paused_search"
+    workflow = workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert workflow.paused_search_track_version_id == PAUSED_SEARCH_TRACK_VERSION_ID
+
+    schedule_result = await schedule_next_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        lead_workflow_repository=workflow_repository,
+        lead_repository=lead_repository,
+        paused_search_track_repository=_paused_search_track_repository(),
+        now=NOW,
+    )
+
+    assert schedule_result.status == CadenceStepScheduleStatus.SCHEDULED
+    assert schedule_result.cadence_step_id == PAUSED_SEARCH_STEP_ID
+
+    execute_result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=PAUSED_SEARCH_STEP_ID,
+        scheduled_for=NOW,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        paused_search_track_repository=_paused_search_track_repository(),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(None),
+        lead_repository=lead_repository,
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=workflow_transitions,
+        message_repository=message_repository,
+        llm_client=FakeLLMClient(),
+        sms_provider=FakeSMSProvider(),
+        email_provider=email_provider,
+        now=NOW,
+    )
+
+    assert execute_result.status == CadenceStepExecutionStatus.SENT
+    assert len(email_provider.messages) == 1
+
+    inbound_result = await process_inbound_message_event(
+        event=_event(body="Yes, I want to talk to an agent now."),
+        lead_repository=lead_repository,
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=conversations,
+        inbound_message_repository=inbound_messages,
+        conversation_summary_repository=summaries,
+        handoff_repository=handoffs,
+        crm_client=cast(CRMClient, crm_client),
+        notification_provider=cast(NotificationProvider, notification_provider),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            WorkspaceHandoffConfig(
+                workspace_id=WORKSPACE_ID,
+                fallback_recipient_email="fallback@example.com",
+                crm_handoff_tag="human_handoff_required",
+                crm_custom_fields={"handoff_status": "required"},
+            )
+        ),
+        handoff_completion_repository=FakeHandoffCompletionRepository(),
+        llm_client=_FakeLLMClientForContinuation(
+            classification_text=_classification_json(
+                intent="human_requested",
+                asks_for_human=True,
+            ),
+            draft_text=_draft_json(),
+            lead_state_text=_lead_state_classification_json(
+                outcome="human_handoff",
+                summary="Lead explicitly wants a human agent now.",
+            ),
+        ),
+        now=NOW,
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=workflow_transitions,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        summary_id_factory=lambda: SUMMARY_ID,
+        handoff_id_factory=lambda: HANDOFF_ID,
+        inbound_message_crm_completion_repository=FakeInboundMessageCRMCompletionRepository(),
+        message_repository=message_repository,
+        sms_provider=FakeSMSProvider(),
+        email_provider=FakeEmailProvider("handoff-email-1"),
+        event_bus=FakeEventBus(),
+        paused_search_track_repository=_paused_search_track_repository(),
+        lead_classification_artifact_repository=FakeLeadClassificationArtifactRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
+    )
+
+    assert inbound_result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert inbound_result.inbound_action == InboundAction.HUMAN_HANDOFF
+    assert len(handoffs.by_id) == 1
+    final_workflow = workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert final_workflow.state == WorkflowState.HUMAN_HANDOFF
+    assert len(notification_provider.notifications) == 1
 
 
 async def test_business_flow_harness_runs_sync_to_continue_ai_path() -> None:
@@ -927,7 +1161,7 @@ async def _prepare_business_flow_until_waiting_for_response() -> _PreparedBusine
     )
 
 
-def _lead() -> CanonicalLeadRecord:
+def _lead(*, tags: tuple[str, ...] = ()) -> CanonicalLeadRecord:
     return CanonicalLeadRecord(
         workspace_id=WORKSPACE_ID,
         lead_id=LEAD_ID,
@@ -939,11 +1173,65 @@ def _lead() -> CanonicalLeadRecord:
         lead_stage="long_term_nurture",
         assigned_agent_crm_id="agent-99",
         has_accountable_owner=True,
+        tags=tags,
         primary_email="lead@example.com",
         has_email=True,
         email_count=1,
         email_permission_status=ContactPermissionStatus.CONFIRMED,
         do_not_contact=False,
+    )
+
+
+def _paused_search_track_repository() -> FakePausedSearchTrackAdminRepository:
+    return FakePausedSearchTrackAdminRepository(
+        mappings=(
+            PausedSearchReasonMapping(
+                mapping_id=UUID("00000000-0000-0000-0000-000000000016"),
+                workspace_id=WORKSPACE_ID,
+                reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+                track_id=UUID("00000000-0000-0000-0000-000000000015"),
+                track_version_id=PAUSED_SEARCH_TRACK_VERSION_ID,
+                created_by_user_id=ACTOR_ID,
+                created_at=NOW,
+            ),
+        ),
+        versions=(
+            PausedSearchTrackVersion(
+                track_version_id=PAUSED_SEARCH_TRACK_VERSION_ID,
+                workspace_id=WORKSPACE_ID,
+                track_id=UUID("00000000-0000-0000-0000-000000000015"),
+                version_number=1,
+                status=CampaignVersionStatus.PUBLISHED,
+                track_family=PausedSearchTrackFamily.MAINTENANCE,
+                enabled=True,
+                allowed_channels=(ContactChannel.EMAIL,),
+                default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
+                fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_MAINTENANCE_INTERVAL,
+                maintenance_interval_days=60,
+                reactivation_window_days=30,
+                max_total_touches=4,
+                requires_review_before_publish=False,
+                created_by_user_id=ACTOR_ID,
+                created_at=NOW,
+                published_at=NOW,
+            ),
+        ),
+        steps=(
+            PausedSearchTrackStep(
+                step_id=PAUSED_SEARCH_STEP_ID,
+                workspace_id=WORKSPACE_ID,
+                track_version_id=PAUSED_SEARCH_TRACK_VERSION_ID,
+                step_order=1,
+                phase=PausedSearchTrackStepPhase.MAINTENANCE,
+                channel=ContactChannel.EMAIL,
+                delay_hours=0,
+                message_goal="Check whether the paused-search timing has changed.",
+                template_key="paused-search-email-1",
+                max_attempts=1,
+                review_required=False,
+                created_at=NOW,
+            ),
+        ),
     )
 
 
@@ -958,7 +1246,7 @@ def _workspace() -> Workspace:
     )
 
 
-def _config() -> CampaignExecutionConfig:
+def _config(*, crm_enrollment_tag: str | None = None) -> CampaignExecutionConfig:
     return CampaignExecutionConfig(
         campaign_id=CAMPAIGN_ID,
         campaign_version_id=CAMPAIGN_VERSION_ID,
@@ -974,12 +1262,19 @@ def _config() -> CampaignExecutionConfig:
         timezone="America/Chicago",
         sms_compliance_required=True,
         preflight_digest_enabled=False,
-        crm_enrollment_tag=None,
+        crm_enrollment_tag=crm_enrollment_tag,
         prompt_version="v1",
         approved_model="openai/gpt-4o-mini",
         cadence_steps=(_step(),),
         created_at=NOW,
         published_at=NOW,
+    )
+
+
+def _contact_policy() -> WorkspaceContactPolicy:
+    return WorkspaceContactPolicy(
+        workspace_id=WORKSPACE_ID,
+        sms_compliance_state=SmsComplianceState.APPROVED,
     )
 
 

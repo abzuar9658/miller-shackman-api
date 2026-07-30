@@ -1,13 +1,16 @@
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import String, and_, case, cast, func, literal, select, union_all
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.ports.lead_activity import (
     LeadActivityItem,
     LeadActivityKind,
     LeadActivitySummary,
+    LeadActivityTranscriptSegment,
 )
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.infrastructure.persistence.postgres.models import (
@@ -90,6 +93,8 @@ class PostgresLeadActivityRepository:
 
 def _activity_union(workspace_id: WorkspaceId, lead_ids: tuple[LeadId, ...]) -> Any:
     null_string = cast(literal(None), String)
+    empty_details = literal({}, type_=JSONB)
+    empty_segments = literal([], type_=JSONB)
     return union_all(
         select(
             InboundMessageModel.inbound_message_id.label("activity_id"),
@@ -102,6 +107,8 @@ def _activity_union(workspace_id: WorkspaceId, lead_ids: tuple[LeadId, ...]) -> 
             literal("inbound").label("direction"),
             _inbound_activity_status().label("status"),
             InboundMessageModel.provider.label("actor_name"),
+            empty_details.label("details"),
+            empty_segments.label("transcript_segments"),
             literal("Inbound message").label("activity_type"),
         )
         .select_from(InboundMessageModel)
@@ -130,6 +137,8 @@ def _activity_union(workspace_id: WorkspaceId, lead_ids: tuple[LeadId, ...]) -> 
             literal("outbound").label("direction"),
             OutboundMessageModel.status.label("status"),
             OutboundMessageModel.provider_name.label("actor_name"),
+            empty_details.label("details"),
+            empty_segments.label("transcript_segments"),
             literal("Outbound message").label("activity_type"),
         )
         .where(OutboundMessageModel.workspace_id == workspace_id)
@@ -145,6 +154,8 @@ def _activity_union(workspace_id: WorkspaceId, lead_ids: tuple[LeadId, ...]) -> 
             CrmConversationEventModel.direction.label("direction"),
             CrmConversationEventModel.activity_type.label("status"),
             CrmConversationEventModel.actor_name.label("actor_name"),
+            CrmConversationEventModel.details.label("details"),
+            CrmConversationEventModel.transcript_segments.label("transcript_segments"),
             CrmConversationEventModel.activity_type.label("activity_type"),
         )
         .where(CrmConversationEventModel.workspace_id == workspace_id)
@@ -160,6 +171,8 @@ def _activity_union(workspace_id: WorkspaceId, lead_ids: tuple[LeadId, ...]) -> 
             null_string.label("direction"),
             HandoffModel.status.label("status"),
             null_string.label("actor_name"),
+            empty_details.label("details"),
+            empty_segments.label("transcript_segments"),
             HandoffModel.reason_code.label("activity_type"),
         )
         .where(HandoffModel.workspace_id == workspace_id)
@@ -243,6 +256,10 @@ def _row_to_item(row: Any) -> LeadActivityItem:
         direction=row.direction,
         status=row.status,
         actor_name=row.actor_name,
+        details=dict(row.details or {}),
+        transcript_segments=tuple(
+            _row_to_transcript_segment(segment) for segment in (row.transcript_segments or [])
+        ),
     )
 
 
@@ -258,6 +275,8 @@ def _title_for(
         return "Outbound outreach logged"
     if kind == LeadActivityKind.HANDOFF:
         return "Human handoff created"
+    if (activity_type or "").strip().lower() == "call":
+        return "CRM call logged"
     if direction == "inbound":
         return "CRM reply logged"
     if direction == "outbound":
@@ -281,3 +300,19 @@ def _preview_text(value: str | None) -> str | None:
 
 def _as_uuid(value: UUID) -> UUID:
     return value
+
+
+def _row_to_transcript_segment(value: dict[str, object]) -> LeadActivityTranscriptSegment:
+    started_at = value.get("started_at")
+    speaker_name = value.get("speaker_name")
+    speaker_role = value.get("speaker_role")
+    return LeadActivityTranscriptSegment(
+        text=str(value.get("text") or ""),
+        speaker_name=str(speaker_name) if speaker_name is not None else None,
+        speaker_role=str(speaker_role) if speaker_role is not None else None,
+        started_at=(
+            datetime.fromisoformat(str(started_at))
+            if isinstance(started_at, str) and started_at
+            else None
+        ),
+    )

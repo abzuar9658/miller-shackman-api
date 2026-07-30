@@ -39,6 +39,9 @@ from app.infrastructure.persistence.postgres.outbound_message_repository import 
     PostgresOutboundMessageCRMCompletionRepository,
     PostgresOutboundMessageRepository,
 )
+from app.infrastructure.persistence.postgres.paused_search_track_repository import (
+    PostgresPausedSearchTrackAdminRepository,
+)
 from app.infrastructure.persistence.postgres.rejected_draft_review_repository import (
     PostgresRejectedDraftReviewRepository,
 )
@@ -91,6 +94,8 @@ async def schedule_next_campaign_cadence_step_activity(
             campaign_version_id=input_.campaign_version_id,
             campaign_execution_repository=PostgresCampaignExecutionRepository(session),
             lead_workflow_repository=PostgresLeadWorkflowRepository(session),
+            lead_repository=PostgresLeadRepository(session),
+            paused_search_track_repository=PostgresPausedSearchTrackAdminRepository(session),
             now=input_.occurred_at,
         )
         await session.commit()
@@ -111,6 +116,7 @@ async def execute_campaign_cadence_step_activity(
             cadence_step_id=input_.cadence_step_id,
             scheduled_for=input_.scheduled_for,
             campaign_execution_repository=PostgresCampaignExecutionRepository(session),
+            paused_search_track_repository=PostgresPausedSearchTrackAdminRepository(session),
             workspace_repository=PostgresWorkspaceRepository(session),
             workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
             workspace_llm_config_repository=PostgresWorkspaceLLMConfigRepository(session),

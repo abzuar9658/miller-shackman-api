@@ -5,6 +5,8 @@ from datetime import UTC, datetime, time, timedelta
 from typing import TypedDict
 from uuid import UUID
 
+import pytest
+
 from app.application.ports.crm import CanonicalLead, CRMActivity, CRMAgent
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
 from app.application.services.llm.reply_classification import InboundReplyIntent
@@ -19,6 +21,12 @@ from app.application.use_cases.process_inbound_message_event import (
     ProcessInboundMessageEventStatus,
     process_inbound_message_event,
 )
+from app.domain.campaigns import (
+    PausedSearchFallbackTimingPolicy,
+    PausedSearchReasonMapping,
+    PausedSearchTrackFamily,
+    PausedSearchTrackVersion,
+)
 from app.domain.campaigns.execution import (
     CampaignCadenceStep,
     CampaignExecutionConfig,
@@ -32,7 +40,11 @@ from app.domain.campaigns.outbound_message import (
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance import SmsComplianceState, WorkspaceContactPolicy
-from app.domain.compliance.contactability import ContactChannel
+from app.domain.compliance.contactability import (
+    ContactChannel,
+    ContactPermissionStatus,
+    SuppressionType,
+)
 from app.domain.conversations import (
     Conversation,
     ConversationStatus,
@@ -48,13 +60,22 @@ from app.domain.conversations import (
 from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
 from app.domain.events import DomainEvent, DomainEventType
 from app.domain.identity import User, UserStatus, Workspace, WorkspaceStatus
-from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.leads import (
+    CanonicalLeadRecord,
+    CRMProvider,
+    LeadPausedSearchHistoryEntry,
+    PausedSearchReasonCode,
+    PausedSearchSource,
+)
 from app.domain.llm import WorkspaceLLMConfig
 from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
-from app.domain.workflows import LeadWorkflow, WorkflowState
+from app.domain.workflows import LeadWorkflow, TemporalSignalName, WorkflowState
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCampaignExecutionRepository,
+    FakeCrmConversationEventRepository,
     FakeEmailProvider,
+    FakeLeadClassificationArtifactRepository,
+    FakeLeadRoutingReviewRepository,
     FakeLeadWorkflowRepository,
     FakeOutboundMessageRepository,
     FakeSMSProvider,
@@ -69,6 +90,9 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
     FakeTemporalSignalOutboxRepository,
 )
 from tests.application.use_cases._lead_read_fakes import FakeUserRepository
+from tests.application.use_cases._paused_search_track_fakes import (
+    FakePausedSearchTrackAdminRepository,
+)
 from tests.application.use_cases.test_complete_handoff import (
     FakeHandoffCompletionRepository,
     FakeNotificationProvider,
@@ -85,11 +109,14 @@ HANDOFF_ID = UUID("00000000-0000-0000-0000-000000000007")
 WORKFLOW_ID = UUID("00000000-0000-0000-0000-000000000008")
 CAMPAIGN_ID = UUID("00000000-0000-0000-0000-000000000009")
 ENROLLMENT_ID = UUID("00000000-0000-0000-0000-000000000010")
+TRACK_ID = UUID("00000000-0000-0000-0000-000000000011")
+TRACK_VERSION_ID = UUID("00000000-0000-0000-0000-000000000012")
 
 
 class FakeLeadRepository:
     def __init__(self, lead: CanonicalLeadRecord | None) -> None:
         self.lead = lead
+        self.paused_search_history: list[LeadPausedSearchHistoryEntry] = []
 
     async def get_by_id(
         self, workspace_id: WorkspaceId, lead_id: LeadId
@@ -187,6 +214,12 @@ class FakeLeadRepository:
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         self.lead = record
         return record
+
+    async def append(
+        self, entry: LeadPausedSearchHistoryEntry
+    ) -> LeadPausedSearchHistoryEntry:
+        self.paused_search_history.append(entry)
+        return entry
 
 
 class FakeExternalEventRepository:
@@ -564,6 +597,8 @@ def _lead(*, assigned_agent_user_id: UUID | None = None) -> CanonicalLeadRecord:
         has_phone=True,
         has_sms_capable_phone=True,
         phone_count=1,
+        sms_permission_status=ContactPermissionStatus.CONFIRMED,
+        email_permission_status=ContactPermissionStatus.CONFIRMED,
     )
 
 
@@ -683,6 +718,29 @@ def _classification_json(
     )
 
 
+def _lead_state_classification_json(
+    *,
+    outcome: str,
+    confidence: float = 0.9,
+    evidence: tuple[str, ...] = ("Lead sent a new reply.",),
+    summary: str = "Lead state updated from latest reply.",
+    handoff_reason_code: str | None = None,
+    pause_reason_code: str | None = None,
+) -> str:
+    payload: dict[str, object] = {
+        "outcome": outcome,
+        "confidence": confidence,
+        "evidence": list(evidence),
+        "summary": summary,
+        "handoff_reason_code": handoff_reason_code,
+        "pause_reason_code": pause_reason_code,
+        "pause_reason_note": None,
+        "reengagement_not_before": None,
+        "reengagement_window_label": None,
+    }
+    return json.dumps(payload)
+
+
 def _draft_json(*, body: str = "Thanks for your question! Your agent will follow up.") -> str:
     return json.dumps(
         {
@@ -719,11 +777,16 @@ class _ContinueAIDependencies(TypedDict):
     inbound_message_repository: FakeInboundMessageRepository
     conversation_summary_repository: FakeConversationSummaryRepository
     handoff_repository: FakeHandoffRepository
+    lead_classification_artifact_repository: FakeLeadClassificationArtifactRepository
+    routing_review_repository: FakeLeadRoutingReviewRepository
+    crm_conversation_event_repository: FakeCrmConversationEventRepository
     crm_client: FakeCRMClient
     inbound_message_crm_completion_repository: FakeInboundMessageCRMCompletionRepository
     outbound_message_crm_completion_repository: FakeOutboundMessageCRMCompletionRepository
     lead_workflow_repository: FakeLeadWorkflowRepository
     workflow_transition_repository: FakeWorkflowTransitionRepository
+    paused_search_track_repository: FakePausedSearchTrackAdminRepository
+    temporal_signal_outbox_repository: FakeTemporalSignalOutboxRepository
     workspace_repository: FakeWorkspaceRepository
     workspace_contact_policy_repository: FakeWorkspaceContactPolicyRepository
     workspace_llm_config_repository: FakeWorkspaceLLMConfigRepository
@@ -736,9 +799,18 @@ class _ContinueAIDependencies(TypedDict):
 
 
 class _FakeLLMClientForContinuation:
-    def __init__(self, classification_text: str, draft_text: str) -> None:
+    def __init__(
+        self,
+        classification_text: str,
+        draft_text: str,
+        lead_state_text: str | None = None,
+    ) -> None:
         self.classification_text = classification_text
         self.draft_text = draft_text
+        self.lead_state_text = lead_state_text or _lead_state_classification_json(
+            outcome="dormant",
+            summary="Lead is still dormant after the reply.",
+        )
         self.requests: list[LLMCompletionRequest] = []
 
     async def complete(self, request: LLMCompletionRequest) -> LLMResult:
@@ -746,6 +818,14 @@ class _FakeLLMClientForContinuation:
         if "draft_outbound_real_estate_lead_follow_up" in request.prompt:
             return LLMResult(
                 text=self.draft_text,
+                model="openai/gpt-4o-mini",
+                prompt_version=request.prompt_version,
+                latency_ms=13,
+                usage_tokens=37,
+            )
+        if "classify_lead_state_from_conversation" in request.prompt:
+            return LLMResult(
+                text=self.lead_state_text,
                 model="openai/gpt-4o-mini",
                 prompt_version=request.prompt_version,
                 latency_ms=13,
@@ -838,11 +918,16 @@ def _continue_ai_dependencies(
         "inbound_message_repository": FakeInboundMessageRepository(),
         "conversation_summary_repository": FakeConversationSummaryRepository(),
         "handoff_repository": FakeHandoffRepository(),
+        "lead_classification_artifact_repository": FakeLeadClassificationArtifactRepository(),
+        "routing_review_repository": FakeLeadRoutingReviewRepository(),
+        "crm_conversation_event_repository": FakeCrmConversationEventRepository(),
         "crm_client": crm_client,
         "inbound_message_crm_completion_repository": FakeInboundMessageCRMCompletionRepository(),
         "outbound_message_crm_completion_repository": FakeOutboundMessageCRMCompletionRepository(),
         "lead_workflow_repository": _workflow_repository(workflow),
         "workflow_transition_repository": FakeWorkflowTransitionRepository(),
+        "paused_search_track_repository": _paused_search_track_repository(),
+        "temporal_signal_outbox_repository": FakeTemporalSignalOutboxRepository(),
         "workspace_repository": FakeWorkspaceRepository(_workspace()),
         "workspace_contact_policy_repository": FakeWorkspaceContactPolicyRepository(
             _workspace_contact_policy(sms_compliance_state=sms_compliance_state)
@@ -868,6 +953,45 @@ def _workflow_repository(workflow: LeadWorkflow) -> FakeLeadWorkflowRepository:
     repository.workflows[workflow.workflow_id] = workflow
     repository.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow
     return repository
+
+
+def _paused_search_track_repository() -> FakePausedSearchTrackAdminRepository:
+    return FakePausedSearchTrackAdminRepository(
+        mappings=(
+            PausedSearchReasonMapping(
+                mapping_id=UUID("00000000-0000-0000-0000-000000000041"),
+                workspace_id=WORKSPACE_ID,
+                reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+                track_id=TRACK_ID,
+                track_version_id=TRACK_VERSION_ID,
+                created_by_user_id=UUID("00000000-0000-0000-0000-000000000042"),
+                created_at=NOW,
+            ),
+        ),
+        versions=(
+            PausedSearchTrackVersion(
+                track_version_id=TRACK_VERSION_ID,
+                workspace_id=WORKSPACE_ID,
+                track_id=TRACK_ID,
+                version_number=1,
+                status=CampaignVersionStatus.PUBLISHED,
+                track_family=PausedSearchTrackFamily.MAINTENANCE,
+                enabled=True,
+                allowed_channels=(ContactChannel.EMAIL,),
+                default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
+                fallback_timing_policy=(
+                    PausedSearchFallbackTimingPolicy.USE_REENGAGEMENT_NOT_BEFORE
+                ),
+                maintenance_interval_days=30,
+                reactivation_window_days=30,
+                max_total_touches=6,
+                requires_review_before_publish=False,
+                created_by_user_id=UUID("00000000-0000-0000-0000-000000000043"),
+                created_at=NOW,
+                published_at=NOW,
+            ),
+        ),
+    )
 
 
 async def test_returns_duplicate_when_external_event_already_exists() -> None:
@@ -1680,6 +1804,140 @@ async def test_continue_ai_preserves_prior_context_for_generic_follow_up_reply()
     assert '"max_price": "500000"' in draft_request.prompt
 
 
+async def test_continue_ai_pauses_when_reply_reroutes_to_paused_search() -> None:
+    workflow = _workflow()
+    dependencies = _continue_ai_dependencies(workflow=workflow)
+    conversation_repository = dependencies["conversation_repository"]
+    lead_workflow_repository = dependencies["lead_workflow_repository"]
+    routing_review_repository = dependencies["routing_review_repository"]
+    temporal_signal_outbox_repository = dependencies["temporal_signal_outbox_repository"]
+    workflow_transition_repository = dependencies["workflow_transition_repository"]
+    sms_provider = dependencies["sms_provider"]
+
+    result = await process_inbound_message_event(
+        event=_event(body="We want to wait until rates improve."),
+        llm_client=_FakeLLMClientForContinuation(
+            classification_text=_classification_json(
+                intent="general_reply",
+                summary_text="Lead wants to wait for better timing.",
+            ),
+            draft_text=_draft_json(),
+            lead_state_text=_lead_state_classification_json(
+                outcome="paused_search",
+                pause_reason_code="waiting_for_rates",
+                summary="Lead is waiting for rates to improve.",
+            ),
+        ),
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        **dependencies,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.inbound_action == InboundAction.CONTINUE_AI
+    assert result.continue_ai_status == ContinueAIStatus.BLOCKED
+    assert result.continue_ai_pause_reason == "ai_continuation_rerouted_to_paused_search"
+    assert len(sms_provider.messages) == 0
+    final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    final_conversation = conversation_repository.by_id[CONVERSATION_ID]
+    assert final_workflow.state == WorkflowState.PAUSED
+    assert final_workflow.paused_search_track_version_id == TRACK_VERSION_ID
+    assert final_conversation.status == ConversationStatus.PAUSED
+    assert len(workflow_transition_repository.transitions) == 1
+    assert len(routing_review_repository.saved) == 0
+    assert any(
+        entry.signal_name == TemporalSignalName.RESCHEDULE_REQUESTED
+        for entry in temporal_signal_outbox_repository.entries.values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_continue_ai_reroute_to_review_hold_creates_pending_routing_review() -> None:
+    workflow = _workflow()
+    dependencies = _continue_ai_dependencies(workflow=workflow)
+    routing_review_repository = dependencies["routing_review_repository"]
+
+    result = await process_inbound_message_event(
+        event=_event(body="We should maybe wait but I am not sure yet."),
+        llm_client=_FakeLLMClientForContinuation(
+            classification_text=_classification_json(
+                intent="general_reply",
+                summary_text="Lead is unsure on timing.",
+            ),
+            draft_text=_draft_json(),
+            lead_state_text=_lead_state_classification_json(
+                outcome="paused_search",
+                confidence=0.4,
+                pause_reason_code="waiting_for_rates",
+                summary="Timing is uncertain.",
+            ),
+        ),
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        **dependencies,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.continue_ai_status == ContinueAIStatus.BLOCKED
+    assert result.continue_ai_pause_reason == "ai_continuation_rerouted_to_review_hold"
+    assert len(routing_review_repository.saved) == 1
+    assert routing_review_repository.saved[0].status.value == "pending"
+
+
+async def test_continue_ai_reroutes_existing_paused_search_to_human_handoff() -> None:
+    workflow = _workflow()
+    dependencies = _continue_ai_dependencies(workflow=workflow)
+    lead_repository = dependencies["lead_repository"]
+    conversation_repository = dependencies["conversation_repository"]
+    lead_workflow_repository = dependencies["lead_workflow_repository"]
+    workflow_transition_repository = dependencies["workflow_transition_repository"]
+    sms_provider = dependencies["sms_provider"]
+
+    assert lead_repository.lead is not None
+    lead_repository.lead = replace(
+        lead_repository.lead,
+        paused_search_active=True,
+        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        paused_search_source=PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
+    )
+
+    result = await process_inbound_message_event(
+        event=_event(body="Can you walk me through the next steps?"),
+        llm_client=_FakeLLMClientForContinuation(
+            classification_text=_classification_json(
+                intent="general_reply",
+                summary_text="Lead asked about next steps.",
+            ),
+            draft_text=_draft_json(),
+            lead_state_text=_lead_state_classification_json(
+                outcome="human_handoff",
+                handoff_reason_code="human_requested",
+                summary="Lead is ready to move forward and needs human help.",
+            ),
+        ),
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        **dependencies,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.inbound_action == InboundAction.CONTINUE_AI
+    assert result.continue_ai_status == ContinueAIStatus.BLOCKED
+    assert result.continue_ai_pause_reason == "ai_continuation_rerouted_to_human_handoff"
+    assert len(sms_provider.messages) == 0
+    final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    final_conversation = conversation_repository.by_id[CONVERSATION_ID]
+    assert final_workflow.state == WorkflowState.PAUSED
+    assert final_conversation.status == ConversationStatus.PAUSED
+    assert len(workflow_transition_repository.transitions) == 1
+
+
 async def test_continue_ai_sends_outbound_email_and_returns_to_waiting_for_response() -> None:
     workflow = _workflow()
     dependencies = _continue_ai_dependencies(workflow=workflow, channel=ContactChannel.EMAIL)
@@ -1776,14 +2034,14 @@ async def test_continue_ai_pauses_when_turn_cap_is_reached() -> None:
     assert final_conversation.status == ConversationStatus.PAUSED
 
 
-async def test_continue_ai_blocks_when_sms_compliance_is_not_approved() -> None:
+async def test_continue_ai_is_not_blocked_when_sms_compliance_is_not_approved_in_v1(
+) -> None:
     workflow = _workflow()
     dependencies = _continue_ai_dependencies(
         workflow=workflow, sms_compliance_state=SmsComplianceState.NOT_APPROVED
     )
     conversation_repository = dependencies["conversation_repository"]
     lead_workflow_repository = dependencies["lead_workflow_repository"]
-    workflow_transition_repository = dependencies["workflow_transition_repository"]
     sms_provider = dependencies["sms_provider"]
     email_provider = dependencies["email_provider"]
 
@@ -1805,16 +2063,15 @@ async def test_continue_ai_blocks_when_sms_compliance_is_not_approved() -> None:
 
     assert result.status == ProcessInboundMessageEventStatus.PROCESSED
     assert result.inbound_action == InboundAction.CONTINUE_AI
-    assert result.continue_ai_status == ContinueAIStatus.BLOCKED
-    assert result.continue_ai_pause_reason == "ai_continuation_planning_blocked"
-    assert len(sms_provider.messages) == 0
+    assert result.continue_ai_status == ContinueAIStatus.SENT
+    assert result.continue_ai_pause_reason is None
+    assert len(sms_provider.messages) == 1
     assert len(email_provider.messages) == 0
-    assert len(workflow_transition_repository.transitions) == 2
     final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     final_conversation = conversation_repository.by_id[CONVERSATION_ID]
-    assert final_workflow.state == WorkflowState.PAUSED
-    assert final_conversation.ai_interaction_count == 0
-    assert final_conversation.status == ConversationStatus.PAUSED
+    assert final_workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+    assert final_conversation.ai_interaction_count == 1
+    assert final_conversation.status == ConversationStatus.ACTIVE_AI
 
 
 async def test_continue_ai_falls_back_to_paused_when_dependencies_missing() -> None:
@@ -1851,6 +2108,39 @@ async def test_continue_ai_falls_back_to_paused_when_dependencies_missing() -> N
     assert result.continue_ai_status is None
     final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     assert final_workflow.state == WorkflowState.PAUSED
+
+
+async def test_continue_ai_skipped_keeps_conversation_status_aligned_with_human_handoff() -> None:
+    workflow = replace(_workflow(), state=WorkflowState.HUMAN_HANDOFF)
+    dependencies = _continue_ai_dependencies(workflow=workflow)
+    conversation_repository = dependencies["conversation_repository"]
+    lead_workflow_repository = dependencies["lead_workflow_repository"]
+    await conversation_repository.save(
+        replace(_conversation(), status=ConversationStatus.HUMAN_HANDOFF)
+    )
+
+    result = await process_inbound_message_event(
+        event=_event(body="Can you tell me a little more?"),
+        llm_client=FakeLLMClient(
+            _classification_json(
+                intent="general_reply",
+                summary_text="Lead replied generally and may want follow-up later.",
+            )
+        ),
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        **dependencies,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.inbound_action == InboundAction.CONTINUE_AI
+    assert result.continue_ai_status == ContinueAIStatus.WORKFLOW_TRANSITION_SKIPPED
+    final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    final_conversation = conversation_repository.by_id[CONVERSATION_ID]
+    assert final_workflow.state == WorkflowState.HUMAN_HANDOFF
+    assert final_conversation.status == ConversationStatus.HUMAN_HANDOFF
 
 
 async def test_duplicate_inbound_event_does_not_send_duplicate_continuation() -> None:
@@ -1946,7 +2236,7 @@ async def test_processing_audit_persisted_for_continue_ai_success() -> None:
     assert audit["crm"]["review_tag_applied"] is False
     assert audit["review_notification"]["sent"] is False
     assert audit["handoff"]["handoff_id"] is None
-    assert audit["signal_queued"] is False
+    assert audit["signal_queued"] is True
 
 
 async def test_processing_audit_persisted_for_continue_ai_blocked_at_turn_cap() -> None:
@@ -2563,6 +2853,57 @@ async def test_handoff_acknowledgment_falls_back_to_static_body_when_draft_is_in
     assert [message.body for message in sms_provider.messages] == [
         "Thanks — our team will get back to you soon."
     ]
+
+
+async def test_handoff_acknowledgment_skips_draft_when_contactability_blocks_channel() -> None:
+    lead = replace(
+        _lead(),
+        suppression_types=frozenset({SuppressionType.SMS_OPT_OUT}),
+    )
+    message_repository = FakeOutboundMessageRepository()
+    sms_provider = FakeSMSProvider("SMACK")
+    llm = FakeLLMClient(
+        _classification_json(intent="human_requested"),
+        _acknowledgment_json(body="This draft should never be used."),
+    )
+
+    result = await process_inbound_message_event(
+        event=_event(),
+        lead_repository=FakeLeadRepository(lead),
+        external_event_repository=FakeExternalEventRepository(),
+        conversation_repository=FakeConversationRepository(),
+        inbound_message_repository=FakeInboundMessageRepository(),
+        conversation_summary_repository=FakeConversationSummaryRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        llm_client=llm,
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            replace(
+                _workspace_handoff_config(),
+                lead_acknowledgment_sms_enabled=True,
+                lead_acknowledgment_sms_body="Thanks — our team will get back to you soon.",
+            )
+        ),
+        lead_workflow_repository=_workflow_repository(_workflow()),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        campaign_execution_repository=FakeCampaignExecutionRepository(_campaign_execution_config()),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
+        message_repository=message_repository,
+        sms_provider=sms_provider,
+        email_provider=FakeEmailProvider(),
+        now=NOW,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        handoff_id_factory=lambda: HANDOFF_ID,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.handoff_id == HANDOFF_ID
+    assert len(llm.requests) == 1
+    assert sms_provider.messages == []
+    assert message_repository.messages_by_idempotency_key == {}
 
 
 async def test_handoff_notification_exception_does_not_abort_inbound_processing() -> None:

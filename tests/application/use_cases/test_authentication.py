@@ -480,6 +480,7 @@ def test_get_current_user_returns_context_and_permissions() -> None:
     assert result.workspace is not None
     assert result.membership is not None
     assert "invite_workspace_user" in result.permissions
+    assert "edit_paused_search_profile_any_lead" in result.permissions
 
 
 def test_switch_active_workspace_issues_new_access_token() -> None:

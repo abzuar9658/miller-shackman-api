@@ -12,7 +12,10 @@ from app.application.ports.repositories import (
     WorkspaceLLMConfigRepository,
     WorkspaceOutboundDraftingConfigRepository,
 )
-from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
+from app.application.services.canonical_lead_inputs import (
+    contactability_facts_from_canonical_lead,
+    lead_has_destination_for_channel,
+)
 from app.application.services.llm.outbound_message_drafting import (
     ApprovedOutboundLeadContext,
     OutboundMessageDraftReasonCode,
@@ -22,6 +25,9 @@ from app.application.services.llm.outbound_message_drafting import (
 )
 from app.application.services.llm.workspace_model_resolution import (
     resolve_workspace_openrouter_model,
+)
+from app.application.services.paused_search_drafting_templates import (
+    apply_paused_search_drafting_template,
 )
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
 from app.domain.campaigns.pre_send import (
@@ -42,7 +48,10 @@ from app.domain.compliance.contactability import (
     evaluate_contactability,
 )
 from app.domain.leads import CanonicalLeadRecord
-from app.domain.outbound_drafting import default_workspace_outbound_drafting_config
+from app.domain.outbound_drafting import (
+    OutboundJourneyKind,
+    default_workspace_outbound_drafting_config,
+)
 
 
 class PlanOutboundMessageStatus(StrEnum):
@@ -87,17 +96,18 @@ class OutboundPlanningContext:
     campaign_goal: str
     brokerage_name: str
     cadence_step_id: str
+    template_key: str | None = None
     assigned_agent_name: str | None = None
     scheduled_for: datetime | None = None
     message_version: int = 1
     pre_send_policy: PreSendPolicy = field(default_factory=PreSendPolicy)
     lead_context: ApprovedOutboundLeadContext = field(default_factory=ApprovedOutboundLeadContext)
+    journey_kind: OutboundJourneyKind | None = None
     preflight_vetoed: bool = False
     handoff_active: bool = False
     human_owned: bool = False
     lead_replied_since_scheduled: bool = False
     recent_human_activity: bool = False
-    ownership_changed: bool = False
     last_global_outreach_at: datetime | None = None
     last_campaign_outreach_at: datetime | None = None
     last_channel_outreach_at: datetime | None = None
@@ -210,6 +220,12 @@ async def plan_outbound_message_for_lead_record(
         drafting_config = (
             await workspace_outbound_drafting_config_repository.get_by_workspace_id(workspace_id)
         ) or drafting_config
+    if context.journey_kind == OutboundJourneyKind.PAUSED_SEARCH:
+        drafting_config = apply_paused_search_drafting_template(
+            drafting_config=drafting_config,
+            channel=selected.channel,
+            template_key=context.template_key,
+        )
 
     draft_result = await draft_outbound_message(
         lead=lead,
@@ -218,6 +234,7 @@ async def plan_outbound_message_for_lead_record(
         brokerage_name=context.brokerage_name,
         assigned_agent_name=context.assigned_agent_name,
         lead_context=context.lead_context,
+        journey_kind=context.journey_kind,
         llm_client=llm_client,
         drafting_config=drafting_config,
         model=openrouter_model,
@@ -302,7 +319,7 @@ async def _select_channel(
     contactability_facts = contactability_facts_from_canonical_lead(lead)
     existing_messages = await message_repository.list_for_lead(workspace_id, lead.lead_id)
     for channel in context.enabled_channels:
-        if not _has_destination_for_channel(lead, channel):
+        if not lead_has_destination_for_channel(lead, channel):
             rejection_reasons.append(PlanOutboundMessageReasonCode.CHANNEL_DESTINATION_MISSING)
             evaluations.append(
                 ChannelEvaluation(
@@ -341,7 +358,6 @@ async def _select_channel(
                 human_owned=context.human_owned,
                 lead_replied_since_scheduled=context.lead_replied_since_scheduled,
                 recent_human_activity=context.recent_human_activity,
-                ownership_changed=context.ownership_changed,
                 last_global_outreach_at=context.last_global_outreach_at,
                 last_campaign_outreach_at=context.last_campaign_outreach_at,
                 last_channel_outreach_at=context.last_channel_outreach_at,
@@ -419,15 +435,6 @@ async def _select_channel(
         reasons=tuple(rejection_reasons),
         evaluations=tuple(evaluations),
     )
-
-
-def _has_destination_for_channel(
-    lead: CanonicalLeadRecord,
-    channel: ContactChannel,
-) -> bool:
-    if channel == ContactChannel.SMS:
-        return lead.has_sms_capable_phone and lead.primary_phone is not None
-    return lead.has_email and lead.primary_email is not None
 
 
 def _message_version_for_channel(

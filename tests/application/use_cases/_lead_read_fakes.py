@@ -11,8 +11,18 @@ from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
 from app.domain.conversations import CrmConversationEvent, Handoff, InboundMessage
 from app.domain.crm_agent_mapping import CRMAgent
 from app.domain.identity import User, WorkspaceMembershipRole
-from app.domain.leads import CanonicalLeadRecord, CRMProvider
-from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransition
+from app.domain.leads import (
+    CanonicalLeadRecord,
+    CRMProvider,
+    LeadClassificationArtifact,
+    LeadPausedSearchHistoryEntry,
+)
+from app.domain.workflows import (
+    LeadWorkflow,
+    LeadWorkflowOverrideAuditLog,
+    WorkflowState,
+    WorkflowTransition,
+)
 
 
 class FakeLeadRepository:
@@ -115,6 +125,63 @@ class FakeLeadRepository:
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         self._leads[(record.workspace_id, record.lead_id)] = record
         return record
+
+
+class FakeLeadPausedSearchHistoryRepository:
+    def __init__(self, entries: tuple[LeadPausedSearchHistoryEntry, ...]) -> None:
+        self._entries = list(entries)
+
+    async def list_for_lead(
+        self,
+        workspace_id: UUID,
+        lead_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadPausedSearchHistoryEntry, ...]:
+        return tuple(
+            entry
+            for entry in self._entries
+            if entry.workspace_id == workspace_id and entry.lead_id == lead_id
+        )[:limit]
+
+    async def append(
+        self,
+        entry: LeadPausedSearchHistoryEntry,
+    ) -> LeadPausedSearchHistoryEntry:
+        self._entries.insert(0, entry)
+        return entry
+
+
+class FakeLeadClassificationArtifactRepository:
+    def __init__(self, artifacts: tuple[LeadClassificationArtifact, ...]) -> None:
+        self._artifacts = tuple(artifacts)
+
+    async def get_by_id(
+        self,
+        workspace_id: UUID,
+        artifact_id: UUID,
+    ) -> LeadClassificationArtifact | None:
+        return next(
+            (
+                artifact
+                for artifact in self._artifacts
+                if artifact.workspace_id == workspace_id and artifact.artifact_id == artifact_id
+            ),
+            None,
+        )
+
+    async def list_for_lead(
+        self,
+        workspace_id: UUID,
+        lead_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadClassificationArtifact, ...]:
+        return tuple(
+            artifact
+            for artifact in self._artifacts
+            if artifact.workspace_id == workspace_id and artifact.lead_id == lead_id
+        )[:limit]
 
 
 class FakeCRMAgentRepository:
@@ -224,6 +291,31 @@ class FakeWorkflowTransitionRepository:
     async def append(self, transition: WorkflowTransition) -> WorkflowTransition:
         self._items.append(transition)
         return transition
+
+
+class FakeLeadWorkflowOverrideAuditLogRepository:
+    def __init__(self, entries: tuple[LeadWorkflowOverrideAuditLog, ...]) -> None:
+        self._entries = list(entries)
+
+    async def list_for_lead(
+        self,
+        workspace_id: UUID,
+        lead_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadWorkflowOverrideAuditLog, ...]:
+        return tuple(
+            entry
+            for entry in self._entries
+            if entry.workspace_id == workspace_id and entry.lead_id == lead_id
+        )[:limit]
+
+    async def append(
+        self,
+        audit_log: LeadWorkflowOverrideAuditLog,
+    ) -> LeadWorkflowOverrideAuditLog:
+        self._entries.insert(0, audit_log)
+        return audit_log
 
 
 class FakeInboundMessageRepository:

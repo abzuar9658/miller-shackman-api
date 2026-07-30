@@ -115,6 +115,7 @@ class WorkspaceCRMSyncConfigResponse(BaseModel):
     workspace_id: UUID
     crm_sync_enabled: bool
     crm_sync_interval_seconds: int
+    max_leads_per_sync_cycle: int | None = None
 
 
 class WorkspaceLLMConfigResponse(BaseModel):
@@ -127,6 +128,7 @@ class WorkspaceOperationalControlResponse(BaseModel):
     workspace_id: UUID
     automation_status: str
     pause_reason: str | None = None
+    recurring_paused_search_enabled: bool = False
 
 
 class WorkspaceOutboundDraftingConfigResponse(BaseModel):
@@ -202,6 +204,7 @@ class UpdateWorkspaceHandoffConfigResponse(BaseModel):
 class UpdateWorkspaceCRMSyncConfigRequest(BaseModel):
     crm_sync_enabled: bool
     crm_sync_interval_seconds: int = Field(ge=60, le=86400)
+    max_leads_per_sync_cycle: int | None = Field(default=None, ge=1, le=5000)
 
     @field_validator("crm_sync_interval_seconds")
     @classmethod
@@ -228,6 +231,7 @@ class UpdateWorkspaceLLMConfigResponse(BaseModel):
 class UpdateWorkspaceOperationalControlRequest(BaseModel):
     automation_status: WorkspaceAutomationStatus
     pause_reason: str | None = Field(default=None, max_length=1000)
+    recurring_paused_search_enabled: bool = False
 
 
 class UpdateWorkspaceOperationalControlResponse(BaseModel):
@@ -320,6 +324,7 @@ class ListingRelevanceBriefResponse(BaseModel):
     safe_talking_point: str | None = None
     safe_cta: str
     draft_directive: str | None = None
+    listing_context_source: str | None = None
 
 
 class WorkspaceOutboundDraftingPreviewRequest(BaseModel):

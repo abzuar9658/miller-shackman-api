@@ -18,6 +18,24 @@ from app.domain.campaigns.execution import (
     CampaignVersionStatus,
 )
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
+from app.domain.campaigns.paused_search_timing import (
+    PausedSearchNextActionPlan,
+    PausedSearchTimingReasonCode,
+    plan_paused_search_next_action,
+)
+from app.domain.campaigns.paused_search_tracks import (
+    PausedSearchFallbackTimingPolicy,
+    PausedSearchReasonMapping,
+    PausedSearchTrack,
+    PausedSearchTrackAdminAuditAction,
+    PausedSearchTrackAdminAuditLog,
+    PausedSearchTrackAdminView,
+    PausedSearchTrackFamily,
+    PausedSearchTrackStatus,
+    PausedSearchTrackStep,
+    PausedSearchTrackStepPhase,
+    PausedSearchTrackVersion,
+)
 from app.domain.campaigns.pre_send import (
     PreSendDecision,
     PreSendFacts,
@@ -64,6 +82,19 @@ __all__ = [
     "CampaignVersionStatus",
     "OutboundMessage",
     "OutboundMessageStatus",
+    "PausedSearchFallbackTimingPolicy",
+    "PausedSearchReasonMapping",
+    "PausedSearchTrack",
+    "PausedSearchTrackAdminAuditAction",
+    "PausedSearchTrackAdminAuditLog",
+    "PausedSearchTrackAdminView",
+    "PausedSearchTrackFamily",
+    "PausedSearchTrackStatus",
+    "PausedSearchTrackStep",
+    "PausedSearchTrackStepPhase",
+    "PausedSearchTrackVersion",
+    "PausedSearchNextActionPlan",
+    "PausedSearchTimingReasonCode",
     "PreSendDecision",
     "PreSendFacts",
     "PreSendPolicy",
@@ -77,4 +108,5 @@ __all__ = [
     "build_enrollment_reason_codes",
     "evaluate_campaign_start_batch",
     "evaluate_pre_send_safety",
+    "plan_paused_search_next_action",
 ]

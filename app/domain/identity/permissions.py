@@ -20,8 +20,11 @@ class PermissionCapability(StrEnum):
     ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS = "enroll_own_lead_when_campaign_allows"
     ENROLL_ANY_ELIGIBLE_LEAD = "enroll_any_eligible_lead"
     VETO_OWN_PREFLIGHT_LEAD = "veto_own_preflight_lead"
+    VIEW_OWN_PREFLIGHT_LEAD = "view_own_preflight_lead"
     PAUSE_CAMPAIGN = "pause_campaign"
     LAUNCH_OR_PUBLISH_CAMPAIGN = "launch_or_publish_campaign"
+    EDIT_PAUSED_SEARCH_PROFILE_OWN_LEAD = "edit_paused_search_profile_own_lead"
+    EDIT_PAUSED_SEARCH_PROFILE_ANY_LEAD = "edit_paused_search_profile_any_lead"
     RESUME_AI_AFTER_HANDOFF_OWN_LEAD = "resume_ai_after_handoff_own_lead"
     RESUME_OR_REASSIGN_ANY_LEAD = "resume_or_reassign_any_lead"
     CHANGE_CONSENT_SUPPRESSION_POLICY = "change_consent_suppression_policy"
@@ -136,6 +139,8 @@ def _role_allows(
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
             PermissionCapability.ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS,
             PermissionCapability.VETO_OWN_PREFLIGHT_LEAD,
+            PermissionCapability.VIEW_OWN_PREFLIGHT_LEAD,
+            PermissionCapability.EDIT_PAUSED_SEARCH_PROFILE_OWN_LEAD,
             PermissionCapability.RESUME_AI_AFTER_HANDOFF_OWN_LEAD,
         }
 
@@ -147,6 +152,7 @@ def _role_allows(
             PermissionCapability.ENROLL_ANY_ELIGIBLE_LEAD,
             PermissionCapability.VETO_OWN_PREFLIGHT_LEAD,
             PermissionCapability.PAUSE_CAMPAIGN,
+            PermissionCapability.EDIT_PAUSED_SEARCH_PROFILE_ANY_LEAD,
             PermissionCapability.RESUME_AI_AFTER_HANDOFF_OWN_LEAD,
             PermissionCapability.RESUME_OR_REASSIGN_ANY_LEAD,
         }
@@ -164,6 +170,7 @@ def _role_allows(
             PermissionCapability.VETO_OWN_PREFLIGHT_LEAD,
             PermissionCapability.PAUSE_CAMPAIGN,
             PermissionCapability.LAUNCH_OR_PUBLISH_CAMPAIGN,
+            PermissionCapability.EDIT_PAUSED_SEARCH_PROFILE_ANY_LEAD,
             PermissionCapability.RESUME_AI_AFTER_HANDOFF_OWN_LEAD,
             PermissionCapability.RESUME_OR_REASSIGN_ANY_LEAD,
             PermissionCapability.CHANGE_CONSENT_SUPPRESSION_POLICY,
@@ -188,6 +195,7 @@ def _context_reasons(
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
             PermissionCapability.ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS,
             PermissionCapability.VETO_OWN_PREFLIGHT_LEAD,
+            PermissionCapability.EDIT_PAUSED_SEARCH_PROFILE_OWN_LEAD,
             PermissionCapability.RESUME_AI_AFTER_HANDOFF_OWN_LEAD,
         }
         and not context.acts_on_assigned_lead

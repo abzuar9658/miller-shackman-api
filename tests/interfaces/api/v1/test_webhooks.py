@@ -36,7 +36,7 @@ from app.domain.conversations import WorkspaceHandoffConfig
 from app.domain.events import DomainEvent
 from app.domain.identity import Workspace, WorkspaceStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
-from app.domain.workflows import LeadWorkflow, WorkflowState
+from app.domain.workflows import LeadWorkflow, TemporalSignalName, WorkflowState
 from app.infrastructure.crm.follow_up_boss.webhook_event_handler import (
     FollowUpBossWebhookEventHandlerImpl,
 )
@@ -51,7 +51,10 @@ from app.interfaces.api.schemas.inbound import MailgunInboundParsePayload
 from app.main import create_app
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCampaignExecutionRepository,
+    FakeClassificationLLMClient,
+    FakeCrmConversationEventRepository,
     FakeEmailProvider,
+    FakeLeadClassificationArtifactRepository,
     FakeLeadRepository,
     FakeLeadWorkflowRepository,
     FakeOutboundMessageRepository,
@@ -67,6 +70,9 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
     FakeCampaignEnrollmentRepository,
     FakeTemporalSignalOutboxRepository,
     FakeTemporalWorkflowStarter,
+)
+from tests.application.use_cases._paused_search_track_fakes import (
+    FakePausedSearchTrackAdminRepository,
 )
 from tests.application.use_cases.test_complete_handoff import (
     FakeHandoffCompletionRepository,
@@ -138,11 +144,14 @@ def webhook_bundle() -> InboundServiceBundle:
         external_event_repository=FakeExternalEventRepository(),
         conversation_repository=FakeConversationRepository(),
         inbound_message_repository=FakeInboundMessageRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        lead_classification_artifact_repository=FakeLeadClassificationArtifactRepository(),
         conversation_summary_repository=FakeConversationSummaryRepository(),
         handoff_repository=FakeHandoffRepository(),
         handoff_completion_repository=FakeHandoffCompletionRepository(),
         inbound_message_crm_completion_repository=FakeInboundMessageCRMCompletionRepository(),
         outbound_message_crm_completion_repository=FakeOutboundMessageCRMCompletionRepository(),
+        paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
@@ -204,11 +213,13 @@ class _FakeCRMClientForWebhook(FakeCRMClient):
     def __init__(self, fetch_result: dict[str, Any] | None) -> None:
         super().__init__()
         self._fetch_result = fetch_result
+        self.requested_uris: list[str] = []
 
     async def fetch_resource_by_uri(
         self, workspace_id: UUID, uri: str
     ) -> dict[str, Any] | None:
-        _ = (workspace_id, uri)
+        _ = workspace_id
+        self.requested_uris.append(uri)
         return self._fetch_result
 
 
@@ -229,10 +240,23 @@ def _build_webhook_client_with_handler(
                 workspace_contact_policy_repository=webhook_bundle.workspace_contact_policy_repository,
                 campaign_execution_repository=webhook_bundle.campaign_execution_repository,
                 campaign_enrollment_repository=webhook_bundle.campaign_enrollment_repository,
+                lead_classification_artifact_repository=webhook_bundle.lead_classification_artifact_repository,
+                paused_search_track_repository=webhook_bundle.paused_search_track_repository,
+                crm_conversation_event_repository=webhook_bundle.crm_conversation_event_repository,
+                workspace_llm_config_repository=webhook_bundle.workspace_llm_config_repository,
                 crm_client=webhook_bundle.crm_client,
                 temporal_workflow_starter=webhook_bundle.temporal_workflow_starter,
+                llm_client=webhook_bundle.llm_client,
                 event_bus=webhook_bundle.event_bus,
                 workspace_operational_control_repository=webhook_bundle.workspace_operational_control_repository,
+                handoff_repository=webhook_bundle.handoff_repository,
+                handoff_completion_repository=webhook_bundle.handoff_completion_repository,
+                workspace_handoff_config_repository=(
+                    webhook_bundle.workspace_handoff_config_repository
+                ),
+                notification_provider=webhook_bundle.notification_provider,
+                user_repository=webhook_bundle.user_repository,
+                default_openrouter_model=webhook_bundle.default_openrouter_model,
                 commit=webhook_bundle.session.commit,
             ),
         )
@@ -1323,20 +1347,22 @@ def test_follow_up_boss_suppression_webhook_returns_duplicate_on_replay(
 def test_follow_up_boss_crm_webhook_processes_people_updated_without_pausing_workflow(
     webhook_bundle: InboundServiceBundle,
 ) -> None:
-    fetch_result = {
-        "people": [
-            {
-                "id": "crm-123",
-                "firstName": "Jamie",
-                "lastName": "Lead",
-                "stage": "nurture",
-                "assignedTo": "agent-100",
-            }
-        ]
-    }
+    crm_client = _FakeCRMClientForWebhook(
+        fetch_result={
+            "people": [
+                {
+                    "id": "crm-123",
+                    "firstName": "Jamie",
+                    "lastName": "Lead",
+                    "stage": "nurture",
+                    "assignedTo": "agent-100",
+                }
+            ]
+        }
+    )
     bundle = replace(
         webhook_bundle,
-        crm_client=cast(CRMClient, _FakeCRMClientForWebhook(fetch_result=fetch_result)),
+        crm_client=cast(CRMClient, crm_client),
     )
 
     with _build_webhook_client_with_handler(bundle) as client:
@@ -1356,6 +1382,188 @@ def test_follow_up_boss_crm_webhook_processes_people_updated_without_pausing_wor
     assert body["status"] == "processed"
     assert body["event_type"] == "peopleUpdated"
     assert body["processed_count"] == 1
+    workflow_repository = cast(FakeLeadWorkflowRepository, bundle.lead_workflow_repository)
+    workflow = workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+
+
+def test_follow_up_boss_crm_webhook_pauses_for_people_updated_contacted_change(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    crm_client = _FakeCRMClientForWebhook(
+        fetch_result={
+            "people": [
+                {
+                    "id": "crm-123",
+                    "firstName": "Jamie",
+                    "lastName": "Lead",
+                    "stage": "nurture",
+                    "assignedTo": "agent-100",
+                    "contacted": 1,
+                    "customFields": {"email_permission_status": "confirmed"},
+                }
+            ]
+        }
+    )
+    bundle = replace(
+        webhook_bundle,
+        crm_client=cast(CRMClient, crm_client),
+    )
+
+    with _build_webhook_client_with_handler(bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/crm/follow-up-boss/{WORKSPACE_ID}",
+            json={
+                "eventId": "evt-people-contacted-1",
+                "eventCreated": NOW.isoformat(),
+                "event": "peopleUpdated",
+                "resourceIds": [123],
+                "uri": "https://api.followupboss.com/v1/people?id=crm-123",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "processed"
+    assert body["event_type"] == "peopleUpdated"
+    assert body["processed_count"] == 1
+    workflow_repository = cast(FakeLeadWorkflowRepository, bundle.lead_workflow_repository)
+    workflow = workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert workflow.state == WorkflowState.PAUSED
+    outbox_repository = cast(
+        FakeTemporalSignalOutboxRepository,
+        bundle.temporal_signal_outbox_repository,
+    )
+    entries = tuple(outbox_repository.entries.values())
+    assert len(entries) == 1
+    assert entries[0].signal_name == TemporalSignalName.PAUSE_REQUESTED
+    assert entries[0].payload["reason"] == "crm_status_changed"
+
+
+@pytest.mark.parametrize(
+    ("event_type", "collection_key", "resource"),
+    [
+        (
+            "textMessagesCreated",
+            "textMessages",
+            {
+                "id": 88,
+                "personId": "crm-123",
+                "created": NOW.isoformat(),
+                "isIncoming": False,
+                "userId": 42,
+                "message": "Checking whether you are still looking.",
+            },
+        ),
+        (
+            "callsCreated",
+            "calls",
+            {
+                "id": 55,
+                "personId": "crm-123",
+                "created": NOW.isoformat(),
+                "isIncoming": False,
+                "userId": 42,
+                "description": "Left voicemail",
+            },
+        ),
+    ],
+)
+def test_follow_up_boss_crm_webhook_pauses_for_outbound_communication_activity(
+    webhook_bundle: InboundServiceBundle,
+    event_type: str,
+    collection_key: str,
+    resource: dict[str, object],
+) -> None:
+    bundle = replace(
+        webhook_bundle,
+        crm_client=cast(
+            CRMClient,
+            _FakeCRMClientForWebhook(fetch_result={collection_key: [resource]}),
+        ),
+    )
+
+    with _build_webhook_client_with_handler(bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/crm/follow-up-boss/{WORKSPACE_ID}",
+            json={
+                "eventId": f"evt-{event_type}",
+                "eventCreated": NOW.isoformat(),
+                "event": event_type,
+                "resourceIds": [123],
+                "uri": f"https://api.followupboss.com/v1/{collection_key}?id=1",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "processed"
+    assert body["processed_count"] == 1
+    workflow_repository = cast(FakeLeadWorkflowRepository, bundle.lead_workflow_repository)
+    workflow = workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert workflow.state == WorkflowState.PAUSED
+
+
+@pytest.mark.parametrize(
+    ("event_type", "collection_key", "resource"),
+    [
+        (
+            "textMessagesCreated",
+            "textMessages",
+            {
+                "id": 89,
+                "personId": "crm-123",
+                "created": NOW.isoformat(),
+                "isIncoming": True,
+                "userId": 42,
+                "message": "Yes, I am still looking.",
+            },
+        ),
+        (
+            "callsCreated",
+            "calls",
+            {
+                "id": 56,
+                "personId": "crm-123",
+                "created": NOW.isoformat(),
+                "isIncoming": True,
+                "userId": 42,
+                "description": "Lead returned the call",
+            },
+        ),
+    ],
+)
+def test_follow_up_boss_crm_webhook_ignores_inbound_communication_activity(
+    webhook_bundle: InboundServiceBundle,
+    event_type: str,
+    collection_key: str,
+    resource: dict[str, object],
+) -> None:
+    bundle = replace(
+        webhook_bundle,
+        crm_client=cast(
+            CRMClient,
+            _FakeCRMClientForWebhook(fetch_result={collection_key: [resource]}),
+        ),
+    )
+
+    with _build_webhook_client_with_handler(bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/crm/follow-up-boss/{WORKSPACE_ID}",
+            json={
+                "eventId": f"evt-{event_type}-incoming",
+                "eventCreated": NOW.isoformat(),
+                "event": event_type,
+                "resourceIds": [123],
+                "uri": f"https://api.followupboss.com/v1/{collection_key}?id=1",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ignored"
+    assert body["processed_count"] == 0
+    assert body["reasons"] == ["no_actionable_resources"]
     workflow_repository = cast(FakeLeadWorkflowRepository, bundle.lead_workflow_repository)
     workflow = workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     assert workflow.state == WorkflowState.WAITING_FOR_RESPONSE
@@ -1443,6 +1651,7 @@ def test_follow_up_boss_crm_webhook_auto_enrolls_matching_configured_tag(
                 "email": "tagged@example.com",
                 "phone": "+15555550124",
                 "tags": ["configured_fub_tag"],
+                "customFields": {"email_permission_status": "confirmed"},
             }
         ]
     }
@@ -1459,6 +1668,7 @@ def test_follow_up_boss_crm_webhook_auto_enrolls_matching_configured_tag(
         ),
         campaign_enrollment_repository=FakeCampaignEnrollmentRepository(),
         temporal_workflow_starter=FakeTemporalWorkflowStarter(),
+        llm_client=FakeClassificationLLMClient(outcome="dormant"),
     )
 
     with _build_webhook_client_with_handler(bundle) as client:
@@ -1482,6 +1692,91 @@ def test_follow_up_boss_crm_webhook_auto_enrolls_matching_configured_tag(
     temporal = cast(FakeTemporalWorkflowStarter, bundle.temporal_workflow_starter)
     assert len(temporal.calls) == 1
     assert cast(FakeSession, bundle.session).commit_count == 2
+
+
+def test_follow_up_boss_crm_webhook_completes_tag_time_human_handoff(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    fetch_result = {
+        "people": [
+            {
+                "id": "crm-tag-2",
+                "firstName": "Taylor",
+                "lastName": "Tagged",
+                "stage": "Lead",
+                "assignedTo": "agent-99",
+                "email": "tagged@example.com",
+                "phone": "+15555550124",
+                "tags": ["configured_fub_tag", "needs_agent_review"],
+                "customFields": {"email_permission_status": "confirmed"},
+            }
+        ]
+    }
+    notification_provider = FakeNotificationProvider()
+    crm_client = _FakeCRMClientForWebhook(fetch_result=fetch_result)
+    bundle = replace(
+        webhook_bundle,
+        lead_repository=FakeLeadRepository(None),
+        lead_workflow_repository=FakeLeadWorkflowRepository(),
+        handoff_repository=FakeHandoffRepository(),
+        handoff_completion_repository=FakeHandoffCompletionRepository(),
+        crm_client=cast(CRMClient, crm_client),
+        notification_provider=cast(NotificationProvider, notification_provider),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _campaign_execution_config(
+                channel=ContactChannel.EMAIL,
+                crm_enrollment_tag="configured_fub_tag",
+            )
+        ),
+        campaign_enrollment_repository=FakeCampaignEnrollmentRepository(),
+        temporal_workflow_starter=FakeTemporalWorkflowStarter(),
+        llm_client=FakeClassificationLLMClient(
+            outcome="human_handoff",
+            handoff_reason_code="human_requested",
+        ),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            WorkspaceHandoffConfig(
+                workspace_id=WORKSPACE_ID,
+                fallback_recipient_email="fallback@example.com",
+                crm_handoff_tag="human_handoff_required",
+                crm_review_tag="needs_agent_review",
+                crm_custom_fields={"handoff_status": "required"},
+            )
+        ),
+    )
+
+    with _build_webhook_client_with_handler(bundle) as client:
+        response = client.post(
+            f"/api/v1/webhooks/crm/follow-up-boss/{WORKSPACE_ID}",
+            json={
+                "eventId": "evt-people-tag-handoff-1",
+                "eventCreated": NOW.isoformat(),
+                "event": "peopleCreated",
+                "resourceIds": [789],
+                "uri": "https://api.followupboss.com/v1/people?id=crm-tag-2",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "processed"
+    assert body["processed_count"] == 1
+    handoffs = cast(FakeHandoffRepository, bundle.handoff_repository)
+    enrollments = cast(FakeCampaignEnrollmentRepository, bundle.campaign_enrollment_repository)
+    completion_repository = cast(
+        FakeHandoffCompletionRepository,
+        bundle.handoff_completion_repository,
+    )
+    handoff_record = completion_repository.record
+    assert {handoff.handoff_id for handoff in handoffs.saved} == {
+        handoff_record.handoff_id if handoff_record is not None else None
+    }
+    assert len(notification_provider.notifications) == 1
+    assert crm_client.tags == ["human_handoff_required"]
+    assert crm_client.custom_field_updates[-1]["handoff_status"] == "required"
+    assert len(crm_client.notes) == 1
+    assert len(enrollments.enrollments) == 0
+    assert cast(FakeSession, bundle.session).commit_count == 1
 
 
 def _mailgun_signature(signing_key: str, token: str, timestamp: str) -> str:

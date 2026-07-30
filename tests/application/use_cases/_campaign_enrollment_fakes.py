@@ -6,6 +6,7 @@ from uuid import UUID
 from app.application.ports.temporal import (
     InboundProcessedLeadNurtureWorkflowSignal,
     PauseLeadNurtureWorkflowSignal,
+    RescheduleLeadNurtureWorkflowSignal,
     ResumeLeadNurtureWorkflowSignal,
     UnblockLeadNurtureWorkflowSignal,
 )
@@ -90,6 +91,19 @@ class FakeLeadWorkflowRepository:
             for workflow in self.latest_by_lead.values()
             if workflow.workspace_id == workspace_id
             and workflow.state == WorkflowState.PAUSED
+        )
+        return matches[:limit]
+
+    async def list_latest_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadWorkflow, ...]:
+        matches = tuple(
+            workflow
+            for workflow in self.latest_by_lead.values()
+            if workflow.workspace_id == workspace_id
         )
         return matches[:limit]
 
@@ -199,6 +213,16 @@ class FakeLeadNurtureWorkflowSignaler:
         self.calls.append({"temporal_workflow_id": temporal_workflow_id, "signal": signal})
         if self.always_fail:
             raise RuntimeError("Temporal inbound processed signal failed")
+
+    async def signal_reschedule_lead_nurture_workflow(
+        self,
+        *,
+        temporal_workflow_id: str,
+        signal: RescheduleLeadNurtureWorkflowSignal,
+    ) -> None:
+        self.calls.append({"temporal_workflow_id": temporal_workflow_id, "signal": signal})
+        if self.always_fail:
+            raise RuntimeError("Temporal reschedule signal failed")
 
 
 NOW = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)

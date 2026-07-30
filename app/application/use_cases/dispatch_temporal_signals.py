@@ -7,6 +7,7 @@ from app.application.ports.temporal import (
     InboundProcessedLeadNurtureWorkflowSignal,
     LeadNurtureWorkflowSignaler,
     PauseLeadNurtureWorkflowSignal,
+    RescheduleLeadNurtureWorkflowSignal,
     ResumeLeadNurtureWorkflowSignal,
     TemporalWorkflowNotFoundError,
     UnblockLeadNurtureWorkflowSignal,
@@ -109,6 +110,7 @@ async def _dispatch_entry(
         TemporalSignalName.PAUSE_REQUESTED: _dispatch_pause_requested,
         TemporalSignalName.RESUME_REQUESTED: _dispatch_resume_requested,
         TemporalSignalName.BLOCKED_REVIEW_COMPLETED: _dispatch_blocked_review_completed,
+        TemporalSignalName.RESCHEDULE_REQUESTED: _dispatch_reschedule_requested,
     }
     dispatcher = dispatchers.get(entry.signal_name)
     if dispatcher is None:
@@ -159,6 +161,16 @@ async def _dispatch_blocked_review_completed(
     await lead_nurture_workflow_signaler.signal_unblock_lead_nurture_workflow(
         temporal_workflow_id=entry.temporal_workflow_id,
         signal=_blocked_review_completed_signal(entry),
+    )
+
+
+async def _dispatch_reschedule_requested(
+    entry: TemporalSignalOutboxEntry,
+    lead_nurture_workflow_signaler: LeadNurtureWorkflowSignaler,
+) -> None:
+    await lead_nurture_workflow_signaler.signal_reschedule_lead_nurture_workflow(
+        temporal_workflow_id=entry.temporal_workflow_id,
+        signal=_reschedule_requested_signal(entry),
     )
 
 
@@ -217,6 +229,20 @@ def _blocked_review_completed_signal(
         occurred_at=datetime.fromisoformat(_string_from_payload(payload, "occurred_at")),
         reason=_string_from_payload(payload, "reason"),
         actor_user_id=_uuid_from_payload(payload, "actor_user_id"),
+        external_event_id=_optional_uuid_from_payload(payload, "external_event_id"),
+    )
+
+
+def _reschedule_requested_signal(
+    entry: TemporalSignalOutboxEntry,
+) -> RescheduleLeadNurtureWorkflowSignal:
+    payload = entry.payload
+    return RescheduleLeadNurtureWorkflowSignal(
+        workspace_id=entry.workspace_id,
+        lead_id=_uuid_from_payload(payload, "lead_id"),
+        occurred_at=datetime.fromisoformat(_string_from_payload(payload, "occurred_at")),
+        reason=_string_from_payload(payload, "reason"),
+        actor_user_id=_optional_uuid_from_payload(payload, "actor_user_id"),
         external_event_id=_optional_uuid_from_payload(payload, "external_event_id"),
     )
 

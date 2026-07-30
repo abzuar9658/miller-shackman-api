@@ -202,6 +202,7 @@ def _crm_sync_config_response(config: WorkspaceCRMSyncConfig) -> WorkspaceCRMSyn
         workspace_id=config.workspace_id,
         crm_sync_enabled=config.crm_sync_enabled,
         crm_sync_interval_seconds=config.crm_sync_interval_seconds,
+        max_leads_per_sync_cycle=config.max_leads_per_sync_cycle,
     )
 
 
@@ -224,6 +225,7 @@ def _operational_control_response(
         workspace_id=control.workspace_id,
         automation_status=control.automation_status.value,
         pause_reason=control.pause_reason,
+        recurring_paused_search_enabled=control.recurring_paused_search_enabled,
     )
 
 
@@ -387,6 +389,7 @@ async def update_workspace_crm_sync_config_route(
         workspace_id=workspace_id,
         crm_sync_enabled=request.crm_sync_enabled,
         crm_sync_interval_seconds=request.crm_sync_interval_seconds,
+        max_leads_per_sync_cycle=request.max_leads_per_sync_cycle,
         workspace_repository=bundle.workspace_repository,
         membership_repository=bundle.membership_repository,
         crm_sync_config_repository=bundle.workspace_crm_sync_config_repository,
@@ -511,6 +514,7 @@ async def preview_workspace_outbound_drafting_route(
         listing_source_repository=bundle.listing_source_repository,
         listing_snapshot_repository=bundle.listing_snapshot_repository,
         listing_search_client=bundle.listing_search_client,
+        listing_cache_ttl=bundle.listing_cache_ttl,
         now=datetime.now(UTC),
         default_openrouter_model=bundle.default_openrouter_model,
     )
@@ -564,6 +568,7 @@ async def update_workspace_operational_control_route(
         workspace_id=workspace_id,
         automation_status=request.automation_status,
         pause_reason=request.pause_reason,
+        recurring_paused_search_enabled=request.recurring_paused_search_enabled,
         workspace_repository=bundle.workspace_repository,
         membership_repository=bundle.membership_repository,
         workspace_operational_control_repository=bundle.workspace_operational_control_repository,

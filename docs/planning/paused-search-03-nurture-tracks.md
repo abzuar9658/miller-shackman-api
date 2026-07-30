@@ -46,7 +46,7 @@ After this slice is implemented, the app should:
 - Temporal timer behavior and long waits
 - automatic wake-up calculations
 - AI extraction prompt design and confidence scoring
-- MLS/IDX-driven listing matching
+- generic or MLS/IDX-driven listing matching and recommendation logic
 - automated rate-feed triggers
 
 Those belong to Doc 4 or later integrations.
@@ -82,6 +82,19 @@ record it:
 Either choice is valid for V1, but the relationship must be explicit so track
 publishing, auditability, and workflow pinning do not drift from the existing
 campaign architecture.
+
+### Implementation decision
+
+Slice 4 implements paused-search tracks as a bounded campaign-domain entity with
+its own immutable version table. Track versions intentionally reuse the existing
+campaign version status vocabulary, cadence-step shape, contact-channel enum,
+and admin audit/event conventions, but they do not overload generic campaign
+cadence rows.
+
+Published reason mappings point to a specific `track_version_id`. That version is
+the durable pin that paused-search Temporal execution should store on a workflow.
+When admins publish a newer version or retire a track, older published versions
+remain readable for workflows that already pinned them.
 
 ## Intelligence note
 
@@ -185,6 +198,24 @@ Not allowed without later approved features:
 - channel-level opt-out immediately removes that channel from the track
 - all normal pre-send checks still run before every step
 
+## Reply-driven re-classification inside a paused-search track
+
+Any meaningful inbound reply received while a paused-search track is active must
+trigger fresh classification on the updated conversation before the next track
+step is chosen.
+
+That re-classification may:
+
+- keep the lead in paused-search with the same track
+- keep the lead in paused-search but update the reason, timing, or selected track
+- move the lead to handoff if active interest or a human request appears
+- move the lead to review hold if the new evidence is ambiguous
+- move the lead out of paused-search entirely if the latest conversation no
+  longer supports that path
+
+The track must yield to the new application-owned decision rather than assuming
+the old paused-search path is still correct.
+
 ## Admin controls
 
 Admins may:
@@ -200,6 +231,7 @@ Admins may:
 Admins may not:
 
 - create new safety outcomes
+- create arbitrary top-level classification paths that do not map to approved application-owned outcomes
 - bypass handoff or suppression rules
 - define arbitrary if/then logic engines
 - remove send-time safety rechecks

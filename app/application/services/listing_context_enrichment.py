@@ -43,7 +43,6 @@ async def maybe_enrich_outbound_lead_context(
     source_repository: ListingSourceRepository | None,
     snapshot_repository: ListingSnapshotRepository | None,
     listing_search_client: ListingSearchClient | None,
-    bypass_cache: bool = False,
 ) -> ApprovedOutboundLeadContext:
     if (
         not enrichment_enabled
@@ -65,75 +64,108 @@ async def maybe_enrich_outbound_lead_context(
     if query is None:
         return lead_context
 
-    if not bypass_cache:
-        candidates = await snapshot_repository.list_current_for_source(
-            lead.workspace_id,
-            source.source_id,
-            limit=MAX_CACHE_CANDIDATES,
-        )
-        cached_matches = select_matching_snapshots(
-            candidates,
+    live_matches = await _try_live_search(
+        query=query,
+        source=source,
+        listing_search_client=listing_search_client,
+    )
+    if live_matches:
+        matched_live_snapshots = select_matching_snapshots(
+            live_matches,
             query=query,
             now=now,
             cache_ttl=cache_ttl,
             max_results=max_results,
         )
-        if cached_matches:
-            return replace(
-                lead_context,
-                listing_context=_listing_context_from_snapshots(
-                    source=source,
-                    query=query,
-                    snapshots=cached_matches,
-                ),
-            )
+        if not matched_live_snapshots:
+            matched_live_snapshots = live_matches[:max_results]
 
-    if listing_search_client is None:
-        return lead_context
-
-    try:
-        live_matches = await listing_search_client.search(source=source, query=query)
-    except Exception:
-        return lead_context
-
-    if not live_matches:
-        return lead_context
-
-    matched_live_snapshots = select_matching_snapshots(
-        live_matches,
-        query=query,
-        now=now,
-        cache_ttl=cache_ttl,
-        max_results=max_results,
-    )
-    if not matched_live_snapshots:
-        matched_live_snapshots = live_matches[:max_results]
-
-    saved_matches = await _persist_live_matches(
-        lead=lead,
-        source=source,
-        snapshots=matched_live_snapshots,
-        snapshot_repository=snapshot_repository,
-        now=now,
-        cache_ttl=cache_ttl,
-    )
-    matches = select_matching_snapshots(
-        saved_matches,
-        query=query,
-        now=now,
-        cache_ttl=cache_ttl,
-        max_results=max_results,
-    )
-    if not matches:
-        matches = saved_matches[:max_results]
-
-    return replace(
-        lead_context,
-        listing_context=_listing_context_from_snapshots(
+        saved_matches = await _persist_live_matches(
+            lead=lead,
             source=source,
+            snapshots=matched_live_snapshots,
+            snapshot_repository=snapshot_repository,
+            now=now,
+            cache_ttl=cache_ttl,
+        )
+        matches = select_matching_snapshots(
+            saved_matches,
             query=query,
-            snapshots=matches,
-        ),
+            now=now,
+            cache_ttl=cache_ttl,
+            max_results=max_results,
+        )
+        if not matches:
+            matches = saved_matches[:max_results]
+
+        return replace(
+            lead_context,
+            listing_context=_listing_context_from_snapshots(
+                source=source,
+                query=query,
+                snapshots=matches,
+                listing_context_source="live",
+            ),
+        )
+
+    cached_matches = await _fetch_cached_matches(
+        workspace_id=lead.workspace_id,
+        source=source,
+        query=query,
+        now=now,
+        cache_ttl=cache_ttl,
+        max_results=max_results,
+        snapshot_repository=snapshot_repository,
+    )
+    if cached_matches:
+        return replace(
+            lead_context,
+            listing_context=_listing_context_from_snapshots(
+                source=source,
+                query=query,
+                snapshots=cached_matches,
+                listing_context_source="cache",
+            ),
+        )
+
+    return lead_context
+
+
+async def _try_live_search(
+    *,
+    query: ListingSearchQuery,
+    source: ListingSource,
+    listing_search_client: ListingSearchClient | None,
+) -> tuple[CanonicalListingSnapshot, ...]:
+    if listing_search_client is None:
+        return ()
+    try:
+        return await listing_search_client.search(source=source, query=query)
+    except Exception:
+        return ()
+
+
+async def _fetch_cached_matches(
+    *,
+    workspace_id: WorkspaceId,
+    source: ListingSource,
+    query: ListingSearchQuery,
+    now: datetime,
+    cache_ttl: timedelta,
+    max_results: int,
+    snapshot_repository: ListingSnapshotRepository,
+) -> tuple[CanonicalListingSnapshot, ...]:
+    candidates = await snapshot_repository.list_current_for_source(
+        workspace_id,
+        source.source_id,
+        limit=MAX_CACHE_CANDIDATES,
+    )
+    return select_matching_snapshots(
+        candidates,
+        query=query,
+        now=now,
+        cache_ttl=cache_ttl,
+        max_results=max_results,
     )
 
 
@@ -325,6 +357,7 @@ def _listing_context_from_snapshots(
     source: ListingSource,
     query: ListingSearchQuery,
     snapshots: tuple[CanonicalListingSnapshot, ...],
+    listing_context_source: str,
 ) -> ApprovedOutboundListingContext:
     return ApprovedOutboundListingContext(
         source_name=source.name,
@@ -333,6 +366,7 @@ def _listing_context_from_snapshots(
         matches=tuple(
             _listing_match_from_snapshot(snapshot) for snapshot in snapshots[: query.limit]
         ),
+        source=listing_context_source,
     )
 
 

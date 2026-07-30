@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -88,6 +89,30 @@ def test_assigned_agent_only_sees_owned_handoffs() -> None:
         OTHER_LEAD_ID,
         HandoffStatus.CREATED,
     )
+
+    result = asyncio.run(
+        list_handoff_views(
+            actor=_actor(WorkspaceMembershipRole.ASSIGNED_AGENT),
+            workspace_id=WORKSPACE_ID,
+            handoff_repository=handoff_repository,
+            lead_repository=lead_repository,
+            user_repository=user_repository,
+        )
+    )
+
+    assert result.status == HandoffReadStatus.OK
+    assert [view.handoff.handoff_id for view in result.views] == [HANDOFF_ID]
+
+
+def test_assigned_agent_handoff_visibility_uses_effective_owner() -> None:
+    handoff_repository = FakeHandoffRepository()
+    lead_repository = FakeLeadRepository()
+    user_repository = FakeUserRepository()
+    lead_repository.leads[LEAD_ID] = replace(
+        _lead(LEAD_ID, "Quinn Demo", OTHER_AGENT_ID),
+        effective_owner_user_id=ACTOR_ID,
+    )
+    handoff_repository.handoffs[HANDOFF_ID] = _handoff(HANDOFF_ID, LEAD_ID, HandoffStatus.CREATED)
 
     result = asyncio.run(
         list_handoff_views(

@@ -214,6 +214,7 @@ async def test_uses_fresh_cached_listing_matches_when_available() -> None:
 
     assert enriched.listing_context is not None
     assert enriched.listing_context.source_name == "StreetEasy"
+    assert enriched.listing_context.source == "cache"
     assert enriched.listing_context.matches[0].address_text == "2738 Miles Avenue, Bronx, NY 10465"
 
 
@@ -239,6 +240,7 @@ async def test_fetches_and_persists_listing_matches_when_cache_is_empty() -> Non
     assert len(client.queries) == 1
     assert len(snapshot_repository.saved) == 1
     assert enriched.listing_context is not None
+    assert enriched.listing_context.source == "live"
     assert enriched.listing_context.matches[0].price_text == "$650,000"
 
 
@@ -334,3 +336,114 @@ async def test_uses_soft_live_results_when_address_query_has_no_strict_match() -
     assert enriched.listing_context is not None
     assert len(snapshot_repository.saved) == 1
     assert snapshot_repository.saved[0].external_listing_id == "fuzzy-1"
+
+
+async def test_prefers_live_search_over_cached_matches() -> None:
+    lead = _lead()
+    source = _source(lead.workspace_id)
+    cached_snapshot = _snapshot(lead.workspace_id, source.source_id)
+    live_snapshot = CanonicalListingSnapshot(
+        **{
+            **cached_snapshot.__dict__,
+            "snapshot_id": uuid4(),
+            "external_listing_id": "live-1",
+            "source_url": "https://streeteasy.com/building/live/1",
+            "address_text": "1 Live Street, Bronx, NY 10465",
+        }
+    )
+    snapshot_repository = FakeListingSnapshotRepository((cached_snapshot,))
+    client = FakeListingSearchClient((live_snapshot,))
+
+    enriched = await maybe_enrich_outbound_lead_context(
+        lead=lead,
+        lead_context=ApprovedOutboundLeadContext(extracted_preferences={"location": "Bronx"}),
+        now=NOW,
+        enrichment_enabled=True,
+        cache_ttl=timedelta(hours=1),
+        max_results=3,
+        source_repository=FakeListingSourceRepository(source),
+        snapshot_repository=snapshot_repository,
+        listing_search_client=client,
+    )
+
+    assert enriched.listing_context is not None
+    assert enriched.listing_context.source == "live"
+    assert len(enriched.listing_context.matches) == 1
+    assert enriched.listing_context.matches[0].address_text == "1 Live Street, Bronx, NY 10465"
+    assert len(snapshot_repository.saved) == 1
+    assert snapshot_repository.saved[0].external_listing_id == "live-1"
+
+
+async def test_falls_back_to_cached_matches_when_live_search_is_empty() -> None:
+    lead = _lead()
+    source = _source(lead.workspace_id)
+    cached_snapshot = _snapshot(lead.workspace_id, source.source_id)
+    snapshot_repository = FakeListingSnapshotRepository((cached_snapshot,))
+    client = FakeListingSearchClient(())
+
+    enriched = await maybe_enrich_outbound_lead_context(
+        lead=lead,
+        lead_context=ApprovedOutboundLeadContext(extracted_preferences={"location": "Bronx"}),
+        now=NOW,
+        enrichment_enabled=True,
+        cache_ttl=timedelta(hours=1),
+        max_results=3,
+        source_repository=FakeListingSourceRepository(source),
+        snapshot_repository=snapshot_repository,
+        listing_search_client=client,
+    )
+
+    assert enriched.listing_context is not None
+    assert enriched.listing_context.source == "cache"
+    assert enriched.listing_context.matches[0].address_text == "2738 Miles Avenue, Bronx, NY 10465"
+
+
+async def test_falls_back_to_cached_matches_when_live_search_errors() -> None:
+    lead = _lead()
+    source = _source(lead.workspace_id)
+    cached_snapshot = _snapshot(lead.workspace_id, source.source_id)
+    snapshot_repository = FakeListingSnapshotRepository((cached_snapshot,))
+
+    enriched = await maybe_enrich_outbound_lead_context(
+        lead=lead,
+        lead_context=ApprovedOutboundLeadContext(extracted_preferences={"location": "Bronx"}),
+        now=NOW,
+        enrichment_enabled=True,
+        cache_ttl=timedelta(hours=1),
+        max_results=3,
+        source_repository=FakeListingSourceRepository(source),
+        snapshot_repository=snapshot_repository,
+        listing_search_client=FakeListingSearchClient(error=RuntimeError("blocked")),
+    )
+
+    assert enriched.listing_context is not None
+    assert enriched.listing_context.source == "cache"
+    assert enriched.listing_context.matches[0].address_text == "2738 Miles Avenue, Bronx, NY 10465"
+
+
+async def test_does_not_use_stale_cached_matches_when_live_search_fails() -> None:
+    lead = _lead()
+    source = _source(lead.workspace_id)
+    stale_snapshot = CanonicalListingSnapshot(
+        **{
+            **_snapshot(lead.workspace_id, source.source_id).__dict__,
+            "snapshot_id": uuid4(),
+            "scraped_at": NOW - timedelta(hours=2),
+            "valid_until": NOW - timedelta(hours=1),
+        }
+    )
+    snapshot_repository = FakeListingSnapshotRepository((stale_snapshot,))
+
+    enriched = await maybe_enrich_outbound_lead_context(
+        lead=lead,
+        lead_context=ApprovedOutboundLeadContext(extracted_preferences={"location": "Bronx"}),
+        now=NOW,
+        enrichment_enabled=True,
+        cache_ttl=timedelta(hours=1),
+        max_results=3,
+        source_repository=FakeListingSourceRepository(source),
+        snapshot_repository=snapshot_repository,
+        listing_search_client=FakeListingSearchClient(error=RuntimeError("blocked")),
+    )
+
+    assert enriched.listing_context is None

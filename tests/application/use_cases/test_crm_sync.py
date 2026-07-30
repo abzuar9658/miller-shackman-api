@@ -1,8 +1,11 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
-from app.application.ports.crm import CRMActivity
+import pytest
+
+from app.application.ports.crm import CRMActivity, CRMActivityTranscriptSegment
 from app.application.ports.crm_sync import CanonicalLeadSnapshotPage
 from app.application.use_cases.crm_sync import (
     ExecuteQueuedCRMSyncStatus,
@@ -24,7 +27,11 @@ from app.domain.compliance.contactability import (
     SmsComplianceState,
     WorkspaceContactPolicy,
 )
-from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
+from app.domain.conversations import (
+    CrmConversationEvent,
+    CrmConversationEventDirection,
+    WorkspaceHandoffConfig,
+)
 from app.domain.crm_agent_mapping import (
     CRMAgent,
     CRMAgentMappingResolutionSource,
@@ -37,6 +44,7 @@ from app.domain.crm_sync import (
     CRMSyncJobStatus,
     CRMSyncLeadSort,
     CRMSyncType,
+    CRMSyncWindowState,
     WorkspaceCRMSyncConfig,
     WorkspaceCRMSyncScheduleTarget,
 )
@@ -53,6 +61,7 @@ from app.domain.leads import (
     CanonicalLeadRecord,
     CRMProvider,
     EffectiveOwnerSource,
+    LeadPausedSearchHistoryEntry,
 )
 from app.domain.workflows import (
     LeadWorkflow,
@@ -60,8 +69,11 @@ from app.domain.workflows import (
 )
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCampaignExecutionRepository,
+    FakeClassificationLLMClient,
+    FakeLeadClassificationArtifactRepository,
     FakeOutboundMessageRepository,
     FakeWorkspaceContactPolicyRepository,
+    FakeWorkspaceLLMConfigRepository,
     FakeWorkspaceOperationalControlRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
@@ -71,6 +83,18 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
     FakeTemporalWorkflowStarter,
     FakeWorkflowTransitionRepository,
 )
+from tests.application.use_cases._paused_search_track_fakes import (
+    FakePausedSearchTrackAdminRepository,
+)
+from tests.application.use_cases.test_complete_handoff import (
+    FakeCRMClient as FakeHandoffCRMClient,
+)
+from tests.application.use_cases.test_complete_handoff import (
+    FakeHandoffCompletionRepository,
+    FakeNotificationProvider,
+    FakeWorkspaceHandoffConfigRepository,
+)
+from tests.application.use_cases.test_process_inbound_message_event import FakeHandoffRepository
 
 NOW = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
 PREVIOUS_SYNC_AT = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
@@ -83,6 +107,20 @@ FALLBACK_MANAGER_USER_ID = UUID("66666666-6666-6666-6666-666666666666")
 MEMBERSHIP_ID = UUID("77777777-7777-7777-7777-777777777777")
 
 
+class FakeLogger:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict[str, Any]]] = []
+
+    def info(self, event: str, **kwargs: Any) -> None:
+        self.records.append(("info", event, kwargs))
+
+    def warning(self, event: str, **kwargs: Any) -> None:
+        self.records.append(("warning", event, kwargs))
+
+    def exception(self, event: str, **kwargs: Any) -> None:
+        self.records.append(("exception", event, kwargs))
+
+
 class FakeLeadRepository:
     def __init__(
         self,
@@ -91,19 +129,23 @@ class FakeLeadRepository:
     ) -> None:
         self.failing_crm_lead_ids = failing_crm_lead_ids or set()
         self.saved: list[CanonicalLeadRecord] = []
+        self.history_entries: list[LeadPausedSearchHistoryEntry] = []
+        self.by_id: dict[tuple[UUID, UUID], CanonicalLeadRecord] = {
+            (lead.workspace_id, lead.lead_id): lead for lead in existing
+        }
         self.by_crm_id = {
             (lead.workspace_id, lead.crm_provider, lead.crm_lead_id): lead for lead in existing
         }
 
     async def get_by_id(self, workspace_id: UUID, lead_id: UUID) -> CanonicalLeadRecord | None:
-        return None
+        return self.by_id.get((workspace_id, lead_id))
 
     async def get_by_id_for_update(
         self,
         workspace_id: UUID,
         lead_id: UUID,
     ) -> CanonicalLeadRecord | None:
-        return None
+        return self.by_id.get((workspace_id, lead_id))
 
     async def get_by_crm_id(
         self,
@@ -164,7 +206,15 @@ class FakeLeadRepository:
             raise RuntimeError(f"boom::{record.crm_lead_id}")
         self.saved.append(record)
         self.by_crm_id[(record.workspace_id, record.crm_provider, record.crm_lead_id)] = record
+        self.by_id[(record.workspace_id, record.lead_id)] = record
         return record
+
+    async def append(
+        self,
+        entry: LeadPausedSearchHistoryEntry,
+    ) -> LeadPausedSearchHistoryEntry:
+        self.history_entries.append(entry)
+        return entry
 
 
 class FakeCRMSyncJobRepository:
@@ -174,15 +224,18 @@ class FakeCRMSyncJobRepository:
         active_job: CRMSyncJob | None = None,
         latest_job: CRMSyncJob | None = None,
         latest_completed_job: CRMSyncJob | None = None,
+        allow_running_save: bool = True,
     ) -> None:
         self.recent_jobs = recent_jobs
         self.active_job = active_job
         self.latest_job = latest_job
         self.latest_completed_job = latest_completed_job
+        self.allow_running_save = allow_running_save
         self.saved: list[CRMSyncJob] = []
+        self.heartbeat_touches: list[datetime] = []
 
     async def get_by_id(self, workspace_id: UUID, sync_job_id: UUID) -> CRMSyncJob | None:
-        return next((job for job in self.saved if job.sync_job_id == sync_job_id), None)
+        return next((job for job in reversed(self.saved) if job.sync_job_id == sync_job_id), None)
 
     async def list_recent(self, workspace_id: UUID, limit: int = 100) -> tuple[CRMSyncJob, ...]:
         return self.recent_jobs[:limit]
@@ -239,11 +292,58 @@ class FakeCRMSyncJobRepository:
             pending,
             status=CRMSyncJobStatus.RUNNING,
             started_at=now,
+            last_heartbeat_at=now,
             updated_at=now,
         )
         self.active_job = claimed
+        self.latest_job = claimed
         self.saved.append(claimed)
         return claimed
+
+    async def fail_stale_active_jobs(
+        self,
+        *,
+        now: datetime,
+        pending_timeout_seconds: int,
+        running_timeout_seconds: int,
+    ) -> int:
+        _ = (now, pending_timeout_seconds, running_timeout_seconds)
+        return 0
+
+    async def touch_running_heartbeat(
+        self,
+        workspace_id: UUID,
+        sync_job_id: UUID,
+        *,
+        now: datetime,
+    ) -> CRMSyncJob | None:
+        running = next(
+            (
+                job
+                for job in reversed(self.saved)
+                if job.workspace_id == workspace_id
+                and job.sync_job_id == sync_job_id
+                and job.status == CRMSyncJobStatus.RUNNING
+            ),
+            None,
+        )
+        if running is None:
+            return None
+        touched = replace(running, last_heartbeat_at=now, updated_at=now)
+        self.heartbeat_touches.append(now)
+        self.active_job = touched
+        self.latest_job = touched
+        self.saved.append(touched)
+        return touched
+
+    async def save_if_running(self, job: CRMSyncJob) -> CRMSyncJob | None:
+        if not self.allow_running_save:
+            return None
+        if self.active_job is None or self.active_job.sync_job_id != job.sync_job_id:
+            return None
+        if self.active_job.status != CRMSyncJobStatus.RUNNING:
+            return None
+        return await self.save(job)
 
     async def save(self, job: CRMSyncJob) -> CRMSyncJob:
         self.saved.append(job)
@@ -288,6 +388,38 @@ class FakeWorkspaceCRMSyncConfigRepository:
         return config
 
 
+class FakeCRMSyncWindowStateRepository:
+    def __init__(self, state: CRMSyncWindowState | None = None) -> None:
+        self.state = state
+        self.saved: list[CRMSyncWindowState] = []
+        self.deleted: list[tuple[UUID, str]] = []
+
+    async def get_by_workspace_provider(
+        self,
+        workspace_id: UUID,
+        crm_provider: str,
+    ) -> CRMSyncWindowState | None:
+        if self.state is None:
+            return None
+        if self.state.workspace_id != workspace_id or self.state.crm_provider != crm_provider:
+            return None
+        return self.state
+
+    async def save(self, state: CRMSyncWindowState) -> CRMSyncWindowState:
+        self.state = state
+        self.saved.append(state)
+        return state
+
+    async def delete(self, workspace_id: UUID, crm_provider: str) -> None:
+        self.deleted.append((workspace_id, crm_provider))
+        if (
+            self.state is not None
+            and self.state.workspace_id == workspace_id
+            and self.state.crm_provider == crm_provider
+        ):
+            self.state = None
+
+
 class FakeLeadSnapshotSource:
     def __init__(
         self,
@@ -323,6 +455,17 @@ class FakeLeadSnapshotSource:
         if self.error is not None:
             raise self.error
         return self.pages.pop(0)
+
+
+class FakeLeadSnapshotCRMClient(FakeHandoffCRMClient, FakeLeadSnapshotSource):
+    def __init__(
+        self,
+        *,
+        pages: tuple[CanonicalLeadSnapshotPage, ...] = (),
+        lead_tags: tuple[str, ...] = (),
+    ) -> None:
+        FakeHandoffCRMClient.__init__(self, lead_tags=lead_tags)
+        FakeLeadSnapshotSource.__init__(self, pages=pages)
 
 
 class FakeCRMActivitySource:
@@ -611,6 +754,16 @@ def _contact_policy() -> WorkspaceContactPolicy:
     )
 
 
+def _workspace_handoff_config() -> WorkspaceHandoffConfig:
+    return WorkspaceHandoffConfig(
+        workspace_id=WORKSPACE_ID,
+        fallback_recipient_email="fallback@example.com",
+        crm_handoff_tag="human_handoff_required",
+        crm_review_tag="needs_agent_review",
+        crm_custom_fields={"handoff_status": "required"},
+    )
+
+
 async def _record_commit(calls: list[str]) -> None:
     calls.append("commit")
 
@@ -629,6 +782,15 @@ def _activity(
         agent_id="42",
         actor_name="Agent Ada",
         direction=direction,
+        details={"duration_seconds": 40},
+        transcript_segments=[
+            CRMActivityTranscriptSegment(
+                text=f"segment::{crm_activity_id}",
+                speaker_name="Agent Ada",
+                speaker_role="agent",
+                started_at=NOW,
+            )
+        ],
     )
 
 
@@ -647,6 +809,7 @@ def _completed_job(*, cursor_finished_at: datetime) -> CRMSyncJob:
         total_upserted=2,
         total_failed=0,
         failure_reason=None,
+        last_heartbeat_at=PREVIOUS_SYNC_AT,
         created_by_user_id=None,
         created_at=PREVIOUS_SYNC_AT,
         updated_at=PREVIOUS_SYNC_AT,
@@ -668,6 +831,7 @@ def _pending_job() -> CRMSyncJob:
         total_upserted=0,
         total_failed=0,
         failure_reason=None,
+        last_heartbeat_at=None,
         created_by_user_id=None,
         created_at=NOW,
         updated_at=NOW,
@@ -1018,9 +1182,11 @@ async def test_runs_limited_full_sync_for_most_recent_leads_only() -> None:
         sync_job_id_factory=lambda: SYNC_JOB_ID,
     )
 
-    assert result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+    assert result.status == RunFollowUpBossLeadSyncStatus.PARTIAL
     assert result.page_count == 2
     assert result.job.total_seen == 3
+    assert result.job.status == CRMSyncJobStatus.PARTIAL
+    assert result.next_cursor == "cursor-3"
     assert [lead.crm_lead_id for lead in lead_repository.saved] == ["1", "2", "3"]
     assert source.requests[0]["page_size"] == 2
     assert source.requests[0]["sort_by"] == CRMSyncLeadSort.UPDATED
@@ -1060,7 +1226,7 @@ async def test_limited_full_sync_imports_activity_for_selected_leads_only() -> N
         sync_job_id_factory=lambda: SYNC_JOB_ID,
     )
 
-    assert result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+    assert result.status == RunFollowUpBossLeadSyncStatus.PARTIAL
     assert [call["crm_lead_id"] for call in activity_source.calls] == ["1", "2"]
     assert all(call["limit"] == 25 for call in activity_source.calls)
     assert [event.crm_activity_id for event in conversation_repository.saved] == ["a-1", "a-2"]
@@ -1112,7 +1278,7 @@ async def test_marks_job_failed_when_page_fetch_raises() -> None:
 
 
 async def test_sync_starts_matching_campaign_when_pulled_lead_has_configured_tag() -> None:
-    source = FakeLeadSnapshotSource(
+    source = FakeLeadSnapshotCRMClient(
         pages=(
             CanonicalLeadSnapshotPage(
                 leads=(
@@ -1136,10 +1302,11 @@ async def test_sync_starts_matching_campaign_when_pulled_lead_has_configured_tag
     temporal = FakeTemporalWorkflowStarter()
     commit_calls: list[str] = []
 
+    lead_repository = FakeLeadRepository()
     result = await run_follow_up_boss_lead_snapshot_sync(
         workspace_id=WORKSPACE_ID,
         lead_snapshot_source=source,
-        lead_repository=FakeLeadRepository(),
+        lead_repository=lead_repository,
         crm_sync_job_repository=FakeCRMSyncJobRepository(),
         campaign_execution_repository=FakeCampaignExecutionRepository(
             _campaign_config(crm_enrollment_tag="ai_nurture"),
@@ -1151,6 +1318,11 @@ async def test_sync_starts_matching_campaign_when_pulled_lead_has_configured_tag
         lead_workflow_repository=workflow_repository,
         workflow_transition_repository=transition_repository,
         temporal_workflow_starter=temporal,
+        paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
+        lead_classification_artifact_repository=FakeLeadClassificationArtifactRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
+        llm_client=FakeClassificationLLMClient(outcome="dormant"),
         event_bus=FakeEventBus(),
         workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(None),
         commit=lambda: _record_commit(commit_calls),
@@ -1164,6 +1336,149 @@ async def test_sync_starts_matching_campaign_when_pulled_lead_has_configured_tag
     assert len(transition_repository.transitions) == 1
     assert len(temporal.calls) == 1
     assert commit_calls == ["commit"]
+
+
+@pytest.mark.parametrize("outcome", ["review_hold", "blocked"])
+async def test_sync_does_not_start_campaign_for_non_dormant_tag_route(outcome: str) -> None:
+    source = FakeLeadSnapshotSource(
+        pages=(
+            CanonicalLeadSnapshotPage(
+                leads=(
+                    _lead(
+                        "1",
+                        tags=("ai_nurture",),
+                        assigned_agent_crm_id="agent-99",
+                        has_accountable_owner=True,
+                        primary_email="lead@example.com",
+                        has_email=True,
+                        email_permission_status=ContactPermissionStatus.CONFIRMED,
+                        do_not_contact=False,
+                    ),
+                ),
+            ),
+        ),
+    )
+    enrollment_repository = FakeCampaignEnrollmentRepository()
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    temporal = FakeTemporalWorkflowStarter()
+    artifact_repository = FakeLeadClassificationArtifactRepository()
+    commit_calls: list[str] = []
+
+    lead_repository = FakeLeadRepository()
+    result = await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=source,
+        lead_repository=lead_repository,
+        crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _campaign_config(crm_enrollment_tag="ai_nurture"),
+        ),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _contact_policy(),
+        ),
+        campaign_enrollment_repository=enrollment_repository,
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        temporal_workflow_starter=temporal,
+        paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
+        lead_classification_artifact_repository=artifact_repository,
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
+        llm_client=FakeClassificationLLMClient(outcome=outcome),
+        event_bus=FakeEventBus(),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(None),
+        commit=lambda: _record_commit(commit_calls),
+        now=NOW,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+
+    assert result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+    assert len(artifact_repository.saved) == 1
+    assert enrollment_repository.enrollments == {}
+    assert workflow_repository.workflows == {}
+    assert transition_repository.transitions == {}
+    assert temporal.calls == []
+    assert commit_calls == []
+
+
+async def test_sync_completes_tag_time_human_handoff_without_starting_campaign() -> None:
+    source = FakeLeadSnapshotCRMClient(
+        pages=(
+            CanonicalLeadSnapshotPage(
+                leads=(
+                    _lead(
+                        "1",
+                        tags=("ai_nurture",),
+                        assigned_agent_crm_id="agent-99",
+                        has_accountable_owner=True,
+                        primary_email="lead@example.com",
+                        has_email=True,
+                        email_permission_status=ContactPermissionStatus.CONFIRMED,
+                        do_not_contact=False,
+                    ),
+                ),
+            ),
+        ),
+        lead_tags=("needs_agent_review",),
+    )
+    enrollment_repository = FakeCampaignEnrollmentRepository()
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    temporal = FakeTemporalWorkflowStarter()
+    artifact_repository = FakeLeadClassificationArtifactRepository()
+    handoff_repository = FakeHandoffRepository()
+    completion_repository = FakeHandoffCompletionRepository()
+    notification_provider = FakeNotificationProvider()
+
+    lead_repository = FakeLeadRepository()
+    result = await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=source,
+        lead_repository=lead_repository,
+        crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _campaign_config(crm_enrollment_tag="ai_nurture"),
+        ),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _contact_policy(),
+        ),
+        campaign_enrollment_repository=enrollment_repository,
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        temporal_workflow_starter=temporal,
+        paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
+        lead_classification_artifact_repository=artifact_repository,
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
+        llm_client=FakeClassificationLLMClient(
+            outcome="human_handoff",
+            handoff_reason_code="human_requested",
+        ),
+        event_bus=FakeEventBus(),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(None),
+        handoff_repository=handoff_repository,
+        handoff_completion_repository=completion_repository,
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            _workspace_handoff_config()
+        ),
+        notification_provider=notification_provider,
+        now=NOW,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+
+    assert result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+    assert len(artifact_repository.saved) == 1
+    assert enrollment_repository.enrollments == {}
+    assert workflow_repository.workflows == {}
+    assert transition_repository.transitions == {}
+    assert temporal.calls == []
+    handoff_id = completion_repository.record.handoff_id if completion_repository.record else None
+    assert {handoff.handoff_id for handoff in handoff_repository.saved} == {handoff_id}
+    assert completion_repository.record is not None
+    assert completion_repository.record.completed_at == NOW
+    assert len(notification_provider.notifications) == 1
+    assert source.tag == "human_handoff_required"
 
 
 async def test_sync_does_not_start_campaign_when_pulled_lead_tag_does_not_match() -> None:
@@ -1188,10 +1503,11 @@ async def test_sync_does_not_start_campaign_when_pulled_lead_tag_does_not_match(
     enrollment_repository = FakeCampaignEnrollmentRepository()
     temporal = FakeTemporalWorkflowStarter()
 
+    lead_repository = FakeLeadRepository()
     result = await run_follow_up_boss_lead_snapshot_sync(
         workspace_id=WORKSPACE_ID,
         lead_snapshot_source=source,
-        lead_repository=FakeLeadRepository(),
+        lead_repository=lead_repository,
         crm_sync_job_repository=FakeCRMSyncJobRepository(),
         campaign_execution_repository=FakeCampaignExecutionRepository(
             _campaign_config(crm_enrollment_tag="ai_nurture"),
@@ -1203,6 +1519,10 @@ async def test_sync_does_not_start_campaign_when_pulled_lead_tag_does_not_match(
         lead_workflow_repository=FakeLeadWorkflowRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
         temporal_workflow_starter=temporal,
+        lead_classification_artifact_repository=FakeLeadClassificationArtifactRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
+        llm_client=FakeClassificationLLMClient(outcome="dormant"),
         now=NOW,
         sync_job_id_factory=lambda: SYNC_JOB_ID,
     )
@@ -1245,6 +1565,11 @@ async def test_repeat_sync_for_tagged_lead_is_idempotent_when_already_enrolled()
         lead_workflow_repository=workflow_repository,
         workflow_transition_repository=transition_repository,
         temporal_workflow_starter=temporal,
+        paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
+        lead_classification_artifact_repository=FakeLeadClassificationArtifactRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
+        llm_client=FakeClassificationLLMClient(outcome="dormant"),
         now=NOW,
         sync_job_id_factory=lambda: SYNC_JOB_ID,
     )
@@ -1261,6 +1586,11 @@ async def test_repeat_sync_for_tagged_lead_is_idempotent_when_already_enrolled()
         lead_workflow_repository=workflow_repository,
         workflow_transition_repository=transition_repository,
         temporal_workflow_starter=temporal,
+        paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
+        lead_classification_artifact_repository=FakeLeadClassificationArtifactRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
+        llm_client=FakeClassificationLLMClient(outcome="dormant"),
         now=NOW + timedelta(minutes=5),
         sync_job_id_factory=lambda: UUID("66666666-6666-6666-6666-666666666666"),
     )
@@ -1326,6 +1656,42 @@ async def test_request_crm_sync_returns_active_job_without_publishing_duplicate(
     assert event_bus.events == []
 
 
+async def test_request_crm_sync_logs_requested_and_active_decisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_logger = FakeLogger()
+    monkeypatch.setattr("app.application.use_cases.crm_sync.logger", fake_logger)
+
+    requested_event_bus = FakeEventBus()
+    requested_repository = FakeCRMSyncJobRepository()
+    requested = await request_crm_sync(
+        workspace_id=WORKSPACE_ID,
+        sync_type=CRMSyncType.FULL,
+        max_leads=50,
+        latest_by=CRMSyncLeadSort.UPDATED,
+        crm_sync_job_repository=requested_repository,
+        event_bus=requested_event_bus,
+        now=NOW,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+
+    active = replace(_pending_job(), status=CRMSyncJobStatus.RUNNING, started_at=NOW)
+    skipped = await request_crm_sync(
+        workspace_id=WORKSPACE_ID,
+        sync_type=CRMSyncType.INCREMENTAL,
+        crm_sync_job_repository=FakeCRMSyncJobRepository(active_job=active),
+        event_bus=FakeEventBus(),
+        now=NOW,
+    )
+
+    assert requested.status == RequestCRMSyncStatus.REQUESTED
+    assert skipped.status == RequestCRMSyncStatus.ALREADY_ACTIVE
+    assert fake_logger.records[0][1] == "crm_sync_requested"
+    assert fake_logger.records[0][2]["sync_job_id"] == str(SYNC_JOB_ID)
+    assert fake_logger.records[1][1] == "crm_sync_request_skipped_active"
+    assert fake_logger.records[1][2]["active_status"] == CRMSyncJobStatus.RUNNING.value
+
+
 async def test_execute_queued_sync_claims_pending_job_and_runs_snapshot_sync() -> None:
     source = FakeLeadSnapshotSource(pages=(CanonicalLeadSnapshotPage(leads=(_lead("1"),)),))
     job_repository = FakeCRMSyncJobRepository()
@@ -1345,6 +1711,38 @@ async def test_execute_queued_sync_claims_pending_job_and_runs_snapshot_sync() -
     assert result.job.status == CRMSyncJobStatus.COMPLETED
     assert result.job.created_at == NOW
     assert result.page_count == 1
+
+
+async def test_execute_queued_sync_persists_continuation_window_state_for_capped_run() -> None:
+    source = FakeLeadSnapshotSource(
+        pages=(
+            CanonicalLeadSnapshotPage(leads=(_lead("1"), _lead("2")), next_cursor="cursor-2"),
+            CanonicalLeadSnapshotPage(leads=(_lead("3"),), next_cursor="cursor-3"),
+        )
+    )
+    job_repository = FakeCRMSyncJobRepository()
+    window_repository = FakeCRMSyncWindowStateRepository()
+    await job_repository.insert_pending_if_no_active(_pending_job())
+
+    result = await execute_queued_follow_up_boss_crm_sync(
+        workspace_id=WORKSPACE_ID,
+        sync_job_id=SYNC_JOB_ID,
+        lead_snapshot_source=source,
+        lead_repository=FakeLeadRepository(),
+        crm_sync_job_repository=job_repository,
+        crm_sync_window_state_repository=window_repository,
+        now=NOW,
+        max_leads=3,
+        latest_by=CRMSyncLeadSort.UPDATED,
+    )
+
+    assert result.status == ExecuteQueuedCRMSyncStatus.PARTIAL
+    assert result.job is not None
+    assert result.job.status == CRMSyncJobStatus.PARTIAL
+    assert window_repository.state is not None
+    assert window_repository.state.next_cursor == "cursor-3"
+    assert window_repository.state.updated_before == NOW
+    assert window_repository.state.sort_by == CRMSyncLeadSort.UPDATED
 
 
 async def test_execute_queued_sync_passes_activity_dependencies_and_recent_limit() -> None:
@@ -1386,6 +1784,48 @@ async def test_execute_queued_sync_is_noop_when_job_was_already_claimed() -> Non
     assert result.job is None
 
 
+async def test_execute_queued_sync_reports_lost_lease_when_final_running_save_fails() -> None:
+    job_repository = FakeCRMSyncJobRepository(allow_running_save=False)
+    await job_repository.insert_pending_if_no_active(_pending_job())
+
+    result = await execute_queued_follow_up_boss_crm_sync(
+        workspace_id=WORKSPACE_ID,
+        sync_job_id=SYNC_JOB_ID,
+        lead_snapshot_source=FakeLeadSnapshotSource(
+            pages=(CanonicalLeadSnapshotPage(leads=(_lead("1"),)),)
+        ),
+        lead_repository=FakeLeadRepository(),
+        crm_sync_job_repository=job_repository,
+        now=NOW,
+    )
+
+    assert result.status == ExecuteQueuedCRMSyncStatus.LOST_LEASE
+    assert result.job is not None
+    assert result.job.status == CRMSyncJobStatus.RUNNING
+
+
+async def test_execute_queued_sync_stops_when_lease_lost_checker_trips_mid_page() -> None:
+    job_repository = FakeCRMSyncJobRepository()
+    lead_repository = FakeLeadRepository()
+    await job_repository.insert_pending_if_no_active(_pending_job())
+    lease_checks = iter([False, False, True])
+
+    result = await execute_queued_follow_up_boss_crm_sync(
+        workspace_id=WORKSPACE_ID,
+        sync_job_id=SYNC_JOB_ID,
+        lead_snapshot_source=FakeLeadSnapshotSource(
+            pages=(CanonicalLeadSnapshotPage(leads=(_lead("1"), _lead("2"))),)
+        ),
+        lead_repository=lead_repository,
+        crm_sync_job_repository=job_repository,
+        now=NOW,
+        lease_lost_checker=lambda: next(lease_checks, True),
+    )
+
+    assert result.status == ExecuteQueuedCRMSyncStatus.LOST_LEASE
+    assert [lead.crm_lead_id for lead in lead_repository.saved] == ["1"]
+
+
 async def test_scheduler_enqueues_full_until_first_success_then_incremental_when_due() -> None:
     event_bus = FakeEventBus()
     never_synced_repository = FakeCRMSyncJobRepository()
@@ -1401,6 +1841,7 @@ async def test_scheduler_enqueues_full_until_first_success_then_incremental_when
             ),
         ),
         crm_sync_job_repository=never_synced_repository,
+        crm_sync_window_state_repository=FakeCRMSyncWindowStateRepository(),
         event_bus=event_bus,
         now=NOW,
         default_interval_seconds=300,
@@ -1426,6 +1867,7 @@ async def test_scheduler_enqueues_full_until_first_success_then_incremental_when
             ),
         ),
         crm_sync_job_repository=due_repository,
+        crm_sync_window_state_repository=FakeCRMSyncWindowStateRepository(),
         event_bus=event_bus,
         now=NOW,
         default_interval_seconds=300,
@@ -1453,6 +1895,7 @@ async def test_scheduler_skips_active_or_not_due_workspaces() -> None:
             ),
         ),
         crm_sync_job_repository=repository,
+        crm_sync_window_state_repository=FakeCRMSyncWindowStateRepository(),
         event_bus=FakeEventBus(),
         now=NOW,
         default_interval_seconds=300,
@@ -1474,6 +1917,7 @@ async def test_scheduler_skips_disabled_workspaces() -> None:
             ),
         ),
         crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        crm_sync_window_state_repository=FakeCRMSyncWindowStateRepository(),
         event_bus=FakeEventBus(),
         now=NOW,
         default_interval_seconds=300,
@@ -1481,6 +1925,96 @@ async def test_scheduler_skips_disabled_workspaces() -> None:
 
     assert result.requested_count == 0
     assert result.skipped_disabled_count == 1
+
+
+async def test_scheduler_logs_per_workspace_decisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_logger = FakeLogger()
+    monkeypatch.setattr("app.application.use_cases.crm_sync.logger", fake_logger)
+
+    active = _pending_job()
+    await enqueue_due_follow_up_boss_crm_syncs(
+        workspace_crm_sync_config_repository=FakeWorkspaceCRMSyncConfigRepository(
+            (
+                WorkspaceCRMSyncScheduleTarget(
+                    workspace_id=WORKSPACE_ID,
+                    crm_sync_enabled=False,
+                    crm_sync_interval_seconds=300,
+                ),
+                WorkspaceCRMSyncScheduleTarget(
+                    workspace_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                    crm_sync_enabled=True,
+                    crm_sync_interval_seconds=300,
+                ),
+                WorkspaceCRMSyncScheduleTarget(
+                    workspace_id=UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+                    crm_sync_enabled=True,
+                    crm_sync_interval_seconds=300,
+                ),
+            ),
+        ),
+        crm_sync_job_repository=FakeCRMSyncJobRepository(
+            active_job=active,
+            latest_job=replace(active, updated_at=NOW - timedelta(minutes=1)),
+        ),
+        crm_sync_window_state_repository=FakeCRMSyncWindowStateRepository(),
+        event_bus=FakeEventBus(),
+        now=NOW,
+        default_interval_seconds=300,
+    )
+
+    assert [record[2]["decision"] for record in fake_logger.records] == [
+        "disabled",
+        "active_job",
+        "active_job",
+    ]
+
+
+async def test_scheduler_resumes_saved_window_state_without_advancing_watermark() -> None:
+    event_bus = FakeEventBus()
+    window_state = CRMSyncWindowState(
+        workspace_id=WORKSPACE_ID,
+        crm_provider=CRMProvider.FOLLOW_UP_BOSS.value,
+        sync_type=CRMSyncType.INCREMENTAL,
+        updated_after=PREVIOUS_SYNC_AT,
+        updated_before=NOW,
+        next_cursor="cursor-55",
+        sort_by=CRMSyncLeadSort.UPDATED,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+    result = await enqueue_due_follow_up_boss_crm_syncs(
+        workspace_crm_sync_config_repository=FakeWorkspaceCRMSyncConfigRepository(
+            (
+                WorkspaceCRMSyncScheduleTarget(
+                    workspace_id=WORKSPACE_ID,
+                    crm_sync_enabled=True,
+                    crm_sync_interval_seconds=300,
+                    max_leads_per_sync_cycle=200,
+                ),
+            ),
+        ),
+        crm_sync_job_repository=FakeCRMSyncJobRepository(
+            latest_job=replace(
+                _pending_job(),
+                status=CRMSyncJobStatus.PARTIAL,
+                updated_at=NOW - timedelta(minutes=6),
+            )
+        ),
+        crm_sync_window_state_repository=FakeCRMSyncWindowStateRepository(window_state),
+        event_bus=event_bus,
+        now=NOW,
+        default_interval_seconds=300,
+    )
+
+    assert result.requested_count == 1
+    payload = event_bus.events[0].payload
+    assert payload["resume_cursor"] == "cursor-55"
+    assert payload["updated_after"] == PREVIOUS_SYNC_AT.isoformat()
+    assert payload["updated_before"] == NOW.isoformat()
+    assert payload["max_leads"] == 200
 
 
 def test_map_crm_activity_to_event_preserves_direction_and_actor_name() -> None:
@@ -1496,3 +2030,6 @@ def test_map_crm_activity_to_event_preserves_direction_and_actor_name() -> None:
     assert event.actor_agent_id == "42"
     assert event.actor_name == "Agent Ada"
     assert event.direction == CrmConversationEventDirection.OUTBOUND
+    assert event.details == {"duration_seconds": 40}
+    assert len(event.transcript_segments) == 1
+    assert event.transcript_segments[0].speaker_name == "Agent Ada"

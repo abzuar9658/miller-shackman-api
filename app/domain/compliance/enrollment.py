@@ -126,20 +126,24 @@ def _evaluate_dormant_selector(
             reasons=(EnrollmentReasonCode.ACTIVITY_DATA_INCOMPLETE,),
         )
 
-    if facts.last_meaningful_communication_at is not None:
-        days_since_last = (now - facts.last_meaningful_communication_at).days
-        if days_since_last < policy.dormant_threshold_days:
-            return CampaignEnrollmentDecision(
-                eligible=False,
-                source=EnrollmentSource.DORMANT_SELECTOR,
-                reasons=(EnrollmentReasonCode.LEAD_NOT_DORMANT,),
-            )
-
-        eligible_at = facts.last_meaningful_communication_at + timedelta(
-            days=policy.dormant_threshold_days,
+    if facts.last_meaningful_communication_at is None:
+        return CampaignEnrollmentDecision(
+            eligible=False,
+            source=EnrollmentSource.DORMANT_SELECTOR,
+            reasons=(EnrollmentReasonCode.ACTIVITY_DATA_INCOMPLETE,),
         )
-    else:
-        eligible_at = None
+
+    days_since_last = (now - facts.last_meaningful_communication_at).days
+    if days_since_last < policy.dormant_threshold_days:
+        return CampaignEnrollmentDecision(
+            eligible=False,
+            source=EnrollmentSource.DORMANT_SELECTOR,
+            reasons=(EnrollmentReasonCode.LEAD_NOT_DORMANT,),
+        )
+
+    eligible_at = facts.last_meaningful_communication_at + timedelta(
+        days=policy.dormant_threshold_days,
+    )
 
     return _evaluate_with_source(
         facts=facts,

@@ -322,7 +322,7 @@ async def test_falls_back_to_email_when_sms_is_not_contactable() -> None:
     assert result.message.subject == "Checking in | Miller Schackman"
 
 
-async def test_falls_back_to_email_when_workspace_sms_compliance_is_not_approved() -> None:
+async def test_prefers_sms_when_workspace_sms_compliance_is_not_approved_in_v1() -> None:
     llm = FakeLLMClient(_draft_json(subject="Checking in"))
 
     result = await plan_outbound_message(
@@ -341,12 +341,12 @@ async def test_falls_back_to_email_when_workspace_sms_compliance_is_not_approved
     )
 
     assert result.status == PlanOutboundMessageStatus.PLANNED
-    assert result.selected_channel == ContactChannel.EMAIL
+    assert result.selected_channel == ContactChannel.SMS
     assert result.message is not None
     assert len(llm.requests) == 1
 
 
-async def test_rejects_without_calling_llm_when_sms_only_workspace_is_not_approved() -> None:
+async def test_plans_sms_when_sms_only_workspace_is_not_approved_in_v1() -> None:
     llm = FakeLLMClient(_draft_json())
 
     result = await plan_outbound_message(
@@ -360,9 +360,10 @@ async def test_rejects_without_calling_llm_when_sms_only_workspace_is_not_approv
         now=NOW,
     )
 
-    assert result.status == PlanOutboundMessageStatus.REJECTED
-    assert result.reasons == (PlanOutboundMessageReasonCode.CHANNEL_NOT_CONTACTABLE,)
-    assert llm.requests == []
+    assert result.status == PlanOutboundMessageStatus.PLANNED
+    assert result.selected_channel == ContactChannel.SMS
+    assert result.message is not None
+    assert len(llm.requests) == 1
 
 
 async def test_rejects_without_calling_llm_when_no_enabled_channel_has_destination() -> None:

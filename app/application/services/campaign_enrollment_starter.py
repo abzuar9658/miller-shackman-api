@@ -22,7 +22,14 @@ from app.domain.campaigns.enrollment import (
     CampaignEnrollmentStatus,
     build_enrollment_reason_codes,
 )
-from app.domain.common.ids import CampaignId, CampaignVersionId, LeadId, UserId, WorkspaceId
+from app.domain.common.ids import (
+    CampaignId,
+    CampaignVersionId,
+    LeadId,
+    PausedSearchTrackVersionId,
+    UserId,
+    WorkspaceId,
+)
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
 from app.domain.workflows import (
     LeadWorkflow,
@@ -51,6 +58,11 @@ async def start_single_campaign_enrollment(
     transition_id: UUID | None = None,
     temporal_workflow_id: str | None = None,
     metadata: Mapping[str, object] | None = None,
+    initial_workflow_state: WorkflowState = WorkflowState.QUEUED,
+    initial_transition_reason_code: WorkflowTransitionReasonCode = (
+        WorkflowTransitionReasonCode.CAMPAIGN_ENROLLMENT_STARTED
+    ),
+    paused_search_track_version_id: PausedSearchTrackVersionId | None = None,
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     commit: Callable[[], Awaitable[None]] | None = None,
@@ -99,12 +111,13 @@ async def start_single_campaign_enrollment(
         campaign_enrollment_id=campaign_enrollment_id,
         campaign_id=campaign_id,
         lead_id=lead_id,
-        state=WorkflowState.QUEUED,
+        state=initial_workflow_state,
         current_step_id=None,
         next_action_at=None,
         last_transition_at=now,
         pause_reason=None,
         resume_reason=None,
+        paused_search_track_version_id=paused_search_track_version_id,
         state_version=1,
         created_at=now,
         updated_at=now,
@@ -117,8 +130,8 @@ async def start_single_campaign_enrollment(
         lead_id=lead_id,
         campaign_id=campaign_id,
         from_state=None,
-        to_state=WorkflowState.QUEUED,
-        reason_code=WorkflowTransitionReasonCode.CAMPAIGN_ENROLLMENT_STARTED,
+        to_state=initial_workflow_state,
+        reason_code=initial_transition_reason_code,
         created_at=now,
         actor_user_id=actor_user_id,
         external_event_id=None,

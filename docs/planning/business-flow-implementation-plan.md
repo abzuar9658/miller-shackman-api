@@ -93,7 +93,7 @@ Out of scope:
 
 - real provider delivery
 - inbound replies
-- property/listing matching
+- generic property/listing matching in this slice, which is handled separately by later V1 listing-source work
 
 Business result:
 

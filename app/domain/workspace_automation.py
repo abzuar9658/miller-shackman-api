@@ -15,6 +15,7 @@ class WorkspaceOperationalControl:
     workspace_id: WorkspaceId
     automation_status: WorkspaceAutomationStatus = WorkspaceAutomationStatus.ACTIVE
     pause_reason: str | None = None
+    recurring_paused_search_enabled: bool = False
 
 
 def default_workspace_operational_control(

@@ -18,11 +18,11 @@ This decision is intentionally narrower than full message sending.
 This rule decides whether a lead is contactable on a channel based on:
 
 - whether a usable email address or SMS-capable phone is present
-- channel-specific consent or permission
 - suppression state
 - do-not-contact state
-- workspace SMS compliance state
 - whether required data is known or unknown
+
+In **Phase One**, the presence of a usable destination is the V1 permission signal. A lead with a mobile number is considered SMS-contactable; a lead with an email address is considered email-contactable. Workspace SMS compliance (A2P/10DLC) and the raw consent/permission status fields are stored for future stricter policy but do not block the contactability decision in V1. Explicit suppression (opt-out, unsubscribe) and do-not-contact always override the destination signal.
 
 ## What this decision does not include
 
@@ -68,23 +68,19 @@ Those belong to later rules.
 
 ### SMS rules
 
-| Condition                                                  | Result    |
-| ---------------------------------------------------------- | --------- |
-| Lead has SMS opt-out suppression                           | Block SMS |
-| SMS consent is unknown and no SMS-capable phone is present | Block SMS |
-| SMS consent is denied or unavailable                       | Block SMS |
-| SMS consent is unknown and an SMS-capable phone is present | Allow SMS |
-| SMS consent is confirmed and no SMS suppression applies    | Allow SMS |
+| Condition                                  | Result    |
+| ------------------------------------------ | --------- |
+| Lead has SMS opt-out suppression           | Block SMS |
+| No usable SMS-capable phone is present     | Block SMS |
+| No SMS suppression and a phone is present | Allow SMS |
 
 ### Email rules
 
-| Condition                                                      | Result      |
-| -------------------------------------------------------------- | ----------- |
-| Lead has email unsubscribe suppression                         | Block email |
-| Email permission is unknown and no usable email is present     | Block email |
-| Email permission is denied or unavailable                      | Block email |
-| Email permission is unknown and a usable email is present      | Allow email |
-| Email permission is confirmed and no email suppression applies | Allow email |
+| Condition                                      | Result      |
+| ---------------------------------------------- | ----------- |
+| Lead has email unsubscribe suppression         | Block email |
+| No usable email address is present             | Block email |
+| No email suppression and an email is present   | Allow email |
 
 ## Decision precedence
 
@@ -92,7 +88,7 @@ When multiple facts exist, evaluate in this order:
 
 1. Do-not-contact
 2. Channel suppression
-3. Channel consent or permission
+3. Channel destination present
 4. Otherwise block as unknown or unavailable
 
 ## Outputs the rule must produce
@@ -114,13 +110,11 @@ For each requested channel, the rule should return:
 
 - `sms_opted_out`
 - `missing_sms_consent`
-- `sms_permission_denied`
 
 ### Email
 
 - `email_unsubscribed`
 - `missing_email_permission`
-- `email_permission_denied`
 
 ## Configurable inputs
 
@@ -136,11 +130,13 @@ These may vary by workspace and should be configurable later:
 These must stay explicit in code and tests:
 
 - do-not-contact blocks all channels
-- suppression overrides permission
-- unknown SMS consent without a usable SMS destination blocks SMS
-- unknown email permission without a usable email destination blocks email
-- usable channel presence implies channel permission in V1 unless an explicit denial or suppression blocks it
+- suppression overrides any destination-based permission signal
+- a usable SMS destination present allows SMS unless a suppression or do-not-contact blocks it
+- a usable email destination present allows email unless a suppression or do-not-contact blocks it
+- no usable SMS destination blocks SMS
+- no usable email destination blocks email
 - workspace SMS compliance does not block SMS in V1
+- raw SMS consent or email permission status fields do not block the V1 decision
 - AI cannot override these decisions
 
 ## Required unit tests
@@ -148,15 +144,14 @@ These must stay explicit in code and tests:
 At minimum, test:
 
 - do-not-contact blocks both SMS and email
-- SMS opt-out blocks SMS even when consent exists
-- email unsubscribe blocks email even when permission exists
-- unknown SMS consent with a usable SMS destination allows SMS
-- unknown SMS consent without a usable SMS destination blocks SMS
-- unknown email permission with a usable email destination allows email
-- unknown email permission without a usable email destination blocks email
+- SMS opt-out blocks SMS even when a destination is present
+- email unsubscribe blocks email even when a destination is present
+- a usable SMS destination present allows SMS in V1 regardless of consent status
+- a usable email destination present allows email in V1 regardless of permission status
+- no usable SMS destination blocks SMS
+- no usable email destination blocks email
 - workspace SMS compliance does not block SMS in V1
-- confirmed SMS consent allows SMS
-- confirmed email permission allows email
+- explicit denied consent or permission does not block when a usable destination is present in V1
 - multiple blocking reasons return deterministic precedence
 - uncertain or missing data fails safe
 
@@ -176,9 +171,9 @@ This rule implies we will likely need durable records for:
 Before locking the implementation, confirm:
 
 1. What exact CRM fields or tags represent do-not-contact?
-2. What exact CRM fields or provider signals represent SMS consent?
-3. What exact CRM fields or provider signals represent email permission?
-4. Should email ever be allowed when permission is unknown, or always blocked in V1?
+2. What exact CRM fields or provider signals represent SMS opt-out?
+3. What exact CRM fields or provider signals represent email unsubscribe?
+4. What exact CRM fields identify a usable mobile number and a usable email address?
 5. Are there any brokerage-level overrides that should block outreach beyond do-not-contact?
 
 ## Next step after approval

@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import and_, func, select
@@ -13,6 +14,7 @@ from app.domain.conversations import (
     ConversationSummary,
     CrmConversationEvent,
     CrmConversationEventDirection,
+    CrmConversationTranscriptSegment,
     Handoff,
     HandoffCompletionRecord,
     HandoffReasonCode,
@@ -633,6 +635,10 @@ def _crm_conversation_event_to_values(event: CrmConversationEvent) -> dict[str, 
         "content": event.content,
         "actor_agent_id": event.actor_agent_id,
         "actor_name": event.actor_name,
+        "details": dict(event.details),
+        "transcript_segments": [
+            _transcript_segment_to_record(segment) for segment in event.transcript_segments
+        ],
         "source_payload_version": event.source_payload_version,
         "created_at": event.created_at,
         "updated_at": event.updated_at,
@@ -657,7 +663,38 @@ def _model_to_crm_conversation_event(model: CrmConversationEventModel) -> CrmCon
         content=model.content,
         actor_agent_id=model.actor_agent_id,
         actor_name=model.actor_name,
+        details=model.details or {},
+        transcript_segments=tuple(
+            _record_to_transcript_segment(record) for record in (model.transcript_segments or [])
+        ),
         source_payload_version=model.source_payload_version,
         created_at=model.created_at,
         updated_at=model.updated_at,
+    )
+
+
+def _transcript_segment_to_record(
+    segment: CrmConversationTranscriptSegment,
+) -> dict[str, object]:
+    return {
+        "text": segment.text,
+        "speaker_name": segment.speaker_name,
+        "speaker_role": segment.speaker_role,
+        "started_at": segment.started_at.isoformat() if segment.started_at is not None else None,
+    }
+
+
+def _record_to_transcript_segment(record: dict[str, object]) -> CrmConversationTranscriptSegment:
+    started_at = record.get("started_at")
+    speaker_name = record.get("speaker_name")
+    speaker_role = record.get("speaker_role")
+    return CrmConversationTranscriptSegment(
+        text=str(record.get("text") or ""),
+        speaker_name=str(speaker_name) if speaker_name is not None else None,
+        speaker_role=str(speaker_role) if speaker_role is not None else None,
+        started_at=(
+            datetime.fromisoformat(str(started_at))
+            if isinstance(started_at, str) and started_at
+            else None
+        ),
     )

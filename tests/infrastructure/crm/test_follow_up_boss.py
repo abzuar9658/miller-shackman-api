@@ -173,6 +173,34 @@ async def test_get_lead_url_returns_follow_up_boss_people_link(
     assert url == "https://app.followupboss.com/2/people/123"
 
 
+async def test_fetch_resource_by_uri_requests_all_fields_for_people_resource(
+    workspace_id: uuid.UUID,
+) -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["query"] = request.url.query.decode("utf-8")
+        return httpx.Response(200, json={"people": []})
+
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=httpx.MockTransport(handler),
+    )
+
+    await client.fetch_resource_by_uri(
+        workspace_id,
+        "https://api.followupboss.com/v1/people?id=123",
+    )
+
+    assert captured == {
+        "path": "/v1/people",
+        "query": "id=123&fields=allFields",
+    }
+
+
 async def test_list_lead_snapshots_maps_payload_and_pagination_metadata(
     workspace_id: uuid.UUID,
 ) -> None:
@@ -393,6 +421,23 @@ async def test_get_recent_activity_uses_events_endpoint_with_person_id(
                             "id": 55,
                             "created": "2026-07-14T10:15:00Z",
                             "description": "Left voicemail",
+                            "duration": 40,
+                            "outcome": "Connected",
+                            "recordingUrl": "https://example.com/recording/55",
+                            "transcriptSegments": [
+                                {
+                                    "speakerName": "Alyssa Hackel",
+                                    "speakerRole": "agent",
+                                    "text": "Hello, this is Alyssa calling about your search.",
+                                    "startedAt": "2026-07-14T10:15:00Z",
+                                },
+                                {
+                                    "speakerName": "Kyle Fisher",
+                                    "speakerRole": "lead",
+                                    "text": "I will call you back when I return next week.",
+                                    "startedAt": "2026-07-14T10:15:15Z",
+                                },
+                            ],
                             "isIncoming": False,
                             "userId": 42,
                             "userName": "Agent Ada",
@@ -428,6 +473,18 @@ async def test_get_recent_activity_uses_events_endpoint_with_person_id(
     ]
     assert activities[0].activity_type == "Call"
     assert activities[0].direction == "outbound"
+    assert activities[0].content == (
+        "Alyssa Hackel: Hello, this is Alyssa calling about your search.\n"
+        "Kyle Fisher: I will call you back when I return next week."
+    )
+    assert activities[0].details == {
+        "duration_seconds": 40,
+        "call_outcome": "Connected",
+        "recording_available": True,
+        "transcript_segment_count": 2,
+    }
+    assert len(activities[0].transcript_segments) == 2
+    assert activities[0].transcript_segments[0].speaker_name == "Alyssa Hackel"
     assert activities[1].activity_type == "Text message"
     assert activities[1].actor_name == "Agent Ada"
     assert activities[2].content == "Agent follow-up note"

@@ -39,6 +39,7 @@ class PostgresWorkspaceOperationalControlRepository:
                 workspace_id=control.workspace_id,
                 automation_status=control.automation_status.value,
                 pause_reason=control.pause_reason,
+                recurring_paused_search_enabled=control.recurring_paused_search_enabled,
                 created_at=now,
                 updated_at=now,
             )
@@ -47,6 +48,7 @@ class PostgresWorkspaceOperationalControlRepository:
                 set_={
                     "automation_status": control.automation_status.value,
                     "pause_reason": control.pause_reason,
+                    "recurring_paused_search_enabled": control.recurring_paused_search_enabled,
                     "updated_at": now,
                 },
             )
@@ -61,4 +63,5 @@ def _control_from_model(model: WorkspaceOperationalControlModel) -> WorkspaceOpe
         workspace_id=model.workspace_id,
         automation_status=WorkspaceAutomationStatus(model.automation_status),
         pause_reason=model.pause_reason,
+        recurring_paused_search_enabled=model.recurring_paused_search_enabled,
     )

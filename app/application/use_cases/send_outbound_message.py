@@ -99,7 +99,6 @@ class OutboundSendContext:
     human_owned: bool = False
     lead_replied_since_scheduled: bool = False
     recent_human_activity: bool = False
-    ownership_changed: bool = False
     last_global_outreach_at: datetime | None = None
     last_campaign_outreach_at: datetime | None = None
     last_channel_outreach_at: datetime | None = None
@@ -150,7 +149,6 @@ class _PreSendCRMRefreshResult:
     status: _PreSendCRMRefreshStatus
     lead: CanonicalLeadRecord | None = None
     recent_human_activity: bool = False
-    ownership_changed: bool = False
     failure_reason: str | None = None
 
 
@@ -257,7 +255,6 @@ async def send_outbound_message(
             recent_human_activity=(
                 context.recent_human_activity or refresh_result.recent_human_activity
             ),
-            ownership_changed=context.ownership_changed or refresh_result.ownership_changed,
         )
 
     contactability_decision = evaluate_contactability(
@@ -282,7 +279,6 @@ async def send_outbound_message(
             human_owned=effective_context.human_owned,
             lead_replied_since_scheduled=effective_context.lead_replied_since_scheduled,
             recent_human_activity=effective_context.recent_human_activity,
-            ownership_changed=effective_context.ownership_changed,
             last_global_outreach_at=effective_context.last_global_outreach_at,
             last_campaign_outreach_at=effective_context.last_campaign_outreach_at,
             last_channel_outreach_at=effective_context.last_channel_outreach_at,
@@ -472,7 +468,7 @@ async def _refresh_lead_for_pre_send(
         now=now,
     )
     saved_lead = await lead_repository.upsert(resolved_lead)
-    reconciliation = await reconcile_lead_assignment_change(
+    await reconcile_lead_assignment_change(
         previous_lead=lead,
         current_lead=saved_lead,
         lead_workflow_repository=crm_refresh_context.lead_workflow_repository,
@@ -491,7 +487,6 @@ async def _refresh_lead_for_pre_send(
             activities=activities,
             message=message,
         ),
-        ownership_changed=reconciliation.ownership_changed,
     )
 
 

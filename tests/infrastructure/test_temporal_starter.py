@@ -8,12 +8,14 @@ from temporalio.service import RPCError, RPCStatusCode
 from app.application.ports.temporal import (
     InboundProcessedLeadNurtureWorkflowSignal,
     PauseLeadNurtureWorkflowSignal,
+    RescheduleLeadNurtureWorkflowSignal,
     ResumeLeadNurtureWorkflowSignal,
     TemporalWorkflowNotFoundError,
 )
 from app.infrastructure.workflows.temporal.lead_nurture import (
     InboundProcessedWorkflowSignal,
     PauseWorkflowSignal,
+    RescheduleWorkflowSignal,
     ResumeWorkflowSignal,
 )
 from app.infrastructure.workflows.temporal.starter import TemporalClientWorkflowStarter
@@ -134,6 +136,43 @@ async def test_temporal_workflow_starter_sends_inbound_processed_signal() -> Non
     assert signal_arg.inbound_action == "human_handoff"
     assert signal_arg.reason == "human_requested"
     assert signal_arg.occurred_at == "2026-07-12T12:10:00+00:00"
+
+
+async def test_temporal_workflow_starter_sends_reschedule_signal() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeHandle:
+        async def signal(self, signal_method: object, signal_arg: object) -> None:
+            captured["signal_method"] = signal_method
+            captured["signal_arg"] = signal_arg
+
+    class FakeClient:
+        def get_workflow_handle(self, workflow_id: str) -> FakeHandle:
+            captured["workflow_id"] = workflow_id
+            return FakeHandle()
+
+    starter = TemporalClientWorkflowStarter(
+        cast(Client, FakeClient()),
+        task_queue="test-task-queue",
+    )
+
+    await starter.signal_reschedule_lead_nurture_workflow(
+        temporal_workflow_id="workflow-999",
+        signal=RescheduleLeadNurtureWorkflowSignal(
+            workspace_id=UUID("60000000-0000-0000-0000-000000000001"),
+            lead_id=UUID("60000000-0000-0000-0000-000000000002"),
+            occurred_at=datetime(2026, 7, 12, 12, 15, tzinfo=UTC),
+            reason="paused_search_profile_updated",
+            external_event_id=UUID("60000000-0000-0000-0000-000000000009"),
+        ),
+    )
+
+    assert captured["workflow_id"] == "workflow-999"
+    assert captured["signal_method"] == "reschedule-requested"
+    signal_arg = captured["signal_arg"]
+    assert isinstance(signal_arg, RescheduleWorkflowSignal)
+    assert signal_arg.reason == "paused_search_profile_updated"
+    assert signal_arg.occurred_at == "2026-07-12T12:15:00+00:00"
 
 
 async def test_temporal_workflow_starter_translates_not_found_signal_errors() -> None:

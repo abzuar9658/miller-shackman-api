@@ -12,7 +12,10 @@ from app.application.ports.repositories import (
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
 )
-from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
+from app.application.services.canonical_lead_inputs import (
+    contactability_facts_from_canonical_lead,
+    lead_has_destination_for_channel,
+)
 from app.application.services.internal_external_events import create_internal_external_event
 from app.application.services.lead_assignment import is_actor_assigned_to_lead
 from app.application.use_cases.apply_workflow_state_transition import (
@@ -380,7 +383,7 @@ def _contactable_channels(
     blocked_reasons: list[str] = []
 
     for channel in (ContactChannel.SMS, ContactChannel.EMAIL):
-        if not _has_destination_for_channel(lead, channel):
+        if not lead_has_destination_for_channel(lead, channel):
             continue
         decision = evaluate_contactability(facts, policy, channel)
         if decision.allowed:
@@ -389,14 +392,6 @@ def _contactable_channels(
         blocked_reasons.extend(reason.value for reason in decision.reasons)
 
     return tuple(allowed), tuple(dict.fromkeys(blocked_reasons))
-
-
-def _has_destination_for_channel(lead: CanonicalLeadRecord, channel: ContactChannel) -> bool:
-    if channel == ContactChannel.SMS:
-        return lead.has_sms_capable_phone and lead.primary_phone is not None
-    return lead.has_email and lead.primary_email is not None
-
-
 def _resumable_states() -> frozenset[WorkflowState]:
     return frozenset({WorkflowState.PAUSED, WorkflowState.HUMAN_HANDOFF, WorkflowState.HUMAN_OWNED})
 

@@ -5,6 +5,7 @@ from app.application.ports.temporal import (
     InboundProcessedLeadNurtureWorkflowSignal,
     LeadNurtureWorkflowSignaler,
     PauseLeadNurtureWorkflowSignal,
+    RescheduleLeadNurtureWorkflowSignal,
     ResumeLeadNurtureWorkflowSignal,
     TemporalWorkflowNotFoundError,
     TemporalWorkflowStarter,
@@ -17,6 +18,7 @@ from app.infrastructure.workflows.temporal.lead_nurture import (
     LeadNurtureWorkflow,
     LeadNurtureWorkflowInput,
     PauseWorkflowSignal,
+    RescheduleWorkflowSignal,
     ResumeWorkflowSignal,
     UnblockWorkflowSignal,
 )
@@ -123,6 +125,25 @@ class TemporalClientWorkflowStarter:
                 workflow_transition_id=signal.workflow_transition_id,
                 inbound_action=signal.inbound_action,
                 reason=signal.reason,
+            ),
+        )
+
+    async def signal_reschedule_lead_nurture_workflow(
+        self,
+        *,
+        temporal_workflow_id: str,
+        signal: RescheduleLeadNurtureWorkflowSignal,
+    ) -> None:
+        await self._signal(
+            temporal_workflow_id=temporal_workflow_id,
+            signal_name="reschedule-requested",
+            signal_arg=RescheduleWorkflowSignal(
+                workspace_id=signal.workspace_id,
+                lead_id=signal.lead_id,
+                occurred_at=signal.occurred_at.isoformat(),
+                reason=signal.reason,
+                actor_user_id=signal.actor_user_id,
+                external_event_id=signal.external_event_id,
             ),
         )
 

@@ -13,6 +13,7 @@ Groups:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import subprocess
 import sys
@@ -135,6 +136,23 @@ def _write_pid_file(pids: dict[str, int]) -> None:
     PID_FILE.write_text("\n".join(f"{name}: {pid}" for name, pid in pids.items()) + "\n")
 
 
+def _bootstrap_rabbitmq_topology() -> None:
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+
+    from app.core.config import get_settings
+    from app.infrastructure.events.rabbitmq.topology import ensure_crm_sync_topology
+
+    settings = get_settings()
+    asyncio.run(
+        ensure_crm_sync_topology(
+            rabbitmq_url=settings.rabbitmq_url,
+            exchange_name=settings.crm_sync_exchange_name,
+            queue_name=settings.crm_sync_queue_name,
+        )
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Start backend workers with log files")
     parser.add_argument(
@@ -178,6 +196,10 @@ def main() -> int:
 
     _print(f"Starting {args.group} workers...")
     _print(f"Logs will be written to: {LOG_DIR}/")
+
+    if args.group in {"all", "workers"}:
+        _print("Bootstrapping RabbitMQ topology...")
+        _bootstrap_rabbitmq_topology()
 
     started_pids: dict[str, int] = {}
     for name, command in workers:

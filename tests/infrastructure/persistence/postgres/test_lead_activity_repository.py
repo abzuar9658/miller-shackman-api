@@ -18,6 +18,7 @@ from app.infrastructure.persistence.postgres.lead_activity_repository import (
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
 from app.infrastructure.persistence.postgres.models import (
     ConversationModel,
+    CrmConversationEventModel,
     ExternalEventModel,
     InboundMessageModel,
     WorkspaceModel,
@@ -123,6 +124,61 @@ async def test_list_for_lead_prefers_inbound_business_outcome_status(
         "human_handoff",
         "pause_for_review",
     ]
+
+
+@pytest.mark.asyncio
+async def test_list_for_lead_returns_rich_crm_conversation_event_content(
+    postgres_session: AsyncSession,
+) -> None:
+    await _seed_workspace(postgres_session)
+    await PostgresLeadRepository(postgres_session).upsert(_lead())
+    postgres_session.add(
+        CrmConversationEventModel(
+            crm_conversation_event_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            conversation_id=None,
+            crm_provider="follow_up_boss",
+            crm_activity_id="call:123",
+            activity_type="Call",
+            direction="inbound",
+            occurred_at=NOW,
+            content="Agent Ada: Hello there.\nJordan Buyer: I will call back next week.",
+            actor_agent_id="demo-agent-001",
+            actor_name="Agent Ada",
+            details={"duration_seconds": 40, "call_outcome": "Connected"},
+            transcript_segments=[
+                {
+                    "text": "Hello there.",
+                    "speaker_name": "Agent Ada",
+                    "speaker_role": "agent",
+                    "started_at": NOW.isoformat(),
+                },
+                {
+                    "text": "I will call back next week.",
+                    "speaker_name": "Jordan Buyer",
+                    "speaker_role": "lead",
+                    "started_at": NOW.isoformat(),
+                },
+            ],
+            source_payload_version="follow_up_boss/v1",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    await postgres_session.commit()
+
+    items = await PostgresLeadActivityRepository(postgres_session).list_for_lead(
+        WORKSPACE_ID,
+        LEAD_ID,
+    )
+
+    assert len(items) == 1
+    assert items[0].title == "CRM call logged"
+    assert items[0].content == "Agent Ada: Hello there.\nJordan Buyer: I will call back next week."
+    assert items[0].details == {"duration_seconds": 40, "call_outcome": "Connected"}
+    assert len(items[0].transcript_segments) == 2
+    assert items[0].transcript_segments[0].speaker_name == "Agent Ada"
 
 
 async def _seed_workspace(postgres_session: AsyncSession) -> None:

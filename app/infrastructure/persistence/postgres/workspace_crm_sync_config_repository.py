@@ -42,6 +42,7 @@ class PostgresWorkspaceCRMSyncConfigRepository:
                 WorkspaceModel.workspace_id,
                 WorkspaceCRMSyncConfigModel.crm_sync_enabled,
                 WorkspaceCRMSyncConfigModel.crm_sync_interval_seconds,
+                WorkspaceCRMSyncConfigModel.max_leads_per_sync_cycle,
                 WorkspaceOperationalControlModel.automation_status,
             )
             .select_from(WorkspaceModel)
@@ -65,9 +66,10 @@ class PostgresWorkspaceCRMSyncConfigRepository:
                 crm_sync_interval_seconds=(
                     row[2] if row[2] is not None else default_interval_seconds
                 ),
+                max_leads_per_sync_cycle=row[3],
                 automation_status=(
-                    WorkspaceAutomationStatus(row[3])
-                    if row[3] is not None
+                    WorkspaceAutomationStatus(row[4])
+                    if row[4] is not None
                     else WorkspaceAutomationStatus.ACTIVE
                 ),
             )
@@ -94,6 +96,7 @@ def _config_from_model(model: WorkspaceCRMSyncConfigModel) -> WorkspaceCRMSyncCo
         workspace_id=model.workspace_id,
         crm_sync_enabled=model.crm_sync_enabled,
         crm_sync_interval_seconds=model.crm_sync_interval_seconds,
+        max_leads_per_sync_cycle=model.max_leads_per_sync_cycle,
     )
 
 
@@ -102,6 +105,7 @@ def _config_to_values(config: WorkspaceCRMSyncConfig, now: datetime) -> dict[str
         "workspace_id": config.workspace_id,
         "crm_sync_enabled": config.crm_sync_enabled,
         "crm_sync_interval_seconds": config.crm_sync_interval_seconds,
+        "max_leads_per_sync_cycle": config.max_leads_per_sync_cycle,
         "created_at": now,
         "updated_at": now,
     }
@@ -111,5 +115,6 @@ def _config_update_values(config: WorkspaceCRMSyncConfig, now: datetime) -> dict
     return {
         "crm_sync_enabled": config.crm_sync_enabled,
         "crm_sync_interval_seconds": config.crm_sync_interval_seconds,
+        "max_leads_per_sync_cycle": config.max_leads_per_sync_cycle,
         "updated_at": now,
     }

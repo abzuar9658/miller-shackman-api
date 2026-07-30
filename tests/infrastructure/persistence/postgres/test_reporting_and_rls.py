@@ -348,6 +348,7 @@ async def _seed_reporting_fixture(session: AsyncSession) -> None:
                 total_upserted=1,
                 total_failed=0,
                 failure_reason=None,
+                last_heartbeat_at=NOW,
                 created_by_user_id=USER_ID,
                 created_at=NOW,
                 updated_at=NOW,

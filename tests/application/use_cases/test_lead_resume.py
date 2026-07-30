@@ -146,7 +146,7 @@ async def test_resume_eligibility_allows_manager_for_opt_out_pause() -> None:
     assert result.status == LeadResumeEligibilityStatus.OK
     assert result.eligibility is not None
     assert result.eligibility.can_resume is True
-    assert result.eligibility.contactable_channels == (ContactChannel.EMAIL,)
+    assert result.eligibility.contactable_channels == (ContactChannel.SMS, ContactChannel.EMAIL)
 
 
 async def test_resume_eligibility_blocks_suppressed_workflow() -> None:

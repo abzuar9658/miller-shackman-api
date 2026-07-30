@@ -36,7 +36,6 @@ class PreSendReasonCode(StrEnum):
     HUMAN_OWNED = "human_owned"
     LEAD_REPLIED_SINCE_SCHEDULED = "lead_replied_since_scheduled"
     RECENT_HUMAN_ACTIVITY = "recent_human_activity"
-    OWNERSHIP_CHANGED = "ownership_changed"
     OUTSIDE_ALLOWED_HOURS = "outside_allowed_hours"
     FREQUENCY_LIMIT_REACHED = "frequency_limit_reached"
     SIMULTANEOUS_CHANNEL_NOT_ALLOWED = "simultaneous_channel_not_allowed"
@@ -84,7 +83,6 @@ class PreSendFacts:
     human_owned: bool = False
     lead_replied_since_scheduled: bool = False
     recent_human_activity: bool = False
-    ownership_changed: bool = False
     last_global_outreach_at: datetime | None = None
     last_campaign_outreach_at: datetime | None = None
     last_channel_outreach_at: datetime | None = None

@@ -43,6 +43,7 @@ class LeadModel(Base):
         Index("ix_leads_workspace_primary_email", "workspace_id", "primary_email"),
         Index("ix_leads_workspace_lead_type", "workspace_id", "lead_type"),
         Index("ix_leads_workspace_primary_phone", "workspace_id", "primary_phone"),
+        Index("ix_leads_workspace_paused_search_active", "workspace_id", "paused_search_active"),
         Index(
             "ix_leads_workspace_last_meaningful",
             "workspace_id",
@@ -123,6 +124,170 @@ class LeadModel(Base):
         nullable=False,
         default=False,
     )
+    paused_search_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    pause_reason_code: Mapped[str | None] = mapped_column(String(100))
+    pause_reason_note: Mapped[str | None] = mapped_column(Text)
+    reengagement_not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reengagement_window_label: Mapped[str | None] = mapped_column(String(100))
+    paused_search_source: Mapped[str | None] = mapped_column(String(100))
+    paused_search_recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    paused_search_recorded_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+    )
+    paused_search_last_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LeadPausedSearchHistoryModel(Base):
+    __tablename__ = "lead_paused_search_history"
+    __table_args__ = (
+        Index(
+            "ix_lead_paused_search_history_workspace_lead_created",
+            "workspace_id",
+            "lead_id",
+            "created_at",
+        ),
+    )
+
+    history_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        nullable=False,
+    )
+    lead_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("leads.lead_id"),
+        nullable=False,
+    )
+    action: Mapped[str] = mapped_column(String(50), nullable=False)
+    previous_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    previous_reason_code: Mapped[str | None] = mapped_column(String(100))
+    previous_reason_note: Mapped[str | None] = mapped_column(Text)
+    previous_reengagement_not_before: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    previous_reengagement_window_label: Mapped[str | None] = mapped_column(String(100))
+    previous_source: Mapped[str | None] = mapped_column(String(100))
+    previous_recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    previous_recorded_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+    )
+    previous_last_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    current_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    current_reason_code: Mapped[str | None] = mapped_column(String(100))
+    current_reason_note: Mapped[str | None] = mapped_column(Text)
+    current_reengagement_not_before: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    current_reengagement_window_label: Mapped[str | None] = mapped_column(String(100))
+    current_source: Mapped[str | None] = mapped_column(String(100))
+    current_recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    current_recorded_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+    )
+    current_last_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    actor_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LeadClassificationArtifactModel(Base):
+    __tablename__ = "lead_classification_artifacts"
+    __table_args__ = (
+        Index(
+            "ix_lead_classification_artifacts_workspace_lead_created",
+            "workspace_id",
+            "lead_id",
+            "created_at",
+        ),
+    )
+
+    artifact_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    lead_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.lead_id"), nullable=False
+    )
+    source: Mapped[str] = mapped_column(String(100), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(100), nullable=False)
+    pause_reason_code: Mapped[str | None] = mapped_column(String(100))
+    reengagement_not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reengagement_window_label: Mapped[str | None] = mapped_column(String(100))
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    summary: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(255), nullable=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    usage_tokens: Mapped[int | None] = mapped_column(Integer)
+    prompt_text: Mapped[str | None] = mapped_column(Text)
+    input_context: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    raw_llm_response_text: Mapped[str | None] = mapped_column(Text)
+    parsed_llm_response: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    applied_status: Mapped[str] = mapped_column(String(100), nullable=False)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LeadRoutingReviewModel(Base):
+    __tablename__ = "lead_routing_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "artifact_id",
+            name="uq_lead_routing_reviews_workspace_artifact",
+        ),
+        Index(
+            "ix_lead_routing_reviews_workspace_status_created",
+            "workspace_id",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "ix_lead_routing_reviews_workspace_lead_created",
+            "workspace_id",
+            "lead_id",
+            "created_at",
+        ),
+    )
+
+    review_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    lead_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.lead_id"), nullable=False
+    )
+    artifact_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("lead_classification_artifacts.artifact_id"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    reason_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    resolution: Mapped[str | None] = mapped_column(String(100))
+    reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.user_id")
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -527,6 +692,198 @@ class CampaignAdminAuditLogModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class PausedSearchTrackModel(Base):
+    __tablename__ = "paused_search_tracks"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "track_key", name="uq_paused_tracks_workspace_key"),
+        Index("ix_paused_tracks_workspace_status", "workspace_id", "status"),
+    )
+
+    track_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    track_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    active_version_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    created_by_user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PausedSearchTrackVersionModel(Base):
+    __tablename__ = "paused_search_track_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "track_id",
+            "version_number",
+            name="uq_paused_track_versions_workspace_track_version",
+        ),
+        Index(
+            "ix_paused_track_versions_workspace_track_status",
+            "workspace_id",
+            "track_id",
+            "status",
+        ),
+    )
+
+    track_version_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    track_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("paused_search_tracks.track_id"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    track_family: Mapped[str] = mapped_column(String(100), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    allowed_channels: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    default_for_reason_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    fallback_timing_policy: Mapped[str] = mapped_column(String(100), nullable=False)
+    maintenance_interval_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    reactivation_window_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_total_touches: Mapped[int] = mapped_column(Integer, nullable=False)
+    requires_review_before_publish: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    created_by_user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PausedSearchTrackStepModel(Base):
+    __tablename__ = "paused_search_track_steps"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "track_version_id",
+            "step_order",
+            name="uq_paused_track_steps_workspace_version_order",
+        ),
+    )
+
+    step_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    track_version_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("paused_search_track_versions.track_version_id"),
+        nullable=False,
+    )
+    step_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    phase: Mapped[str] = mapped_column(String(50), nullable=False)
+    channel: Mapped[str] = mapped_column(String(50), nullable=False)
+    delay_hours: Mapped[int] = mapped_column(Integer, nullable=False)
+    message_goal: Mapped[str] = mapped_column(String(500), nullable=False)
+    template_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    review_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PausedSearchReasonMappingModel(Base):
+    __tablename__ = "paused_search_reason_mappings"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "reason_code", name="uq_paused_reason_workspace_reason"),
+        Index("ix_paused_reason_mappings_track_version", "workspace_id", "track_version_id"),
+    )
+
+    mapping_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    reason_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    track_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("paused_search_tracks.track_id"), nullable=False
+    )
+    track_version_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("paused_search_track_versions.track_version_id"),
+        nullable=False,
+    )
+    created_by_user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PausedSearchTrackAdminAuditLogModel(Base):
+    __tablename__ = "paused_search_track_admin_audit_logs"
+    __table_args__ = (
+        Index("ix_paused_track_audit_workspace_track", "workspace_id", "track_id", "created_at"),
+        Index("ix_paused_track_audit_workspace_action", "workspace_id", "action", "created_at"),
+    )
+
+    audit_log_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    track_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("paused_search_tracks.track_id"), nullable=False
+    )
+    track_version_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("paused_search_track_versions.track_version_id")
+    )
+    actor_user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    details: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LeadWorkflowOverrideAuditLogModel(Base):
+    __tablename__ = "lead_workflow_override_audit_logs"
+    __table_args__ = (
+        Index(
+            "ix_lead_workflow_override_audit_workspace_lead",
+            "workspace_id",
+            "lead_id",
+            "created_at",
+        ),
+        Index(
+            "ix_lead_workflow_override_audit_workspace_action",
+            "workspace_id",
+            "action",
+            "created_at",
+        ),
+    )
+
+    audit_log_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    lead_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.lead_id"), nullable=False
+    )
+    workflow_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("lead_workflows.workflow_id"), nullable=False
+    )
+    actor_user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    details: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class CRMSyncJobModel(Base):
     __tablename__ = "crm_sync_jobs"
     __table_args__ = (
@@ -570,10 +927,42 @@ class CRMSyncJobModel(Base):
     total_upserted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failure_reason: Mapped[str | None] = mapped_column(String(255))
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.user_id"),
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CRMSyncWindowStateModel(Base):
+    __tablename__ = "crm_sync_window_states"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "crm_provider",
+            name="uq_crm_sync_window_states_workspace_provider",
+        ),
+        Index(
+            "ix_crm_sync_window_states_workspace_provider_updated",
+            "workspace_id",
+            "crm_provider",
+            "updated_at",
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("workspaces.workspace_id"),
+        primary_key=True,
+    )
+    crm_provider: Mapped[str] = mapped_column(String(50), primary_key=True)
+    sync_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    updated_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_before: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    next_cursor: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_by: Mapped[str | None] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -986,6 +1375,12 @@ class CrmConversationEventModel(Base):
     content: Mapped[str | None] = mapped_column(String)
     actor_agent_id: Mapped[str | None] = mapped_column(String(255))
     actor_name: Mapped[str | None] = mapped_column(String(255))
+    details: Mapped[dict[str, str | int | float | bool | None]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    transcript_segments: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
     source_payload_version: Mapped[str] = mapped_column(String(100), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -1230,6 +1625,7 @@ class WorkspaceCRMSyncConfigModel(Base):
     )
     crm_sync_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     crm_sync_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_leads_per_sync_cycle: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -1288,6 +1684,11 @@ class WorkspaceOperationalControlModel(Base):
     )
     automation_status: Mapped[str] = mapped_column(String(32), nullable=False)
     pause_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recurring_paused_search_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

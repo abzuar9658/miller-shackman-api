@@ -11,7 +11,14 @@ from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import WorkspaceContactPolicy
 from app.domain.conversations import CrmConversationEvent
 from app.domain.identity import Workspace
-from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.leads import (
+    CanonicalLeadRecord,
+    CRMProvider,
+    LeadClassificationArtifact,
+    LeadPausedSearchHistoryEntry,
+    LeadRoutingReview,
+    LeadRoutingReviewStatus,
+)
 from app.domain.llm import WorkspaceLLMConfig
 from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
 from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransition
@@ -173,9 +180,10 @@ class FakeWorkspaceOutboundDraftingConfigRepository:
 
 
 class FakeLeadRepository:
-    def __init__(self, lead: CanonicalLeadRecord | None) -> None:
+    def __init__(self, lead: CanonicalLeadRecord | None = None) -> None:
         self.lead = lead
         self.saved: list[CanonicalLeadRecord] = []
+        self.history_entries: list[LeadPausedSearchHistoryEntry] = []
         self.by_id: dict[tuple[WorkspaceId, LeadId], CanonicalLeadRecord] = {}
         self.by_crm_id: dict[tuple[WorkspaceId, CRMProvider, str], CanonicalLeadRecord] = {}
         if lead is not None:
@@ -275,6 +283,24 @@ class FakeLeadRepository:
         self.saved.append(record)
         self._store(record)
         return record
+
+    async def append(self, entry: LeadPausedSearchHistoryEntry) -> LeadPausedSearchHistoryEntry:
+        self.history_entries.append(entry)
+        return entry
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadPausedSearchHistoryEntry, ...]:
+        _ = (workspace_id, limit)
+        return tuple(
+            entry
+            for entry in self.history_entries
+            if entry.workspace_id == workspace_id and entry.lead_id == lead_id
+        )
 
     async def list_for_workspace(
         self,
@@ -492,6 +518,107 @@ class FakeCrmConversationEventRepository:
         return event
 
 
+class FakeLeadClassificationArtifactRepository:
+    def __init__(self) -> None:
+        self.saved: list[LeadClassificationArtifact] = []
+
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        artifact_id: UUID,
+    ) -> LeadClassificationArtifact | None:
+        for artifact in self.saved:
+            if artifact.workspace_id == workspace_id and artifact.artifact_id == artifact_id:
+                return artifact
+        return None
+
+    async def save(self, artifact: LeadClassificationArtifact) -> LeadClassificationArtifact:
+        self.saved.append(artifact)
+        return artifact
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadClassificationArtifact, ...]:
+        _ = (workspace_id, limit)
+        return tuple(
+            artifact
+            for artifact in self.saved
+            if artifact.workspace_id == workspace_id and artifact.lead_id == lead_id
+        )
+
+
+class FakeLeadRoutingReviewRepository:
+    def __init__(self) -> None:
+        self.saved: list[LeadRoutingReview] = []
+
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        review_id: UUID,
+    ) -> LeadRoutingReview | None:
+        for review in self.saved:
+            if review.workspace_id == workspace_id and review.review_id == review_id:
+                return review
+        return None
+
+    async def get_by_artifact_id(
+        self,
+        workspace_id: WorkspaceId,
+        artifact_id: UUID,
+    ) -> LeadRoutingReview | None:
+        for review in self.saved:
+            if review.workspace_id == workspace_id and review.artifact_id == artifact_id:
+                return review
+        return None
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 20,
+    ) -> tuple[LeadRoutingReview, ...]:
+        matches = tuple(
+            review
+            for review in self.saved
+            if review.workspace_id == workspace_id and review.lead_id == lead_id
+        )
+        return matches[:limit]
+
+    async def list_pending_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadRoutingReview, ...]:
+        matches = tuple(
+            review
+            for review in self.saved
+            if review.workspace_id == workspace_id
+            and review.status == LeadRoutingReviewStatus.PENDING
+        )
+        return matches[:limit]
+
+    async def save(self, review: LeadRoutingReview) -> LeadRoutingReview:
+        for index, existing in enumerate(self.saved):
+            if existing.review_id == review.review_id:
+                self.saved[index] = review
+                return review
+            if (
+                existing.workspace_id == review.workspace_id
+                and existing.artifact_id == review.artifact_id
+            ):
+                self.saved[index] = review
+                return review
+        self.saved.append(review)
+        return review
+
+
+
 class FakeRejectedDraftReviewRepository:
     def __init__(self) -> None:
         self.saved: list[RejectedDraftReview] = []
@@ -549,6 +676,47 @@ class FakeLLMClient:
                 "confidence": confidence,
                 "personalization_notes": ["Used safe canonical context."],
                 "safety_flags": list(safety_flags),
+            }
+        )
+
+    async def complete(self, request: LLMCompletionRequest) -> LLMResult:
+        self.requests.append(request)
+        return LLMResult(
+            text=self._text,
+            model="openai/gpt-4o-mini",
+            prompt_version=request.prompt_version,
+            latency_ms=13,
+            usage_tokens=37,
+        )
+
+
+class FakeClassificationLLMClient:
+    def __init__(
+        self,
+        *,
+        outcome: str = "dormant",
+        confidence: float = 0.91,
+        evidence: list[str] | None = None,
+        summary: str = "Lead appears dormant.",
+        handoff_reason_code: str | None = None,
+        reengagement_not_before: str | None = None,
+        reengagement_window_label: str | None = None,
+        pause_reason_code: str | None = None,
+    ) -> None:
+        self.requests: list[LLMCompletionRequest] = []
+        resolved_handoff_reason_code = handoff_reason_code
+        if resolved_handoff_reason_code is None and outcome == "human_handoff":
+            resolved_handoff_reason_code = "human_requested"
+        self._text = json.dumps(
+            {
+                "outcome": outcome,
+                "confidence": confidence,
+                "evidence": evidence or ["No recent replies."],
+                "summary": summary,
+                "handoff_reason_code": resolved_handoff_reason_code,
+                "reengagement_not_before": reengagement_not_before,
+                "reengagement_window_label": reengagement_window_label,
+                "pause_reason_code": pause_reason_code,
             }
         )
 

@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 from app.application.ports.lead_activity import (
@@ -7,22 +10,41 @@ from app.application.ports.lead_activity import (
     LeadActivitySummary,
 )
 from app.application.ports.lead_read import (
+    LeadReadClassificationArtifactRepository,
     LeadReadHandoffRepository,
     LeadReadInboundMessageRepository,
     LeadReadLeadRepository,
     LeadReadOutboundMessageRepository,
+    LeadReadPausedSearchHistoryRepository,
+    LeadReadPausedSearchTrackRepository,
     LeadReadUserRepository,
+    LeadReadWorkflowOverrideAuditRepository,
     LeadReadWorkflowRepository,
     LeadReadWorkflowTransitionRepository,
 )
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
-from app.application.ports.repositories import CRMAgentRepository
+from app.application.ports.repositories import (
+    CRMAgentRepository,
+    LeadRoutingReviewRepository,
+)
 from app.application.services.lead_assignment import (
     is_actor_assigned_to_lead,
     lead_assigned_agent_user_id,
     lead_effective_owner_user_id,
 )
+from app.application.services.lead_decision_tree import (
+    LeadDecisionTreeView,
+    PausedSearchTrackOptionSpec,
+    build_lead_decision_tree,
+)
+from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.outbound_message import OutboundMessage
+from app.domain.campaigns.paused_search_tracks import (
+    PausedSearchTrack,
+    PausedSearchTrackStatus,
+    PausedSearchTrackStep,
+    PausedSearchTrackVersion,
+)
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
 from app.domain.common.ids import LeadId, UserId, WorkspaceId
 from app.domain.conversations import Handoff, InboundMessage
@@ -35,8 +57,13 @@ from app.domain.identity import (
     WorkspaceMembershipRole,
     evaluate_permission,
 )
-from app.domain.leads import CanonicalLeadRecord
-from app.domain.workflows import LeadWorkflow, WorkflowTransition
+from app.domain.leads import (
+    CanonicalLeadRecord,
+    LeadClassificationArtifact,
+    LeadPausedSearchHistoryEntry,
+    LeadRoutingReview,
+)
+from app.domain.workflows import LeadWorkflow, LeadWorkflowOverrideAuditLog, WorkflowTransition
 
 
 class LeadReadStatus(StrEnum):
@@ -76,12 +103,44 @@ class LeadListResult:
 @dataclass(frozen=True)
 class LeadDetailView:
     lead: LeadReadView
+    qualification_plan: LeadQualificationPlanView | None
+    decision_tree: LeadDecisionTreeView
     workflow_transitions: tuple[WorkflowTransition, ...]
+    workflow_override_audits: tuple[LeadWorkflowOverrideAuditView, ...]
+    paused_search_history: tuple[LeadPausedSearchHistoryView, ...]
+    routing_reviews: tuple[LeadRoutingReview, ...]
     rejected_draft_reviews: tuple[RejectedDraftReview, ...]
     activity_items: tuple[LeadActivityItem, ...]
     inbound_messages: tuple[InboundMessage, ...]
     outbound_messages: tuple[OutboundMessage, ...]
     handoffs: tuple[Handoff, ...]
+
+
+@dataclass(frozen=True)
+class LeadPausedSearchHistoryView:
+    entry: LeadPausedSearchHistoryEntry
+    actor_name: str | None = None
+
+
+@dataclass(frozen=True)
+class LeadWorkflowOverrideAuditView:
+    entry: LeadWorkflowOverrideAuditLog
+    actor_name: str | None = None
+
+
+@dataclass(frozen=True)
+class LeadPausedSearchPlanView:
+    track: PausedSearchTrack
+    version: PausedSearchTrackVersion
+    steps: tuple[PausedSearchTrackStep, ...] = ()
+    current_step: PausedSearchTrackStep | None = None
+    next_action_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class LeadQualificationPlanView:
+    classification_artifact: LeadClassificationArtifact | None = None
+    paused_search_plan: LeadPausedSearchPlanView | None = None
 
 
 @dataclass(frozen=True)
@@ -167,8 +226,12 @@ async def get_lead_detail_view(
     workspace_id: WorkspaceId,
     lead_id: LeadId,
     lead_repository: LeadReadLeadRepository,
+    paused_search_history_repository: LeadReadPausedSearchHistoryRepository,
+    classification_artifact_repository: LeadReadClassificationArtifactRepository,
     workflow_repository: LeadReadWorkflowRepository,
+    workflow_override_audit_repository: LeadReadWorkflowOverrideAuditRepository,
     workflow_transition_repository: LeadReadWorkflowTransitionRepository,
+    paused_search_track_repository: LeadReadPausedSearchTrackRepository,
     activity_repository: LeadActivityRepository,
     rejected_draft_review_repository: RejectedDraftReviewRepository,
     inbound_message_repository: LeadReadInboundMessageRepository,
@@ -176,6 +239,7 @@ async def get_lead_detail_view(
     handoff_repository: LeadReadHandoffRepository,
     user_repository: LeadReadUserRepository,
     crm_agent_repository: CRMAgentRepository,
+    routing_review_repository: LeadRoutingReviewRepository,
 ) -> LeadDetailResult:
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
     if lead is None:
@@ -200,9 +264,22 @@ async def get_lead_detail_view(
     )
     handoffs = await handoff_repository.list_for_lead(workspace_id, lead_id)
     activity_summaries = await activity_repository.list_summaries(workspace_id, (lead_id,))
+    classification_artifacts = await classification_artifact_repository.list_for_lead(
+        workspace_id,
+        lead_id,
+        limit=1,
+    )
     user_name_cache: dict[UserId, str | None] = {}
     user_cache: dict[UserId, User | None] = {}
     crm_agent_cache: dict[tuple[str, str], CRMAgent | None] = {}
+    paused_search_history_entries = await paused_search_history_repository.list_for_lead(
+        workspace_id,
+        lead_id,
+    )
+    workflow_override_audit_entries = await workflow_override_audit_repository.list_for_lead(
+        workspace_id,
+        lead_id,
+    )
     lead_view = LeadReadView(
         lead=lead,
         assigned_agent_name=await _assigned_agent_name(lead, user_repository, user_name_cache),
@@ -217,11 +294,75 @@ async def get_lead_detail_view(
         latest_handoff=handoffs[0] if handoffs else None,
         activity_summary=activity_summaries[0] if activity_summaries else None,
     )
+    paused_search_history_views: list[LeadPausedSearchHistoryView] = []
+    for history_entry in paused_search_history_entries:
+        paused_search_history_views.append(
+            LeadPausedSearchHistoryView(
+                entry=history_entry,
+                actor_name=await _user_name(
+                    history_entry.actor_user_id,
+                    user_repository,
+                    user_name_cache,
+                ),
+            )
+        )
+    workflow_override_audit_views: list[LeadWorkflowOverrideAuditView] = []
+    for audit_entry in workflow_override_audit_entries:
+        workflow_override_audit_views.append(
+            LeadWorkflowOverrideAuditView(
+                entry=audit_entry,
+                actor_name=await _user_name(
+                    audit_entry.actor_user_id,
+                    user_repository,
+                    user_name_cache,
+                ),
+            )
+        )
+    paused_search_plan = await _paused_search_plan_view(
+        workspace_id,
+        latest_workflow,
+        paused_search_track_repository,
+    )
+    paused_search_track_options = await _paused_search_track_options(
+        workspace_id,
+        paused_search_track_repository,
+    )
+    qualification_plan = LeadQualificationPlanView(
+        classification_artifact=classification_artifacts[0] if classification_artifacts else None,
+        paused_search_plan=paused_search_plan,
+    )
+    decision_tree = build_lead_decision_tree(
+        lead=lead,
+        classification_artifact=qualification_plan.classification_artifact,
+        paused_search_track=(paused_search_plan.track if paused_search_plan is not None else None),
+        paused_search_track_version=(
+            paused_search_plan.version if paused_search_plan is not None else None
+        ),
+        paused_search_steps=(paused_search_plan.steps if paused_search_plan is not None else ()),
+        paused_search_current_step=(
+            paused_search_plan.current_step if paused_search_plan is not None else None
+        ),
+        paused_search_track_options=paused_search_track_options,
+        latest_workflow=latest_workflow,
+        latest_handoff=lead_view.latest_handoff,
+    )
     return LeadDetailResult(
         status=LeadReadStatus.OK,
         view=LeadDetailView(
             lead=lead_view,
+            qualification_plan=(
+                qualification_plan
+                if qualification_plan.classification_artifact is not None
+                or qualification_plan.paused_search_plan is not None
+                else None
+            ),
+            decision_tree=decision_tree,
             workflow_transitions=transitions,
+            workflow_override_audits=tuple(workflow_override_audit_views),
+            paused_search_history=tuple(paused_search_history_views),
+            routing_reviews=await routing_review_repository.list_for_lead(
+                workspace_id, lead_id
+            ),
             rejected_draft_reviews=await rejected_draft_review_repository.list_for_lead(
                 workspace_id, lead_id
             ),
@@ -235,12 +376,82 @@ async def get_lead_detail_view(
     )
 
 
+async def _paused_search_plan_view(
+    workspace_id: WorkspaceId,
+    workflow: LeadWorkflow | None,
+    paused_search_track_repository: LeadReadPausedSearchTrackRepository,
+) -> LeadPausedSearchPlanView | None:
+    if workflow is None or workflow.paused_search_track_version_id is None:
+        return None
+
+    version = await paused_search_track_repository.get_version(
+        workspace_id,
+        workflow.paused_search_track_version_id,
+    )
+    if version is None:
+        return None
+
+    track = await paused_search_track_repository.get_track(workspace_id, version.track_id)
+    if track is None:
+        return None
+
+    steps = await paused_search_track_repository.get_steps(
+        workspace_id,
+        version.track_version_id,
+    )
+    current_step = next(
+        (step for step in steps if step.step_id == workflow.paused_search_track_step_id),
+        None,
+    )
+    return LeadPausedSearchPlanView(
+        track=track,
+        version=version,
+        steps=steps,
+        current_step=current_step,
+        next_action_at=workflow.next_action_at,
+    )
+
+
+async def _paused_search_track_options(
+    workspace_id: WorkspaceId,
+    paused_search_track_repository: LeadReadPausedSearchTrackRepository,
+) -> tuple[PausedSearchTrackOptionSpec, ...]:
+    options: list[PausedSearchTrackOptionSpec] = []
+    for track in await paused_search_track_repository.list_tracks(workspace_id):
+        if track.status != PausedSearchTrackStatus.ACTIVE or track.active_version_id is None:
+            continue
+        version = await paused_search_track_repository.get_version(
+            workspace_id,
+            track.active_version_id,
+        )
+        if (
+            version is None
+            or not version.enabled
+            or version.status != CampaignVersionStatus.PUBLISHED
+        ):
+            continue
+        steps = await paused_search_track_repository.get_steps(
+            workspace_id,
+            version.track_version_id,
+        )
+        options.append(PausedSearchTrackOptionSpec(track=track, version=version, steps=steps))
+    return tuple(options)
+
+
 async def _assigned_agent_name(
     lead: CanonicalLeadRecord,
     user_repository: LeadReadUserRepository,
     user_name_cache: dict[UserId, str | None],
 ) -> str | None:
     user_id = lead_effective_owner_user_id(lead)
+    return await _user_name(user_id, user_repository, user_name_cache)
+
+
+async def _user_name(
+    user_id: UserId | None,
+    user_repository: LeadReadUserRepository,
+    user_name_cache: dict[UserId, str | None],
+) -> str | None:
     if user_id is None:
         return None
     if user_id not in user_name_cache:

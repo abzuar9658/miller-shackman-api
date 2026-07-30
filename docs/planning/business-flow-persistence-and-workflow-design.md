@@ -392,7 +392,7 @@ The agreed next delivery sequence is captured in
 
 ## Deferred from this design
 
-- MLS/IDX or property listing matching.
+- MLS/IDX integrations and later listing-context workflows beyond this core nurture-spine design.
 - Advanced lead scoring.
 - Raw email MIME parsing.
 - Slack/SLA escalation workflows.

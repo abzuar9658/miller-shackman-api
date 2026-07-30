@@ -77,33 +77,48 @@ Edge cases:
 Business result:
 - staff can explicitly record and view paused-search leads reliably
 
-### Slice 2 — LLM paused-search analysis + review proposal flow
+### Slice 2 — LLM lead-state analysis + AI-first classification flow
 
-Goal: add intelligence safely without auto-mutating lead state.
+Goal: make AI the first classifier for paused-search, dormant, handoff, and
+review-needed states safely, while preserving human override and review
+fallback.
 
 Deliverables:
-- focused LLM extraction use case for reason, timing, readiness, and confidence
+- focused LLM classification use case for paused-search, dormant, handoff,
+  blocked, and review-needed outcomes
 - strict structured-output schema and validator
-- proposal record or review artifact rather than automatic profile mutation
-- admin/manager review action to accept, edit, or reject the proposal
-- audit of model, prompt version, confidence, and reviewer action
+- direct AI write path into paused-search profile when the paused-search output
+  is valid and confidence passes threshold
+- durable AI classification artifact with model, prompt, confidence, evidence, and applied-vs-review status
+- review fallback for low-confidence, conflicting, or timing-unclear cases
+- reply-time re-classification for paused-search and dormant leads using the
+  updated conversation
+- agent/manager override action to edit, replace, clear, or reject AI-classified state
+- overwrite guardrails so re-analysis does not silently churn trusted human truth
 
 Tests:
-- schema validation and low-confidence rejection
-- fake LLM tests for clear, ambiguous, and conflicting conversations
-- review acceptance/rejection flow tests
-- API/UI tests for review queue and proposal details
+- schema validation and low-confidence review fallback
+- fake LLM tests for clear paused-search, dormant, handoff, ambiguous, and
+  conflicting conversations
+- tests proving high-confidence valid classification updates the persisted profile
+- tests proving active-interest classification routes to handoff rather than nurture
+- tests proving paused/dormant reply handling re-runs classification before continuing
+- override/re-analysis precedence tests
+- API/UI tests for confidence display, review queue, and manual override behavior
 
 Edge cases:
 - conflicting timing statements
 - intent changed to active interest
+- dormant lead replies and becomes paused-search
+- paused-search lead replies and becomes handoff-ready
 - missing conversation history
 - repeated re-analysis of the same lead
+- recent human override followed by another AI run
 - LLM malformed output
 
 Business result:
-- the system can understand conversation meaning without trusting regex or auto-
-  changing lead state unsafely
+- the system can understand conversation meaning, classify the lead's current
+  state first, and still fail safe when confidence or evidence is weak
 
 ### Slice 3 — `ai_nurture` router + enrollment path selection
 
@@ -111,14 +126,21 @@ Goal: turn the tag into a safe routing gate for paused-search, dormant, or hold.
 
 Deliverables:
 - internal `ai_nurture` concept mapped from configurable external tags
-- routing use case with precedence: paused-search, dormant fallback, hold/review
+- routing use case with precedence: handoff/human-control, paused-search,
+  dormant fallback, hold/review
+- automatic dormant-path start when dormant routing wins and start checks pass
+- dormant journey drafting from recent conversation context and known lead facts
 - integration into CRM sync/tag enrollment flow
 - durable route-decision audit record with reason codes and evidence
 - configuration for dormant fallback vs review-first behavior
 
 Tests:
 - tag present/absent routing tests
+- tag absent never starts nurture even when AI classification already exists
 - paused-search precedence over dormant
+- accidental tag on active-interest lead routes to handoff instead of nurture
+- dormant route auto-starts without a second manual approval step
+- dormant first-touch drafting uses recent conversation context
 - review-hold on ambiguity or missing facts
 - tag idempotency and duplicate enrollment protection
 - integration tests covering CRM tag processing + workflow start decision
@@ -131,24 +153,38 @@ Edge cases:
 - human-owned or suppressed lead tagged by mistake
 
 Business result:
-- tagging a lead triggers the right nurture evaluation path instead of one generic campaign
+- tagging a lead triggers the right nurture evaluation path instead of one
+  generic campaign, while still protecting hot leads from accidental automation
+
+Supporting design note:
+- the dormant journey behavior itself is defined in
+  `dormant-reengagement-01-journey-and-reply-handling.md`
 
 ### Slice 4 — Paused-search track admin model + publish flow
 
 Goal: let admins manage paused-search strategy without code changes.
 
 Deliverables:
-- paused-search track draft/publish data model, or safe extension of existing campaign versioning
-- reason-to-track mapping model
-- cadence-step phase metadata: maintenance vs reactivation
-- workspace nurture settings UI/API for tracks, mappings, and fallback timing
-- publish audit trail and immutable version snapshots
+- paused-search track draft/publish data model, or safe extension of existing campaign versioning — **implemented as a bounded track entity with immutable versions**
+- reason-to-track mapping model — **implemented for published versions**
+- cadence-step phase metadata: maintenance vs reactivation — **implemented**
+- workspace nurture settings UI/API for tracks, mappings, and fallback timing — **deferred to an admin-surface slice**
+- publish audit trail and immutable version snapshots — **implemented**
 
 Tests:
-- draft/update/publish/retire workflow tests
-- mapping validation tests
-- version pinning tests for new vs existing enrollments
-- UI tests for editing, publishing, and previewing track changes
+- draft/update/publish/retire workflow tests — **implemented**
+- mapping validation tests — **implemented**
+- version pinning tests for new vs existing enrollments — **implemented at the repository/use-case boundary**
+- UI tests for editing, publishing, and previewing track changes — **deferred with the admin-surface slice**
+
+Implementation status:
+
+The backend foundation now includes `PausedSearchTrack`,
+`PausedSearchTrackVersion`, phased track steps, published reason mappings,
+admin audit logs, Postgres persistence, RLS-backed migration tables, and focused
+application plus persistence tests. Temporal execution should now use the
+published `track_version_id` selected from the reason mapping as the durable pin
+for any paused-search workflow it starts.
 
 Edge cases:
 - multiple tracks for same reason
@@ -168,7 +204,10 @@ Deliverables:
 - extend scheduling/execution use cases for maintenance/reactivation phases
 - persist next-action timing derived from paused-search track + lead profile
 - Temporal wake/sleep/reschedule logic for long waits
-- explicit recomputation on profile change, override, pause, reply, or ownership change
+- explicit recomputation on profile change, override, pause, reply, or
+  ownership change
+- reply-time re-classification before continuing a paused-search or dormant
+  journey after new inbound evidence
 - version-pinned execution for long-lived workflows
 
 Tests:
@@ -217,7 +256,9 @@ Business result:
 Goal: prove the whole paused-search system works under real business scenarios.
 
 Deliverables:
-- end-to-end harness covering: profile set, LLM proposal, tag routing, track pinning, long wait, maintenance touch, reactivation, reply, handoff
+- end-to-end harness covering: AI classification, optional human override, tag
+  routing, dormant vs paused path selection, track pinning, long wait,
+  maintenance touch, reactivation, reply-time re-classification, and handoff
 - observability and audit queries for route decisions and next scheduled action
 - rollout checklist, support runbook, and pilot-safe feature flag controls
 
@@ -248,7 +289,7 @@ A slice is not done until all of these are true:
 
 ## Recommendation
 
-Build in the sequence above. It gives you the smartest path with the lowest risk:
-manual truth first, LLM understanding second, routing third, admin strategy
-control fourth, durable timing fifth, operator overrides sixth, and full
-hardening last.
+Build in the sequence above. It gives you the smartest path with the lowest
+risk: persisted paused-search state first, AI classification second, routing
+third, admin strategy control fourth, durable timing fifth, operator overrides
+sixth, and full hardening last.

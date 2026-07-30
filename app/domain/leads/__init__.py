@@ -3,9 +3,23 @@ from app.domain.leads.canonical import (
     ActivityReliability,
     CanonicalLeadRecord,
     CRMProvider,
+    LeadClassificationAppliedStatus,
+    LeadClassificationArtifact,
     LeadClassificationReason,
+    LeadPausedSearchHistoryEntry,
+    LeadPausedSearchProfile,
+    LeadStateClassificationOutcome,
     LeadType,
+    PausedSearchAction,
+    PausedSearchReasonCode,
+    PausedSearchSource,
     PropertyEventType,
+    lead_paused_search_profile,
+)
+from app.domain.leads.routing_reviews import (
+    LeadRoutingReview,
+    LeadRoutingReviewResolution,
+    LeadRoutingReviewStatus,
 )
 
 __all__ = [
@@ -14,7 +28,19 @@ __all__ = [
     "CRMProvider",
     "CanonicalLeadRecord",
     "EffectiveOwnerSource",
+    "LeadClassificationAppliedStatus",
+    "LeadClassificationArtifact",
     "LeadClassificationReason",
+    "LeadPausedSearchHistoryEntry",
+    "LeadPausedSearchProfile",
+    "LeadRoutingReview",
+    "LeadRoutingReviewResolution",
+    "LeadRoutingReviewStatus",
+    "LeadStateClassificationOutcome",
     "LeadType",
+    "PausedSearchAction",
+    "PausedSearchReasonCode",
+    "PausedSearchSource",
     "PropertyEventType",
+    "lead_paused_search_profile",
 ]

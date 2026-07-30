@@ -51,6 +51,14 @@ def _empty_string_mapping() -> Mapping[str, str]:
     return {}
 
 
+def _empty_object_mapping() -> Mapping[str, str | int | float | bool | None]:
+    return {}
+
+
+def _empty_transcript_segments() -> tuple["CrmConversationTranscriptSegment", ...]:
+    return ()
+
+
 @dataclass(frozen=True)
 class WorkspaceHandoffConfig:
     workspace_id: WorkspaceId
@@ -198,4 +206,18 @@ class CrmConversationEvent:
     content: str | None = None
     actor_agent_id: str | None = None
     actor_name: str | None = None
+    details: Mapping[str, str | int | float | bool | None] = field(
+        default_factory=_empty_object_mapping
+    )
+    transcript_segments: tuple["CrmConversationTranscriptSegment", ...] = field(
+        default_factory=_empty_transcript_segments
+    )
     source_payload_version: str = "follow_up_boss/v1"
+
+
+@dataclass(frozen=True)
+class CrmConversationTranscriptSegment:
+    text: str
+    speaker_name: str | None = None
+    speaker_role: str | None = None
+    started_at: datetime | None = None

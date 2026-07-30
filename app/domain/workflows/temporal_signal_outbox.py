@@ -11,6 +11,7 @@ class TemporalSignalName(StrEnum):
     PAUSE_REQUESTED = "pause_requested"
     RESUME_REQUESTED = "resume_requested"
     BLOCKED_REVIEW_COMPLETED = "blocked_review_completed"
+    RESCHEDULE_REQUESTED = "reschedule_requested"
 
 
 class TemporalSignalOutboxStatus(StrEnum):

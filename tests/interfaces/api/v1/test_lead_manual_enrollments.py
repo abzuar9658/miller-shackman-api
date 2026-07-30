@@ -5,6 +5,13 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 
+from app.application.ports.crm import CRMClient
+from app.domain.campaigns import (
+    PausedSearchFallbackTimingPolicy,
+    PausedSearchReasonMapping,
+    PausedSearchTrackFamily,
+    PausedSearchTrackVersion,
+)
 from app.domain.campaigns.admin import CampaignAdminCampaign, CampaignAdminVersion
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.start_queue import CampaignStatus
@@ -16,7 +23,7 @@ from app.domain.identity import (
     WorkspaceMembershipStatus,
     WorkspaceStatus,
 )
-from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.leads import CanonicalLeadRecord, CRMProvider, PausedSearchReasonCode
 from app.interfaces.api.dependencies.lead_manual_enrollment import (
     LeadManualEnrollmentBundle,
     get_lead_manual_enrollment_bundle,
@@ -28,6 +35,12 @@ from tests.application.use_cases._campaign_admin_fakes import (
     FakeEventBus,
 )
 from tests.application.use_cases._campaign_cadence_fakes import (
+    FakeClassificationLLMClient,
+    FakeCrmConversationEventRepository,
+    FakeLeadClassificationArtifactRepository,
+    FakeLeadRepository,
+    FakeLeadRoutingReviewRepository,
+    FakeWorkspaceLLMConfigRepository,
     FakeWorkspaceOperationalControlRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
@@ -36,7 +49,19 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
     FakeTemporalWorkflowStarter,
     FakeWorkflowTransitionRepository,
 )
-from tests.application.use_cases._lead_read_fakes import FakeLeadRepository
+from tests.application.use_cases._lead_read_fakes import FakeUserRepository
+from tests.application.use_cases._paused_search_track_fakes import (
+    FakePausedSearchTrackAdminRepository,
+)
+from tests.application.use_cases.test_complete_handoff import (
+    FakeCRMClient,
+    FakeHandoffCompletionRepository,
+    FakeNotificationProvider,
+    FakeWorkspaceHandoffConfigRepository,
+)
+from tests.application.use_cases.test_process_inbound_message_event import (
+    FakeHandoffRepository,
+)
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -82,6 +107,41 @@ def test_assigned_agent_can_start_own_lead_when_campaign_allows() -> None:
 
     assert response.status_code == 200
     assert response.json()["status"] == "started"
+
+
+def test_manual_start_routes_to_paused_search_before_starting_workflow() -> None:
+    client = _client_for_role(
+        WorkspaceMembershipRole.BROKERAGE_ADMIN,
+        classification_outcome="paused_search",
+        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+    )
+
+    response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/manual-enrollments",
+        json={"campaign_id": str(CAMPAIGN_ID)},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "started"
+    assert response.json()["route"] == "paused_search"
+    assert client.starter.calls[0]["campaign_version_id"] == VERSION_ID
+
+
+def test_manual_start_returns_review_hold_when_classification_needs_review() -> None:
+    client = _client_for_role(
+        WorkspaceMembershipRole.BROKERAGE_ADMIN,
+        classification_outcome="review_hold",
+    )
+
+    response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/manual-enrollments",
+        json={"campaign_id": str(CAMPAIGN_ID)},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "review_hold"
+    assert response.json()["route"] == "review_hold"
+    assert client.starter.calls == []
 
 
 def test_assigned_agent_cannot_access_unowned_lead_manual_enrollment() -> None:
@@ -163,6 +223,9 @@ def _client_for_role(
     allow_assigned_agent_manual_enrollment: bool = True,
     campaign_status: CampaignStatus = CampaignStatus.ACTIVE,
     already_enrolled: bool = False,
+    classification_outcome: str = "dormant",
+    classification_confidence: float = 0.91,
+    pause_reason_code: PausedSearchReasonCode | None = None,
 ) -> LeadManualEnrollmentTestClient:
     app = create_app()
     lead = CanonicalLeadRecord(
@@ -213,6 +276,7 @@ def _client_for_role(
     )
     starter = FakeTemporalWorkflowStarter()
     enrollment_repository = FakeCampaignEnrollmentRepository()
+    lead_repository = FakeLeadRepository(lead)
     if already_enrolled:
         from app.domain.campaigns.enrollment import (
             CampaignEnrollment,
@@ -245,13 +309,31 @@ def _client_for_role(
     session = _FakeSession()
     bundle = LeadManualEnrollmentBundle(
         session=session,
-        lead_repository=FakeLeadRepository((lead,)),
+        lead_repository=lead_repository,
         campaign_admin_repository=campaign_repository,
         campaign_enrollment_repository=enrollment_repository,
         lead_workflow_repository=FakeLeadWorkflowRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
         workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
         temporal_workflow_starter=starter,
+        lead_classification_artifact_repository=FakeLeadClassificationArtifactRepository(),
+        paused_search_history_repository=lead_repository,
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
+        llm_client=FakeClassificationLLMClient(
+            outcome=classification_outcome,
+            confidence=classification_confidence,
+            pause_reason_code=(pause_reason_code.value if pause_reason_code is not None else None),
+        ),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        paused_search_track_repository=_track_repository(),
+        routing_review_repository=FakeLeadRoutingReviewRepository(),
+        default_openrouter_model="openai/gpt-4o-mini",
+        handoff_repository=FakeHandoffRepository(),
+        handoff_completion_repository=FakeHandoffCompletionRepository(),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(),
+        crm_client=cast(CRMClient, FakeCRMClient()),
+        notification_provider=FakeNotificationProvider(),
+        user_repository=FakeUserRepository({}),
         event_bus=FakeEventBus(),
     )
 
@@ -282,3 +364,40 @@ class _FakeSession:
 
     async def commit(self) -> None:
         self.commits += 1
+def _track_repository() -> FakePausedSearchTrackAdminRepository:
+    return FakePausedSearchTrackAdminRepository(
+        mappings=(
+            PausedSearchReasonMapping(
+                mapping_id=UUID("00000000-0000-0000-0000-000000000011"),
+                workspace_id=WORKSPACE_ID,
+                reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+                track_id=UUID("00000000-0000-0000-0000-000000000012"),
+                track_version_id=UUID("00000000-0000-0000-0000-000000000013"),
+                created_by_user_id=USER_ID,
+                created_at=NOW,
+            ),
+        ),
+        versions=(
+            PausedSearchTrackVersion(
+                track_version_id=UUID("00000000-0000-0000-0000-000000000013"),
+                workspace_id=WORKSPACE_ID,
+                track_id=UUID("00000000-0000-0000-0000-000000000012"),
+                version_number=1,
+                status=CampaignVersionStatus.PUBLISHED,
+                track_family=PausedSearchTrackFamily.MAINTENANCE,
+                enabled=True,
+                allowed_channels=(ContactChannel.EMAIL,),
+                default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
+                fallback_timing_policy=(
+                    PausedSearchFallbackTimingPolicy.USE_REENGAGEMENT_NOT_BEFORE
+                ),
+                maintenance_interval_days=30,
+                reactivation_window_days=30,
+                max_total_touches=6,
+                requires_review_before_publish=False,
+                created_by_user_id=USER_ID,
+                created_at=NOW,
+                published_at=NOW,
+            ),
+        ),
+    )

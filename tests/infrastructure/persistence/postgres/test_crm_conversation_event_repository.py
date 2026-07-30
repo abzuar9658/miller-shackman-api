@@ -5,7 +5,11 @@ from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
+from app.domain.conversations import (
+    CrmConversationEvent,
+    CrmConversationEventDirection,
+    CrmConversationTranscriptSegment,
+)
 from app.infrastructure.persistence.postgres.conversation_repository import (
     PostgresCrmConversationEventRepository,
 )
@@ -68,6 +72,15 @@ def _event(crm_activity_id: str = "act-1") -> CrmConversationEvent:
         content="Test content",
         actor_agent_id="user-1",
         actor_name="Agent One",
+        details={"duration_seconds": 40, "call_outcome": "Connected"},
+        transcript_segments=(
+            CrmConversationTranscriptSegment(
+                text="Hello from the CRM transcript",
+                speaker_name="Agent One",
+                speaker_role="agent",
+                started_at=NOW,
+            ),
+        ),
         source_payload_version="follow_up_boss/v1",
         created_at=NOW,
         updated_at=NOW,
@@ -87,6 +100,15 @@ def _model(crm_activity_id: str = "act-1") -> CrmConversationEventModel:
         content="Test content",
         actor_agent_id="user-1",
         actor_name="Agent One",
+        details={"duration_seconds": 40, "call_outcome": "Connected"},
+        transcript_segments=[
+            {
+                "text": "Hello from the CRM transcript",
+                "speaker_name": "Agent One",
+                "speaker_role": "agent",
+                "started_at": NOW.isoformat(),
+            }
+        ],
         source_payload_version="follow_up_boss/v1",
         created_at=NOW,
         updated_at=NOW,
@@ -136,3 +158,5 @@ async def test_save_maps_direction_enum_to_string() -> None:
 
     compiled = session.statements[0].compile()
     assert compiled.params["direction"] == "internal"
+    assert compiled.params["details"] == {"duration_seconds": 40, "call_outcome": "Connected"}
+    assert compiled.params["transcript_segments"][0]["speaker_name"] == "Agent One"

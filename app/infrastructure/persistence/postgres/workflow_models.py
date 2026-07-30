@@ -109,6 +109,14 @@ class LeadWorkflowModel(Base):
     current_step_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("campaign_cadence_steps.cadence_step_id")
     )
+    paused_search_track_version_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("paused_search_track_versions.track_version_id"),
+    )
+    paused_search_track_step_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("paused_search_track_steps.step_id"),
+    )
     next_action_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_transition_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     pause_reason: Mapped[str | None] = mapped_column(String(255))

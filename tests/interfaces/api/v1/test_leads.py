@@ -6,7 +6,11 @@ from uuid import UUID
 import time_machine
 from fastapi.testclient import TestClient
 
-from app.application.ports.lead_activity import LeadActivityItem, LeadActivityKind
+from app.application.ports.lead_activity import (
+    LeadActivityItem,
+    LeadActivityKind,
+    LeadActivityTranscriptSegment,
+)
 from app.application.ports.repositories import (
     CRMAgentRepository,
     UserRepository,
@@ -20,6 +24,15 @@ from app.domain.campaigns.execution import (
     CampaignVersionStatus,
 )
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
+from app.domain.campaigns.paused_search_tracks import (
+    PausedSearchFallbackTimingPolicy,
+    PausedSearchTrack,
+    PausedSearchTrackFamily,
+    PausedSearchTrackStatus,
+    PausedSearchTrackStep,
+    PausedSearchTrackStepPhase,
+    PausedSearchTrackVersion,
+)
 from app.domain.campaigns.pre_send import ProviderSendStatus
 from app.domain.campaigns.rejected_draft_review import (
     RejectedDraftReview,
@@ -61,9 +74,22 @@ from app.domain.leads import (
     CanonicalLeadRecord,
     CRMProvider,
     EffectiveOwnerSource,
+    LeadClassificationAppliedStatus,
+    LeadClassificationArtifact,
+    LeadPausedSearchHistoryEntry,
+    LeadPausedSearchProfile,
+    LeadRoutingReview,
+    LeadRoutingReviewResolution,
+    LeadRoutingReviewStatus,
+    LeadStateClassificationOutcome,
+    PausedSearchAction,
+    PausedSearchReasonCode,
+    PausedSearchSource,
 )
 from app.domain.workflows import (
     LeadWorkflow,
+    LeadWorkflowOverrideAction,
+    LeadWorkflowOverrideAuditLog,
     WorkflowState,
     WorkflowTransition,
     WorkflowTransitionReasonCode,
@@ -72,6 +98,10 @@ from app.interfaces.api.dependencies.lead_draft_review import (
     LeadDraftReviewActionBundle,
     get_lead_draft_review_action_bundle,
 )
+from app.interfaces.api.dependencies.lead_paused_search import (
+    LeadPausedSearchActionBundle,
+    get_lead_paused_search_action_bundle,
+)
 from app.interfaces.api.dependencies.lead_read import LeadReadBundle, get_lead_read_bundle
 from app.interfaces.api.dependencies.lead_resume import (
     LeadResumeActionBundle,
@@ -79,11 +109,16 @@ from app.interfaces.api.dependencies.lead_resume import (
     get_lead_resume_action_bundle,
     get_lead_resume_read_bundle,
 )
+from app.interfaces.api.dependencies.lead_workflow_overrides import (
+    LeadWorkflowOverrideActionBundle,
+    get_lead_workflow_override_action_bundle,
+)
 from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.main import create_app
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCampaignExecutionRepository,
     FakeEmailProvider,
+    FakeLeadRoutingReviewRepository,
     FakeSMSProvider,
     FakeWorkspaceContactPolicyRepository,
     FakeWorkspaceOperationalControlRepository,
@@ -103,12 +138,18 @@ from tests.application.use_cases._lead_read_fakes import (
     FakeHandoffRepository,
     FakeInboundMessageRepository,
     FakeLeadActivityRepository,
+    FakeLeadClassificationArtifactRepository,
+    FakeLeadPausedSearchHistoryRepository,
     FakeLeadRepository,
+    FakeLeadWorkflowOverrideAuditLogRepository,
     FakeLeadWorkflowRepository,
     FakeOutboundMessageRepository,
     FakeRejectedDraftReviewRepository,
     FakeUserRepository,
     FakeWorkflowTransitionRepository,
+)
+from tests.application.use_cases._paused_search_track_fakes import (
+    FakePausedSearchTrackAdminRepository,
 )
 from tests.application.use_cases.test_process_inbound_message_event import (
     FakeCRMClient,
@@ -278,7 +319,13 @@ class FakeWorkspaceMembershipRepository:
 
 
 def test_lead_routes_return_list_and_detail() -> None:
-    client = _client_for_role(WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    client = _client_for_role(
+        WorkspaceMembershipRole.BROKERAGE_ADMIN,
+        routing_reviews=(
+            _resolved_routing_review(),
+            _superseded_routing_review(),
+        ),
+    )
 
     list_response = client.client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/leads")
     detail_response = client.client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}")
@@ -293,7 +340,7 @@ def test_lead_routes_return_list_and_detail() -> None:
     }
     assert list_payload["ownership"]["mapped_app_user"]["user_id"] == str(USER_ID)
     assert list_payload["has_activity"] is True
-    assert list_payload["activity_count"] == 3
+    assert list_payload["activity_count"] == 4
     assert list_payload["inbound_message_count"] == 1
     assert list_payload["latest_activity_preview"] is not None
     assert detail_response.status_code == 200
@@ -304,15 +351,88 @@ def test_lead_routes_return_list_and_detail() -> None:
     }
     assert detail_response.json()["ownership"]["mapped_app_user"]["user_id"] == str(USER_ID)
     assert detail_response.json()["ownership"]["mapped_app_user"]["email"] == "agent@example.com"
+    assert (
+        detail_response.json()["lead"]["paused_search"]["pause_reason_code"]
+        == "waiting_for_rates"
+    )
+    assert detail_response.json()["qualification_plan"]["classification_artifact"]["outcome"] == (
+        "paused_search"
+    )
+    assert detail_response.json()["qualification_plan"]["classification_artifact"][
+        "pause_reason_code"
+    ] == "waiting_for_rates"
+    trace = detail_response.json()["qualification_plan"]["classification_artifact"]["llm_trace"]
+    assert trace["prompt_text"] == "Prompt text for paused-search classification."
+    assert trace["input_context"]["conversation_summary"] == "Lead asked to wait for lower rates."
+    assert trace["parsed_response"]["outcome"] == "paused_search"
+    assert detail_response.json()["qualification_plan"]["paused_search_plan"][
+        "display_name"
+    ] == "Rates Watch"
+    assert detail_response.json()["qualification_plan"]["paused_search_plan"][
+        "current_phase"
+    ] == "reactivation"
+    paused_search_edge = next(
+        edge
+        for edge in detail_response.json()["decision_tree"]["edges"]
+        if edge["edge_id"] == "route_decision->paused_search"
+    )
+    assert paused_search_edge["description"] is not None
+    assert any(
+        "Classifier summary: Pause until rates settle, then re-engage." == line
+        for line in paused_search_edge["detail_lines"]
+    )
+    assert any(
+        "Possible paused-search phases on this track:" in line
+        for line in paused_search_edge["detail_lines"]
+    )
+    assert detail_response.json()["paused_search_history"][0]["action"] == "set"
     assert len(detail_response.json()["workflow_transitions"]) == 1
+    assert (
+        detail_response.json()["workflow_override_audits"][0]["action"]
+        == "paused_search_timing_changed"
+    )
     assert detail_response.json()["workflow_transitions"][0]["metadata"]["draft_reasons"] == [
         "safety_flags_present"
     ]
+    assert [review["status"] for review in detail_response.json()["routing_reviews"]] == [
+        "resolved",
+        "superseded",
+    ]
+    assert detail_response.json()["routing_reviews"][0]["resolution"] == "paused_search"
     assert len(detail_response.json()["rejected_draft_reviews"]) == 1
-    assert len(detail_response.json()["activity_log"]) == 3
+    assert len(detail_response.json()["activity_log"]) == 4
+    crm_activity = next(
+        item
+        for item in detail_response.json()["activity_log"]
+        if item["kind"] == "crm_conversation_event"
+    )
+    assert crm_activity["content"] == (
+        "Agent Ada: We can reconnect once you are back in town.\n"
+        "Jordan Buyer: Sounds good, call me in two weeks."
+    )
+    assert crm_activity["details"] == {
+        "duration_seconds": 40,
+        "call_outcome": "Connected",
+        "transcript_segment_count": 2,
+    }
+    assert crm_activity["transcript_segments"][0]["speaker_name"] == "Agent Ada"
     assert len(detail_response.json()["inbound_messages"]) == 1
     assert detail_response.json()["inbound_messages"][0]["from_address_redacted"] is None
     assert detail_response.json()["inbound_messages"][0]["to_address_redacted"] is None
+
+
+def test_review_queue_route_returns_pending_items_for_brokerage_admin() -> None:
+    client = _client_for_role(WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    response = client.client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/review-queue")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert len(payload["items"]) == 1
+    assert payload["items"][0]["review"]["status"] == "pending"
+    assert payload["items"][0]["lead"]["lead_id"] == str(LEAD_ID)
+    assert payload["items"][0]["artifact"]["outcome"] == "review_hold"
 
 
 def test_admin_can_approve_rejected_draft_review() -> None:
@@ -388,6 +508,71 @@ def test_resume_routes_return_eligibility_and_request_resume() -> None:
     assert len(client.outbox.entries) == 1
 
 
+def test_pause_route_requests_manual_pause() -> None:
+    client = _client_for_role(
+        WorkspaceMembershipRole.BROKERAGE_ADMIN,
+        workflow_state=WorkflowState.ACTIVE_NURTURE,
+    )
+
+    response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/pause",
+        json={"reason": "Agent asked to pause automated follow-up."},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "requested"
+    assert response.json()["workflow_state"] == "paused"
+    assert response.json()["signal_queued"] is True
+    assert len(client.outbox.entries) == 1
+
+
+def test_update_paused_search_route_updates_profile_and_history() -> None:
+    client = _client_for_role(WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    response = client.client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search",
+        json={
+            "active": True,
+            "reason_code": "waiting_for_inventory",
+            "reason_note": "Holding for new listings this fall.",
+            "reengagement_not_before": "2030-03-01T12:00:00Z",
+            "reengagement_window_label": "fall inventory",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "updated"
+    assert payload["paused_search"]["pause_reason_code"] == "waiting_for_inventory"
+    assert payload["history_entry"]["action"] == "updated"
+
+
+def test_assigned_agent_cannot_update_unowned_paused_search_profile() -> None:
+    client = _client_for_role(
+        WorkspaceMembershipRole.ASSIGNED_AGENT,
+        assigned_agent_user_id=UUID("00000000-0000-0000-0000-000000000099"),
+    )
+
+    response = client.client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search",
+        json={"active": True, "reason_code": "timing_not_right"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == ["permission_denied"]
+
+
+def test_clear_paused_search_request_rejects_extra_fields() -> None:
+    client = _client_for_role(WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    response = client.client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search",
+        json={"active": False, "reason_code": "timing_not_right"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_assigned_agent_can_resume_own_lead() -> None:
     client = _client_for_role(WorkspaceMembershipRole.ASSIGNED_AGENT)
 
@@ -453,6 +638,7 @@ def _client_for_role(
     email_permission_status: ContactPermissionStatus = ContactPermissionStatus.CONFIRMED,
     workflow_state: WorkflowState = WorkflowState.PAUSED,
     workflow_pause_reason: str | None = None,
+    routing_reviews: tuple[LeadRoutingReview, ...] | None = None,
 ) -> LeadsTestClient:
     app = create_app()
     lead = CanonicalLeadRecord(
@@ -476,6 +662,15 @@ def _client_for_role(
         sms_permission_status=sms_permission_status,
         email_permission_status=email_permission_status,
         do_not_contact=False,
+        paused_search_active=True,
+        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        pause_reason_note="Asked to revisit once rates settle.",
+        reengagement_not_before=NOW,
+        reengagement_window_label="check back in 90 days",
+        paused_search_source=PausedSearchSource.OPERATOR,
+        paused_search_recorded_at=NOW,
+        paused_search_recorded_by_user_id=USER_ID,
+        paused_search_last_confirmed_at=NOW,
         mapped_custom_fields={
             "assigned_agent_user_id": str(assigned_agent_user_id),
             "display_name": "Jordan Seller",
@@ -493,7 +688,10 @@ def _client_for_role(
         state_version=1,
         created_at=NOW,
         updated_at=NOW,
+        next_action_at=NOW,
         pause_reason=workflow_pause_reason,
+        paused_search_track_version_id=UUID("00000000-0000-0000-0000-000000000052"),
+        paused_search_track_step_id=UUID("00000000-0000-0000-0000-000000000053"),
     )
     policy_repository = FakeWorkspaceContactPolicyRepository(
         WorkspaceContactPolicy(
@@ -503,9 +701,41 @@ def _client_for_role(
     )
     outbox = FakeTemporalSignalOutboxRepository()
     crm_client = LeadRouteCRMClient()
+    lead_repository = FakeLeadRepository((lead,))
+    paused_search_history_repository = FakeLeadPausedSearchHistoryRepository(
+        (
+            LeadPausedSearchHistoryEntry(
+                history_id=UUID("00000000-0000-0000-0000-000000000041"),
+                workspace_id=WORKSPACE_ID,
+                lead_id=LEAD_ID,
+                action=PausedSearchAction.SET,
+                previous_profile=None,
+                current_profile=LeadPausedSearchProfile(
+                    paused_search_active=True,
+                    pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+                    pause_reason_note="Asked to revisit once rates settle.",
+                    reengagement_not_before=NOW,
+                    reengagement_window_label="check back in 90 days",
+                    paused_search_source=PausedSearchSource.OPERATOR,
+                    paused_search_recorded_at=NOW,
+                    paused_search_recorded_by_user_id=USER_ID,
+                    paused_search_last_confirmed_at=NOW,
+                ),
+                actor_user_id=USER_ID,
+                created_at=NOW,
+            ),
+        )
+    )
     bundle = LeadReadBundle(
-        lead_repository=FakeLeadRepository((lead,)),
+        lead_repository=lead_repository,
+        paused_search_history_repository=paused_search_history_repository,
+        classification_artifact_repository=FakeLeadClassificationArtifactRepository(
+            (_classification_artifact(), _review_queue_artifact())
+        ),
         workflow_repository=FakeLeadWorkflowRepository((workflow,)),
+        workflow_override_audit_repository=FakeLeadWorkflowOverrideAuditLogRepository(
+            (_workflow_override_audit_log(),)
+        ),
         workflow_transition_repository=FakeWorkflowTransitionRepository(
             (
                 WorkflowTransition(
@@ -528,6 +758,11 @@ def _client_for_role(
                     },
                 ),
             )
+        ),
+        paused_search_track_repository=FakePausedSearchTrackAdminRepository(
+            tracks=(_paused_search_track(),),
+            versions=(_paused_search_track_version(),),
+            steps=(_paused_search_track_step(),),
         ),
         activity_repository=FakeLeadActivityRepository(_activity_items()),
         rejected_draft_review_repository=FakeRejectedDraftReviewRepository(
@@ -596,6 +831,7 @@ def _client_for_role(
             }
         ),
         crm_agent_repository=FakeCRMAgentRepository(),
+        routing_review_repository=_routing_review_repository(routing_reviews),
         workspace_contact_policy_repository=policy_repository,
     )
     resume_read_bundle = LeadResumeReadBundle(
@@ -612,6 +848,24 @@ def _client_for_role(
         workflow_transition_repository=FakeWorkflowTransitionRepository(()),
         temporal_signal_outbox_repository=outbox,
         external_event_repository=_FakeExternalEventRepository(),
+    )
+    paused_search_action_bundle = LeadPausedSearchActionBundle(
+        session=_FakeSession(),
+        lead_repository=lead_repository,
+        paused_search_history_repository=paused_search_history_repository,
+        lead_workflow_repository=FakeLeadWorkflowRepository((workflow,)),
+        paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
+        temporal_signal_outbox_repository=outbox,
+    )
+    workflow_override_action_bundle = LeadWorkflowOverrideActionBundle(
+        session=_FakeSession(),
+        lead_repository=lead_repository,
+        paused_search_history_repository=paused_search_history_repository,
+        lead_workflow_repository=FakeLeadWorkflowRepository((workflow,)),
+        lead_workflow_override_audit_repository=FakeLeadWorkflowOverrideAuditLogRepository(()),
+        paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
+        temporal_signal_outbox_repository=outbox,
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
     )
     draft_review_action_bundle = LeadDraftReviewActionBundle(
         session=_FakeSession(),
@@ -653,14 +907,242 @@ def _client_for_role(
     app.dependency_overrides[get_lead_read_bundle] = lambda: bundle
     app.dependency_overrides[get_lead_resume_read_bundle] = lambda: resume_read_bundle
     app.dependency_overrides[get_lead_resume_action_bundle] = lambda: resume_action_bundle
+    app.dependency_overrides[get_lead_paused_search_action_bundle] = (
+        lambda: paused_search_action_bundle
+    )
+    app.dependency_overrides[get_lead_workflow_override_action_bundle] = (
+        lambda: workflow_override_action_bundle
+    )
     app.dependency_overrides[get_lead_draft_review_action_bundle] = lambda: (
         draft_review_action_bundle
     )
     return LeadsTestClient(client=TestClient(app), outbox=outbox, crm_client=crm_client)
 
 
+def _classification_artifact() -> LeadClassificationArtifact:
+    return LeadClassificationArtifact(
+        artifact_id=UUID("00000000-0000-0000-0000-000000000051"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        source="ai_conversation_classification",
+        outcome=LeadStateClassificationOutcome.PAUSED_SEARCH,
+        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        reengagement_not_before=NOW,
+        reengagement_window_label="check back in 90 days",
+        confidence=0.94,
+        evidence=("Lead asked to wait for lower rates.",),
+        summary="Pause until rates settle, then re-engage.",
+        model="openai/gpt-4o-mini",
+        prompt_version="lead_state_classification:v1",
+        latency_ms=701,
+        usage_tokens=512,
+        applied_status=LeadClassificationAppliedStatus.APPLIED,
+        applied_at=NOW,
+        created_at=NOW,
+        prompt_text="Prompt text for paused-search classification.",
+        input_context={
+            "conversation_summary": "Lead asked to wait for lower rates.",
+            "recent_messages": [
+                {
+                    "content": "Let's reconnect when rates come down.",
+                    "timestamp": NOW.isoformat(),
+                    "direction": "inbound",
+                }
+            ],
+        },
+        raw_llm_response_text=(
+            '{"outcome":"paused_search","pause_reason_code":"waiting_for_rates"}'
+        ),
+        parsed_llm_response={
+            "outcome": "paused_search",
+            "pause_reason_code": "waiting_for_rates",
+            "confidence": 0.94,
+            "summary": "Pause until rates settle, then re-engage.",
+        },
+    )
+
+
+def _review_queue_artifact() -> LeadClassificationArtifact:
+    return LeadClassificationArtifact(
+        artifact_id=UUID("00000000-0000-0000-0000-000000000061"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        source="ai_conversation_classification",
+        outcome=LeadStateClassificationOutcome.REVIEW_HOLD,
+        pause_reason_code=None,
+        reengagement_not_before=None,
+        reengagement_window_label=None,
+        confidence=0.55,
+        evidence=("Low confidence",),
+        summary="Needs manager review.",
+        model="openai/gpt-4o-mini",
+        prompt_version="lead_state_classification:v1",
+        latency_ms=220,
+        usage_tokens=84,
+        applied_status=LeadClassificationAppliedStatus.REVIEW,
+        applied_at=None,
+        created_at=NOW,
+        prompt_text="Prompt text for review-hold classification.",
+        input_context={
+            "conversation_summary": "Lead intent was unclear and needs review.",
+            "recent_messages": [
+                {
+                    "content": "Can you explain this situation more clearly?",
+                    "timestamp": NOW.isoformat(),
+                    "direction": "inbound",
+                }
+            ],
+        },
+        raw_llm_response_text='{"outcome":"review_hold","confidence":0.55}',
+        parsed_llm_response={
+            "outcome": "review_hold",
+            "confidence": 0.55,
+            "summary": "Needs manager review.",
+        },
+    )
+
+
+def _routing_review_repository(
+    reviews: tuple[LeadRoutingReview, ...] | None = None,
+) -> FakeLeadRoutingReviewRepository:
+    repository = FakeLeadRoutingReviewRepository()
+    repository.saved.extend(reviews or (_pending_routing_review(),))
+    return repository
+
+
+def _pending_routing_review() -> LeadRoutingReview:
+    return LeadRoutingReview(
+        review_id=UUID("00000000-0000-0000-0000-000000000062"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        artifact_id=UUID("00000000-0000-0000-0000-000000000061"),
+        status=LeadRoutingReviewStatus.PENDING,
+        reason_codes=("classification_rejected",),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _resolved_routing_review() -> LeadRoutingReview:
+    return LeadRoutingReview(
+        review_id=UUID("00000000-0000-0000-0000-000000000063"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        artifact_id=UUID("00000000-0000-0000-0000-000000000061"),
+        status=LeadRoutingReviewStatus.RESOLVED,
+        reason_codes=("classification_rejected",),
+        resolution=LeadRoutingReviewResolution.PAUSED_SEARCH,
+        reviewed_by_user_id=USER_ID,
+        reviewed_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _superseded_routing_review() -> LeadRoutingReview:
+    return LeadRoutingReview(
+        review_id=UUID("00000000-0000-0000-0000-000000000064"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        artifact_id=UUID("00000000-0000-0000-0000-000000000061"),
+        status=LeadRoutingReviewStatus.SUPERSEDED,
+        reason_codes=("stale_review",),
+        reviewed_by_user_id=USER_ID,
+        reviewed_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _paused_search_track() -> PausedSearchTrack:
+    return PausedSearchTrack(
+        track_id=UUID("00000000-0000-0000-0000-000000000054"),
+        workspace_id=WORKSPACE_ID,
+        track_key="rates-watch",
+        display_name="Rates Watch",
+        status=PausedSearchTrackStatus.ACTIVE,
+        active_version_id=UUID("00000000-0000-0000-0000-000000000052"),
+        created_by_user_id=USER_ID,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _paused_search_track_version() -> PausedSearchTrackVersion:
+    return PausedSearchTrackVersion(
+        track_version_id=UUID("00000000-0000-0000-0000-000000000052"),
+        workspace_id=WORKSPACE_ID,
+        track_id=UUID("00000000-0000-0000-0000-000000000054"),
+        version_number=2,
+        status=CampaignVersionStatus.PUBLISHED,
+        track_family=PausedSearchTrackFamily.REACTIVATION,
+        enabled=True,
+        allowed_channels=(ContactChannel.SMS, ContactChannel.EMAIL),
+        default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
+        fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_REENGAGEMENT_NOT_BEFORE,
+        maintenance_interval_days=30,
+        reactivation_window_days=14,
+        max_total_touches=5,
+        requires_review_before_publish=False,
+        created_by_user_id=USER_ID,
+        created_at=NOW,
+        published_at=NOW,
+    )
+
+
+def _paused_search_track_step() -> PausedSearchTrackStep:
+    return PausedSearchTrackStep(
+        step_id=UUID("00000000-0000-0000-0000-000000000053"),
+        workspace_id=WORKSPACE_ID,
+        track_version_id=UUID("00000000-0000-0000-0000-000000000052"),
+        step_order=1,
+        phase=PausedSearchTrackStepPhase.REACTIVATION,
+        channel=ContactChannel.EMAIL,
+        delay_hours=0,
+        message_goal="Check whether rates improved enough to restart the search.",
+        template_key="paused_search_rates_watch_reactivation",
+        max_attempts=1,
+        review_required=False,
+        created_at=NOW,
+    )
+
+
 def _activity_items() -> tuple[LeadActivityItem, ...]:
     return (
+        LeadActivityItem(
+            activity_id=UUID("00000000-0000-0000-0000-000000000012"),
+            lead_id=LEAD_ID,
+            kind=LeadActivityKind.CRM_CONVERSATION_EVENT,
+            occurred_at=NOW,
+            title="CRM call logged",
+            preview="We can reconnect once you are back in town.",
+            content=(
+                "Agent Ada: We can reconnect once you are back in town.\n"
+                "Jordan Buyer: Sounds good, call me in two weeks."
+            ),
+            direction="inbound",
+            status="Call",
+            actor_name="Agent Ada",
+            details={
+                "duration_seconds": 40,
+                "call_outcome": "Connected",
+                "transcript_segment_count": 2,
+            },
+            transcript_segments=(
+                LeadActivityTranscriptSegment(
+                    text="We can reconnect once you are back in town.",
+                    speaker_name="Agent Ada",
+                    speaker_role="agent",
+                    started_at=NOW,
+                ),
+                LeadActivityTranscriptSegment(
+                    text="Sounds good, call me in two weeks.",
+                    speaker_name="Jordan Buyer",
+                    speaker_role="lead",
+                    started_at=NOW,
+                ),
+            ),
+        ),
         LeadActivityItem(
             activity_id=UUID("00000000-0000-0000-0000-000000000008"),
             lead_id=LEAD_ID,
@@ -733,6 +1215,20 @@ def _workspace() -> Workspace:
         default_timezone="America/Chicago",
         created_at=NOW,
         updated_at=NOW,
+    )
+
+
+def _workflow_override_audit_log() -> LeadWorkflowOverrideAuditLog:
+    return LeadWorkflowOverrideAuditLog(
+        audit_log_id=UUID("00000000-0000-0000-0000-000000000040"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        workflow_id=WORKFLOW_ID,
+        actor_user_id=USER_ID,
+        action=LeadWorkflowOverrideAction.TIMING_CHANGED,
+        reason="Move the follow-up to later in the year.",
+        details={"new_reengagement_window_label": "fall inventory"},
+        created_at=NOW,
     )
 
 

@@ -14,15 +14,19 @@ from app.application.ports.repositories import (
     CampaignExecutionRepository,
     ConversationRepository,
     ConversationSummaryRepository,
+    CrmConversationEventRepository,
     ExternalEventRepository,
     HandoffCompletionRepository,
     HandoffRepository,
     InboundMessageCRMCompletionRepository,
     InboundMessageRepository,
+    LeadClassificationArtifactRepository,
     LeadRepository,
+    LeadRoutingReviewRepository,
     LeadWorkflowRepository,
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
+    PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     UserRepository,
     WorkflowTransitionRepository,
@@ -45,6 +49,7 @@ from app.infrastructure.persistence.postgres.campaign_execution_repository impor
 from app.infrastructure.persistence.postgres.conversation_repository import (
     PostgresConversationRepository,
     PostgresConversationSummaryRepository,
+    PostgresCrmConversationEventRepository,
     PostgresHandoffCompletionRepository,
     PostgresHandoffRepository,
     PostgresInboundMessageCRMCompletionRepository,
@@ -57,7 +62,13 @@ from app.infrastructure.persistence.postgres.identity_repository import (
     PostgresUserRepository,
     PostgresWorkspaceRepository,
 )
+from app.infrastructure.persistence.postgres.lead_classification_artifact_repository import (
+    PostgresLeadClassificationArtifactRepository,
+)
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
+from app.infrastructure.persistence.postgres.lead_routing_review_repository import (
+    PostgresLeadRoutingReviewRepository,
+)
 from app.infrastructure.persistence.postgres.outbound_message_repository import (
     PostgresOutboundMessageCRMCompletionRepository,
     PostgresOutboundMessageRepository,
@@ -65,6 +76,9 @@ from app.infrastructure.persistence.postgres.outbound_message_repository import 
 from app.infrastructure.persistence.postgres.outbox_event_repository import (
     PostgresOutboxEventRepository,
     PostgresTransactionalEventBus,
+)
+from app.infrastructure.persistence.postgres.paused_search_track_repository import (
+    PostgresPausedSearchTrackAdminRepository,
 )
 from app.infrastructure.persistence.postgres.temporal_signal_outbox_repository import (
     PostgresTemporalSignalOutboxRepository,
@@ -110,11 +124,14 @@ class InboundServiceBundle:
     external_event_repository: ExternalEventRepository
     conversation_repository: ConversationRepository
     inbound_message_repository: InboundMessageRepository
+    crm_conversation_event_repository: CrmConversationEventRepository
+    lead_classification_artifact_repository: LeadClassificationArtifactRepository
     conversation_summary_repository: ConversationSummaryRepository
     handoff_repository: HandoffRepository
     handoff_completion_repository: HandoffCompletionRepository
     inbound_message_crm_completion_repository: InboundMessageCRMCompletionRepository
     outbound_message_crm_completion_repository: OutboundMessageCRMCompletionRepository
+    paused_search_track_repository: PausedSearchTrackMappingRepository
     lead_workflow_repository: LeadWorkflowRepository
     workflow_transition_repository: WorkflowTransitionRepository
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository
@@ -136,6 +153,7 @@ class InboundServiceBundle:
     sms_provider: SMSProvider
     email_provider: EmailProvider
     user_repository: UserRepository | None = None
+    routing_review_repository: LeadRoutingReviewRepository | None = None
 
 
 async def get_inbound_service_bundle(
@@ -148,6 +166,8 @@ async def get_inbound_service_bundle(
         external_event_repository=PostgresExternalEventRepository(session),
         conversation_repository=PostgresConversationRepository(session),
         inbound_message_repository=PostgresInboundMessageRepository(session),
+        crm_conversation_event_repository=PostgresCrmConversationEventRepository(session),
+        lead_classification_artifact_repository=PostgresLeadClassificationArtifactRepository(session),
         conversation_summary_repository=PostgresConversationSummaryRepository(session),
         handoff_repository=PostgresHandoffRepository(session),
         handoff_completion_repository=PostgresHandoffCompletionRepository(session),
@@ -158,6 +178,7 @@ async def get_inbound_service_bundle(
         outbound_message_crm_completion_repository=PostgresOutboundMessageCRMCompletionRepository(
             session
         ),
+        paused_search_track_repository=PostgresPausedSearchTrackAdminRepository(session),
         lead_workflow_repository=PostgresLeadWorkflowRepository(session),
         workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
         workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
@@ -182,4 +203,5 @@ async def get_inbound_service_bundle(
         message_repository=PostgresOutboundMessageRepository(session),
         sms_provider=build_sms_provider(settings),
         email_provider=build_email_provider(settings),
+        routing_review_repository=PostgresLeadRoutingReviewRepository(session),
     )

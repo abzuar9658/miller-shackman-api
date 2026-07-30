@@ -4,7 +4,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.application.ports.repositories import CampaignAdminRepository
+from app.application.ports.preflight_digest import PreflightDigestRepository
+from app.application.ports.repositories import (
+    CampaignAdminRepository,
+    CRMAgentRepository,
+    WorkspaceAgentCRMMappingRepository,
+)
+from app.application.services.preflight_actor_resolution import actor_preflight_recipient_ids
 from app.application.use_cases.campaign_admin import (
     CampaignAdminReasonCode,
     CampaignCadenceStepInput,
@@ -478,7 +484,17 @@ async def run_dormant_selector_route(
         preflight_digest_repository=bundle.preflight_digest_repository,
         notification_provider=bundle.notification_provider,
         crm_client=bundle.crm_client,
+        lead_repository=bundle.lead_repository,
+        paused_search_history_repository=bundle.paused_search_history_repository,
+        artifact_repository=bundle.artifact_repository,
+        crm_conversation_event_repository=bundle.crm_conversation_event_repository,
+        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
+        llm_client=bundle.llm_client,
+        default_openrouter_model=bundle.default_openrouter_model,
+        paused_search_track_repository=bundle.paused_search_track_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         event_bus=bundle.event_bus,
+        routing_review_repository=bundle.routing_review_repository,
         workspace_operational_control_repository=bundle.workspace_operational_control_repository,
         now=datetime.now(UTC),
     )
@@ -521,6 +537,7 @@ async def run_dormant_selector_route(
         selected_count=result.selected_count,
         held_back_count=result.held_back_count,
         started_count=result.started_count,
+        paused_search_started_count=result.paused_search_started_count,
         veto_window_expires_at=result.veto_window_expires_at,
         reason=result.reason,
     )
@@ -538,19 +555,39 @@ async def record_preflight_veto_route(
     actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
     bundle: Annotated[CampaignServiceBundle, Depends(get_campaign_service_bundle)],
 ) -> RecordPreflightVetoResponse:
-    if actor.active_role not in _ALLOWED_DORMANT_SELECTOR_ROLES:
+    if actor.active_role not in _ALLOWED_PREFLIGHT_VETO_ROLES:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only brokerage admins and managers may record preflight vetoes.",
+            detail="Only assigned agents, managers, and brokerage admins may record preflight vetoes.",  # noqa: E501
         )
 
     actor_role = _veto_role_from_membership(actor.active_role)
+    actor_id = str(actor.user_id)
+
+    if actor_role == VetoActorRole.ASSIGNED_AGENT:
+        resolved_actor_id = await _resolve_assigned_agent_veto_actor_id(
+            actor=actor,
+            workspace_id=workspace_id,
+            campaign_id=campaign_id,
+            batch_id=batch_id,
+            lead_id=request.lead_id,
+            preflight_digest_repository=bundle.preflight_digest_repository,
+            crm_agent_repository=bundle.crm_agent_repository,
+            workspace_agent_crm_mapping_repository=bundle.workspace_agent_crm_mapping_repository,
+        )
+        if resolved_actor_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=["unauthorized_veto_actor"],
+            )
+        actor_id = resolved_actor_id
+
     result = await record_preflight_veto(
         workspace_id=workspace_id,
         campaign_id=campaign_id,
         batch_id=batch_id,
         lead_id=request.lead_id,
-        actor_id=str(actor.user_id),
+        actor_id=actor_id,
         actor_role=actor_role,
         reason=request.reason,
         policy=PreflightVetoPolicy(),
@@ -571,10 +608,50 @@ async def record_preflight_veto_route(
         lead_id=result.lead_id,
         recorded=result.recorded,
         recorded_at=result.recorded_at,
-        actor_id=UUID(result.actor_id),
+        actor_id=result.actor_id,
         duplicate=result.duplicate,
         reasons=[reason.value for reason in result.reasons],
     )
+
+
+_ALLOWED_PREFLIGHT_VETO_ROLES: frozenset[WorkspaceMembershipRole] = frozenset(
+    {
+        WorkspaceMembershipRole.ASSIGNED_AGENT,
+        WorkspaceMembershipRole.MANAGER,
+        WorkspaceMembershipRole.BROKERAGE_ADMIN,
+    }
+)
+
+
+async def _resolve_assigned_agent_veto_actor_id(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: UUID,
+    campaign_id: UUID,
+    batch_id: str,
+    lead_id: UUID,
+    preflight_digest_repository: PreflightDigestRepository,
+    crm_agent_repository: CRMAgentRepository,
+    workspace_agent_crm_mapping_repository: WorkspaceAgentCRMMappingRepository,
+) -> str | None:
+    digest = await preflight_digest_repository.get_digest(workspace_id, campaign_id, batch_id)
+    if digest is None:
+        return None
+    matching_entry = next(
+        (entry for entry in digest.entries if entry.lead_id == lead_id),
+        None,
+    )
+    if matching_entry is None:
+        return None
+    recipient_ids = await actor_preflight_recipient_ids(
+        actor=actor,
+        workspace_id=workspace_id,
+        crm_agent_repository=crm_agent_repository,
+        workspace_agent_crm_mapping_repository=workspace_agent_crm_mapping_repository,
+    )
+    if matching_entry.recipient_id not in recipient_ids:
+        return None
+    return matching_entry.recipient_id
 
 
 def _veto_role_from_membership(role: WorkspaceMembershipRole) -> VetoActorRole:
@@ -582,6 +659,8 @@ def _veto_role_from_membership(role: WorkspaceMembershipRole) -> VetoActorRole:
         return VetoActorRole.BROKERAGE_ADMIN
     if role == WorkspaceMembershipRole.MANAGER:
         return VetoActorRole.MANAGER
+    if role == WorkspaceMembershipRole.ASSIGNED_AGENT:
+        return VetoActorRole.ASSIGNED_AGENT
     return VetoActorRole.UNAUTHORIZED
 
 

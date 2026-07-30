@@ -37,6 +37,7 @@ from app.domain.common.ids import CampaignId, LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel, WorkspaceContactPolicy
 from app.domain.conversations import CrmConversationEvent
 from app.domain.leads import CanonicalLeadRecord
+from app.domain.outbound_drafting import OutboundJourneyKind
 
 OUTBOUND_CONTEXT_ACTIVITY_HISTORY_LIMIT = 24
 
@@ -62,16 +63,17 @@ class PlanNextOutboundMessageContext:
     campaign_goal: str
     brokerage_name: str
     cadence_step_id: str
+    template_key: str | None = None
     assigned_agent_name: str | None = None
     scheduled_for: datetime | None = None
     message_version: int = 1
     pre_send_policy: PreSendPolicy = field(default_factory=PreSendPolicy)
+    journey_kind: OutboundJourneyKind | None = None
     preflight_vetoed: bool = False
     handoff_active: bool = False
     human_owned: bool = False
     lead_replied_since_scheduled: bool = False
     recent_human_activity: bool = False
-    ownership_changed: bool = False
     last_global_outreach_at: datetime | None = None
     last_campaign_outreach_at: datetime | None = None
     last_channel_outreach_at: datetime | None = None
@@ -103,7 +105,7 @@ async def plan_next_outbound_message_for_lead(
     listing_snapshot_repository: ListingSnapshotRepository | None = None,
     listing_search_client: ListingSearchClient | None = None,
     listing_enrichment_enabled: bool = False,
-    listing_cache_ttl: timedelta = timedelta(hours=6),
+    listing_cache_ttl: timedelta = timedelta(hours=1),
     listing_max_results: int = 3,
     message_id_factory: Callable[[], UUID] | None = None,
 ) -> PlanOutboundMessageResult:
@@ -112,6 +114,11 @@ async def plan_next_outbound_message_for_lead(
         return PlanOutboundMessageResult(
             status=PlanOutboundMessageStatus.REJECTED,
             reasons=(PlanOutboundMessageReasonCode.LEAD_NOT_FOUND,),
+        )
+    if not context.enabled_channels:
+        return PlanOutboundMessageResult(
+            status=PlanOutboundMessageStatus.REJECTED,
+            reasons=(PlanOutboundMessageReasonCode.NO_ENABLED_CHANNELS,),
         )
 
     activity_items = context.activity_items
@@ -146,16 +153,17 @@ async def plan_next_outbound_message_for_lead(
         campaign_goal=context.campaign_goal,
         brokerage_name=context.brokerage_name,
         cadence_step_id=context.cadence_step_id,
+        template_key=context.template_key,
         assigned_agent_name=context.assigned_agent_name or _assigned_agent_name_from_lead(lead),
         scheduled_for=context.scheduled_for,
         message_version=context.message_version,
         pre_send_policy=context.pre_send_policy,
+        journey_kind=context.journey_kind,
         preflight_vetoed=context.preflight_vetoed,
         handoff_active=context.handoff_active,
         human_owned=context.human_owned,
         lead_replied_since_scheduled=context.lead_replied_since_scheduled,
         recent_human_activity=context.recent_human_activity,
-        ownership_changed=context.ownership_changed,
         last_global_outreach_at=context.last_global_outreach_at,
         last_campaign_outreach_at=context.last_campaign_outreach_at,
         last_channel_outreach_at=context.last_channel_outreach_at,
@@ -224,17 +232,18 @@ async def plan_next_outbound_message_for_lead(
         campaign_goal=context.campaign_goal,
         brokerage_name=context.brokerage_name,
         cadence_step_id=context.cadence_step_id,
+        template_key=context.template_key,
         assigned_agent_name=context.assigned_agent_name or _assigned_agent_name_from_lead(lead),
         scheduled_for=context.scheduled_for,
         message_version=context.message_version,
         pre_send_policy=context.pre_send_policy,
         lead_context=lead_context,
+        journey_kind=context.journey_kind,
         preflight_vetoed=context.preflight_vetoed,
         handoff_active=context.handoff_active,
         human_owned=context.human_owned,
         lead_replied_since_scheduled=context.lead_replied_since_scheduled,
         recent_human_activity=context.recent_human_activity,
-        ownership_changed=context.ownership_changed,
         last_global_outreach_at=context.last_global_outreach_at,
         last_campaign_outreach_at=context.last_campaign_outreach_at,
         last_channel_outreach_at=context.last_channel_outreach_at,

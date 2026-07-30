@@ -69,7 +69,7 @@ business rules.
 
 ## Out of scope
 
-- automatic inference from AI replies
+- the exact trigger rules for when AI classification runs
 - automatic campaign enrollment into a paused-search nurture flow
 - changing cadence timing based on paused-search reasons
 - automatic wake-up or scheduled reactivation
@@ -83,7 +83,10 @@ Those will be handled in later docs.
 ### Brokerage admin / manager
 
 - As an operator, I want to see that a lead is paused rather than lost.
-- As an operator, I want to record why the lead paused in a structured way.
+- As an operator, I want the system to classify why the lead paused from the
+  conversation before I open the dashboard.
+- As an operator, I want to correct or replace the AI classification when it is
+  wrong or incomplete.
 - As an operator, I want to record roughly when the lead may be worth
   re-engaging.
 
@@ -93,6 +96,8 @@ Those will be handled in later docs.
   because of rates, timing, renting, or inventory.
 - As the assigned agent, I want the app to preserve that context instead of
   forcing me to rediscover it from notes.
+- As the assigned agent, I want to see whether the current paused-search state
+  came from AI or a human override.
 
 ### System / future workflow logic
 
@@ -164,12 +169,13 @@ This feature should introduce a structured paused-search profile with at least:
 
 ### V1 allowed source values
 
+- `ai_conversation_classification`
 - `manual_operator_entry`
 - `crm_tag_mapping`
 - `crm_note_review`
 - `inbound_conversation_review`
 
-This slice defines the values but does not require all capture methods to be
+This document defines the values but does not require all capture methods to be
 implemented yet.
 
 ## Business rules
@@ -177,7 +183,11 @@ implemented yet.
 ### Rule 1: paused-search is explicit state, not inferred ad hoc
 
 The app must not treat a lead as paused-search just because a freeform summary
-sounds like a pause. A paused-search profile must be explicitly recorded.
+sounds like a pause. A paused-search profile must be explicitly persisted.
+
+That persisted state may be written by a structured AI classification flow or by
+an authorized human action, but it must not live only inside transient prompt
+output, notes, or freeform summaries.
 
 ### Rule 2: paused-search does not override compliance or human-control rules
 
@@ -222,6 +232,14 @@ paused-search reasons, timing, or routing intent. They may still be used for
 narrow deterministic safety/compliance cases such as explicit opt-out detection
 or provider-normalized suppression events.
 
+### Rule 8: human override is authoritative over AI until new evidence is reviewed
+
+If an authorized user edits or clears AI-classified paused-search state, that
+human override becomes the authoritative current state.
+
+Later AI re-analysis must not silently churn or overwrite that human truth
+without a meaningful new evidence trigger or an explicit review path.
+
 ## API and UI implications
 
 ## Relationship to existing code and models
@@ -251,6 +269,8 @@ Minimum V1 UI expectation after implementation:
 
 - lead detail clearly shows whether paused-search is active
 - lead detail shows primary pause reason and timing note/date
+- lead detail shows whether the current state came from AI classification or a
+  human action
 - paused-search facts are visible without opening raw notes or handoff history
 
 ## Data-model recommendation
@@ -300,6 +320,8 @@ After this feature is implemented, the app can:
 - explicitly identify a lead as a paused-search lead
 - show a normalized reason that the search is paused
 - show the best-known re-engagement timing target
+- display current paused-search state regardless of whether it was set by AI or
+  a human override
 - preserve paused-search context as durable product state
 - support later enrollment, timing, and messaging features without depending on
   freeform notes alone

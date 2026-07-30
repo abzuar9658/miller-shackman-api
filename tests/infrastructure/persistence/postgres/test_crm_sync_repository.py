@@ -10,16 +10,20 @@ from app.domain.common.ids import WorkspaceId
 from app.domain.crm_sync import (
     CRMSyncJob,
     CRMSyncJobStatus,
+    CRMSyncLeadSort,
     CRMSyncType,
+    CRMSyncWindowState,
     ExternalEvent,
     ExternalEventStatus,
 )
 from app.infrastructure.persistence.postgres.crm_sync_repository import (
     PostgresCRMSyncJobRepository,
+    PostgresCRMSyncWindowStateRepository,
     PostgresExternalEventRepository,
 )
 from app.infrastructure.persistence.postgres.models import (
     CRMSyncJobModel,
+    CRMSyncWindowStateModel,
     ExternalEventModel,
 )
 
@@ -45,9 +49,11 @@ class _FakeResult:
         *,
         scalar_value: object | None = None,
         scalar_values: list[object] | None = None,
+        rowcount: int | None = None,
     ) -> None:
         self._scalar_value = scalar_value
         self._scalar_values = scalar_values or []
+        self.rowcount = rowcount
 
     def scalar_one_or_none(self) -> object | None:
         return self._scalar_value
@@ -85,6 +91,7 @@ def _sync_job_model() -> CRMSyncJobModel:
         total_upserted=0,
         total_failed=0,
         failure_reason=None,
+        last_heartbeat_at=NOW,
         created_by_user_id=CREATOR_USER_ID,
         created_at=NOW,
         updated_at=NOW,
@@ -106,6 +113,7 @@ def _sync_job() -> CRMSyncJob:
         total_upserted=0,
         total_failed=0,
         failure_reason=None,
+        last_heartbeat_at=NOW,
         created_by_user_id=CREATOR_USER_ID,
         created_at=NOW,
         updated_at=NOW,
@@ -145,6 +153,34 @@ def _external_event() -> ExternalEvent:
         status=ExternalEventStatus.PENDING,
         payload_redacted={"id": "evt-123"},
         failure_reason=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _window_state_model() -> CRMSyncWindowStateModel:
+    return CRMSyncWindowStateModel(
+        workspace_id=WORKSPACE_ID,
+        crm_provider="follow_up_boss",
+        sync_type="incremental",
+        updated_after=NOW,
+        updated_before=NOW.replace(hour=13),
+        next_cursor="cursor-2",
+        sort_by="updated",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _window_state() -> CRMSyncWindowState:
+    return CRMSyncWindowState(
+        workspace_id=WORKSPACE_ID,
+        crm_provider="follow_up_boss",
+        sync_type=CRMSyncType.INCREMENTAL,
+        updated_after=NOW,
+        updated_before=NOW.replace(hour=13),
+        next_cursor="cursor-2",
+        sort_by=CRMSyncLeadSort.UPDATED,
         created_at=NOW,
         updated_at=NOW,
     )
@@ -243,6 +279,7 @@ def test_sync_job_repository_claim_pending_by_id_updates_only_pending_job() -> N
     assert claimed == _sync_job()
     statement_str = str(session.statements[0])
     assert "UPDATE crm_sync_jobs" in statement_str
+    assert "last_heartbeat_at" in statement_str
     assert "crm_sync_jobs.status" in statement_str
     assert "RETURNING" in statement_str
 
@@ -257,6 +294,94 @@ def test_sync_job_repository_save_returns_domain() -> None:
     assert saved == job
     statement_str = str(session.statements[0])
     assert "ON CONFLICT (sync_job_id) DO UPDATE" in statement_str
+
+
+def test_sync_job_repository_fail_stale_active_jobs_marks_pending_and_running() -> None:
+    session = _FakeSession(_FakeResult(rowcount=2))
+
+    updated = _run(
+        PostgresCRMSyncJobRepository(cast(AsyncSession, session)).fail_stale_active_jobs(
+            now=NOW,
+            pending_timeout_seconds=600,
+            running_timeout_seconds=28800,
+        )
+    )
+
+    assert updated == 2
+    statement_str = str(session.statements[0])
+    assert "UPDATE crm_sync_jobs" in statement_str
+    assert "coalesce" in statement_str.lower()
+    assert "last_heartbeat_at" in statement_str
+    assert "status" in statement_str
+
+
+def test_sync_job_repository_touch_running_heartbeat_updates_only_running_job() -> None:
+    session = _FakeSession(_FakeResult(scalar_value=_sync_job_model()))
+
+    touched = _run(
+        PostgresCRMSyncJobRepository(cast(AsyncSession, session)).touch_running_heartbeat(
+            WORKSPACE_ID,
+            SYNC_JOB_ID,
+            now=NOW,
+        )
+    )
+
+    assert touched == _sync_job()
+    statement_str = str(session.statements[0])
+    assert "UPDATE crm_sync_jobs" in statement_str
+    assert "last_heartbeat_at" in statement_str
+
+
+def test_sync_job_repository_save_if_running_requires_running_status() -> None:
+    session = _FakeSession(_FakeResult(scalar_value=_sync_job_model()))
+
+    saved = _run(
+        PostgresCRMSyncJobRepository(cast(AsyncSession, session)).save_if_running(_sync_job())
+    )
+
+    assert saved == _sync_job()
+    statement_str = str(session.statements[0])
+    assert "UPDATE crm_sync_jobs" in statement_str
+    assert "crm_sync_jobs.status" in statement_str
+
+
+def test_window_state_repository_get_by_workspace_provider_maps_domain() -> None:
+    model = _window_state_model()
+    session = _FakeSession(_FakeResult(scalar_value=model))
+
+    state = _run(
+        PostgresCRMSyncWindowStateRepository(cast(AsyncSession, session)).get_by_workspace_provider(
+            WORKSPACE_ID,
+            "follow_up_boss",
+        )
+    )
+
+    assert state == _window_state()
+
+
+def test_window_state_repository_save_upserts_state() -> None:
+    state = _window_state()
+    session = _FakeSession(_FakeResult(scalar_value=_window_state_model()))
+
+    saved = _run(PostgresCRMSyncWindowStateRepository(cast(AsyncSession, session)).save(state))
+
+    assert saved == state
+    assert "ON CONFLICT (workspace_id, crm_provider) DO UPDATE" in str(session.statements[0])
+
+
+def test_window_state_repository_delete_targets_workspace_provider() -> None:
+    session = _FakeSession(_FakeResult())
+
+    _run(
+        PostgresCRMSyncWindowStateRepository(cast(AsyncSession, session)).delete(
+            WORKSPACE_ID,
+            "follow_up_boss",
+        )
+    )
+
+    statement_str = str(session.statements[0])
+    assert "DELETE FROM crm_sync_window_states" in statement_str
+    assert "crm_sync_window_states.workspace_id" in statement_str
 
 
 def test_external_event_repository_get_by_provider_event_id_maps_domain() -> None:

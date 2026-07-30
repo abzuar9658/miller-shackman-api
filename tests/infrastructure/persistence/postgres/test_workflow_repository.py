@@ -27,6 +27,7 @@ LEAD_ID = UUID("00000000-0000-0000-0000-000000000003")
 CAMPAIGN_ID = UUID("00000000-0000-0000-0000-000000000004")
 ENROLLMENT_ID = UUID("00000000-0000-0000-0000-000000000005")
 TRANSITION_ID = UUID("00000000-0000-0000-0000-000000000006")
+TRACK_VERSION_ID = UUID("00000000-0000-0000-0000-000000000007")
 
 
 class _FakeScalarSequence:
@@ -114,6 +115,7 @@ def _workflow_model() -> LeadWorkflowModel:
         lead_id=LEAD_ID,
         state="waiting_for_response",
         current_step_id=None,
+        paused_search_track_version_id=TRACK_VERSION_ID,
         next_action_at=None,
         last_transition_at=NOW,
         pause_reason=None,
@@ -137,6 +139,7 @@ def _workflow() -> LeadWorkflow:
         state_version=1,
         created_at=NOW,
         updated_at=NOW,
+        paused_search_track_version_id=TRACK_VERSION_ID,
     )
 
 

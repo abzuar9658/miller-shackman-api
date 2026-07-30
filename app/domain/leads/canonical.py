@@ -39,6 +39,44 @@ class PropertyEventType(StrEnum):
     VIEWED_PROPERTY = "viewed_property"
 
 
+class PausedSearchReasonCode(StrEnum):
+    RENTED_TEMPORARILY = "rented_temporarily"
+    TIMING_NOT_RIGHT = "timing_not_right"
+    WAITING_FOR_RATES = "waiting_for_rates"
+    WAITING_FOR_INVENTORY = "waiting_for_inventory"
+    FINANCIAL_PREP = "financial_prep"
+    PERSONAL_LIFE_TIMING = "personal_life_timing"
+    OTHER_KNOWN_PAUSE = "other_known_pause"
+
+
+class PausedSearchSource(StrEnum):
+    OPERATOR = "operator"
+    REVIEW_PROPOSAL = "review_proposal"
+    CRM_SIGNAL = "crm_signal"
+    AI_CONVERSATION_CLASSIFICATION = "ai_conversation_classification"
+    DETERMINISTIC_FUTURE_TIMING = "deterministic_future_timing"
+
+
+class LeadStateClassificationOutcome(StrEnum):
+    PAUSED_SEARCH = "paused_search"
+    DORMANT = "dormant"
+    HUMAN_HANDOFF = "human_handoff"
+    REVIEW_HOLD = "review_hold"
+    BLOCKED = "blocked"
+
+
+class LeadClassificationAppliedStatus(StrEnum):
+    APPLIED = "applied"
+    REVIEW = "review"
+    BLOCKED = "blocked"
+
+
+class PausedSearchAction(StrEnum):
+    SET = "set"
+    UPDATED = "updated"
+    CLEARED = "cleared"
+
+
 def _empty_tags() -> tuple[str, ...]:
     return ()
 
@@ -49,6 +87,57 @@ def _empty_mapping() -> Mapping[str, str]:
 
 def _empty_suppressions() -> frozenset[SuppressionType]:
     return frozenset()
+
+
+@dataclass(frozen=True)
+class LeadPausedSearchProfile:
+    paused_search_active: bool
+    pause_reason_code: PausedSearchReasonCode | None = None
+    pause_reason_note: str | None = None
+    reengagement_not_before: datetime | None = None
+    reengagement_window_label: str | None = None
+    paused_search_source: PausedSearchSource | None = None
+    paused_search_recorded_at: datetime | None = None
+    paused_search_recorded_by_user_id: UUID | None = None
+    paused_search_last_confirmed_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class LeadClassificationArtifact:
+    artifact_id: UUID
+    workspace_id: WorkspaceId
+    lead_id: LeadId
+    source: str
+    outcome: LeadStateClassificationOutcome
+    pause_reason_code: PausedSearchReasonCode | None
+    reengagement_not_before: datetime | None
+    reengagement_window_label: str | None
+    confidence: float
+    evidence: tuple[str, ...]
+    summary: str | None
+    model: str
+    prompt_version: str
+    latency_ms: int
+    usage_tokens: int | None
+    applied_status: LeadClassificationAppliedStatus
+    applied_at: datetime | None
+    created_at: datetime
+    prompt_text: str | None = None
+    input_context: Mapping[str, object] = field(default_factory=dict)
+    raw_llm_response_text: str | None = None
+    parsed_llm_response: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class LeadPausedSearchHistoryEntry:
+    history_id: UUID
+    workspace_id: WorkspaceId
+    lead_id: LeadId
+    action: PausedSearchAction
+    previous_profile: LeadPausedSearchProfile | None
+    current_profile: LeadPausedSearchProfile | None
+    actor_user_id: UUID | None
+    created_at: datetime
 
 
 @dataclass(frozen=True)
@@ -102,3 +191,30 @@ class CanonicalLeadRecord:
     latest_property_event_at: datetime | None = None
     latest_property_price_band: str | None = None
     latest_property_context_present: bool = False
+    paused_search_active: bool = False
+    pause_reason_code: PausedSearchReasonCode | None = None
+    pause_reason_note: str | None = None
+    reengagement_not_before: datetime | None = None
+    reengagement_window_label: str | None = None
+    paused_search_source: PausedSearchSource | None = None
+    paused_search_recorded_at: datetime | None = None
+    paused_search_recorded_by_user_id: UUID | None = None
+    paused_search_last_confirmed_at: datetime | None = None
+
+
+def lead_paused_search_profile(
+    lead: CanonicalLeadRecord,
+) -> LeadPausedSearchProfile | None:
+    if not lead.paused_search_active:
+        return None
+    return LeadPausedSearchProfile(
+        paused_search_active=lead.paused_search_active,
+        pause_reason_code=lead.pause_reason_code,
+        pause_reason_note=lead.pause_reason_note,
+        reengagement_not_before=lead.reengagement_not_before,
+        reengagement_window_label=lead.reengagement_window_label,
+        paused_search_source=lead.paused_search_source,
+        paused_search_recorded_at=lead.paused_search_recorded_at,
+        paused_search_recorded_by_user_id=lead.paused_search_recorded_by_user_id,
+        paused_search_last_confirmed_at=lead.paused_search_last_confirmed_at,
+    )

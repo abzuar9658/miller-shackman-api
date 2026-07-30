@@ -5,6 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.domain.common.ids import LeadId, WorkspaceId
+from app.domain.compliance.contactability import ContactPermissionStatus, SuppressionType
 from app.domain.leads import (
     ActivityReliability,
     CanonicalLeadRecord,
@@ -16,6 +17,7 @@ from app.domain.leads import (
 
 SOURCE_PAYLOAD_VERSION = "follow_up_boss_person:v1"
 UNKNOWN = "unknown"
+_EMPTY_MAPPING: Mapping[str, Any] = {}
 
 
 def map_follow_up_boss_person_to_canonical_lead(
@@ -28,6 +30,7 @@ def map_follow_up_boss_person_to_canonical_lead(
     mapped_custom_field_keys: Iterable[str] = (),
 ) -> CanonicalLeadRecord:
     facts_derived_at = now or datetime.now(UTC)
+    custom_fields = _custom_fields(payload)
     lead_type, reason, raw_type = _classify_lead_type(payload.get("type"))
     emails = _records(payload, "emails", fallback_key="email")
     phones = _records(payload, "phones", fallback_key="phone")
@@ -38,6 +41,31 @@ def map_follow_up_boss_person_to_canonical_lead(
         payload.get("assignedTo"),
     )
     assigned_agent_name = _text(payload.get("assignedTo"))
+    sms_permission_status = _contact_permission_status(
+        payload,
+        custom_fields,
+        keys=("sms_permission_status", "smsPermissionStatus", "sms_consent_status"),
+    )
+    email_permission_status = _contact_permission_status(
+        payload,
+        custom_fields,
+        keys=("email_permission_status", "emailPermissionStatus"),
+    )
+    sms_opted_out = _bool_flag(
+        payload,
+        custom_fields,
+        keys=("sms_opted_out", "smsOptedOut"),
+    )
+    email_unsubscribed = _bool_flag(
+        payload,
+        custom_fields,
+        keys=("email_unsubscribed", "emailUnsubscribed"),
+    )
+    do_not_contact = _optional_bool_flag(
+        payload,
+        custom_fields,
+        keys=("do_not_contact", "doNotContact"),
+    )
 
     return CanonicalLeadRecord(
         workspace_id=workspace_id,
@@ -58,7 +86,7 @@ def map_follow_up_boss_person_to_canonical_lead(
         created_via=_text_or_unknown(payload.get("createdVia")),
         tags=_tags(payload.get("tags")),
         mapped_custom_fields=_mapped_custom_fields(
-            payload.get("customFields"),
+            custom_fields,
             mapped_custom_field_keys,
             assigned_agent_name=assigned_agent_name,
         ),
@@ -69,6 +97,22 @@ def map_follow_up_boss_person_to_canonical_lead(
         has_sms_capable_phone=_has_sms_capable_phone(phones),
         email_count=len(emails),
         phone_count=len(phones),
+        sms_permission_status=sms_permission_status,
+        email_permission_status=email_permission_status,
+        sms_opted_out=sms_opted_out,
+        email_unsubscribed=email_unsubscribed,
+        do_not_contact=do_not_contact,
+        suppression_types=_suppression_types(
+            sms_opted_out=sms_opted_out,
+            email_unsubscribed=email_unsubscribed,
+        ),
+        permission_evidence=_permission_evidence(
+            sms_permission_status=sms_permission_status,
+            email_permission_status=email_permission_status,
+            sms_opted_out=sms_opted_out,
+            email_unsubscribed=email_unsubscribed,
+            do_not_contact=do_not_contact,
+        ),
         crm_created_at=_parse_datetime(payload.get("created")),
         crm_updated_at=_parse_datetime(payload.get("updated")),
         last_activity_at=_parse_datetime(payload.get("lastActivity")),
@@ -188,6 +232,131 @@ def _mapped_custom_fields(
     if assigned_agent_name:
         fields.setdefault("assigned_agent_name", assigned_agent_name)
     return fields
+
+
+def _custom_fields(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    raw = payload.get("customFields")
+    if isinstance(raw, Mapping):
+        return raw
+    return _EMPTY_MAPPING
+
+
+def _contact_permission_status(
+    payload: Mapping[str, Any],
+    custom_fields: Mapping[str, Any],
+    *,
+    keys: tuple[str, ...],
+) -> ContactPermissionStatus:
+    raw = _first_present_value(payload, custom_fields, keys)
+    if raw is None:
+        return ContactPermissionStatus.UNKNOWN
+    if isinstance(raw, bool):
+        return ContactPermissionStatus.CONFIRMED if raw else ContactPermissionStatus.DENIED
+    normalized = str(raw).strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {
+        "confirmed",
+        "allow",
+        "allowed",
+        "yes",
+        "true",
+        "1",
+        "opt_in",
+        "opted_in",
+        "granted",
+        "subscribed",
+    }:
+        return ContactPermissionStatus.CONFIRMED
+    if normalized in {
+        "denied",
+        "deny",
+        "disallowed",
+        "no",
+        "false",
+        "0",
+        "opt_out",
+        "opted_out",
+        "revoked",
+        "unsubscribed",
+    }:
+        return ContactPermissionStatus.DENIED
+    return ContactPermissionStatus.UNKNOWN
+
+
+def _bool_flag(
+    payload: Mapping[str, Any],
+    custom_fields: Mapping[str, Any],
+    *,
+    keys: tuple[str, ...],
+) -> bool:
+    result = _optional_bool_flag(payload, custom_fields, keys=keys)
+    return bool(result)
+
+
+def _optional_bool_flag(
+    payload: Mapping[str, Any],
+    custom_fields: Mapping[str, Any],
+    *,
+    keys: tuple[str, ...],
+) -> bool | None:
+    raw = _first_present_value(payload, custom_fields, keys)
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    normalized = str(raw).strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"true", "1", "yes", "y", "on", "confirmed"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off", "denied"}:
+        return False
+    return None
+
+
+def _first_present_value(
+    payload: Mapping[str, Any],
+    custom_fields: Mapping[str, Any],
+    keys: tuple[str, ...],
+) -> object | None:
+    for key in keys:
+        if key in payload:
+            return payload.get(key)
+        if key in custom_fields:
+            return custom_fields.get(key)
+    return None
+
+
+def _suppression_types(
+    *,
+    sms_opted_out: bool,
+    email_unsubscribed: bool,
+) -> frozenset[SuppressionType]:
+    suppressions: set[SuppressionType] = set()
+    if sms_opted_out:
+        suppressions.add(SuppressionType.SMS_OPT_OUT)
+    if email_unsubscribed:
+        suppressions.add(SuppressionType.EMAIL_UNSUBSCRIBED)
+    return frozenset(suppressions)
+
+
+def _permission_evidence(
+    *,
+    sms_permission_status: ContactPermissionStatus,
+    email_permission_status: ContactPermissionStatus,
+    sms_opted_out: bool,
+    email_unsubscribed: bool,
+    do_not_contact: bool | None,
+) -> dict[str, str]:
+    evidence: dict[str, str] = {}
+    if sms_permission_status != ContactPermissionStatus.UNKNOWN:
+        evidence["sms_permission_status_source"] = "follow_up_boss.customFields"
+    if email_permission_status != ContactPermissionStatus.UNKNOWN:
+        evidence["email_permission_status_source"] = "follow_up_boss.customFields"
+    if sms_opted_out:
+        evidence["sms_opted_out_source"] = "follow_up_boss.customFields"
+    if email_unsubscribed:
+        evidence["email_unsubscribed_source"] = "follow_up_boss.customFields"
+    if do_not_contact is not None:
+        evidence["do_not_contact_source"] = "follow_up_boss.customFields"
+    return evidence
 
 
 def _meaningful_activity(payload: Mapping[str, Any]) -> tuple[datetime | None, ActivityReliability]:

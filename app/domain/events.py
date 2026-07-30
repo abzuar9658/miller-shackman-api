@@ -14,6 +14,7 @@ class AggregateType(StrEnum):
     LEAD = "lead"
     LISTING_SOURCE = "listing_source"
     MESSAGE = "message"
+    PAUSED_SEARCH_TRACK = "paused_search_track"
     WORKFLOW = "workflow"
 
 
@@ -36,6 +37,10 @@ class DomainEventType(StrEnum):
     MESSAGE_FAILED = "message.failed"
     MESSAGE_RECEIVED = "message.received"
     MESSAGE_SENT = "message.sent"
+    PAUSED_SEARCH_TRACK_DRAFT_CREATED = "paused_search_track.draft_created"
+    PAUSED_SEARCH_TRACK_DRAFT_UPDATED = "paused_search_track.draft_updated"
+    PAUSED_SEARCH_TRACK_PUBLISHED = "paused_search_track.published"
+    PAUSED_SEARCH_TRACK_RETIRED = "paused_search_track.retired"
     WORKFLOW_TRANSITIONED = "workflow.transitioned"
 
 

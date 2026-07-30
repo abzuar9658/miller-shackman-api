@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     crm_sync_incremental_interval_seconds: int = 300
     crm_sync_scheduler_poll_seconds: int = 60
     crm_sync_scheduler_workspace_limit: int = 100
+    crm_sync_pending_stale_timeout_seconds: int = 600
+    crm_sync_running_stale_timeout_seconds: int = 300
+    crm_sync_running_heartbeat_interval_seconds: int = 30
     listing_source_crawl_queue_name: str = "miller_schackman.listing_source_crawl"
     listing_source_crawl_worker_prefetch_count: int = 1
     listing_source_crawl_scheduler_poll_seconds: int = 60
@@ -81,7 +84,7 @@ class Settings(BaseSettings):
 
     listing_context_enrichment_enabled: bool = False
     listing_context_enrichment_max_results: int = 3
-    listing_context_enrichment_cache_ttl_minutes: int = 360
+    listing_context_enrichment_cache_ttl_minutes: int = 60
     streeteasy_base_url: str = "https://streeteasy.com"
     streeteasy_timeout_seconds: float = 10.0
     streeteasy_user_agent: str = "Mozilla/5.0 (compatible; MillerSchackmanBot/0.1)"

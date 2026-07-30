@@ -64,8 +64,8 @@ def test_list_active_workspace_schedule_targets_applies_defaults() -> None:
         [
             _FakeResult(
                 rows=[
-                    (WORKSPACE_ID, False, 900, "paused"),
-                    (UUID("00000000-0000-0000-0000-000000000002"), None, None, None),
+                    (WORKSPACE_ID, False, 900, 250, "paused"),
+                    (UUID("00000000-0000-0000-0000-000000000002"), None, None, None, None),
                 ]
             )
         ]
@@ -80,9 +80,11 @@ def test_list_active_workspace_schedule_targets_applies_defaults() -> None:
     assert len(result) == 2
     assert result[0].crm_sync_enabled is False
     assert result[0].crm_sync_interval_seconds == 900
+    assert result[0].max_leads_per_sync_cycle == 250
     assert result[0].automation_status.value == "paused"
     assert result[1].crm_sync_enabled is True
     assert result[1].crm_sync_interval_seconds == 300
+    assert result[1].max_leads_per_sync_cycle is None
     assert result[1].automation_status.value == "active"
     assert "LEFT OUTER JOIN workspace_crm_sync_configs" in str(session.statements[0])
 
@@ -104,6 +106,7 @@ def _config_model() -> WorkspaceCRMSyncConfigModel:
         workspace_id=WORKSPACE_ID,
         crm_sync_enabled=False,
         crm_sync_interval_seconds=900,
+        max_leads_per_sync_cycle=250,
         created_at=NOW,
         updated_at=NOW,
     )
@@ -114,6 +117,7 @@ def _config() -> WorkspaceCRMSyncConfig:
         workspace_id=WORKSPACE_ID,
         crm_sync_enabled=False,
         crm_sync_interval_seconds=900,
+        max_leads_per_sync_cycle=250,
     )
 
 

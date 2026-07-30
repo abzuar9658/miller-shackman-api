@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID
@@ -5,6 +6,7 @@ from uuid import UUID
 from app.application.ports.temporal import (
     LeadNurtureWorkflowSignaler,
     PauseLeadNurtureWorkflowSignal,
+    RescheduleLeadNurtureWorkflowSignal,
     ResumeLeadNurtureWorkflowSignal,
     TemporalWorkflowNotFoundError,
     UnblockLeadNurtureWorkflowSignal,
@@ -52,6 +54,11 @@ class MissingWorkflowSignaler:
     ) -> None:
         await self._raise(temporal_workflow_id=temporal_workflow_id, signal=signal)
 
+    async def signal_reschedule_lead_nurture_workflow(
+        self, *, temporal_workflow_id: str, signal: object
+    ) -> None:
+        await self._raise(temporal_workflow_id=temporal_workflow_id, signal=signal)
+
 
 class UnavailableWorkflowSignaler:
     async def _raise(self, *, temporal_workflow_id: str, signal: object) -> None:  # noqa: ARG002
@@ -73,6 +80,11 @@ class UnavailableWorkflowSignaler:
         await self._raise(temporal_workflow_id=temporal_workflow_id, signal=signal)
 
     async def signal_unblock_lead_nurture_workflow(
+        self, *, temporal_workflow_id: str, signal: object
+    ) -> None:
+        await self._raise(temporal_workflow_id=temporal_workflow_id, signal=signal)
+
+    async def signal_reschedule_lead_nurture_workflow(
         self, *, temporal_workflow_id: str, signal: object
     ) -> None:
         await self._raise(temporal_workflow_id=temporal_workflow_id, signal=signal)
@@ -168,6 +180,29 @@ def _blocked_review_completed_entry(*, available_at: datetime = NOW) -> Temporal
             "external_event_id": str(EXTERNAL_EVENT_ID),
         },
         idempotency_key=f"blocked-review-completed:{EXTERNAL_EVENT_ID}",
+        status=TemporalSignalOutboxStatus.PENDING,
+        attempt_count=0,
+        available_at=available_at,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _reschedule_requested_entry(*, available_at: datetime = NOW) -> TemporalSignalOutboxEntry:
+    return TemporalSignalOutboxEntry(
+        temporal_signal_id=UUID("10000000-0000-0000-0000-000000000009"),
+        workspace_id=WORKSPACE_ID,
+        workflow_id=WORKFLOW_ID,
+        temporal_workflow_id="workflow-123",
+        signal_name=TemporalSignalName.RESCHEDULE_REQUESTED,
+        payload={
+            "lead_id": str(LEAD_ID),
+            "occurred_at": NOW.isoformat(),
+            "reason": "paused_search_profile_updated",
+            "actor_user_id": str(USER_ID),
+            "external_event_id": str(EXTERNAL_EVENT_ID),
+        },
+        idempotency_key=f"reschedule-requested:{EXTERNAL_EVENT_ID}",
         status=TemporalSignalOutboxStatus.PENDING,
         attempt_count=0,
         available_at=available_at,
@@ -296,3 +331,54 @@ async def test_dispatch_temporal_signals_sends_blocked_review_completed_signal()
     assert signaler.calls[0]["temporal_workflow_id"] == "workflow-123"
     unblock_signal = cast(UnblockLeadNurtureWorkflowSignal, signaler.calls[0]["signal"])
     assert unblock_signal.reason == "approved after review"
+
+
+async def test_dispatch_temporal_signals_sends_reschedule_requested_signal() -> None:
+    repository = FakeTemporalSignalOutboxRepository()
+    await repository.append(_reschedule_requested_entry())
+    signaler = FakeLeadNurtureWorkflowSignaler()
+
+    result = await dispatch_temporal_signals(
+        temporal_signal_outbox_repository=repository,
+        lead_nurture_workflow_signaler=signaler,
+        now=NOW,
+    )
+
+    assert result.claimed_count == 1
+    assert result.sent_count == 1
+    assert signaler.calls[0]["temporal_workflow_id"] == "workflow-123"
+    reschedule_signal = cast(RescheduleLeadNurtureWorkflowSignal, signaler.calls[0]["signal"])
+    assert reschedule_signal.reason == "paused_search_profile_updated"
+
+
+async def test_dispatch_temporal_signals_preserves_reschedule_then_pause_order() -> None:
+    repository = FakeTemporalSignalOutboxRepository()
+    await repository.append(
+        replace(
+            _pause_requested_entry(),
+            created_at=NOW + timedelta(seconds=1),
+            updated_at=NOW + timedelta(seconds=1),
+        )
+    )
+    await repository.append(
+        replace(
+            _reschedule_requested_entry(),
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    signaler = FakeLeadNurtureWorkflowSignaler()
+
+    result = await dispatch_temporal_signals(
+        temporal_signal_outbox_repository=repository,
+        lead_nurture_workflow_signaler=signaler,
+        now=NOW,
+        batch_size=2,
+    )
+
+    assert result.claimed_count == 2
+    assert result.sent_count == 2
+    first_signal = cast(RescheduleLeadNurtureWorkflowSignal, signaler.calls[0]["signal"])
+    second_signal = cast(PauseLeadNurtureWorkflowSignal, signaler.calls[1]["signal"])
+    assert first_signal.reason == "paused_search_profile_updated"
+    assert second_signal.reason == "crm_note_added"

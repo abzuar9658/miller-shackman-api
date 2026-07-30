@@ -91,6 +91,7 @@ Imported lists must first exist in the CRM and then be tagged or categorized the
 | No meaningful communication for at least the configured threshold | Dormant condition passes              |
 | Meaningful communication exists within the threshold window       | Not eligible through dormant selector |
 | CRM activity is incomplete, missing, or unreliable                | Not eligible through dormant selector |
+| `last_meaningful_communication_at` is missing or `None`           | Not eligible through dormant selector |
 
 The default dormant threshold starts at 60 days and remains configurable.
 
@@ -166,6 +167,7 @@ These must stay explicit in code and tests:
 
 - only configured CRM tag enrollment and simple dormant selection are allowed in V1
 - uncertain CRM activity data blocks dormant enrollment
+- a missing or `None` `last_meaningful_communication_at` blocks dormant enrollment immediately (not held for later queue logic)
 - no weighted scoring is allowed in V1
 - FIFO ordering must use the oldest eligible candidates first
 - a lead with no currently contactable campaign channel is not eligible
@@ -179,6 +181,7 @@ At minimum, test:
 - dormant selector makes a lead eligible when the threshold is met and activity data is reliable
 - a lead is not eligible through dormant selector when meaningful communication is too recent
 - incomplete or uncertain activity data blocks dormant enrollment
+- a missing `last_meaningful_communication_at` blocks dormant enrollment at the enrollment decision boundary
 - a lead with no contactable enabled channels is not eligible
 - unsupported enrollment sources are excluded
 - when both tag and dormant source apply, the decision uses deterministic source precedence

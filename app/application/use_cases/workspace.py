@@ -1048,6 +1048,7 @@ async def update_workspace_crm_sync_config(
     workspace_id: UUID,
     crm_sync_enabled: bool,
     crm_sync_interval_seconds: int,
+    max_leads_per_sync_cycle: int | None,
     workspace_repository: WorkspaceRepository,
     membership_repository: WorkspaceMembershipRepository,
     crm_sync_config_repository: WorkspaceCRMSyncConfigRepository,
@@ -1093,6 +1094,7 @@ async def update_workspace_crm_sync_config(
     if (
         current_config.crm_sync_enabled == crm_sync_enabled
         and current_config.crm_sync_interval_seconds == crm_sync_interval_seconds
+        and current_config.max_leads_per_sync_cycle == max_leads_per_sync_cycle
     ):
         return UpdateWorkspaceCRMSyncConfigResult(
             status=UpdateWorkspaceCRMSyncConfigStatus.UPDATED,
@@ -1104,6 +1106,7 @@ async def update_workspace_crm_sync_config(
             workspace_id=workspace_id,
             crm_sync_enabled=crm_sync_enabled,
             crm_sync_interval_seconds=crm_sync_interval_seconds,
+            max_leads_per_sync_cycle=max_leads_per_sync_cycle,
         )
     )
     await audit_log_repository.append(
@@ -1115,6 +1118,11 @@ async def update_workspace_crm_sync_config(
             event_details={
                 "crm_sync_enabled": str(saved_config.crm_sync_enabled).lower(),
                 "crm_sync_interval_seconds": str(saved_config.crm_sync_interval_seconds),
+                "max_leads_per_sync_cycle": (
+                    str(saved_config.max_leads_per_sync_cycle)
+                    if saved_config.max_leads_per_sync_cycle is not None
+                    else "null"
+                ),
             },
         ),
     )
@@ -1217,6 +1225,7 @@ async def update_workspace_operational_control(
     workspace_operational_control_repository: WorkspaceOperationalControlRepository,
     audit_log_repository: AuthAuditLogRepository,
     now: datetime,
+    recurring_paused_search_enabled: bool = False,
 ) -> UpdateWorkspaceOperationalControlResult:
     effective_actor = await _actor_for_workspace(
         actor=actor,
@@ -1257,6 +1266,8 @@ async def update_workspace_operational_control(
     if (
         current_control.automation_status == automation_status
         and current_control.pause_reason == normalized_reason
+        and current_control.recurring_paused_search_enabled
+        == recurring_paused_search_enabled
     ):
         return UpdateWorkspaceOperationalControlResult(
             status=UpdateWorkspaceOperationalControlStatus.UPDATED,
@@ -1268,9 +1279,15 @@ async def update_workspace_operational_control(
             workspace_id=workspace_id,
             automation_status=automation_status,
             pause_reason=normalized_reason,
+            recurring_paused_search_enabled=recurring_paused_search_enabled,
         )
     )
-    event_details = {"automation_status": saved_control.automation_status.value}
+    event_details: dict[str, str] = {
+        "automation_status": saved_control.automation_status.value,
+    }
+    event_details[
+        "recurring_paused_search_enabled"
+    ] = str(saved_control.recurring_paused_search_enabled).lower()
     if saved_control.pause_reason is not None:
         event_details["pause_reason"] = saved_control.pause_reason
 

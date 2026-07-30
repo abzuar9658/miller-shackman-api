@@ -4,23 +4,29 @@ import aio_pika
 
 from app.application.ports.event_bus import OutboxEventPublisher
 from app.domain.events import OutboxEvent
+from app.infrastructure.events.rabbitmq.topology import ensure_crm_sync_topology_on_channel
 
 
 class RabbitMQOutboxEventPublisher(OutboxEventPublisher):
     def __init__(
-        self, *, rabbitmq_url: str, exchange_name: str = "miller_schackman.events"
+        self,
+        *,
+        rabbitmq_url: str,
+        exchange_name: str = "miller_schackman.events",
+        crm_sync_queue_name: str = "miller_schackman.crm_sync",
     ) -> None:
         self._rabbitmq_url = rabbitmq_url
         self._exchange_name = exchange_name
+        self._crm_sync_queue_name = crm_sync_queue_name
 
     async def publish(self, event: OutboxEvent) -> None:
         connection = await aio_pika.connect_robust(self._rabbitmq_url)
         async with connection:
             channel = await connection.channel()
-            exchange = await channel.declare_exchange(
-                self._exchange_name,
-                aio_pika.ExchangeType.TOPIC,
-                durable=True,
+            exchange, _ = await ensure_crm_sync_topology_on_channel(
+                channel=channel,
+                exchange_name=self._exchange_name,
+                queue_name=self._crm_sync_queue_name,
             )
             message = aio_pika.Message(
                 body=json.dumps(_message_body(event), sort_keys=True).encode("utf-8"),

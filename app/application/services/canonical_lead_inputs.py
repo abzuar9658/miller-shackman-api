@@ -155,6 +155,15 @@ def contactability_facts_from_canonical_lead(
     )
 
 
+def lead_has_destination_for_channel(
+    lead: CanonicalLeadRecord,
+    channel: ContactChannel,
+) -> bool:
+    if channel == ContactChannel.SMS:
+        return lead.has_sms_capable_phone and lead.primary_phone is not None
+    return lead.has_email and lead.primary_email is not None
+
+
 def _contactability_do_not_contact(
     *,
     lead: CanonicalLeadRecord,

@@ -5,7 +5,7 @@ import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, cast
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 from uuid import UUID
 
 import httpx
@@ -14,6 +14,7 @@ import structlog
 from app.application.ports.crm import (
     CanonicalLead,
     CRMActivity,
+    CRMActivityTranscriptSegment,
     CRMAgent,
     CRMAgentDirectoryEntry,
 )
@@ -347,11 +348,24 @@ class FollowUpBossCRMClient:
         workspace_id: UUID,
         uri: str,
     ) -> dict[str, Any] | None:
-        response = await self._client.get(uri)
+        _ = workspace_id
+        response = await self._client.get(self._with_follow_up_boss_people_fields(uri))
         if response.status_code == 404:
             return None
         response.raise_for_status()
         return cast("dict[str, Any]", response.json())
+
+    def _with_follow_up_boss_people_fields(self, uri: str) -> str:
+        parsed = urlparse(uri)
+        if "/people" not in parsed.path:
+            return uri
+
+        params = parse_qsl(parsed.query, keep_blank_values=True)
+        if any(key == "fields" for key, _ in params):
+            return uri
+
+        params.append(("fields", "allFields"))
+        return urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
 
     def _map_person(self, workspace_id: UUID, payload: dict[str, Any]) -> CanonicalLead:
         return CanonicalLead(
@@ -509,6 +523,7 @@ class FollowUpBossCRMClient:
 
     def _map_call_activity(self, payload: dict[str, Any]) -> CRMActivity:
         is_incoming = self._is_incoming(payload)
+        transcript_segments = self._extract_transcript_segments(payload)
         return CRMActivity(
             crm_activity_id=f"call:{payload.get('id', '')}",
             activity_type="Call",
@@ -516,10 +531,12 @@ class FollowUpBossCRMClient:
                 payload.get("created") or payload.get("called") or payload.get("updated"),
             )
             or datetime.utcnow(),
-            content=self._normalize_content(payload.get("note") or payload.get("description")),
+            content=self._call_content(payload, transcript_segments),
             agent_id=str(payload.get("userId")) if payload.get("userId") is not None else None,
             actor_name=self._first_non_empty(payload.get("userName"), payload.get("fromName")),
             direction="inbound" if is_incoming else "outbound",
+            details=self._call_activity_details(payload, transcript_segments=transcript_segments),
+            transcript_segments=transcript_segments,
         )
 
     def _map_agent(self, payload: dict[str, Any]) -> CRMAgent:
@@ -600,6 +617,138 @@ class FollowUpBossCRMClient:
         normalized = " ".join(normalized.split())
         return normalized or None
 
+    def _call_content(
+        self,
+        payload: dict[str, Any],
+        transcript_segments: list[CRMActivityTranscriptSegment],
+    ) -> str | None:
+        transcript_text = self._transcript_content(transcript_segments)
+        if transcript_text is not None:
+            return transcript_text
+        return self._normalize_content(
+            self._first_non_empty(
+                payload.get("transcript"),
+                payload.get("transcription"),
+                payload.get("summary"),
+                payload.get("note"),
+                payload.get("description"),
+            )
+        )
+
+    def _call_activity_details(
+        self,
+        payload: dict[str, Any],
+        *,
+        transcript_segments: list[CRMActivityTranscriptSegment],
+    ) -> dict[str, str | int | float | bool | None]:
+        details: dict[str, str | int | float | bool | None] = {}
+        duration_seconds = self._first_number(
+            payload.get("duration"),
+            payload.get("durationSeconds"),
+            payload.get("callDuration"),
+            payload.get("talkTime"),
+        )
+        if duration_seconds is not None:
+            details["duration_seconds"] = duration_seconds
+        call_outcome = self._first_non_empty(
+            payload.get("outcome"),
+            payload.get("callOutcome"),
+            payload.get("disposition"),
+            payload.get("status"),
+            payload.get("result"),
+        )
+        if call_outcome is not None:
+            details["call_outcome"] = call_outcome
+        if self._has_non_empty(
+            payload.get("recordingUrl"),
+            payload.get("recording_url"),
+            payload.get("recording"),
+        ):
+            details["recording_available"] = True
+        if len(transcript_segments) > 0:
+            details["transcript_segment_count"] = len(transcript_segments)
+        return details
+
+    def _extract_transcript_segments(
+        self,
+        payload: dict[str, Any],
+    ) -> list[CRMActivityTranscriptSegment]:
+        for candidate in (
+            payload.get("transcriptSegments"),
+            payload.get("transcript_segments"),
+            payload.get("segments"),
+            payload.get("utterances"),
+            payload.get("transcript"),
+        ):
+            segments = self._coerce_transcript_segments(candidate)
+            if len(segments) > 0:
+                return segments
+        return []
+
+    def _coerce_transcript_segments(self, value: Any) -> list[CRMActivityTranscriptSegment]:
+        if isinstance(value, dict):
+            nested = value.get("segments") or value.get("utterances") or value.get("items")
+            return self._coerce_transcript_segments(nested)
+        if not isinstance(value, list):
+            return []
+        segments: list[CRMActivityTranscriptSegment] = []
+        for entry in value:
+            if isinstance(entry, str):
+                text = self._normalize_content(entry)
+                if text is None:
+                    continue
+                segments.append(CRMActivityTranscriptSegment(text=text))
+                continue
+            if not isinstance(entry, dict):
+                continue
+            text = self._normalize_content(
+                entry.get("text")
+                or entry.get("message")
+                or entry.get("body")
+                or entry.get("content")
+            )
+            if text is None:
+                continue
+            segments.append(
+                CRMActivityTranscriptSegment(
+                    text=text,
+                    speaker_name=self._first_non_empty(
+                        entry.get("speakerName"),
+                        entry.get("speaker"),
+                        entry.get("name"),
+                        entry.get("fromName"),
+                        entry.get("userName"),
+                    ),
+                    speaker_role=self._first_non_empty(
+                        entry.get("speakerRole"),
+                        entry.get("role"),
+                        entry.get("participantType"),
+                        entry.get("direction"),
+                    ),
+                    started_at=self._parse_datetime(
+                        entry.get("startedAt")
+                        or entry.get("startTime")
+                        or entry.get("timestamp")
+                        or entry.get("created")
+                    ),
+                )
+            )
+        return segments
+
+    def _transcript_content(
+        self,
+        transcript_segments: list[CRMActivityTranscriptSegment],
+    ) -> str | None:
+        if len(transcript_segments) == 0:
+            return None
+        lines = [
+            f"{segment.speaker_name}: {segment.text}"
+            if segment.speaker_name is not None
+            else segment.text
+            for segment in transcript_segments
+        ]
+        return "\n".join(lines)
+
     def _first_non_empty(self, *values: Any) -> str | None:
         for value in values:
             if not isinstance(value, str):
@@ -608,6 +757,27 @@ class FollowUpBossCRMClient:
             if normalized:
                 return normalized
         return None
+
+    def _first_number(self, *values: Any) -> int | float | None:
+        for value in values:
+            if isinstance(value, bool) or value is None:
+                continue
+            if isinstance(value, (int, float)):
+                return int(value) if isinstance(value, float) and value.is_integer() else value
+            if not isinstance(value, str):
+                continue
+            normalized = value.strip()
+            if not normalized:
+                continue
+            try:
+                parsed = float(normalized)
+            except ValueError:
+                continue
+            return int(parsed) if parsed.is_integer() else parsed
+        return None
+
+    def _has_non_empty(self, *values: Any) -> bool:
+        return self._first_non_empty(*values) is not None
 
     def _is_incoming(self, payload: dict[str, Any]) -> bool:
         if isinstance(payload.get("isIncoming"), bool):

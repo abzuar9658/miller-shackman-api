@@ -8,6 +8,9 @@ from app.interfaces.api.v1.handoffs import router as handoffs_router
 from app.interfaces.api.v1.health import router as health_router
 from app.interfaces.api.v1.leads import router as leads_router
 from app.interfaces.api.v1.listing_sources import router as listing_sources_router
+from app.interfaces.api.v1.paused_search_tracks import (
+    router as paused_search_tracks_router,
+)
 from app.interfaces.api.v1.preflight import router as preflight_router
 from app.interfaces.api.v1.reporting import router as reporting_router
 from app.interfaces.api.v1.webhooks import router as webhook_router
@@ -24,5 +27,6 @@ api_router.include_router(attention_router, prefix="/workspaces")
 api_router.include_router(handoffs_router, prefix="/workspaces")
 api_router.include_router(leads_router, prefix="/workspaces")
 api_router.include_router(listing_sources_router, prefix="/workspaces")
+api_router.include_router(paused_search_tracks_router, prefix="/workspaces")
 api_router.include_router(preflight_router, prefix="/workspaces")
 api_router.include_router(reporting_router, prefix="/workspaces")

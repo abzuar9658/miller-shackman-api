@@ -1,11 +1,17 @@
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.application.ports.lead_activity import LeadActivityItem
+from app.application.ports.lead_read import LeadReadLeadRepository
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
+from app.application.services.lead_decision_tree import LeadDecisionTreeView
+from app.application.use_cases.apply_lead_state_classification import (
+    ApplyLeadStateClassificationStatus,
+    apply_lead_state_classification,
+)
 from app.application.use_cases.lead_draft_review import (
     ApproveRejectedDraftReviewStatus,
     approve_rejected_draft_review_and_send,
@@ -16,11 +22,23 @@ from app.application.use_cases.lead_manual_enrollment import (
     list_lead_manual_enrollment_options,
     start_lead_manual_enrollment,
 )
+from app.application.use_cases.lead_pause import (
+    LeadPauseActionStatus,
+    pause_lead_workflow,
+)
+from app.application.use_cases.lead_paused_search import (
+    LeadPausedSearchActionStatus,
+    update_lead_paused_search,
+)
 from app.application.use_cases.lead_read import (
     LeadDetailView,
     LeadOwnershipView,
+    LeadPausedSearchHistoryView,
+    LeadPausedSearchPlanView,
+    LeadQualificationPlanView,
     LeadReadStatus,
     LeadReadView,
+    LeadWorkflowOverrideAuditView,
     get_lead_detail_view,
     list_lead_views,
 )
@@ -29,6 +47,22 @@ from app.application.use_cases.lead_resume import (
     LeadResumeEligibilityStatus,
     get_lead_resume_eligibility,
     resume_lead_workflow,
+)
+from app.application.use_cases.lead_review_hold_resolution import (
+    LeadReviewHoldResolution,
+    LeadReviewHoldResolutionStatus,
+    resolve_lead_review_hold,
+)
+from app.application.use_cases.lead_workflow_overrides import (
+    PausedSearchWorkflowOverrideStatus,
+    migrate_paused_search_track_version,
+    override_paused_search_timing,
+    skip_paused_search_next_touch,
+)
+from app.application.use_cases.review_queue_read import (
+    PendingRoutingReviewView,
+    ReviewQueueReadStatus,
+    list_pending_routing_reviews,
 )
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
@@ -41,8 +75,18 @@ from app.domain.compliance import (
 from app.domain.conversations import InboundMessage
 from app.domain.crm_agent_mapping import CRMAgent
 from app.domain.identity import AuthenticatedActor, User
-from app.domain.leads import CanonicalLeadRecord
+from app.domain.leads import (
+    CanonicalLeadRecord,
+    LeadClassificationArtifact,
+    LeadPausedSearchProfile,
+    LeadRoutingReview,
+    lead_paused_search_profile,
+)
 from app.domain.workflows import LeadWorkflow, WorkflowTransition
+from app.interfaces.api.dependencies.lead_classification import (
+    LeadClassificationActionBundle,
+    get_lead_classification_action_bundle,
+)
 from app.interfaces.api.dependencies.lead_draft_review import (
     LeadDraftReviewActionBundle,
     get_lead_draft_review_action_bundle,
@@ -51,6 +95,10 @@ from app.interfaces.api.dependencies.lead_manual_enrollment import (
     LeadManualEnrollmentBundle,
     get_lead_manual_enrollment_bundle,
 )
+from app.interfaces.api.dependencies.lead_paused_search import (
+    LeadPausedSearchActionBundle,
+    get_lead_paused_search_action_bundle,
+)
 from app.interfaces.api.dependencies.lead_read import LeadReadBundle, get_lead_read_bundle
 from app.interfaces.api.dependencies.lead_resume import (
     LeadResumeActionBundle,
@@ -58,16 +106,26 @@ from app.interfaces.api.dependencies.lead_resume import (
     get_lead_resume_action_bundle,
     get_lead_resume_read_bundle,
 )
+from app.interfaces.api.dependencies.lead_workflow_overrides import (
+    LeadWorkflowOverrideActionBundle,
+    get_lead_workflow_override_action_bundle,
+)
 from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.interfaces.api.schemas.leads import (
     ApproveRejectedDraftReviewRequest,
     ApproveRejectedDraftReviewResponse,
+    ClassifyLeadResponse,
     InboundMessageResponse,
     LeadActivityItemResponse,
     LeadAssignedCRMAgentResponse,
     LeadChannelContactabilityResponse,
     LeadChannelSendabilityResponse,
+    LeadClassificationArtifactResponse,
+    LeadClassificationTraceResponse,
     LeadContactabilityResponse,
+    LeadDecisionTreeEdgeResponse,
+    LeadDecisionTreeNodeResponse,
+    LeadDecisionTreeResponse,
     LeadDetailResponse,
     LeadListItemResponse,
     LeadListResponse,
@@ -75,16 +133,36 @@ from app.interfaces.api.schemas.leads import (
     LeadManualEnrollmentOptionsResponse,
     LeadMappedAppUserResponse,
     LeadOwnershipResponse,
+    LeadPausedSearchHistoryEntryResponse,
+    LeadPausedSearchProfileResponse,
+    LeadPausedSearchTrackPlanResponse,
+    LeadQualificationPlanResponse,
     LeadResponse,
     LeadResumeEligibilityResponse,
+    LeadRoutingReviewResponse,
     LeadSendabilityResponse,
+    LeadWorkflowOverrideAuditLogResponse,
     LeadWorkflowResponse,
+    MigratePausedSearchTrackRequest,
+    MigratePausedSearchTrackResponse,
     OutboundMessageResponse,
+    OverridePausedSearchTimingRequest,
+    OverridePausedSearchTimingResponse,
+    PauseLeadWorkflowRequest,
+    PauseLeadWorkflowResponse,
+    PendingRoutingReviewItemResponse,
+    PendingRoutingReviewListResponse,
     RejectedDraftReviewResponse,
+    ResolveLeadReviewHoldRequest,
+    ResolveLeadReviewHoldResponse,
     ResumeLeadWorkflowRequest,
     ResumeLeadWorkflowResponse,
+    SkipPausedSearchNextTouchRequest,
+    SkipPausedSearchNextTouchResponse,
     StartLeadManualEnrollmentRequest,
     StartLeadManualEnrollmentResponse,
+    UpdateLeadPausedSearchRequest,
+    UpdateLeadPausedSearchResponse,
     WorkflowTransitionResponse,
 )
 from app.interfaces.api.serializers.handoffs import handoff_response
@@ -113,7 +191,7 @@ async def list_leads_route(
     if result.status == LeadReadStatus.REJECTED:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=[reason.value for reason in result.reasons],
+            detail=list(result.reasons),
         )
     contact_policy = await bundle.workspace_contact_policy_repository.get_by_workspace_id(
         workspace_id
@@ -122,6 +200,39 @@ async def list_leads_route(
         status=result.status.value,
         leads=[
             _lead_list_item_response(
+                view,
+                contact_policy or WorkspaceContactPolicy(workspace_id=workspace_id),
+            )
+            for view in result.views
+        ],
+    )
+
+
+@router.get("/{workspace_id}/review-queue", response_model=PendingRoutingReviewListResponse)
+async def list_review_queue_route(
+    workspace_id: UUID,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[LeadReadBundle, Depends(get_lead_read_bundle)],
+) -> PendingRoutingReviewListResponse:
+    result = await list_pending_routing_reviews(
+        actor=actor,
+        workspace_id=workspace_id,
+        lead_repository=bundle.lead_repository,
+        artifact_repository=bundle.classification_artifact_repository,
+        routing_review_repository=bundle.routing_review_repository,
+    )
+    if result.status == ReviewQueueReadStatus.REJECTED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=list(result.reasons),
+        )
+    contact_policy = await bundle.workspace_contact_policy_repository.get_by_workspace_id(
+        workspace_id
+    )
+    return PendingRoutingReviewListResponse(
+        status=result.status.value,
+        items=[
+            _pending_routing_review_item_response(
                 view,
                 contact_policy or WorkspaceContactPolicy(workspace_id=workspace_id),
             )
@@ -142,8 +253,12 @@ async def get_lead_route(
         workspace_id=workspace_id,
         lead_id=lead_id,
         lead_repository=bundle.lead_repository,
+        paused_search_history_repository=bundle.paused_search_history_repository,
+        classification_artifact_repository=bundle.classification_artifact_repository,
         workflow_repository=bundle.workflow_repository,
+        workflow_override_audit_repository=bundle.workflow_override_audit_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
+        paused_search_track_repository=bundle.paused_search_track_repository,
         activity_repository=bundle.activity_repository,
         rejected_draft_review_repository=bundle.rejected_draft_review_repository,
         inbound_message_repository=bundle.inbound_message_repository,
@@ -151,11 +266,12 @@ async def get_lead_route(
         handoff_repository=bundle.handoff_repository,
         user_repository=bundle.user_repository,
         crm_agent_repository=bundle.crm_agent_repository,
+        routing_review_repository=bundle.routing_review_repository,
     )
     if result.status == LeadReadStatus.REJECTED:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=[reason.value for reason in result.reasons],
+            detail=list(result.reasons),
         )
     if result.status == LeadReadStatus.NOT_FOUND:
         raise HTTPException(
@@ -186,7 +302,7 @@ async def list_lead_manual_enrollment_options_route(
         actor=actor,
         workspace_id=workspace_id,
         lead_id=lead_id,
-        lead_repository=bundle.lead_repository,
+        lead_repository=cast(LeadReadLeadRepository, bundle.lead_repository),
         campaign_admin_repository=bundle.campaign_admin_repository,
         campaign_enrollment_repository=bundle.campaign_enrollment_repository,
     )
@@ -237,22 +353,140 @@ async def start_lead_manual_enrollment_route(
         workflow_transition_repository=bundle.workflow_transition_repository,
         workspace_operational_control_repository=bundle.workspace_operational_control_repository,
         temporal_workflow_starter=bundle.temporal_workflow_starter,
+        lead_classification_artifact_repository=bundle.lead_classification_artifact_repository,
+        paused_search_history_repository=bundle.paused_search_history_repository,
+        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
+        llm_client=bundle.llm_client,
+        crm_conversation_event_repository=bundle.crm_conversation_event_repository,
+        paused_search_track_repository=bundle.paused_search_track_repository,
+        routing_review_repository=bundle.routing_review_repository,
         commit=bundle.session.commit,
         event_bus=bundle.event_bus,
         now=datetime.now(UTC),
+        default_openrouter_model=bundle.default_openrouter_model,
+        handoff_repository=bundle.handoff_repository,
+        handoff_completion_repository=bundle.handoff_completion_repository,
+        workspace_handoff_config_repository=bundle.workspace_handoff_config_repository,
+        crm_client=bundle.crm_client,
+        notification_provider=bundle.notification_provider,
+        user_repository=bundle.user_repository,
     )
     if result.status == LeadManualEnrollmentActionStatus.REJECTED:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=["permission_denied"])
     if result.status == LeadManualEnrollmentActionStatus.NOT_FOUND:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=[reason.value for reason in result.reasons],
+            detail=list(result.reasons),
         )
     await bundle.session.commit()
     return StartLeadManualEnrollmentResponse(
         status=result.status.value,
         campaign_id=result.campaign_id,
         campaign_version_id=result.campaign_version_id,
+        campaign_enrollment_id=result.campaign_enrollment_id,
+        workflow_id=result.workflow_id,
+        temporal_workflow_id=result.temporal_workflow_id,
+        route=result.route.value if result.route is not None else None,
+        reasons=list(result.reasons),
+        error=result.error,
+    )
+
+
+@router.post(
+    "/{workspace_id}/leads/{lead_id}/review-hold-resolutions",
+    response_model=ResolveLeadReviewHoldResponse,
+)
+async def resolve_lead_review_hold_route(
+    workspace_id: UUID,
+    lead_id: UUID,
+    request: ResolveLeadReviewHoldRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    manual_bundle: Annotated[
+        LeadManualEnrollmentBundle,
+        Depends(get_lead_manual_enrollment_bundle),
+    ],
+    paused_bundle: Annotated[
+        LeadPausedSearchActionBundle,
+        Depends(get_lead_paused_search_action_bundle),
+    ],
+    classification_bundle: Annotated[
+        LeadClassificationActionBundle,
+        Depends(get_lead_classification_action_bundle),
+    ],
+) -> ResolveLeadReviewHoldResponse:
+    result = await resolve_lead_review_hold(
+        actor=actor,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        campaign_id=request.campaign_id,
+        resolution=LeadReviewHoldResolution(request.resolution),
+        lead_repository=paused_bundle.lead_repository,
+        lead_read_repository=cast(LeadReadLeadRepository, manual_bundle.lead_repository),
+        artifact_repository=classification_bundle.artifact_repository,
+        paused_search_history_repository=paused_bundle.paused_search_history_repository,
+        workspace_llm_config_repository=classification_bundle.workspace_llm_config_repository,
+        llm_client=classification_bundle.llm_client,
+        crm_conversation_event_repository=classification_bundle.crm_conversation_event_repository,
+        campaign_admin_repository=manual_bundle.campaign_admin_repository,
+        campaign_enrollment_repository=manual_bundle.campaign_enrollment_repository,
+        lead_workflow_repository=manual_bundle.lead_workflow_repository,
+        workflow_transition_repository=manual_bundle.workflow_transition_repository,
+        paused_search_track_repository=paused_bundle.paused_search_track_repository,
+        temporal_signal_outbox_repository=paused_bundle.temporal_signal_outbox_repository,
+        temporal_workflow_starter=manual_bundle.temporal_workflow_starter,
+        event_bus=manual_bundle.event_bus,
+        workspace_operational_control_repository=(
+            manual_bundle.workspace_operational_control_repository
+        ),
+        now=datetime.now(UTC),
+        default_openrouter_model=classification_bundle.default_openrouter_model,
+        commit=manual_bundle.session.commit,
+        routing_review_repository=classification_bundle.routing_review_repository,
+        handoff_repository=manual_bundle.handoff_repository,
+        handoff_completion_repository=manual_bundle.handoff_completion_repository,
+        workspace_handoff_config_repository=manual_bundle.workspace_handoff_config_repository,
+        crm_client=manual_bundle.crm_client,
+        notification_provider=manual_bundle.notification_provider,
+        user_repository=manual_bundle.user_repository,
+        pause_reason_code=request.pause_reason_code,
+        pause_reason_note=request.pause_reason_note,
+        reengagement_not_before=request.reengagement_not_before,
+        reengagement_window_label=request.reengagement_window_label,
+    )
+    if result.status == LeadReviewHoldResolutionStatus.REJECTED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=[reason.value for reason in result.reasons],
+        )
+    if result.status == LeadReviewHoldResolutionStatus.NOT_FOUND:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=[reason.value for reason in result.reasons],
+        )
+    if result.status in {
+        LeadReviewHoldResolutionStatus.INVALID,
+        LeadReviewHoldResolutionStatus.REVIEW_REQUIRED,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=[reason.value for reason in result.reasons],
+        )
+    return ResolveLeadReviewHoldResponse(
+        status=result.status.value,
+        resolution=result.resolution.value if result.resolution is not None else None,
+        lead_id=result.lead_id,
+        campaign_id=result.campaign_id,
+        artifact=(
+            _classification_artifact_response(result.artifact)
+            if result.artifact is not None
+            else None
+        ),
+        paused_search=_paused_search_profile_response(result.paused_search),
+        history_entry=(
+            _paused_search_history_response(LeadPausedSearchHistoryView(entry=result.history_entry))
+            if result.history_entry is not None
+            else None
+        ),
         campaign_enrollment_id=result.campaign_enrollment_id,
         workflow_id=result.workflow_id,
         temporal_workflow_id=result.temporal_workflow_id,
@@ -345,6 +579,359 @@ async def resume_lead_route(
         workflow_state=result.workflow_state.value if result.workflow_state is not None else None,
         reasons=[reason.value for reason in result.reasons],
         signal_queued=result.signal_queued,
+    )
+
+
+@router.post("/{workspace_id}/leads/{lead_id}/pause", response_model=PauseLeadWorkflowResponse)
+async def pause_lead_route(
+    workspace_id: UUID,
+    lead_id: UUID,
+    request: PauseLeadWorkflowRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[LeadResumeActionBundle, Depends(get_lead_resume_action_bundle)],
+) -> PauseLeadWorkflowResponse:
+    result = await pause_lead_workflow(
+        actor=actor,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        reason=request.reason,
+        lead_repository=bundle.lead_repository,
+        workflow_repository=bundle.workflow_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        external_event_repository=bundle.external_event_repository,
+        commit=bundle.session.commit,
+        now=datetime.now(UTC),
+    )
+    if result.status == LeadPauseActionStatus.REJECTED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=[reason.value for reason in result.reasons],
+        )
+    if result.status == LeadPauseActionStatus.NOT_FOUND:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=[reason.value for reason in result.reasons],
+        )
+    await bundle.session.commit()
+    return PauseLeadWorkflowResponse(
+        status=result.status.value,
+        workflow_id=result.workflow_id,
+        workflow_state=result.workflow_state.value if result.workflow_state is not None else None,
+        reasons=[reason.value for reason in result.reasons],
+        signal_queued=result.signal_queued,
+    )
+
+
+@router.patch(
+    "/{workspace_id}/leads/{lead_id}/paused-search",
+    response_model=UpdateLeadPausedSearchResponse,
+)
+async def update_lead_paused_search_route(
+    workspace_id: UUID,
+    lead_id: UUID,
+    request: UpdateLeadPausedSearchRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[
+        LeadPausedSearchActionBundle,
+        Depends(get_lead_paused_search_action_bundle),
+    ],
+) -> UpdateLeadPausedSearchResponse:
+    result = await update_lead_paused_search(
+        actor=actor,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        active=request.active,
+        reason_code=request.reason_code,
+        reason_note=request.reason_note,
+        reengagement_not_before=request.reengagement_not_before,
+        reengagement_window_label=request.reengagement_window_label,
+        lead_repository=bundle.lead_repository,
+        paused_search_history_repository=bundle.paused_search_history_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        paused_search_track_repository=bundle.paused_search_track_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        now=datetime.now(UTC),
+    )
+    if result.status == LeadPausedSearchActionStatus.REJECTED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=[reason.value for reason in result.reasons],
+        )
+    if result.status == LeadPausedSearchActionStatus.NOT_FOUND:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=[reason.value for reason in result.reasons],
+        )
+    await bundle.session.commit()
+    return UpdateLeadPausedSearchResponse(
+        status=result.status.value,
+        lead_id=result.lead_id,
+        paused_search=_paused_search_profile_response(result.profile),
+        history_entry=(
+            _paused_search_history_response(
+                LeadPausedSearchHistoryView(entry=result.history_entry),
+            )
+            if result.history_entry is not None
+            else None
+        ),
+        reasons=[reason.value for reason in result.reasons],
+    )
+
+
+@router.post(
+    "/{workspace_id}/leads/{lead_id}/paused-search/timing-override",
+    response_model=OverridePausedSearchTimingResponse,
+)
+async def override_paused_search_timing_route(
+    workspace_id: UUID,
+    lead_id: UUID,
+    request: OverridePausedSearchTimingRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[
+        LeadWorkflowOverrideActionBundle,
+        Depends(get_lead_workflow_override_action_bundle),
+    ],
+) -> OverridePausedSearchTimingResponse:
+    result = await override_paused_search_timing(
+        actor=actor,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        reengagement_not_before=request.reengagement_not_before,
+        reengagement_window_label=request.reengagement_window_label,
+        reason=request.reason,
+        lead_repository=bundle.lead_repository,
+        paused_search_history_repository=bundle.paused_search_history_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        lead_workflow_override_audit_repository=bundle.lead_workflow_override_audit_repository,
+        paused_search_track_repository=bundle.paused_search_track_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        workspace_repository=bundle.workspace_repository,
+        now=datetime.now(UTC),
+    )
+    _raise_for_override_error(result.status, [reason.value for reason in result.reasons])
+    await bundle.session.commit()
+    return OverridePausedSearchTimingResponse(
+        status=result.status.value,
+        lead_id=result.lead_id,
+        workflow_id=result.workflow.workflow_id if result.workflow is not None else None,
+        paused_search=_paused_search_profile_response(result.profile),
+        next_action_at=result.workflow.next_action_at if result.workflow is not None else None,
+        reasons=[reason.value for reason in result.reasons],
+    )
+
+
+@router.post(
+    "/{workspace_id}/leads/{lead_id}/paused-search/track-migrations",
+    response_model=MigratePausedSearchTrackResponse,
+)
+async def migrate_paused_search_track_route(
+    workspace_id: UUID,
+    lead_id: UUID,
+    request: MigratePausedSearchTrackRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[
+        LeadWorkflowOverrideActionBundle,
+        Depends(get_lead_workflow_override_action_bundle),
+    ],
+) -> MigratePausedSearchTrackResponse:
+    result = await migrate_paused_search_track_version(
+        actor=actor,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        target_track_version_id=request.target_track_version_id,
+        reason=request.reason,
+        lead_repository=bundle.lead_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        lead_workflow_override_audit_repository=bundle.lead_workflow_override_audit_repository,
+        paused_search_track_repository=bundle.paused_search_track_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        workspace_repository=bundle.workspace_repository,
+        now=datetime.now(UTC),
+    )
+    _raise_for_override_error(result.status, [reason.value for reason in result.reasons])
+    await bundle.session.commit()
+    return MigratePausedSearchTrackResponse(
+        status=result.status.value,
+        lead_id=result.lead_id,
+        workflow_id=result.workflow.workflow_id if result.workflow is not None else None,
+        target_track_version_id=request.target_track_version_id,
+        next_action_at=result.workflow.next_action_at if result.workflow is not None else None,
+        reasons=[reason.value for reason in result.reasons],
+    )
+
+
+@router.post(
+    "/{workspace_id}/leads/{lead_id}/paused-search/skip-next-touch",
+    response_model=SkipPausedSearchNextTouchResponse,
+)
+async def skip_paused_search_next_touch_route(
+    workspace_id: UUID,
+    lead_id: UUID,
+    request: SkipPausedSearchNextTouchRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[
+        LeadWorkflowOverrideActionBundle,
+        Depends(get_lead_workflow_override_action_bundle),
+    ],
+) -> SkipPausedSearchNextTouchResponse:
+    result = await skip_paused_search_next_touch(
+        actor=actor,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        reason=request.reason,
+        lead_repository=bundle.lead_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        lead_workflow_override_audit_repository=bundle.lead_workflow_override_audit_repository,
+        paused_search_track_repository=bundle.paused_search_track_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        workspace_repository=bundle.workspace_repository,
+        now=datetime.now(UTC),
+    )
+    _raise_for_override_error(result.status, [reason.value for reason in result.reasons])
+    await bundle.session.commit()
+    return SkipPausedSearchNextTouchResponse(
+        status=result.status.value,
+        lead_id=result.lead_id,
+        workflow_id=result.workflow.workflow_id if result.workflow is not None else None,
+        skipped_step_id=result.skipped_step_id,
+        next_action_at=result.workflow.next_action_at if result.workflow is not None else None,
+        reasons=[reason.value for reason in result.reasons],
+    )
+
+
+
+@router.post(
+    "/{workspace_id}/leads/{lead_id}/classify",
+    response_model=ClassifyLeadResponse,
+)
+async def classify_lead_route(
+    workspace_id: UUID,
+    lead_id: UUID,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[
+        LeadClassificationActionBundle,
+        Depends(get_lead_classification_action_bundle),
+    ],
+) -> ClassifyLeadResponse:
+    result = await apply_lead_state_classification(
+        actor=actor,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        lead_repository=bundle.lead_repository,
+        paused_search_history_repository=bundle.paused_search_history_repository,
+        artifact_repository=bundle.artifact_repository,
+        crm_conversation_event_repository=bundle.crm_conversation_event_repository,
+        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        paused_search_track_repository=bundle.paused_search_track_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        llm_client=bundle.llm_client,
+        now=datetime.now(UTC),
+        default_openrouter_model=bundle.default_openrouter_model,
+    )
+    if result.status == ApplyLeadStateClassificationStatus.REJECTED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=[reason for reason in result.reasons],
+        )
+    if result.status == ApplyLeadStateClassificationStatus.NOT_FOUND:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=[reason for reason in result.reasons],
+        )
+    await bundle.session.commit()
+    outcome_value = None
+    confidence_value = None
+    if result.classification_result is not None:
+        confidence_value = result.classification_result.confidence
+        if result.classification_result.outcome is not None:
+            outcome_value = result.classification_result.outcome.value
+    return ClassifyLeadResponse(
+        status=result.status.value,
+        lead_id=lead_id,
+        outcome=outcome_value,
+        confidence=confidence_value,
+        applied_status=result.artifact.applied_status.value if result.artifact else None,
+        artifact=_classification_artifact_response(result.artifact) if result.artifact else None,
+        paused_search=_paused_search_profile_response(result.profile),
+        history_entry=(
+            _paused_search_history_response(
+                LeadPausedSearchHistoryView(entry=result.history_entry),
+            )
+            if result.history_entry is not None
+            else None
+        ),
+        reasons=[reason for reason in result.reasons],
+    )
+
+
+def _classification_artifact_response(
+    artifact: LeadClassificationArtifact,
+) -> LeadClassificationArtifactResponse:
+    llm_trace = _classification_trace_response(artifact)
+    return LeadClassificationArtifactResponse(
+        artifact_id=artifact.artifact_id,
+        source=artifact.source,
+        outcome=artifact.outcome.value,
+        pause_reason_code=artifact.pause_reason_code.value if artifact.pause_reason_code else None,
+        reengagement_not_before=artifact.reengagement_not_before,
+        reengagement_window_label=artifact.reengagement_window_label,
+        confidence=artifact.confidence,
+        evidence=list(artifact.evidence),
+        summary=artifact.summary,
+        model=artifact.model,
+        prompt_version=artifact.prompt_version,
+        latency_ms=artifact.latency_ms,
+        usage_tokens=artifact.usage_tokens,
+        applied_status=artifact.applied_status.value,
+        applied_at=artifact.applied_at,
+        created_at=artifact.created_at,
+        llm_trace=llm_trace,
+    )
+
+
+def _classification_trace_response(
+    artifact: LeadClassificationArtifact,
+) -> LeadClassificationTraceResponse | None:
+    if (
+        artifact.prompt_text is None
+        and artifact.raw_llm_response_text is None
+        and not artifact.input_context
+        and not artifact.parsed_llm_response
+    ):
+        return None
+    return LeadClassificationTraceResponse(
+        prompt_text=artifact.prompt_text,
+        input_context=dict(artifact.input_context),
+        raw_response_text=artifact.raw_llm_response_text,
+        parsed_response=dict(artifact.parsed_llm_response),
+    )
+
+
+def _routing_review_response(review: LeadRoutingReview) -> LeadRoutingReviewResponse:
+    return LeadRoutingReviewResponse(
+        review_id=review.review_id,
+        artifact_id=review.artifact_id,
+        status=review.status.value,
+        reason_codes=list(review.reason_codes),
+        resolution=review.resolution.value if review.resolution is not None else None,
+        reviewed_by_user_id=review.reviewed_by_user_id,
+        reviewed_at=review.reviewed_at,
+        created_at=review.created_at,
+        updated_at=review.updated_at,
+    )
+
+
+def _pending_routing_review_item_response(
+    view: PendingRoutingReviewView,
+    contact_policy: WorkspaceContactPolicy,
+) -> PendingRoutingReviewItemResponse:
+    return PendingRoutingReviewItemResponse(
+        review=_routing_review_response(view.review),
+        lead=_lead_response(view.lead, None, contact_policy),
+        artifact=_classification_artifact_response(view.artifact),
     )
 
 
@@ -461,7 +1048,18 @@ def _lead_detail_response(
         latest_handoff=handoff_response(view.lead.latest_handoff)
         if view.lead.latest_handoff
         else None,
+        qualification_plan=_qualification_plan_response(view.qualification_plan),
+        decision_tree=_decision_tree_response(view.decision_tree),
         workflow_transitions=[_transition_response(item) for item in view.workflow_transitions],
+        workflow_override_audits=[
+            _workflow_override_audit_response(item) for item in view.workflow_override_audits
+        ],
+        paused_search_history=[
+            _paused_search_history_response(item) for item in view.paused_search_history
+        ],
+        routing_reviews=[
+            _routing_review_response(item) for item in view.routing_reviews
+        ],
         rejected_draft_reviews=[
             _rejected_draft_review_response(item) for item in view.rejected_draft_reviews
         ],
@@ -469,6 +1067,84 @@ def _lead_detail_response(
         inbound_messages=[_inbound_message_response(item) for item in view.inbound_messages],
         outbound_messages=[_outbound_message_response(item) for item in view.outbound_messages],
         handoffs=[handoff_response(item) for item in view.handoffs],
+    )
+
+
+def _qualification_plan_response(
+    view: LeadQualificationPlanView | None,
+) -> LeadQualificationPlanResponse | None:
+    if view is None:
+        return None
+    return LeadQualificationPlanResponse(
+        classification_artifact=(
+            _classification_artifact_response(view.classification_artifact)
+            if view.classification_artifact is not None
+            else None
+        ),
+        paused_search_plan=(
+            _paused_search_plan_response(view.paused_search_plan)
+            if view.paused_search_plan is not None
+            else None
+        ),
+    )
+
+
+def _decision_tree_response(view: LeadDecisionTreeView) -> LeadDecisionTreeResponse:
+    nodes = view.nodes
+    edges = view.edges
+    return LeadDecisionTreeResponse(
+        title=view.title,
+        subtitle=view.subtitle,
+        nodes=[
+            LeadDecisionTreeNodeResponse(
+                node_id=node.node_id,
+                kind=node.kind.value,
+                label=node.label,
+                row=node.row,
+                column=node.column,
+                status=node.status.value,
+                description=node.description,
+                chips=list(node.chips),
+            )
+            for node in nodes
+        ],
+        edges=[
+            LeadDecisionTreeEdgeResponse(
+                edge_id=edge.edge_id,
+                from_node_id=edge.from_node_id,
+                to_node_id=edge.to_node_id,
+                status=edge.status.value,
+                label=edge.label,
+                description=edge.description,
+                detail_lines=list(edge.detail_lines),
+            )
+            for edge in edges
+        ],
+    )
+
+
+def _paused_search_plan_response(
+    plan: LeadPausedSearchPlanView,
+) -> LeadPausedSearchTrackPlanResponse:
+    return LeadPausedSearchTrackPlanResponse(
+        track_id=plan.track.track_id,
+        track_key=plan.track.track_key,
+        display_name=plan.track.display_name,
+        track_version_id=plan.version.track_version_id,
+        version_number=plan.version.version_number,
+        track_family=plan.version.track_family.value,
+        current_step_id=(plan.current_step.step_id if plan.current_step is not None else None),
+        current_step_order=(
+            plan.current_step.step_order if plan.current_step is not None else None
+        ),
+        current_phase=(plan.current_step.phase.value if plan.current_step is not None else None),
+        current_channel=(
+            plan.current_step.channel.value if plan.current_step is not None else None
+        ),
+        current_message_goal=(
+            plan.current_step.message_goal if plan.current_step is not None else None
+        ),
+        next_action_at=plan.next_action_at,
     )
 
 
@@ -507,10 +1183,21 @@ def _activity_item_response(item: LeadActivityItem) -> LeadActivityItemResponse:
         occurred_at=item.occurred_at,
         title=item.title,
         preview=item.preview,
+        content=item.content,
         channel=item.channel,
         direction=item.direction,
         status=item.status,
         actor_name=item.actor_name,
+        details=item.details,
+        transcript_segments=[
+            {
+                "text": segment.text,
+                "speaker_name": segment.speaker_name,
+                "speaker_role": segment.speaker_role,
+                "started_at": segment.started_at.isoformat() if segment.started_at else None,
+            }
+            for segment in item.transcript_segments
+        ],
     )
 
 
@@ -573,10 +1260,60 @@ def _lead_response(
         suppression_types=sorted(item.value for item in lead.suppression_types),
         contactability=_lead_contactability_response(lead),
         sendability=_lead_sendability_response(lead, contact_policy),
+        paused_search=_paused_search_profile_response(lead_paused_search_profile(lead)),
         facts_derived_at=lead.facts_derived_at,
         last_activity_at=lead.last_activity_at,
         last_meaningful_communication_at=lead.last_meaningful_communication_at,
         last_agent_activity_at=lead.last_agent_activity_at,
+    )
+
+
+def _paused_search_history_response(
+    item: LeadPausedSearchHistoryView,
+) -> LeadPausedSearchHistoryEntryResponse:
+    return LeadPausedSearchHistoryEntryResponse(
+        history_id=item.entry.history_id,
+        action=item.entry.action.value,
+        actor_user_id=item.entry.actor_user_id,
+        actor_name=item.actor_name,
+        created_at=item.entry.created_at,
+        previous_profile=_paused_search_profile_response(item.entry.previous_profile),
+        current_profile=_paused_search_profile_response(item.entry.current_profile),
+    )
+
+
+def _workflow_override_audit_response(
+    item: LeadWorkflowOverrideAuditView,
+) -> LeadWorkflowOverrideAuditLogResponse:
+    return LeadWorkflowOverrideAuditLogResponse(
+        audit_log_id=item.entry.audit_log_id,
+        workflow_id=item.entry.workflow_id,
+        action=item.entry.action.value,
+        reason=item.entry.reason,
+        actor_user_id=item.entry.actor_user_id,
+        actor_name=item.actor_name,
+        details=dict(item.entry.details),
+        created_at=item.entry.created_at,
+    )
+
+
+def _paused_search_profile_response(
+    profile: LeadPausedSearchProfile | None,
+) -> LeadPausedSearchProfileResponse | None:
+    if profile is None:
+        return None
+    return LeadPausedSearchProfileResponse(
+        paused_search_active=profile.paused_search_active,
+        pause_reason_code=profile.pause_reason_code.value if profile.pause_reason_code else None,
+        pause_reason_note=profile.pause_reason_note,
+        reengagement_not_before=profile.reengagement_not_before,
+        reengagement_window_label=profile.reengagement_window_label,
+        paused_search_source=(
+            profile.paused_search_source.value if profile.paused_search_source else None
+        ),
+        paused_search_recorded_at=profile.paused_search_recorded_at,
+        paused_search_recorded_by_user_id=profile.paused_search_recorded_by_user_id,
+        paused_search_last_confirmed_at=profile.paused_search_last_confirmed_at,
     )
 
 
@@ -655,10 +1392,21 @@ def _workflow_response(workflow: LeadWorkflow | None) -> LeadWorkflowResponse | 
         state=workflow.state.value,
         current_step_id=str(workflow.current_step_id) if workflow.current_step_id else None,
         next_action_at=workflow.next_action_at,
+        paused_search_track_version_id=workflow.paused_search_track_version_id,
+        paused_search_track_step_id=workflow.paused_search_track_step_id,
         last_transition_at=workflow.last_transition_at,
         pause_reason=workflow.pause_reason,
         resume_reason=workflow.resume_reason,
     )
+
+
+def _raise_for_override_error(status_value: str, reasons: list[str]) -> None:
+    if status_value == PausedSearchWorkflowOverrideStatus.REJECTED.value:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=reasons)
+    if status_value == PausedSearchWorkflowOverrideStatus.NOT_FOUND.value:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=reasons)
+    if status_value == PausedSearchWorkflowOverrideStatus.INVALID.value:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=reasons)
 
 
 def _transition_response(transition: WorkflowTransition) -> WorkflowTransitionResponse:

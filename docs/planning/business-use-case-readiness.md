@@ -50,11 +50,19 @@ This means the backend can now:
   evidence, idempotency, and workflow pause/suppress handling
 - run a daily dormant-lead selector, issue pre-flight digests to assigned agents,
   record vetoes, and start the selected batch into a campaign
+- classify `ai_nurture`-tagged leads into dormant, paused-search, human-handoff,
+  blocked, or review-hold outcomes with durable artifacts and reply-time
+  re-classification
+- auto-start paused-search workflows from the CRM-tag route, pin immutable published
+  paused-search track versions, and execute paused-search touches through the shared
+  pre-send/send pipeline
+- manage paused-search strategy through backend admin APIs for draft create/update,
+  list/detail, publish, and retire
 
-The backend now has the core V1 business-flow spine, including provider delivery
-callback reconciliation and transactional outbox/RabbitMQ fan-out, but it is not yet
-V1-complete because campaign administration, reporting, and final operational readiness
-slices are still missing.
+The backend now has the core V1 business-flow spine for the scoped dormant and
+paused-search journeys, including provider delivery callback reconciliation,
+transactional outbox/RabbitMQ fan-out, paused-search routing/execution, and backend
+admin APIs needed for later frontend integration.
 
 ## V1 Status Summary
 
@@ -75,7 +83,7 @@ slices are still missing.
 ### Current honest status
 
 - the backend business-flow plan for slices 14–18 is complete
-- the project is **backend-V1 ready for the scoped business-flow work**
+- the project is **backend-V1 ready for the scoped business-flow work and API/frontend integration**
 - the next work, if any, should be planned as a new approved slice rather than added
   implicitly here
 
@@ -103,6 +111,8 @@ slices are still missing.
   RabbitMQ topic-exchange publisher worker
 - campaign admin/publishing controls now support draft create/update, version publish,
   campaign pause, role/capability enforcement, launch auditing, and outbox events
+- paused-search track administration now supports backend draft create/update,
+  list/detail, version publish, retire, audit logging, and outbox events
 - reporting now exposes workspace operations, campaign operations, and campaign admin
   audit visibility through explicit reporting APIs and Postgres read models
 - PostgreSQL row-level security policies now exist for tenant-owned business-flow
@@ -113,6 +123,9 @@ slices are still missing.
   (SMS compliance state, quiet hours, timezone)
 - dormant-lead selection, pre-flight digest issuance, veto recording, and veto
   enforcement before starting the selected batch are implemented end-to-end
+- AI-tag routing, paused-search workflow start/pin behavior, paused-search outbound
+  execution, reply-time re-classification, and safe review-hold fallback are
+  implemented end-to-end on the backend
 
 ### Technical foundations
 
@@ -127,6 +140,8 @@ slices are still missing.
 - sink providers exist for safe local end-to-end outbound testing
 - both application-level and real Postgres-backed business-flow harnesses now cover:
   `sync -> enrollment -> first cadence send -> delivery callback -> inbound reply -> human_handoff -> reporting visibility`
+- paused-search application-level harness now covers:
+  `crm_tag -> AI paused_search route -> workflow start -> track pin -> paused-search send -> inbound handoff`
 - validation baseline is green at the current slice boundary
 
 ## Still Missing Before V1 Completion
@@ -141,7 +156,8 @@ slices are still missing.
 
 ## Recommended Next Order
 
-1. only start new work through a new explicitly approved slice or plan
+1. start API/frontend integration against the stabilized backend surfaces
+2. only start new backend work through a new explicitly approved slice or plan
 
 ## Ready-to-Test Definitions
 

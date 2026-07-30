@@ -24,7 +24,7 @@ from app.domain.campaigns.outbound_message import (
     OutboundMessageStatus,
     build_outbound_email_message_id,
 )
-from app.domain.campaigns.pre_send import ProviderSendStatus, WorkflowState
+from app.domain.campaigns.pre_send import PreSendReasonCode, ProviderSendStatus, WorkflowState
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import (
@@ -695,7 +695,7 @@ async def test_rejects_when_pre_send_blocks_message() -> None:
     assert message_repository.saved == []
 
 
-async def test_rejects_sms_send_when_workspace_sms_compliance_is_not_approved() -> None:
+async def test_sends_sms_when_workspace_sms_compliance_is_not_approved_in_v1() -> None:
     message_repository = FakeOutboundMessageRepository(_message())
     sms_provider = FakeSMSProvider()
 
@@ -711,12 +711,13 @@ async def test_rejects_sms_send_when_workspace_sms_compliance_is_not_approved() 
         now=NOW,
     )
 
-    assert result.status == SendOutboundMessageStatus.REJECTED
-    assert result.reasons == (SendOutboundMessageReasonCode.PRE_SEND_BLOCKED,)
+    assert result.status == SendOutboundMessageStatus.SENT
+    assert result.message is not None
+    assert result.message.channel == ContactChannel.SMS
     assert result.pre_send_decision is not None
-    assert result.pre_send_decision.allowed is False
-    assert sms_provider.messages == []
-    assert message_repository.saved == []
+    assert result.pre_send_decision.allowed is True
+    assert len(sms_provider.messages) == 1
+    assert message_repository.saved
 
 
 async def test_email_send_is_not_blocked_by_workspace_sms_compliance() -> None:
@@ -805,7 +806,10 @@ async def test_rejects_when_channel_destination_is_missing() -> None:
     )
 
     assert result.status == SendOutboundMessageStatus.REJECTED
-    assert result.reasons == (SendOutboundMessageReasonCode.CHANNEL_DESTINATION_MISSING,)
+    assert result.reasons == (SendOutboundMessageReasonCode.PRE_SEND_BLOCKED,)
+    assert result.pre_send_decision is not None
+    assert result.pre_send_decision.allowed is False
+    assert PreSendReasonCode.CHANNEL_NOT_CONTACTABLE in result.pre_send_decision.reasons
 
 
 async def test_rejects_email_when_subject_is_missing() -> None:

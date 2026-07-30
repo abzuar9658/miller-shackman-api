@@ -16,13 +16,14 @@ from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord
 from app.domain.outbound_drafting import (
     SUPPORTED_TEMPLATE_PLACEHOLDERS,
+    OutboundJourneyKind,
     WorkspaceOutboundDraftingConfig,
     default_workspace_outbound_drafting_config,
     render_outbound_subject_template,
     render_outbound_template,
 )
 
-OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v9"
+OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v10"
 MIN_DRAFT_CONFIDENCE = 0.7
 MAX_SMS_BODY_LENGTH = 320
 MAX_EMAIL_BODY_LENGTH = 4000
@@ -102,6 +103,7 @@ class ApprovedOutboundListingContext:
     matches: tuple[ApprovedOutboundListingMatch, ...] = field(
         default_factory=_empty_listing_matches
     )
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,7 @@ class ApprovedListingRelevanceBrief:
     budget_alignment_note: str | None = None
     safe_talking_point: str | None = None
     safe_cta: str = "Ask whether they want their assigned agent to send a few current options."
+    listing_context_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +184,7 @@ async def draft_outbound_message(
     brokerage_name: str,
     assigned_agent_name: str | None,
     lead_context: ApprovedOutboundLeadContext,
+    journey_kind: OutboundJourneyKind | None = None,
     llm_client: LLMClient,
     drafting_config: WorkspaceOutboundDraftingConfig | None = None,
     model: str | None = None,
@@ -190,6 +194,7 @@ async def draft_outbound_message(
         lead.workspace_id,
     )
     resolved_agent_name = _resolved_assigned_agent_name(assigned_agent_name)
+    resolved_lead_first_name = _resolved_lead_first_name(lead)
     prompt_version = _prompt_version_for_config(resolved_config)
     llm_result = await llm_client.complete(
         LLMCompletionRequest(
@@ -200,6 +205,7 @@ async def draft_outbound_message(
                 brokerage_name=brokerage_name,
                 assigned_agent_name=resolved_agent_name,
                 lead_context=lead_context,
+                journey_kind=journey_kind,
                 drafting_config=resolved_config,
             ),
             prompt_version=prompt_version,
@@ -234,6 +240,7 @@ async def draft_outbound_message(
         {
             "agent_name": resolved_agent_name or "",
             "brokerage_name": brokerage_name,
+            "lead_first_name": resolved_lead_first_name,
             "message_body": _normalized_message_body_fragment(draft.body),
         },
     )
@@ -318,6 +325,7 @@ def _build_prompt(
     brokerage_name: str,
     assigned_agent_name: str | None,
     lead_context: ApprovedOutboundLeadContext,
+    journey_kind: OutboundJourneyKind | None,
     drafting_config: WorkspaceOutboundDraftingConfig,
 ) -> str:
     channel_template = _channel_template_for_config(drafting_config, channel=channel)
@@ -328,6 +336,7 @@ def _build_prompt(
     payload = {
         "task": "draft_outbound_real_estate_lead_follow_up",
         "channel": channel.value,
+        "journey_kind": journey_kind.value if journey_kind is not None else None,
         "campaign_goal": campaign_goal,
         "brokerage_name": brokerage_name,
         "assigned_agent_name": assigned_agent_name,
@@ -401,6 +410,7 @@ def _build_prompt(
         "continue the thread naturally. Avoid repeating the same greeting, ask, or "
         "call-to-action if recent outbound messages already covered it, unless the lead's "
         "context clearly changed.\n"
+        f"{_journey_instructions(journey_kind)}"
         "If approved listing context is present, the payload will include both "
         "listing_relevance_brief and listing_message_guidance. You MUST follow "
         "listing_message_guidance.draft_directive and explicitly acknowledge current "
@@ -429,11 +439,40 @@ def _build_prompt(
     )
 
 
+def _journey_instructions(journey_kind: OutboundJourneyKind | None) -> str:
+    if journey_kind == OutboundJourneyKind.DORMANT:
+        return (
+            "For dormant outreach, treat the lead as quiet for an unknown reason. Keep the "
+            "message low-pressure and administrative. Do not imply you already know why they "
+            "stopped responding unless that reason appears in the approved context. Use the "
+            "approved context to ask whether they are still interested, whether timing or "
+            "preferences changed, or whether they want their assigned agent to reconnect.\n"
+        )
+    if journey_kind == OutboundJourneyKind.PAUSED_SEARCH:
+        return (
+            "For paused-search outreach, treat the lead as someone whose home search or "
+            "move timing was intentionally paused. Keep the message administrative, "
+            "low-pressure, and timing-aware. Do not imply urgency, available listings, "
+            "pricing advice, or market predictions. Ask whether their timing or "
+            "preferences have changed, or whether they want their assigned agent to "
+            "reconnect.\n"
+        )
+    return ""
+
+
 def _resolved_assigned_agent_name(assigned_agent_name: str | None) -> str | None:
     if assigned_agent_name is None:
         return None
     normalized = assigned_agent_name.strip()
     return normalized or None
+
+
+def _resolved_lead_first_name(lead: CanonicalLeadRecord) -> str:
+    raw_name = str(lead.mapped_custom_fields.get("display_name") or "").strip()
+    if not raw_name or "@" in raw_name:
+        return "there"
+    first_name = raw_name.split()[0].strip(",.!? ")
+    return first_name or "there"
 
 
 def _normalized_message_body_fragment(body: str) -> str:
@@ -522,6 +561,7 @@ def build_listing_relevance_brief(
             search_basis=search_basis,
             budget_alignment_note=budget_alignment_note,
         ),
+        listing_context_source=listing_context.source,
     )
 
 
@@ -595,6 +635,7 @@ def _listing_relevance_brief_payload(
         "safe_talking_point": relevance_brief.safe_talking_point,
         "safe_cta": relevance_brief.safe_cta,
         "draft_directive": _listing_draft_directive(relevance_brief),
+        "listing_context_source": relevance_brief.listing_context_source,
     }
 
 

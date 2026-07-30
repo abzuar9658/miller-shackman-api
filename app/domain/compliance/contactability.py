@@ -126,16 +126,8 @@ def _evaluate_sms_reasons(
     if SuppressionType.SMS_OPT_OUT in facts.suppressions:
         reasons.append(ContactabilityReasonCode.SMS_OPTED_OUT)
 
-    if policy.sms_compliance_state != SmsComplianceState.APPROVED:
-        reasons.append(ContactabilityReasonCode.SMS_COMPLIANCE_NOT_APPROVED)
-
-    if (
-        facts.sms_consent_status in (None, ContactPermissionStatus.UNKNOWN)
-        and not facts.has_sms_destination
-    ):
+    if not facts.has_sms_destination:
         reasons.append(ContactabilityReasonCode.MISSING_SMS_CONSENT)
-    elif facts.sms_consent_status == ContactPermissionStatus.DENIED:
-        reasons.append(ContactabilityReasonCode.SMS_PERMISSION_DENIED)
 
     return reasons
 
@@ -148,12 +140,7 @@ def _evaluate_email_reasons(
     if SuppressionType.EMAIL_UNSUBSCRIBED in facts.suppressions:
         reasons.append(ContactabilityReasonCode.EMAIL_UNSUBSCRIBED)
 
-    if (
-        facts.email_permission_status in (None, ContactPermissionStatus.UNKNOWN)
-        and not facts.has_email_destination
-    ):
+    if not facts.has_email_destination:
         reasons.append(ContactabilityReasonCode.MISSING_EMAIL_PERMISSION)
-    elif facts.email_permission_status == ContactPermissionStatus.DENIED:
-        reasons.append(ContactabilityReasonCode.EMAIL_PERMISSION_DENIED)
 
     return reasons

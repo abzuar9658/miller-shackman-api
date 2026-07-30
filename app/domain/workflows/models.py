@@ -4,7 +4,14 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from app.domain.common.ids import CampaignId, LeadId, UserId, WorkspaceId
+from app.domain.common.ids import (
+    CampaignId,
+    LeadId,
+    PausedSearchTrackStepId,
+    PausedSearchTrackVersionId,
+    UserId,
+    WorkspaceId,
+)
 
 
 class WorkflowState(StrEnum):
@@ -66,6 +73,8 @@ class LeadWorkflow:
     next_action_at: datetime | None = None
     pause_reason: str | None = None
     resume_reason: str | None = None
+    paused_search_track_version_id: PausedSearchTrackVersionId | None = None
+    paused_search_track_step_id: PausedSearchTrackStepId | None = None
 
 
 @dataclass(frozen=True)

@@ -21,6 +21,7 @@ from app.application.ports.repositories import (
     LeadWorkflowRepository,
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
+    PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     UserRepository,
     WorkflowTransitionRepository,
@@ -34,6 +35,7 @@ from app.application.ports.repositories import (
     WorkspaceOutboundDraftingConfigRepository,
     WorkspaceRepository,
 )
+from app.application.services.canonical_lead_inputs import lead_has_destination_for_channel
 from app.application.services.workspace_automation_control import (
     resolve_workspace_operational_control,
     workspace_automation_block_reason,
@@ -52,8 +54,14 @@ from app.application.use_cases.plan_next_outbound_message import (
 )
 from app.application.use_cases.plan_outbound_message import (
     ChannelEvaluation,
+    PlanOutboundMessageReasonCode,
     PlanOutboundMessageResult,
     PlanOutboundMessageStatus,
+)
+from app.application.use_cases.schedule_next_paused_search_action import (
+    PausedSearchNextActionScheduleResult,
+    PausedSearchScheduleStatus,
+    schedule_next_paused_search_action,
 )
 from app.application.use_cases.send_outbound_message import (
     OutboundSendContext,
@@ -63,6 +71,7 @@ from app.application.use_cases.send_outbound_message import (
     send_outbound_message,
 )
 from app.domain.campaigns.execution import CampaignCadenceStep
+from app.domain.campaigns.paused_search_tracks import PausedSearchTrackStep
 from app.domain.campaigns.pre_send import PreSendPolicy
 from app.domain.campaigns.rejected_draft_review import (
     RejectedDraftReview,
@@ -75,6 +84,8 @@ from app.domain.compliance.contactability import (
     default_workspace_contact_policy,
 )
 from app.domain.conversations import CrmConversationEventDirection, WorkspaceHandoffConfig
+from app.domain.leads import CanonicalLeadRecord
+from app.domain.outbound_drafting import OutboundJourneyKind
 from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransitionReasonCode
 
 
@@ -128,6 +139,8 @@ async def schedule_next_campaign_cadence_step(
     campaign_version_id: CampaignVersionId,
     campaign_execution_repository: CampaignExecutionRepository,
     lead_workflow_repository: LeadWorkflowRepository,
+    lead_repository: LeadRepository | None = None,
+    paused_search_track_repository: PausedSearchTrackMappingRepository | None = None,
     now: datetime,
 ) -> CadenceStepScheduleResult:
     config = await campaign_execution_repository.get_by_version_id(
@@ -141,6 +154,48 @@ async def schedule_next_campaign_cadence_step(
     workflow = await lead_workflow_repository.get_latest_for_lead_for_update(workspace_id, lead_id)
     if workflow is None:
         return CadenceStepScheduleResult(status=CadenceStepScheduleStatus.NO_WORKFLOW)
+
+    if workflow.state in {
+        WorkflowState.COMPLETED,
+        WorkflowState.SUPPRESSED,
+        WorkflowState.CLOSED,
+    }:
+        return CadenceStepScheduleResult(
+            status=CadenceStepScheduleStatus.NO_CADENCE_STEP,
+            workflow=workflow,
+            skip_reason=f"Workflow is not schedulable from state {workflow.state.value}.",
+        )
+
+    if _workflow_has_no_remaining_cadence_steps(workflow):
+        return CadenceStepScheduleResult(
+            status=CadenceStepScheduleStatus.NO_CADENCE_STEP,
+            workflow=workflow,
+            skip_reason="Workflow has no remaining cadence steps.",
+        )
+
+    lead = None
+    if lead_repository is not None:
+        lead = await lead_repository.get_by_id(workspace_id, lead_id)
+
+    if workflow.paused_search_track_version_id is not None or (
+        lead is not None and lead.paused_search_active
+    ):
+        if lead_repository is None or paused_search_track_repository is None:
+            return CadenceStepScheduleResult(
+                status=CadenceStepScheduleStatus.NO_CADENCE_STEP,
+                workflow=workflow,
+                skip_reason="Paused-search schedule dependencies are unavailable.",
+            )
+        paused_result = await schedule_next_paused_search_action(
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            lead_repository=lead_repository,
+            paused_search_track_repository=paused_search_track_repository,
+            lead_workflow_repository=lead_workflow_repository,
+            timezone=config.timezone,
+            now=now,
+        )
+        return _paused_search_schedule_result(paused_result)
 
     step = _scheduled_or_initial_step(config.cadence_steps, workflow.current_step_id)
     if step is None:
@@ -174,6 +229,7 @@ async def execute_campaign_cadence_step(
     cadence_step_id: UUID,
     scheduled_for: datetime,
     campaign_execution_repository: CampaignExecutionRepository,
+    paused_search_track_repository: PausedSearchTrackMappingRepository | None = None,
     workspace_repository: WorkspaceRepository,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository,
     workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
@@ -191,7 +247,7 @@ async def execute_campaign_cadence_step(
     listing_snapshot_repository: ListingSnapshotRepository | None = None,
     listing_search_client: ListingSearchClient | None = None,
     listing_enrichment_enabled: bool = False,
-    listing_cache_ttl: timedelta = timedelta(hours=6),
+    listing_cache_ttl: timedelta = timedelta(hours=1),
     listing_max_results: int = 3,
     llm_client: LLMClient,
     sms_provider: SMSProvider,
@@ -219,15 +275,69 @@ async def execute_campaign_cadence_step(
             status=CadenceStepExecutionStatus.MISSING_CAMPAIGN_CONFIG,
         )
 
-    step = _step_by_id(config.cadence_steps, cadence_step_id)
-    if step is None:
-        return CadenceStepExecutionResult(status=CadenceStepExecutionStatus.NO_CADENCE_STEP)
-
     workflow = await lead_workflow_repository.get_latest_for_lead_for_update(workspace_id, lead_id)
     if workflow is None:
         return CadenceStepExecutionResult(status=CadenceStepExecutionStatus.NO_WORKFLOW)
 
-    if workflow.current_step_id not in {None, step.cadence_step_id}:
+    lead = await lead_repository.get_by_id(workspace_id, lead_id)
+    if (
+        lead is not None
+        and lead.paused_search_active
+        and workflow.paused_search_track_version_id is None
+    ):
+        return CadenceStepExecutionResult(
+            status=CadenceStepExecutionStatus.NO_CADENCE_STEP,
+            workflow=workflow,
+            cadence_step_id=cadence_step_id,
+            skip_reason=(
+                "Lead is paused-search active but no pinned paused-search track "
+                "is available."
+            ),
+        )
+
+    cadence_steps = config.cadence_steps
+    cursor_step_id = workflow.current_step_id
+    journey_kind = OutboundJourneyKind.DORMANT
+    is_paused_search_step = workflow.paused_search_track_version_id is not None
+    if is_paused_search_step:
+        if paused_search_track_repository is None:
+            return CadenceStepExecutionResult(
+                status=CadenceStepExecutionStatus.NO_CADENCE_STEP,
+                workflow=workflow,
+                cadence_step_id=cadence_step_id,
+                skip_reason="Paused-search track repository is unavailable.",
+            )
+        workflow, paused_search_gate_result = await _revalidate_paused_search_execution_gate(
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            cadence_step_id=cadence_step_id,
+            timezone=config.timezone,
+            lead_repository=lead_repository,
+            lead_workflow_repository=lead_workflow_repository,
+            paused_search_track_repository=paused_search_track_repository,
+            workflow=workflow,
+            now=now,
+        )
+        if paused_search_gate_result is not None:
+            return paused_search_gate_result
+        paused_search_track_version_id = workflow.paused_search_track_version_id
+        assert paused_search_track_version_id is not None
+        paused_steps = await paused_search_track_repository.get_steps(
+            workspace_id,
+            paused_search_track_version_id,
+        )
+        cadence_steps = _paused_search_steps_as_cadence_steps(
+            paused_steps,
+            campaign_version_id=campaign_version_id,
+        )
+        cursor_step_id = workflow.paused_search_track_step_id
+        journey_kind = OutboundJourneyKind.PAUSED_SEARCH
+
+    step = _step_by_id(cadence_steps, cadence_step_id)
+    if step is None:
+        return CadenceStepExecutionResult(status=CadenceStepExecutionStatus.NO_CADENCE_STEP)
+
+    if cursor_step_id not in {None, step.cadence_step_id}:
         return CadenceStepExecutionResult(
             status=CadenceStepExecutionStatus.SKIPPED,
             workflow=workflow,
@@ -237,7 +347,7 @@ async def execute_campaign_cadence_step(
 
     if (
         workflow.state == WorkflowState.WAITING_FOR_RESPONSE
-        and workflow.current_step_id == step.cadence_step_id
+        and cursor_step_id == step.cadence_step_id
         and workflow.next_action_at is None
     ):
         return CadenceStepExecutionResult(
@@ -261,6 +371,20 @@ async def execute_campaign_cadence_step(
             skip_reason=f"Workflow is not sendable from state {workflow.state.value}.",
         )
 
+    if lead is not None and not lead_has_destination_for_channel(lead, step.channel):
+        return await _handle_missing_step_destination(
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            workflow=workflow,
+            lead=lead,
+            cadence_steps=cadence_steps,
+            cadence_step=step,
+            is_paused_search_step=is_paused_search_step,
+            lead_workflow_repository=lead_workflow_repository,
+            workflow_transition_repository=workflow_transition_repository,
+            now=now,
+        )
+
     workspace = await workspace_repository.get_by_id(workspace_id)
     if workspace is None:
         return CadenceStepExecutionResult(
@@ -275,13 +399,13 @@ async def execute_campaign_cadence_step(
     )
     if not workspace_automation_is_active(operational_control):
         deferred_until = now + workspace_automation_defer_interval
-        workflow = await lead_workflow_repository.save(
-            replace(
-                workflow,
-                current_step_id=step.cadence_step_id,
-                next_action_at=deferred_until,
-                updated_at=now,
-            )
+        workflow = await _save_step_cursor(
+            workflow=workflow,
+            cadence_step_id=step.cadence_step_id,
+            scheduled_for=deferred_until,
+            is_paused_search_step=is_paused_search_step,
+            lead_workflow_repository=lead_workflow_repository,
+            now=now,
         )
         return CadenceStepExecutionResult(
             status=CadenceStepExecutionStatus.DEFERRED,
@@ -302,14 +426,16 @@ async def execute_campaign_cadence_step(
         workspace.default_timezone,
     )
 
-    if workflow.current_step_id != step.cadence_step_id or workflow.next_action_at != scheduled_for:
-        workflow = await lead_workflow_repository.save(
-            replace(
-                workflow,
-                current_step_id=step.cadence_step_id,
-                next_action_at=scheduled_for,
-                updated_at=now,
-            )
+    if cursor_step_id != step.cadence_step_id or (
+        not is_paused_search_step and workflow.next_action_at != scheduled_for
+    ):
+        workflow = await _save_step_cursor(
+            workflow=workflow,
+            cadence_step_id=step.cadence_step_id,
+            scheduled_for=scheduled_for,
+            is_paused_search_step=is_paused_search_step,
+            lead_workflow_repository=lead_workflow_repository,
+            now=now,
         )
 
     if workflow.state != WorkflowState.ACTIVE_NURTURE:
@@ -334,16 +460,20 @@ async def execute_campaign_cadence_step(
                 skip_reason=active_outcome.skip_reason,
             )
 
+    enabled_channels = (step.channel,)
+
     planning_context = PlanNextOutboundMessageContext(
         campaign_status=config.campaign_status,
         workflow_state=WorkflowState.ACTIVE_NURTURE,
-        enabled_channels=(step.channel,),
+        enabled_channels=enabled_channels,
         workspace_contact_policy=workspace_contact_policy,
         campaign_goal=step.message_goal,
         brokerage_name=workspace.name,
         cadence_step_id=str(step.cadence_step_id),
+        template_key=step.template_key,
         scheduled_for=scheduled_for,
         pre_send_policy=pre_send_policy,
+        journey_kind=journey_kind,
     )
     plan_result = await plan_next_outbound_message_for_lead(
         workspace_id=workspace_id,
@@ -398,7 +528,7 @@ async def execute_campaign_cadence_step(
                     campaign_version_id=campaign_version_id,
                     lead_id=lead_id,
                     cadence_step_id=step.cadence_step_id,
-                    channel=step.channel,
+                    channel=plan_result.selected_channel or step.channel,
                     plan_result=plan_result,
                     now=now,
                 )
@@ -465,13 +595,25 @@ async def execute_campaign_cadence_step(
                     workspace_handoff_config=handoff_config,
                     snapshot_status="waiting_for_response",
                 )
+        if is_paused_search_step:
+            return await advance_paused_search_workflow_after_outbound_send(
+                workspace_id=workspace_id,
+                lead_id=lead_id,
+                workflow=workflow,
+                lead_workflow_repository=lead_workflow_repository,
+                workflow_transition_repository=workflow_transition_repository,
+                cadence_steps=cadence_steps,
+                cadence_step_id=step.cadence_step_id,
+                send_result=send_result,
+                now=now,
+            )
         return await advance_workflow_after_outbound_send(
             workspace_id=workspace_id,
             lead_id=lead_id,
             workflow=workflow,
             lead_workflow_repository=lead_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
-            cadence_steps=config.cadence_steps,
+            cadence_steps=cadence_steps,
             cadence_step_id=step.cadence_step_id,
             send_result=send_result,
             now=now,
@@ -543,6 +685,222 @@ async def _pause_after_block(
     )
 
 
+async def _save_step_cursor(
+    *,
+    workflow: LeadWorkflow,
+    cadence_step_id: UUID,
+    scheduled_for: datetime,
+    is_paused_search_step: bool,
+    lead_workflow_repository: LeadWorkflowRepository,
+    now: datetime,
+) -> LeadWorkflow:
+    if is_paused_search_step:
+        return await lead_workflow_repository.save(
+            replace(
+                workflow,
+                current_step_id=None,
+                paused_search_track_step_id=cadence_step_id,
+                next_action_at=scheduled_for,
+                updated_at=now,
+            )
+        )
+    return await lead_workflow_repository.save(
+        replace(
+            workflow,
+            current_step_id=cadence_step_id,
+            next_action_at=scheduled_for,
+            updated_at=now,
+        )
+    )
+
+
+async def _save_next_step_cursor_after_skip(
+    *,
+    workflow: LeadWorkflow,
+    cadence_step_id: UUID,
+    is_paused_search_step: bool,
+    lead_workflow_repository: LeadWorkflowRepository,
+    now: datetime,
+) -> LeadWorkflow:
+    if is_paused_search_step:
+        return await lead_workflow_repository.save(
+            replace(
+                workflow,
+                current_step_id=None,
+                paused_search_track_step_id=cadence_step_id,
+                next_action_at=None,
+                updated_at=now,
+            )
+        )
+    return await lead_workflow_repository.save(
+        replace(
+            workflow,
+            current_step_id=cadence_step_id,
+            next_action_at=None,
+            updated_at=now,
+        )
+    )
+
+
+async def _clear_step_cursor(
+    *,
+    workflow: LeadWorkflow,
+    is_paused_search_step: bool,
+    lead_workflow_repository: LeadWorkflowRepository,
+    now: datetime,
+) -> LeadWorkflow:
+    if is_paused_search_step:
+        return await lead_workflow_repository.save(
+            replace(
+                workflow,
+                current_step_id=None,
+                paused_search_track_step_id=None,
+                next_action_at=None,
+                updated_at=now,
+            )
+        )
+    return await lead_workflow_repository.save(
+        replace(
+            workflow,
+            current_step_id=None,
+            next_action_at=None,
+            updated_at=now,
+        )
+    )
+
+
+async def _handle_missing_step_destination(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    workflow: LeadWorkflow,
+    lead: CanonicalLeadRecord,
+    cadence_steps: tuple[CampaignCadenceStep, ...],
+    cadence_step: CampaignCadenceStep,
+    is_paused_search_step: bool,
+    lead_workflow_repository: LeadWorkflowRepository,
+    workflow_transition_repository: WorkflowTransitionRepository,
+    now: datetime,
+) -> CadenceStepExecutionResult:
+    if not any(lead_has_destination_for_channel(lead, step.channel) for step in cadence_steps):
+        return await _pause_after_block(
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            lead_workflow_repository=lead_workflow_repository,
+            workflow_transition_repository=workflow_transition_repository,
+            cadence_step_id=cadence_step.cadence_step_id,
+            now=now,
+            reason_code=WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED,
+            skip_reason="Planning blocked: no contact information found.",
+            metadata={
+                "cadence_step_id": str(cadence_step.cadence_step_id),
+                "block_stage": "planning",
+                "reason": PlanOutboundMessageReasonCode.NO_ENABLED_CHANNELS.value,
+                "reason_codes": [PlanOutboundMessageReasonCode.NO_ENABLED_CHANNELS.value],
+                "explanation": "Planning blocked: no contact information found.",
+            },
+            status=CadenceStepExecutionStatus.REJECTED,
+        )
+
+    next_step = _next_step(cadence_steps, cadence_step.cadence_step_id)
+    skip_reason = (
+        f"Skipped cadence step: no {cadence_step.channel.value} destination found for this lead."
+    )
+    if next_step is None:
+        workflow = await _clear_step_cursor(
+            workflow=workflow,
+            is_paused_search_step=is_paused_search_step,
+            lead_workflow_repository=lead_workflow_repository,
+            now=now,
+        )
+        return CadenceStepExecutionResult(
+            status=CadenceStepExecutionStatus.SKIPPED,
+            workflow=workflow,
+            cadence_step_id=cadence_step.cadence_step_id,
+            skip_reason=skip_reason,
+        )
+
+    workflow = await _save_next_step_cursor_after_skip(
+        workflow=workflow,
+        cadence_step_id=next_step.cadence_step_id,
+        is_paused_search_step=is_paused_search_step,
+        lead_workflow_repository=lead_workflow_repository,
+        now=now,
+    )
+    return CadenceStepExecutionResult(
+        status=CadenceStepExecutionStatus.SKIPPED,
+        workflow=workflow,
+        cadence_step_id=cadence_step.cadence_step_id,
+        skip_reason=skip_reason,
+        has_more_steps=True,
+    )
+
+
+async def _revalidate_paused_search_execution_gate(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    cadence_step_id: UUID,
+    timezone: str,
+    lead_repository: LeadRepository,
+    lead_workflow_repository: LeadWorkflowRepository,
+    paused_search_track_repository: PausedSearchTrackMappingRepository,
+    workflow: LeadWorkflow,
+    now: datetime,
+) -> tuple[LeadWorkflow, CadenceStepExecutionResult | None]:
+    revalidated = await schedule_next_paused_search_action(
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        lead_repository=lead_repository,
+        paused_search_track_repository=paused_search_track_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        timezone=timezone,
+        now=now,
+    )
+    refreshed_workflow = revalidated.workflow or workflow
+    if revalidated.status != PausedSearchScheduleStatus.SCHEDULED:
+        return refreshed_workflow, CadenceStepExecutionResult(
+            status=CadenceStepExecutionStatus.NO_CADENCE_STEP,
+            workflow=refreshed_workflow,
+            cadence_step_id=cadence_step_id,
+            skip_reason=_paused_search_execution_skip_reason(revalidated),
+        )
+
+    if revalidated.step_id != cadence_step_id:
+        return refreshed_workflow, CadenceStepExecutionResult(
+            status=CadenceStepExecutionStatus.SKIPPED,
+            workflow=refreshed_workflow,
+            cadence_step_id=cadence_step_id,
+            skip_reason=(
+                "Paused-search timing changed before execution and a different "
+                "track step is now due."
+            ),
+        )
+
+    if revalidated.next_action_at is None or revalidated.next_action_at > now:
+        return refreshed_workflow, CadenceStepExecutionResult(
+            status=CadenceStepExecutionStatus.SKIPPED,
+            workflow=refreshed_workflow,
+            cadence_step_id=cadence_step_id,
+            skip_reason=(
+                "Paused-search timing changed before execution and this action "
+                "is no longer due yet."
+            ),
+        )
+
+    return refreshed_workflow, None
+
+
+def _paused_search_execution_skip_reason(
+    result: PausedSearchNextActionScheduleResult,
+) -> str:
+    return result.reason_detail or (
+        result.reason_code.value
+        if result.reason_code is not None
+        else "paused-search action not sendable"
+    )
+
+
 async def advance_workflow_after_outbound_send(
     *,
     workspace_id: WorkspaceId,
@@ -590,7 +948,79 @@ async def advance_workflow_after_outbound_send(
     workflow_outcome = await lead_workflow_repository.save(
         replace(
             waiting_outcome.workflow,
-            current_step_id=next_step.cadence_step_id if next_step is not None else cadence_step_id,
+            current_step_id=next_step.cadence_step_id if next_step is not None else None,
+            next_action_at=None,
+            updated_at=now,
+        )
+    )
+    return CadenceStepExecutionResult(
+        status=(
+            CadenceStepExecutionStatus.SENT
+            if send_result.status == SendOutboundMessageStatus.SENT
+            else CadenceStepExecutionStatus.ALREADY_SENT
+        ),
+        workflow=workflow_outcome,
+        transition_id=waiting_outcome.transition_id,
+        cadence_step_id=cadence_step_id,
+        outbound_message_id=send_result.message.message_id if send_result.message else None,
+        provider_message_id=(
+            send_result.message.provider_message_id if send_result.message else None
+        ),
+        has_more_steps=next_step is not None,
+    )
+
+
+async def advance_paused_search_workflow_after_outbound_send(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    workflow: LeadWorkflow,
+    lead_workflow_repository: LeadWorkflowRepository,
+    workflow_transition_repository: WorkflowTransitionRepository,
+    cadence_steps: tuple[CampaignCadenceStep, ...],
+    cadence_step_id: UUID,
+    send_result: SendOutboundMessageResult,
+    now: datetime,
+) -> CadenceStepExecutionResult:
+    waiting_outcome = await apply_workflow_state_transition(
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        to_state=WorkflowState.WAITING_FOR_RESPONSE,
+        reason_code=WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_SENT,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        now=now,
+        metadata={
+            "paused_search_track_step_id": str(cadence_step_id),
+            "outbound_message_id": (
+                str(send_result.message.message_id) if send_result.message else None
+            ),
+        },
+    )
+    if (
+        waiting_outcome.status != WorkflowStateTransitionStatus.UPDATED
+        or waiting_outcome.workflow is None
+    ):
+        return CadenceStepExecutionResult(
+            status=CadenceStepExecutionStatus.SKIPPED,
+            workflow=waiting_outcome.workflow or workflow,
+            transition_id=waiting_outcome.transition_id,
+            cadence_step_id=cadence_step_id,
+            outbound_message_id=send_result.message.message_id if send_result.message else None,
+            provider_message_id=(
+                send_result.message.provider_message_id if send_result.message else None
+            ),
+            skip_reason=waiting_outcome.skip_reason,
+        )
+
+    next_step = _next_step(cadence_steps, cadence_step_id)
+    workflow_outcome = await lead_workflow_repository.save(
+        replace(
+            waiting_outcome.workflow,
+            current_step_id=None,
+            paused_search_track_step_id=(
+                next_step.cadence_step_id if next_step is not None else None
+            ),
             next_action_at=None,
             updated_at=now,
         )
@@ -673,6 +1103,63 @@ def _step_by_id(
         if step.cadence_step_id == cadence_step_id:
             return step
     return None
+
+
+def _paused_search_steps_as_cadence_steps(
+    steps: tuple[PausedSearchTrackStep, ...],
+    *,
+    campaign_version_id: CampaignVersionId,
+) -> tuple[CampaignCadenceStep, ...]:
+    return tuple(
+        CampaignCadenceStep(
+            cadence_step_id=step.step_id,
+            workspace_id=step.workspace_id,
+            campaign_version_id=campaign_version_id,
+            step_order=step.step_order,
+            channel=step.channel,
+            delay_hours=step.delay_hours,
+            message_goal=step.message_goal,
+            template_key=step.template_key,
+            max_attempts=step.max_attempts,
+            created_at=step.created_at,
+        )
+        for step in steps
+    )
+
+
+def _paused_search_schedule_result(
+    result: PausedSearchNextActionScheduleResult,
+) -> CadenceStepScheduleResult:
+    if result.status == PausedSearchScheduleStatus.SCHEDULED:
+        return CadenceStepScheduleResult(
+            status=CadenceStepScheduleStatus.SCHEDULED,
+            workflow=result.workflow,
+            cadence_step_id=result.step_id,
+            scheduled_for=result.next_action_at,
+            skip_reason=result.reason_detail,
+        )
+    if result.status == PausedSearchScheduleStatus.NO_WORKFLOW:
+        status = CadenceStepScheduleStatus.NO_WORKFLOW
+    else:
+        status = CadenceStepScheduleStatus.NO_CADENCE_STEP
+    return CadenceStepScheduleResult(
+        status=status,
+        workflow=result.workflow,
+        cadence_step_id=result.step_id,
+        scheduled_for=result.next_action_at,
+        skip_reason=(
+            result.reason_detail or (result.reason_code.value if result.reason_code else None)
+        ),
+    )
+
+
+def _workflow_has_no_remaining_cadence_steps(workflow: LeadWorkflow) -> bool:
+    return (
+        workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+        and workflow.next_action_at is None
+        and workflow.current_step_id is None
+        and workflow.paused_search_track_step_id is None
+    )
 
 
 def _next_step(
@@ -786,7 +1273,10 @@ def _send_block_metadata(
 
 
 def _planning_block_explanation(plan_result: PlanOutboundMessageResult) -> str:
-    parts = [f"Planning blocked: {_humanized_reason_values(plan_result.reasons)}."]
+    if plan_result.reasons == (PlanOutboundMessageReasonCode.NO_ENABLED_CHANNELS,):
+        parts = ["Planning blocked: no contact information found."]
+    else:
+        parts = [f"Planning blocked: {_humanized_reason_values(plan_result.reasons)}."]
     if plan_result.channel_evaluations:
         considered_channels = _humanized_strings(
             evaluation.channel.value for evaluation in plan_result.channel_evaluations

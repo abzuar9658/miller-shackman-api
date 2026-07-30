@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from app.domain.compliance.contactability import ContactPermissionStatus, SuppressionType
 from app.domain.leads import (
     ActivityReliability,
     LeadClassificationReason,
@@ -113,6 +114,36 @@ def test_primary_phone_prefers_sms_capable_number_when_multiple_numbers_exist() 
 
     assert lead.primary_phone == "+15550000002"
     assert lead.has_sms_capable_phone is True
+
+
+def test_maps_contactability_fields_from_follow_up_boss_custom_fields() -> None:
+    lead = map_follow_up_boss_person_to_canonical_lead(
+        workspace_id=uuid4(),
+        payload={
+            "id": 123,
+            "type": "Buyer",
+            "emails": [{"value": "lead@example.com"}],
+            "customFields": {
+                "email_permission_status": "confirmed",
+                "sms_permission_status": "denied",
+                "sms_opted_out": True,
+                "do_not_contact": False,
+            },
+        },
+        now=NOW,
+    )
+
+    assert lead.email_permission_status == ContactPermissionStatus.CONFIRMED
+    assert lead.sms_permission_status == ContactPermissionStatus.DENIED
+    assert lead.sms_opted_out is True
+    assert lead.do_not_contact is False
+    assert lead.suppression_types == frozenset({SuppressionType.SMS_OPT_OUT})
+    assert lead.permission_evidence == {
+        "email_permission_status_source": "follow_up_boss.customFields",
+        "sms_permission_status_source": "follow_up_boss.customFields",
+        "sms_opted_out_source": "follow_up_boss.customFields",
+        "do_not_contact_source": "follow_up_boss.customFields",
+    }
 
 
 def test_property_event_keeps_safe_context_without_exact_price_or_address() -> None:

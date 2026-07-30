@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -193,6 +193,7 @@ def test_preview_workspace_outbound_drafting_uses_saved_config_and_live_search()
             listing_source_repository=_FakeListingSourceRepository(source),
             listing_snapshot_repository=_FakeListingSnapshotRepository(),
             listing_search_client=listing_search_client,
+            listing_cache_ttl=timedelta(hours=1),
             now=NOW,
         ),
     )
@@ -214,7 +215,7 @@ def test_preview_workspace_outbound_drafting_uses_saved_config_and_live_search()
     assert result.email_preview.subject == "Preview subject | Taylor Brokerage"
     assert result.email_preview.body is not None
     assert result.email_preview.body == "Regards,\nTaylor Brokerage\n\nEmail preview body"
-    assert result.sms_preview.prompt_version == "outbound_message_draft:v9:r2"
+    assert result.sms_preview.prompt_version == "outbound_message_draft:v10:r2"
     assert len(llm_client.requests) == 3
     assert len(listing_search_client.search_calls) == 1
     assert listing_search_client.search_calls[0].search_type.value == "rent"

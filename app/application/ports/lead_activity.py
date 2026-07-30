@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
@@ -36,6 +36,14 @@ class LeadActivitySummary:
 
 
 @dataclass(frozen=True)
+class LeadActivityTranscriptSegment:
+    text: str
+    speaker_name: str | None = None
+    speaker_role: str | None = None
+    started_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class LeadActivityItem:
     activity_id: UUID
     lead_id: LeadId
@@ -48,6 +56,8 @@ class LeadActivityItem:
     direction: str | None = None
     status: str | None = None
     actor_name: str | None = None
+    details: dict[str, str | int | float | bool | None] = field(default_factory=dict)
+    transcript_segments: tuple[LeadActivityTranscriptSegment, ...] = ()
 
 
 class LeadActivityRepository(Protocol):

@@ -1,6 +1,7 @@
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from app.domain.common.ids import WorkspaceId
 
@@ -17,6 +18,7 @@ SUPPORTED_QUERY_EXTRACTION_FIELDS = (
 SUPPORTED_TEMPLATE_PLACEHOLDERS = (
     "agent_name",
     "brokerage_name",
+    "lead_first_name",
     "message_body",
     "message_subject",
 )
@@ -52,6 +54,11 @@ LEGACY_EMAIL_INSTRUCTION_TEMPLATE = (
     "and end with a clear offer to have the assigned agent follow up."
 )
 TEMPLATE_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-z_]+)\s*}}")
+
+
+class OutboundJourneyKind(StrEnum):
+    DORMANT = "dormant"
+    PAUSED_SEARCH = "paused_search"
 
 
 def _default_enabled_extraction_fields() -> tuple[str, ...]:

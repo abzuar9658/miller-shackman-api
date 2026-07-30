@@ -1,21 +1,31 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID, uuid4
 
-from app.application.ports.crm import CRMActivity
+import structlog
+
+from app.application.ports.crm import CRMActivity, CRMClient
 from app.application.ports.crm_sync import CanonicalLeadSnapshotSource
 from app.application.ports.event_bus import EventBus
+from app.application.ports.llm import LLMClient
+from app.application.ports.notifications import NotificationProvider
 from app.application.ports.repositories import (
     CampaignEnrollmentRepository,
     CampaignExecutionRepository,
     CRMAgentRepository,
     CrmConversationEventRepository,
     CRMSyncJobRepository,
+    CRMSyncWindowStateRepository,
+    HandoffCompletionRepository,
+    HandoffRepository,
+    LeadClassificationArtifactRepository,
+    LeadPausedSearchHistoryRepository,
     LeadRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     UserRepository,
     WorkflowTransitionRepository,
@@ -23,6 +33,8 @@ from app.application.ports.repositories import (
     WorkspaceAgentMappingConfigRepository,
     WorkspaceContactPolicyRepository,
     WorkspaceCRMSyncConfigRepository,
+    WorkspaceHandoffConfigRepository,
+    WorkspaceLLMConfigRepository,
     WorkspaceMembershipRepository,
     WorkspaceOperationalControlRepository,
 )
@@ -40,16 +52,30 @@ from app.application.use_cases.reconcile_lead_assignment import (
     reconcile_lead_assignment_change,
 )
 from app.domain.common.ids import LeadId, WorkspaceId
-from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
-from app.domain.crm_sync import CRMSyncJob, CRMSyncJobStatus, CRMSyncLeadSort, CRMSyncType
+from app.domain.conversations import (
+    CrmConversationEvent,
+    CrmConversationEventDirection,
+    CrmConversationTranscriptSegment,
+)
+from app.domain.crm_sync import (
+    CRMSyncJob,
+    CRMSyncJobStatus,
+    CRMSyncLeadSort,
+    CRMSyncType,
+    CRMSyncWindowState,
+)
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workspace_automation import WorkspaceAutomationStatus
 
+logger = structlog.get_logger(__name__)
+
 
 class RunFollowUpBossLeadSyncStatus(StrEnum):
     COMPLETED = "completed"
+    PARTIAL = "partial"
     FAILED = "failed"
+    LOST_LEASE = "lost_lease"
 
 
 @dataclass(frozen=True)
@@ -57,6 +83,7 @@ class RunFollowUpBossLeadSyncResult:
     status: RunFollowUpBossLeadSyncStatus
     job: CRMSyncJob
     page_count: int
+    next_cursor: str | None = None
 
 
 class RequestCRMSyncStatus(StrEnum):
@@ -72,7 +99,9 @@ class RequestCRMSyncResult:
 
 class ExecuteQueuedCRMSyncStatus(StrEnum):
     COMPLETED = "completed"
+    PARTIAL = "partial"
     FAILED = "failed"
+    LOST_LEASE = "lost_lease"
     NOT_CLAIMED = "not_claimed"
 
 
@@ -114,8 +143,10 @@ async def run_follow_up_boss_lead_snapshot_sync(
     page_size: int = 100,
     max_leads: int | None = None,
     latest_by: CRMSyncLeadSort | None = None,
+    initial_cursor: str | None = None,
     created_by_user_id: UUID | None = None,
     updated_after: datetime | None = None,
+    updated_before: datetime | None = None,
     mapped_custom_field_keys: tuple[str, ...] = (),
     sync_job_id_factory: Callable[[], UUID] | None = None,
     sync_job: CRMSyncJob | None = None,
@@ -127,8 +158,13 @@ async def run_follow_up_boss_lead_snapshot_sync(
     lead_workflow_repository: LeadWorkflowRepository | None = None,
     workflow_transition_repository: WorkflowTransitionRepository | None = None,
     temporal_workflow_starter: TemporalWorkflowStarter | None = None,
+    paused_search_track_repository: PausedSearchTrackMappingRepository | None = None,
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
+    handoff_repository: HandoffRepository | None = None,
+    handoff_completion_repository: HandoffCompletionRepository | None = None,
+    workspace_handoff_config_repository: WorkspaceHandoffConfigRepository | None = None,
+    notification_provider: NotificationProvider | None = None,
     crm_agent_repository: CRMAgentRepository | None = None,
     workspace_agent_crm_mapping_repository: WorkspaceAgentCRMMappingRepository | None = None,
     workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository | None = None,
@@ -136,16 +172,23 @@ async def run_follow_up_boss_lead_snapshot_sync(
     user_repository: UserRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     outbound_message_repository: LeadAssignmentMessageRepository | None = None,
+    lead_classification_artifact_repository: LeadClassificationArtifactRepository | None = None,
+    workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
+    llm_client: LLMClient | None = None,
+    default_openrouter_model: str = "openai/gpt-4o-mini",
     commit: Callable[[], Awaitable[None]] | None = None,
     activity_limit: int = 50,
+    heartbeat_now_factory: Callable[[], datetime] | None = None,
+    lease_lost_checker: Callable[[], bool] | None = None,
 ) -> RunFollowUpBossLeadSyncResult:
     if not 1 <= page_size <= 100:
         raise ValueError("page_size must be between 1 and 100")
     max_leads, latest_by = _normalize_recent_limit(
-        sync_type=sync_type,
         max_leads=max_leads,
         latest_by=latest_by,
     )
+    heartbeat_now = heartbeat_now_factory or _default_heartbeat_now
+    has_lost_lease = lease_lost_checker or _lease_not_lost
 
     cursor_started_at = await _resolve_cursor_started_at(
         workspace_id=workspace_id,
@@ -153,21 +196,34 @@ async def run_follow_up_boss_lead_snapshot_sync(
         sync_type=sync_type,
         updated_after=updated_after,
     )
-    cursor_finished_at = now
-    job = await crm_sync_job_repository.save(
-        _running_sync_job(
-            workspace_id=workspace_id,
-            sync_type=sync_type,
-            now=now,
-            cursor_started_at=cursor_started_at,
-            cursor_finished_at=cursor_finished_at,
-            created_by_user_id=created_by_user_id,
-            sync_job_id_factory=sync_job_id_factory,
-            sync_job=sync_job,
+    cursor_finished_at = updated_before or now
+    initial_job = _running_sync_job(
+        workspace_id=workspace_id,
+        sync_type=sync_type,
+        now=now,
+        cursor_started_at=cursor_started_at,
+        cursor_finished_at=cursor_finished_at,
+        created_by_user_id=created_by_user_id,
+        sync_job_id_factory=sync_job_id_factory,
+        sync_job=sync_job,
+    )
+    job = await crm_sync_job_repository.save(initial_job) if sync_job is None else initial_job
+    logger.info(
+        "crm_sync_run_started",
+        workspace_id=str(workspace_id),
+        sync_job_id=str(job.sync_job_id),
+        sync_type=sync_type.value,
+        page_size=page_size,
+        max_leads=max_leads,
+        latest_by=latest_by.value if latest_by is not None else None,
+        resume_cursor_present=initial_cursor is not None,
+        cursor_started_at=(
+            cursor_started_at.isoformat() if cursor_started_at is not None else None
         ),
+        cursor_finished_at=cursor_finished_at.isoformat(),
     )
 
-    next_cursor: str | None = None
+    next_cursor: str | None = initial_cursor
     remaining_leads = max_leads
     page_count = 0
     first_failure: str | None = None
@@ -181,6 +237,15 @@ async def run_follow_up_boss_lead_snapshot_sync(
     )
     try:
         while True:
+            if has_lost_lease():
+                return await _lost_lease_result(
+                    workspace_id=workspace_id,
+                    crm_sync_job_repository=crm_sync_job_repository,
+                    job=job,
+                    sync_type=sync_type,
+                    page_count=page_count,
+                    phase="before_page_fetch",
+                )
             request_page_size = page_size
             if remaining_leads is not None:
                 if remaining_leads <= 0:
@@ -195,11 +260,21 @@ async def run_follow_up_boss_lead_snapshot_sync(
                 sort_by=latest_by,
                 mapped_custom_field_keys=mapped_custom_field_keys,
             )
+            page_next_cursor = page.next_cursor
             page_count += 1
             total_seen = job.total_seen + len(page.leads)
             total_upserted = job.total_upserted
             total_failed = job.total_failed
             for lead in page.leads:
+                if has_lost_lease():
+                    return await _lost_lease_result(
+                        workspace_id=workspace_id,
+                        crm_sync_job_repository=crm_sync_job_repository,
+                        job=job,
+                        sync_type=sync_type,
+                        page_count=page_count,
+                        phase="during_lead_processing",
+                    )
                 try:
                     existing_lead = await lead_repository.get_by_crm_id(
                         workspace_id,
@@ -244,6 +319,12 @@ async def run_follow_up_boss_lead_snapshot_sync(
                         lead_workflow_repository=lead_workflow_repository,
                         workflow_transition_repository=workflow_transition_repository,
                         temporal_workflow_starter=temporal_workflow_starter,
+                        lead_repository=lead_repository,
+                        paused_search_track_repository=paused_search_track_repository,
+                        lead_classification_artifact_repository=lead_classification_artifact_repository,
+                        crm_conversation_event_repository=crm_conversation_event_repository,
+                        workspace_llm_config_repository=workspace_llm_config_repository,
+                        llm_client=llm_client,
                     ):
                         assert campaign_execution_repository is not None
                         assert workspace_contact_policy_repository is not None
@@ -251,6 +332,12 @@ async def run_follow_up_boss_lead_snapshot_sync(
                         assert lead_workflow_repository is not None
                         assert workflow_transition_repository is not None
                         assert temporal_workflow_starter is not None
+                        assert lead_repository is not None
+                        assert paused_search_track_repository is not None
+                        assert lead_classification_artifact_repository is not None
+                        assert crm_conversation_event_repository is not None
+                        assert workspace_llm_config_repository is not None
+                        assert llm_client is not None
                         await process_crm_tag_campaign_enrollment(
                             workspace_id=workspace_id,
                             lead=upserted_lead,
@@ -262,42 +349,101 @@ async def run_follow_up_boss_lead_snapshot_sync(
                             lead_workflow_repository=lead_workflow_repository,
                             workflow_transition_repository=workflow_transition_repository,
                             temporal_workflow_starter=temporal_workflow_starter,
+                            lead_repository=lead_repository,
+                            paused_search_history_repository=cast(
+                                LeadPausedSearchHistoryRepository,
+                                lead_repository,
+                            ),
+                            paused_search_track_repository=paused_search_track_repository,
+                            artifact_repository=lead_classification_artifact_repository,
+                            crm_conversation_event_repository=crm_conversation_event_repository,
+                            workspace_llm_config_repository=workspace_llm_config_repository,
+                            llm_client=llm_client,
                             event_bus=event_bus,
                             workspace_operational_control_repository=(
                                 workspace_operational_control_repository
                             ),
+                            handoff_repository=handoff_repository,
+                            handoff_completion_repository=handoff_completion_repository,
+                            workspace_handoff_config_repository=(
+                                workspace_handoff_config_repository
+                            ),
+                            crm_client=cast(CRMClient, lead_snapshot_source),
+                            notification_provider=notification_provider,
+                            user_repository=user_repository,
                             commit=commit,
+                            default_openrouter_model=default_openrouter_model,
                         )
                 except Exception as exc:
                     total_failed += 1
                     if first_failure is None:
                         first_failure = str(exc) or exc.__class__.__name__
-            job = await crm_sync_job_repository.save(
-                replace(
-                    job,
-                    total_seen=total_seen,
-                    total_upserted=total_upserted,
-                    total_failed=total_failed,
-                    updated_at=now,
-                ),
+            page_updated_at = heartbeat_now()
+            job = replace(
+                job,
+                total_seen=total_seen,
+                total_upserted=total_upserted,
+                total_failed=total_failed,
+                last_heartbeat_at=page_updated_at,
+                updated_at=page_updated_at,
+            )
+            logger.info(
+                "crm_sync_page_processed",
+                workspace_id=str(workspace_id),
+                sync_job_id=str(job.sync_job_id),
+                sync_type=sync_type.value,
+                page_number=page_count,
+                page_lead_count=len(page.leads),
+                total_seen=job.total_seen,
+                total_upserted=job.total_upserted,
+                total_failed=job.total_failed,
+                remaining_leads=remaining_leads,
+                next_cursor_present=page_next_cursor is not None,
             )
             if remaining_leads is not None:
                 remaining_leads -= len(page.leads)
-                if remaining_leads <= 0:
-                    break
-            if page.next_cursor is None:
+            next_cursor = page_next_cursor
+            if remaining_leads is not None and remaining_leads <= 0:
                 break
-            next_cursor = page.next_cursor
+            if page_next_cursor is None:
+                break
     except Exception as exc:
-        failed_job = await crm_sync_job_repository.save(
+        if has_lost_lease():
+            return await _lost_lease_result(
+                workspace_id=workspace_id,
+                crm_sync_job_repository=crm_sync_job_repository,
+                job=job,
+                sync_type=sync_type,
+                page_count=page_count,
+                phase="exception_path",
+            )
+        logger.exception(
+            "crm_sync_run_failed",
+            workspace_id=str(workspace_id),
+            sync_job_id=str(job.sync_job_id),
+            sync_type=sync_type.value,
+            page_count=page_count,
+        )
+        failed_at = heartbeat_now()
+        failed_job = await crm_sync_job_repository.save_if_running(
             replace(
                 job,
                 status=CRMSyncJobStatus.FAILED,
-                finished_at=now,
+                finished_at=failed_at,
                 failure_reason=_page_failure_reason(exc),
-                updated_at=now,
+                last_heartbeat_at=failed_at,
+                updated_at=failed_at,
             ),
         )
+        if failed_job is None:
+            return await _lost_lease_result(
+                workspace_id=workspace_id,
+                crm_sync_job_repository=crm_sync_job_repository,
+                job=job,
+                sync_type=sync_type,
+                page_count=page_count,
+                phase="failed_finalize",
+            )
         return RunFollowUpBossLeadSyncResult(
             status=RunFollowUpBossLeadSyncStatus.FAILED,
             job=failed_job,
@@ -305,27 +451,79 @@ async def run_follow_up_boss_lead_snapshot_sync(
         )
 
     final_status = (
-        RunFollowUpBossLeadSyncStatus.COMPLETED
-        if job.total_failed == 0
-        else RunFollowUpBossLeadSyncStatus.FAILED
+        RunFollowUpBossLeadSyncStatus.PARTIAL
+        if next_cursor is not None
+        else (
+            RunFollowUpBossLeadSyncStatus.COMPLETED
+            if job.total_failed == 0
+            else RunFollowUpBossLeadSyncStatus.FAILED
+        )
     )
-    final_job = await crm_sync_job_repository.save(
+    if has_lost_lease():
+        return await _lost_lease_result(
+            workspace_id=workspace_id,
+            crm_sync_job_repository=crm_sync_job_repository,
+            job=job,
+            sync_type=sync_type,
+            page_count=page_count,
+            phase="before_finalize",
+        )
+    finished_at = heartbeat_now()
+    final_job = await crm_sync_job_repository.save_if_running(
         replace(
             job,
             status=(
-                CRMSyncJobStatus.COMPLETED
-                if final_status == RunFollowUpBossLeadSyncStatus.COMPLETED
-                else CRMSyncJobStatus.FAILED
+                CRMSyncJobStatus.PARTIAL
+                if final_status == RunFollowUpBossLeadSyncStatus.PARTIAL
+                else (
+                    CRMSyncJobStatus.COMPLETED
+                    if final_status == RunFollowUpBossLeadSyncStatus.COMPLETED
+                    else CRMSyncJobStatus.FAILED
+                )
             ),
-            finished_at=now,
+            finished_at=finished_at,
             failure_reason=_lead_failure_reason(job.total_failed, first_failure),
-            updated_at=now,
+            last_heartbeat_at=finished_at,
+            updated_at=finished_at,
         ),
+    )
+    if final_job is None:
+        return await _lost_lease_result(
+            workspace_id=workspace_id,
+            crm_sync_job_repository=crm_sync_job_repository,
+            job=job,
+            sync_type=sync_type,
+            page_count=page_count,
+            phase="completed_finalize",
+        )
+    logger.info(
+        "crm_sync_run_completed",
+        workspace_id=str(workspace_id),
+        sync_job_id=str(final_job.sync_job_id),
+        status=final_status.value,
+        sync_type=sync_type.value,
+        page_count=page_count,
+        total_seen=final_job.total_seen,
+        total_upserted=final_job.total_upserted,
+        total_failed=final_job.total_failed,
+        next_cursor=next_cursor,
+        cursor_started_at=(
+            final_job.cursor_started_at.isoformat()
+            if final_job.cursor_started_at is not None
+            else None
+        ),
+        cursor_finished_at=(
+            final_job.cursor_finished_at.isoformat()
+            if final_job.cursor_finished_at is not None
+            else None
+        ),
+        failure_reason=final_job.failure_reason,
     )
     return RunFollowUpBossLeadSyncResult(
         status=final_status,
         job=final_job,
         page_count=page_count,
+        next_cursor=next_cursor,
     )
 
 
@@ -335,6 +533,9 @@ async def request_crm_sync(
     sync_type: CRMSyncType,
     max_leads: int | None = None,
     latest_by: CRMSyncLeadSort | None = None,
+    resume_cursor: str | None = None,
+    updated_after: datetime | None = None,
+    updated_before: datetime | None = None,
     crm_sync_job_repository: CRMSyncJobRepository,
     event_bus: EventBus,
     now: datetime,
@@ -342,7 +543,6 @@ async def request_crm_sync(
     sync_job_id_factory: Callable[[], UUID] | None = None,
 ) -> RequestCRMSyncResult:
     max_leads, latest_by = _normalize_recent_limit(
-        sync_type=sync_type,
         max_leads=max_leads,
         latest_by=latest_by,
     )
@@ -360,6 +560,7 @@ async def request_crm_sync(
         total_upserted=0,
         total_failed=0,
         failure_reason=None,
+        last_heartbeat_at=None,
         created_by_user_id=created_by_user_id,
         created_at=now,
         updated_at=now,
@@ -372,6 +573,17 @@ async def request_crm_sync(
         )
         if active is None:
             active = job
+        logger.info(
+            "crm_sync_request_skipped_active",
+            workspace_id=str(workspace_id),
+            requested_sync_type=sync_type.value,
+            active_sync_job_id=str(active.sync_job_id),
+            active_status=active.status.value,
+            active_sync_type=active.sync_type.value,
+            max_leads=max_leads,
+            latest_by=latest_by.value if latest_by is not None else None,
+            resume_cursor_present=resume_cursor is not None,
+        )
         return RequestCRMSyncResult(status=RequestCRMSyncStatus.ALREADY_ACTIVE, job=active)
 
     await event_bus.publish(
@@ -386,8 +598,24 @@ async def request_crm_sync(
                 "sync_type": inserted.sync_type.value,
                 "max_leads": max_leads,
                 "latest_by": latest_by.value if latest_by is not None else None,
+                "resume_cursor": resume_cursor,
+                "updated_after": updated_after.isoformat() if updated_after is not None else None,
+                "updated_before": (
+                    updated_before.isoformat() if updated_before is not None else None
+                ),
             },
         ),
+    )
+    logger.info(
+        "crm_sync_requested",
+        workspace_id=str(workspace_id),
+        sync_job_id=str(inserted.sync_job_id),
+        sync_type=inserted.sync_type.value,
+        max_leads=max_leads,
+        latest_by=latest_by.value if latest_by is not None else None,
+        resume_cursor_present=resume_cursor is not None,
+        updated_after=updated_after.isoformat() if updated_after is not None else None,
+        updated_before=updated_before.isoformat() if updated_before is not None else None,
     )
     return RequestCRMSyncResult(status=RequestCRMSyncStatus.REQUESTED, job=inserted)
 
@@ -403,17 +631,26 @@ async def execute_queued_follow_up_boss_crm_sync(
     page_size: int = 100,
     max_leads: int | None = None,
     latest_by: CRMSyncLeadSort | None = None,
+    resume_cursor: str | None = None,
+    updated_after: datetime | None = None,
+    updated_before: datetime | None = None,
     mapped_custom_field_keys: tuple[str, ...] = (),
     crm_activity_source: CRMActivitySource | None = None,
     crm_conversation_event_repository: CrmConversationEventRepository | None = None,
+    crm_sync_window_state_repository: CRMSyncWindowStateRepository | None = None,
     campaign_execution_repository: CampaignExecutionRepository | None = None,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None = None,
     campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
     lead_workflow_repository: LeadWorkflowRepository | None = None,
     workflow_transition_repository: WorkflowTransitionRepository | None = None,
     temporal_workflow_starter: TemporalWorkflowStarter | None = None,
+    paused_search_track_repository: PausedSearchTrackMappingRepository | None = None,
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
+    handoff_repository: HandoffRepository | None = None,
+    handoff_completion_repository: HandoffCompletionRepository | None = None,
+    workspace_handoff_config_repository: WorkspaceHandoffConfigRepository | None = None,
+    notification_provider: NotificationProvider | None = None,
     crm_agent_repository: CRMAgentRepository | None = None,
     workspace_agent_crm_mapping_repository: WorkspaceAgentCRMMappingRepository | None = None,
     workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository | None = None,
@@ -421,8 +658,14 @@ async def execute_queued_follow_up_boss_crm_sync(
     user_repository: UserRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     outbound_message_repository: LeadAssignmentMessageRepository | None = None,
+    lead_classification_artifact_repository: LeadClassificationArtifactRepository | None = None,
+    workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
+    llm_client: LLMClient | None = None,
+    default_openrouter_model: str = "openai/gpt-4o-mini",
     commit: Callable[[], Awaitable[None]] | None = None,
     activity_limit: int = 50,
+    heartbeat_now_factory: Callable[[], datetime] | None = None,
+    lease_lost_checker: Callable[[], bool] | None = None,
 ) -> ExecuteQueuedCRMSyncResult:
     claimed = await crm_sync_job_repository.claim_pending_by_id(
         workspace_id,
@@ -430,7 +673,15 @@ async def execute_queued_follow_up_boss_crm_sync(
         now=now,
     )
     if claimed is None:
+        logger.info(
+            "crm_sync_claim_not_acquired",
+            workspace_id=str(workspace_id),
+            sync_job_id=str(sync_job_id),
+        )
         return ExecuteQueuedCRMSyncResult(status=ExecuteQueuedCRMSyncStatus.NOT_CLAIMED, job=None)
+
+    if commit is not None:
+        await commit()
 
     result = await run_follow_up_boss_lead_snapshot_sync(
         workspace_id=workspace_id,
@@ -442,7 +693,10 @@ async def execute_queued_follow_up_boss_crm_sync(
         page_size=page_size,
         max_leads=max_leads,
         latest_by=latest_by,
+        initial_cursor=resume_cursor,
         created_by_user_id=claimed.created_by_user_id,
+        updated_after=updated_after,
+        updated_before=updated_before,
         mapped_custom_field_keys=mapped_custom_field_keys,
         sync_job=claimed,
         crm_activity_source=crm_activity_source,
@@ -453,8 +707,13 @@ async def execute_queued_follow_up_boss_crm_sync(
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
         temporal_workflow_starter=temporal_workflow_starter,
+        paused_search_track_repository=paused_search_track_repository,
         event_bus=event_bus,
         workspace_operational_control_repository=workspace_operational_control_repository,
+        handoff_repository=handoff_repository,
+        handoff_completion_repository=handoff_completion_repository,
+        workspace_handoff_config_repository=workspace_handoff_config_repository,
+        notification_provider=notification_provider,
         crm_agent_repository=crm_agent_repository,
         workspace_agent_crm_mapping_repository=workspace_agent_crm_mapping_repository,
         workspace_agent_mapping_config_repository=workspace_agent_mapping_config_repository,
@@ -462,9 +721,64 @@ async def execute_queued_follow_up_boss_crm_sync(
         user_repository=user_repository,
         temporal_signal_outbox_repository=temporal_signal_outbox_repository,
         outbound_message_repository=outbound_message_repository,
+        lead_classification_artifact_repository=lead_classification_artifact_repository,
+        workspace_llm_config_repository=workspace_llm_config_repository,
+        llm_client=llm_client,
+        default_openrouter_model=default_openrouter_model,
         commit=commit,
         activity_limit=activity_limit,
+        heartbeat_now_factory=heartbeat_now_factory,
+        lease_lost_checker=lease_lost_checker,
     )
+
+    if crm_sync_window_state_repository is not None:
+        if (
+            result.status == RunFollowUpBossLeadSyncStatus.PARTIAL
+            and result.next_cursor is not None
+        ):
+            await crm_sync_window_state_repository.save(
+                CRMSyncWindowState(
+                    workspace_id=workspace_id,
+                    crm_provider=CRMProvider.FOLLOW_UP_BOSS.value,
+                    sync_type=claimed.sync_type,
+                    updated_after=result.job.cursor_started_at,
+                    updated_before=result.job.cursor_finished_at or now,
+                    next_cursor=result.next_cursor,
+                    sort_by=latest_by,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            logger.info(
+                "crm_sync_window_state_saved",
+                workspace_id=str(workspace_id),
+                sync_job_id=str(claimed.sync_job_id),
+                sync_type=claimed.sync_type.value,
+                next_cursor=result.next_cursor,
+                updated_after=(
+                    result.job.cursor_started_at.isoformat()
+                    if result.job.cursor_started_at is not None
+                    else None
+                ),
+                updated_before=(
+                    result.job.cursor_finished_at.isoformat()
+                    if result.job.cursor_finished_at is not None
+                    else None
+                ),
+                latest_by=latest_by.value if latest_by is not None else None,
+            )
+        elif result.status == RunFollowUpBossLeadSyncStatus.COMPLETED:
+            await crm_sync_window_state_repository.delete(
+                workspace_id,
+                CRMProvider.FOLLOW_UP_BOSS.value,
+            )
+            logger.info(
+                "crm_sync_window_state_cleared",
+                workspace_id=str(workspace_id),
+                sync_job_id=str(claimed.sync_job_id),
+                sync_type=claimed.sync_type.value,
+            )
+
     return ExecuteQueuedCRMSyncResult(
         status=ExecuteQueuedCRMSyncStatus(result.status.value),
         job=result.job,
@@ -476,6 +790,7 @@ async def enqueue_due_follow_up_boss_crm_syncs(
     *,
     workspace_crm_sync_config_repository: WorkspaceCRMSyncConfigRepository,
     crm_sync_job_repository: CRMSyncJobRepository,
+    crm_sync_window_state_repository: CRMSyncWindowStateRepository,
     event_bus: EventBus,
     now: datetime,
     default_interval_seconds: int,
@@ -494,10 +809,22 @@ async def enqueue_due_follow_up_boss_crm_syncs(
     skipped_not_due_count = 0
     for target in schedule_targets:
         if not target.crm_sync_enabled:
+            logger.info(
+                "crm_sync_scheduler_decision",
+                workspace_id=str(target.workspace_id),
+                decision="disabled",
+                interval_seconds=target.crm_sync_interval_seconds,
+            )
             skipped_disabled_count += 1
             continue
 
         if target.automation_status != WorkspaceAutomationStatus.ACTIVE:
+            logger.info(
+                "crm_sync_scheduler_decision",
+                workspace_id=str(target.workspace_id),
+                decision="automation_blocked",
+                automation_status=target.automation_status.value,
+            )
             skipped_automation_blocked_count += 1
             continue
 
@@ -506,6 +833,14 @@ async def enqueue_due_follow_up_boss_crm_syncs(
             CRMProvider.FOLLOW_UP_BOSS.value,
         )
         if active is not None:
+            logger.info(
+                "crm_sync_scheduler_decision",
+                workspace_id=str(target.workspace_id),
+                decision="active_job",
+                active_sync_job_id=str(active.sync_job_id),
+                active_status=active.status.value,
+                active_sync_type=active.sync_type.value,
+            )
             skipped_active_count += 1
             continue
 
@@ -516,7 +851,50 @@ async def enqueue_due_follow_up_boss_crm_syncs(
         if latest is not None and _latest_attempt_at(latest) > now - timedelta(
             seconds=target.crm_sync_interval_seconds,
         ):
+            logger.info(
+                "crm_sync_scheduler_decision",
+                workspace_id=str(target.workspace_id),
+                decision="not_due",
+                latest_sync_job_id=(str(latest.sync_job_id) if latest is not None else None),
+                latest_attempt_at=(
+                    _latest_attempt_at(latest).isoformat() if latest is not None else None
+                ),
+                interval_seconds=target.crm_sync_interval_seconds,
+            )
             skipped_not_due_count += 1
+            continue
+
+        window_state = await crm_sync_window_state_repository.get_by_workspace_provider(
+            target.workspace_id,
+            CRMProvider.FOLLOW_UP_BOSS.value,
+        )
+        if window_state is not None:
+            request = await request_crm_sync(
+                workspace_id=target.workspace_id,
+                sync_type=window_state.sync_type,
+                max_leads=target.max_leads_per_sync_cycle,
+                latest_by=window_state.sort_by,
+                resume_cursor=window_state.next_cursor,
+                updated_after=window_state.updated_after,
+                updated_before=window_state.updated_before,
+                crm_sync_job_repository=crm_sync_job_repository,
+                event_bus=event_bus,
+                now=now,
+            )
+            logger.info(
+                "crm_sync_scheduler_decision",
+                workspace_id=str(target.workspace_id),
+                decision=(
+                    "resume_window_requested"
+                    if request.status == RequestCRMSyncStatus.REQUESTED
+                    else "resume_window_already_active"
+                ),
+                sync_type=window_state.sync_type.value,
+                max_leads=target.max_leads_per_sync_cycle,
+                next_cursor=window_state.next_cursor,
+            )
+            if request.status == RequestCRMSyncStatus.REQUESTED:
+                requested_count += 1
             continue
 
         latest_completed = (
@@ -529,9 +907,29 @@ async def enqueue_due_follow_up_boss_crm_syncs(
         request = await request_crm_sync(
             workspace_id=target.workspace_id,
             sync_type=sync_type,
+            max_leads=target.max_leads_per_sync_cycle,
+            latest_by=(
+                CRMSyncLeadSort.UPDATED
+                if target.max_leads_per_sync_cycle is not None
+                else None
+            ),
             crm_sync_job_repository=crm_sync_job_repository,
             event_bus=event_bus,
             now=now,
+        )
+        logger.info(
+            "crm_sync_scheduler_decision",
+            workspace_id=str(target.workspace_id),
+            decision=(
+                "requested"
+                if request.status == RequestCRMSyncStatus.REQUESTED
+                else "already_active"
+            ),
+            sync_type=sync_type.value,
+            max_leads=target.max_leads_per_sync_cycle,
+            latest_completed_sync_job_id=(
+                str(latest_completed.sync_job_id) if latest_completed is not None else None
+            ),
         )
         if request.status == RequestCRMSyncStatus.REQUESTED:
             requested_count += 1
@@ -616,6 +1014,16 @@ def _map_crm_activity_to_event(
         content=activity.content,
         actor_agent_id=activity.agent_id,
         actor_name=activity.actor_name,
+        details=activity.details,
+        transcript_segments=tuple(
+            CrmConversationTranscriptSegment(
+                text=segment.text,
+                speaker_name=segment.speaker_name,
+                speaker_role=segment.speaker_role,
+                started_at=segment.started_at,
+            )
+            for segment in activity.transcript_segments
+        ),
         direction=_crm_activity_direction(activity.direction),
         source_payload_version="follow_up_boss/v1",
         created_at=now,
@@ -640,6 +1048,12 @@ def _can_process_crm_tag_enrollment(
     lead_workflow_repository: LeadWorkflowRepository | None,
     workflow_transition_repository: WorkflowTransitionRepository | None,
     temporal_workflow_starter: TemporalWorkflowStarter | None,
+    lead_repository: LeadRepository | None,
+    paused_search_track_repository: PausedSearchTrackMappingRepository | None,
+    lead_classification_artifact_repository: LeadClassificationArtifactRepository | None,
+    crm_conversation_event_repository: CrmConversationEventRepository | None,
+    workspace_llm_config_repository: WorkspaceLLMConfigRepository | None,
+    llm_client: LLMClient | None,
 ) -> bool:
     return all(
         dependency is not None
@@ -650,6 +1064,12 @@ def _can_process_crm_tag_enrollment(
             lead_workflow_repository,
             workflow_transition_repository,
             temporal_workflow_starter,
+            lead_repository,
+            paused_search_track_repository,
+            lead_classification_artifact_repository,
+            crm_conversation_event_repository,
+            workspace_llm_config_repository,
+            llm_client,
         )
     )
 
@@ -710,7 +1130,6 @@ def _crm_tag_enrollment_observed_at(lead: CanonicalLeadRecord) -> datetime:
 
 def _normalize_recent_limit(
     *,
-    sync_type: CRMSyncType,
     max_leads: int | None,
     latest_by: CRMSyncLeadSort | None,
 ) -> tuple[int | None, CRMSyncLeadSort | None]:
@@ -720,8 +1139,6 @@ def _normalize_recent_limit(
         return None, None
     if max_leads < 1:
         raise ValueError("max_leads must be greater than 0")
-    if sync_type != CRMSyncType.FULL:
-        raise ValueError("max_leads is only supported for full syncs")
     return max_leads, latest_by or CRMSyncLeadSort.UPDATED
 
 
@@ -759,6 +1176,7 @@ def _running_sync_job(
             total_upserted=0,
             total_failed=0,
             failure_reason=None,
+            last_heartbeat_at=now,
             created_by_user_id=created_by_user_id,
             created_at=now,
             updated_at=now,
@@ -774,7 +1192,41 @@ def _running_sync_job(
         total_upserted=0,
         total_failed=0,
         failure_reason=None,
+        last_heartbeat_at=sync_job.last_heartbeat_at or now,
         updated_at=now,
+    )
+
+
+def _default_heartbeat_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _lease_not_lost() -> bool:
+    return False
+
+
+async def _lost_lease_result(
+    *,
+    workspace_id: WorkspaceId,
+    crm_sync_job_repository: CRMSyncJobRepository,
+    job: CRMSyncJob,
+    sync_type: CRMSyncType,
+    page_count: int,
+    phase: str,
+) -> RunFollowUpBossLeadSyncResult:
+    persisted_job = await crm_sync_job_repository.get_by_id(workspace_id, job.sync_job_id) or job
+    logger.info(
+        "crm_sync_run_lease_lost",
+        workspace_id=str(workspace_id),
+        sync_job_id=str(job.sync_job_id),
+        sync_type=sync_type.value,
+        page_count=page_count,
+        phase=phase,
+    )
+    return RunFollowUpBossLeadSyncResult(
+        status=RunFollowUpBossLeadSyncStatus.LOST_LEASE,
+        job=persisted_job,
+        page_count=page_count,
     )
 
 

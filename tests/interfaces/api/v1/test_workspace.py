@@ -240,6 +240,7 @@ def test_get_workspace_settings_returns_crm_sync_defaults(
         "workspace_id": str(WORKSPACE_ID),
         "crm_sync_enabled": True,
         "crm_sync_interval_seconds": 300,
+        "max_leads_per_sync_cycle": None,
     }
     assert body["llm_config"] == {
         "workspace_id": str(WORKSPACE_ID),
@@ -250,6 +251,7 @@ def test_get_workspace_settings_returns_crm_sync_defaults(
         "workspace_id": str(WORKSPACE_ID),
         "automation_status": "active",
         "pause_reason": None,
+        "recurring_paused_search_enabled": False,
     }
     assert body["handoff_config"] == {
         "workspace_id": str(WORKSPACE_ID),
@@ -314,7 +316,11 @@ def test_update_workspace_crm_sync_config_returns_200(
 ) -> None:
     response = workspace_client.client.patch(
         f"/api/v1/workspaces/{WORKSPACE_ID}/settings/crm-sync",
-        json={"crm_sync_enabled": False, "crm_sync_interval_seconds": 900},
+        json={
+            "crm_sync_enabled": False,
+            "crm_sync_interval_seconds": 900,
+            "max_leads_per_sync_cycle": 250,
+        },
     )
 
     assert response.status_code == 200
@@ -324,6 +330,7 @@ def test_update_workspace_crm_sync_config_returns_200(
         "workspace_id": str(WORKSPACE_ID),
         "crm_sync_enabled": False,
         "crm_sync_interval_seconds": 900,
+        "max_leads_per_sync_cycle": 250,
     }
 
 
@@ -393,6 +400,7 @@ def test_update_workspace_outbound_drafting_config_returns_200(
         "supported_template_placeholders": [
             "agent_name",
             "brokerage_name",
+            "lead_first_name",
             "message_body",
             "message_subject",
         ],
@@ -429,6 +437,7 @@ def test_update_workspace_operational_control_returns_200(
         json={
             "automation_status": "paused",
             "pause_reason": "Brokerage requested a temporary pause.",
+            "recurring_paused_search_enabled": True,
         },
     )
 
@@ -439,6 +448,7 @@ def test_update_workspace_operational_control_returns_200(
         "workspace_id": str(WORKSPACE_ID),
         "automation_status": "paused",
         "pause_reason": "Brokerage requested a temporary pause.",
+        "recurring_paused_search_enabled": True,
     }
 
 

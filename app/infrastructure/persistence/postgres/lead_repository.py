@@ -13,10 +13,15 @@ from app.domain.leads import (
     CRMProvider,
     EffectiveOwnerSource,
     LeadClassificationReason,
+    LeadPausedSearchHistoryEntry,
+    LeadPausedSearchProfile,
     LeadType,
+    PausedSearchAction,
+    PausedSearchReasonCode,
+    PausedSearchSource,
     PropertyEventType,
 )
-from app.infrastructure.persistence.postgres.models import LeadModel
+from app.infrastructure.persistence.postgres.models import LeadModel, LeadPausedSearchHistoryModel
 
 
 class PostgresLeadRepository:
@@ -183,6 +188,40 @@ class PostgresLeadRepository:
         model = result.scalar_one()
         return _model_to_record(model)
 
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 100,
+    ) -> tuple[LeadPausedSearchHistoryEntry, ...]:
+        result = await self._session.execute(
+            select(LeadPausedSearchHistoryModel)
+            .where(
+                LeadPausedSearchHistoryModel.workspace_id == workspace_id,
+                LeadPausedSearchHistoryModel.lead_id == lead_id,
+            )
+            .order_by(
+                LeadPausedSearchHistoryModel.created_at.desc(),
+                LeadPausedSearchHistoryModel.history_id.desc(),
+            )
+            .limit(limit)
+        )
+        return tuple(_history_model_to_entry(model) for model in result.scalars().all())
+
+    async def append(
+        self,
+        entry: LeadPausedSearchHistoryEntry,
+    ) -> LeadPausedSearchHistoryEntry:
+        statement = (
+            insert(LeadPausedSearchHistoryModel)
+            .values(**_history_entry_to_values(entry))
+            .returning(LeadPausedSearchHistoryModel)
+        )
+        result = await self._session.execute(statement)
+        model = result.scalar_one()
+        return _history_model_to_entry(model)
+
 
 def _record_to_values(
     record: CanonicalLeadRecord,
@@ -244,6 +283,17 @@ def _record_to_values(
         "latest_property_event_at": record.latest_property_event_at,
         "latest_property_price_band": record.latest_property_price_band,
         "latest_property_context_present": record.latest_property_context_present,
+        "paused_search_active": record.paused_search_active,
+        "pause_reason_code": record.pause_reason_code.value if record.pause_reason_code else None,
+        "pause_reason_note": record.pause_reason_note,
+        "reengagement_not_before": record.reengagement_not_before,
+        "reengagement_window_label": record.reengagement_window_label,
+        "paused_search_source": record.paused_search_source.value
+        if record.paused_search_source
+        else None,
+        "paused_search_recorded_at": record.paused_search_recorded_at,
+        "paused_search_recorded_by_user_id": record.paused_search_recorded_by_user_id,
+        "paused_search_last_confirmed_at": record.paused_search_last_confirmed_at,
         "created_at": created_at,
         "updated_at": updated_at,
     }
@@ -306,6 +356,116 @@ def _model_to_record(model: LeadModel) -> CanonicalLeadRecord:
         latest_property_event_at=model.latest_property_event_at,
         latest_property_price_band=model.latest_property_price_band,
         latest_property_context_present=model.latest_property_context_present,
+        paused_search_active=model.paused_search_active,
+        pause_reason_code=PausedSearchReasonCode(model.pause_reason_code)
+        if model.pause_reason_code
+        else None,
+        pause_reason_note=model.pause_reason_note,
+        reengagement_not_before=model.reengagement_not_before,
+        reengagement_window_label=model.reengagement_window_label,
+        paused_search_source=PausedSearchSource(model.paused_search_source)
+        if model.paused_search_source
+        else None,
+        paused_search_recorded_at=model.paused_search_recorded_at,
+        paused_search_recorded_by_user_id=model.paused_search_recorded_by_user_id,
+        paused_search_last_confirmed_at=model.paused_search_last_confirmed_at,
+    )
+
+
+def _history_entry_to_values(entry: LeadPausedSearchHistoryEntry) -> dict[str, object]:
+    values: dict[str, object] = {
+        "history_id": entry.history_id,
+        "workspace_id": entry.workspace_id,
+        "lead_id": entry.lead_id,
+        "action": entry.action.value,
+        "actor_user_id": entry.actor_user_id,
+        "created_at": entry.created_at,
+    }
+    values.update(_profile_values("previous", entry.previous_profile))
+    values.update(_profile_values("current", entry.current_profile))
+    return values
+
+
+def _profile_values(prefix: str, profile: LeadPausedSearchProfile | None) -> dict[str, object]:
+    if profile is None:
+        return {
+            f"{prefix}_active": False,
+            f"{prefix}_reason_code": None,
+            f"{prefix}_reason_note": None,
+            f"{prefix}_reengagement_not_before": None,
+            f"{prefix}_reengagement_window_label": None,
+            f"{prefix}_source": None,
+            f"{prefix}_recorded_at": None,
+            f"{prefix}_recorded_by_user_id": None,
+            f"{prefix}_last_confirmed_at": None,
+        }
+    return {
+        f"{prefix}_active": profile.paused_search_active,
+        f"{prefix}_reason_code": (
+            profile.pause_reason_code.value if profile.pause_reason_code else None
+        ),
+        f"{prefix}_reason_note": profile.pause_reason_note,
+        f"{prefix}_reengagement_not_before": profile.reengagement_not_before,
+        f"{prefix}_reengagement_window_label": profile.reengagement_window_label,
+        f"{prefix}_source": (
+            profile.paused_search_source.value if profile.paused_search_source else None
+        ),
+        f"{prefix}_recorded_at": profile.paused_search_recorded_at,
+        f"{prefix}_recorded_by_user_id": profile.paused_search_recorded_by_user_id,
+        f"{prefix}_last_confirmed_at": profile.paused_search_last_confirmed_at,
+    }
+
+
+def _history_model_to_entry(model: LeadPausedSearchHistoryModel) -> LeadPausedSearchHistoryEntry:
+    return LeadPausedSearchHistoryEntry(
+        history_id=model.history_id,
+        workspace_id=model.workspace_id,
+        lead_id=model.lead_id,
+        action=PausedSearchAction(model.action),
+        previous_profile=_profile_from_model(model, "previous"),
+        current_profile=_profile_from_model(model, "current"),
+        actor_user_id=model.actor_user_id,
+        created_at=model.created_at,
+    )
+
+
+def _profile_from_model(
+    model: LeadPausedSearchHistoryModel,
+    prefix: str,
+) -> LeadPausedSearchProfile | None:
+    is_active = getattr(model, f"{prefix}_active")
+    reason_code = getattr(model, f"{prefix}_reason_code")
+    reason_note = getattr(model, f"{prefix}_reason_note")
+    reengagement_not_before = getattr(model, f"{prefix}_reengagement_not_before")
+    reengagement_window_label = getattr(model, f"{prefix}_reengagement_window_label")
+    source = getattr(model, f"{prefix}_source")
+    recorded_at = getattr(model, f"{prefix}_recorded_at")
+    recorded_by_user_id = getattr(model, f"{prefix}_recorded_by_user_id")
+    last_confirmed_at = getattr(model, f"{prefix}_last_confirmed_at")
+    if not is_active and all(
+        value is None
+        for value in (
+            reason_code,
+            reason_note,
+            reengagement_not_before,
+            reengagement_window_label,
+            source,
+            recorded_at,
+            recorded_by_user_id,
+            last_confirmed_at,
+        )
+    ):
+        return None
+    return LeadPausedSearchProfile(
+        paused_search_active=is_active,
+        pause_reason_code=PausedSearchReasonCode(reason_code) if reason_code else None,
+        pause_reason_note=reason_note,
+        reengagement_not_before=reengagement_not_before,
+        reengagement_window_label=reengagement_window_label,
+        paused_search_source=PausedSearchSource(source) if source else None,
+        paused_search_recorded_at=recorded_at,
+        paused_search_recorded_by_user_id=recorded_by_user_id,
+        paused_search_last_confirmed_at=last_confirmed_at,
     )
 
 

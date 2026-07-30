@@ -118,6 +118,11 @@ If the lead replies, an operator updates the paused-search profile, ownership
 changes, or a manual override adjusts timing, the workflow must recompute the
 next scheduled action instead of trusting the stale timer.
 
+When the trigger is an inbound reply, the system must first re-run
+classification on the updated conversation context. The workflow may remain in
+paused-search, move to handoff, move to review, or exit the paused-search path
+entirely depending on the new classification result.
+
 ## Temporal execution model
 
 Use Temporal as the durable owner of long waits and wake-ups.
@@ -134,10 +139,24 @@ At a high level:
 
 1. workflow starts with the pinned published nurture version
 2. workflow computes the next action from the current track phase and lead facts
-3. Temporal sleeps until the next action time
-4. at wake-up, the app re-loads current persisted facts
-5. the workflow either sends, defers, pauses, hands off, or reschedules
+3. Temporal waits until the next action time **or until an interrupting signal arrives**
+4. at wake-up or interrupt, the app re-loads current persisted facts
+5. the workflow either sends, defers, pauses, hands off, re-routes, or reschedules
 6. the cycle repeats until the lead is completed, suppressed, closed, or human-owned
+
+Current implementation note:
+
+- the backend now computes and persists `next_action_at` plus the pinned
+  paused-search step cursor
+- the Temporal lead-nurture workflow now uses an interruptible wait instead of
+  trusting a stale long sleep
+- explicit `reschedule_requested` signals wake the workflow early when a
+  paused-search profile or AI-applied paused-search classification changes
+- duplicate wake signals collapse into a single recompute pass for the current
+  wait cycle
+- paused-search outbound touch execution is intentionally not introduced in this
+  slice; the current implementation covers durable waiting, safe wake-up, and
+  recomputation semantics that a later paused-search executor can consume
 
 ## Workflow state expectations
 
@@ -165,13 +184,25 @@ The workflow should recompute `next_action_at` when any of these happen:
 - `reengagement_not_before` changes
 - lead-level track override changes
 - manual pause or resume occurs
-- inbound reply changes the lead's status
+- inbound reply changes the lead's status and triggers re-classification before the workflow continues
 - human activity or ownership change is detected
 - suppression, consent, or contactability facts change
+
+Current backend wiring for early wake-up includes:
+
+- operator paused-search profile edits
+- AI-applied paused-search classifications
+- existing pause/resume/inbound workflow signals that already block or redirect
+  nurture execution
 
 ## Failure and defer behavior
 
 When the workflow wakes up, it should not blindly send.
+
+If a stale timer wakes after newer facts have already changed the lead state,
+the workflow must recompute before any send attempt. If the recomputed state is
+now blocked by human activity, inbound reply handling, suppression, or another
+stop condition, the due action must not execute.
 
 Possible outcomes at wake-up:
 
@@ -179,6 +210,7 @@ Possible outcomes at wake-up:
 - **defer**: temporary operational block, quiet-hours conflict, or temporary automation stop
 - **pause**: manual pause, human-owned state, or policy condition requiring explicit resume
 - **handoff**: meaningful interest or human-request signal exists
+- **re-route**: updated classification means the lead no longer belongs in the current paused-search path
 - **suppress/close**: lead is no longer eligible for automated nurture
 - **reschedule**: timing changed and a later action is now correct
 
@@ -243,3 +275,8 @@ After this feature is implemented, the app can:
 - keep long-running workflows auditable and version-pinned
 
 At that point, the end-to-end paused-search design is complete.
+
+For the current implementation state, the long-wait timing layer is complete
+once the system can durably wait, wake early on timing changes, avoid duplicate
+recompute/send behavior, and refuse to execute stale due actions after newer
+human or inbound signals arrive.

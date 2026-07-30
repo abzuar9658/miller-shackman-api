@@ -34,6 +34,13 @@ class CRMAgentDirectoryEntry(BaseModel):
     raw_payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class CRMActivityTranscriptSegment(BaseModel):
+    text: str
+    speaker_name: str | None = None
+    speaker_role: str | None = None
+    started_at: datetime | None = None
+
+
 class CRMActivity(BaseModel):
     crm_activity_id: str
     activity_type: str
@@ -42,6 +49,8 @@ class CRMActivity(BaseModel):
     agent_id: str | None = None
     actor_name: str | None = None
     direction: str | None = None
+    details: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+    transcript_segments: list[CRMActivityTranscriptSegment] = Field(default_factory=list)
 
 
 class CRMClient(Protocol):
