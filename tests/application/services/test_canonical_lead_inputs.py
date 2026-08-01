@@ -311,8 +311,7 @@ def test_history_preferences_fall_back_to_crm_events_when_activity_items_missing
             _crm_event(
                 crm_activity_id="act-1",
                 content=(
-                    "We want to rent near 225 East 134th Street and need 1 bedroom with "
-                    "doorman."
+                    "We want to rent near 225 East 134th Street and need 1 bedroom with doorman."
                 ),
                 direction=CrmConversationEventDirection.INBOUND,
             ),

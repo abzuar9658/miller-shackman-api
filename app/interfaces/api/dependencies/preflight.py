@@ -32,7 +32,5 @@ async def get_preflight_read_bundle(
     return PreflightReadBundle(
         repository=PostgresPreflightDigestRepository(session),
         crm_agent_repository=PostgresCRMAgentRepository(session),
-        workspace_agent_crm_mapping_repository=PostgresWorkspaceAgentCRMMappingRepository(
-            session
-        ),
+        workspace_agent_crm_mapping_repository=PostgresWorkspaceAgentCRMMappingRepository(session),
     )

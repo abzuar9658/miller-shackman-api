@@ -215,9 +215,7 @@ class _FakeCRMClientForWebhook(FakeCRMClient):
         self._fetch_result = fetch_result
         self.requested_uris: list[str] = []
 
-    async def fetch_resource_by_uri(
-        self, workspace_id: UUID, uri: str
-    ) -> dict[str, Any] | None:
+    async def fetch_resource_by_uri(self, workspace_id: UUID, uri: str) -> dict[str, Any] | None:
         _ = workspace_id
         self.requested_uris.append(uri)
         return self._fetch_result
@@ -1533,7 +1531,7 @@ def test_follow_up_boss_crm_webhook_pauses_for_outbound_communication_activity(
         ),
     ],
 )
-def test_follow_up_boss_crm_webhook_ignores_inbound_communication_activity(
+def test_follow_up_boss_crm_webhook_processes_inbound_communication_activity(
     webhook_bundle: InboundServiceBundle,
     event_type: str,
     collection_key: str,
@@ -1561,12 +1559,12 @@ def test_follow_up_boss_crm_webhook_ignores_inbound_communication_activity(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "ignored"
-    assert body["processed_count"] == 0
-    assert body["reasons"] == ["no_actionable_resources"]
+    assert body["status"] == "processed"
+    assert body["processed_count"] == 1
+    assert body["reasons"] == []
     workflow_repository = cast(FakeLeadWorkflowRepository, bundle.lead_workflow_repository)
     workflow = workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
-    assert workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+    assert workflow.state == WorkflowState.PAUSED
 
 
 def test_follow_up_boss_crm_webhook_returns_duplicate_on_replay(
@@ -1870,13 +1868,9 @@ def test_mailgun_inbound_webhook_matches_duplicate_email_lead_from_thread_refere
                 "Message-Id": "<mailgun-inbound-threaded@example.com>",
                 "message-headers": (
                     '[["In-Reply-To", "<'
-                    + build_outbound_email_message_id(
-                        UUID("60000000-0000-0000-0000-000000000001")
-                    )
+                    + build_outbound_email_message_id(UUID("60000000-0000-0000-0000-000000000001"))
                     + '>"], ["References", "<'
-                    + build_outbound_email_message_id(
-                        UUID("60000000-0000-0000-0000-000000000001")
-                    )
+                    + build_outbound_email_message_id(UUID("60000000-0000-0000-0000-000000000001"))
                     + '>"]]'
                 ),
             },

@@ -53,9 +53,7 @@ def test_get_by_workspace_id_maps_config() -> None:
 def test_save_maps_config_to_model() -> None:
     session = _FakeSession([_FakeResult(scalar_value=_config_model())])
 
-    result = _run(
-        PostgresWorkspaceLLMConfigRepository(cast(AsyncSession, session)).save(_config())
-    )
+    result = _run(PostgresWorkspaceLLMConfigRepository(cast(AsyncSession, session)).save(_config()))
 
     assert result == _config()
     assert "workspace_llm_configs" in str(session.statements[0])

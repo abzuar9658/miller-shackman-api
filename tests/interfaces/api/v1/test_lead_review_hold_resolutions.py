@@ -31,6 +31,7 @@ from app.domain.leads import (
     LeadStateClassificationOutcome,
     PausedSearchReasonCode,
 )
+from app.domain.workspace_automation import WorkspaceOperationalControl
 from app.interfaces.api.dependencies.lead_classification import (
     LeadClassificationActionBundle,
     get_lead_classification_action_bundle,
@@ -163,7 +164,12 @@ def _client_for_role(
         campaign_enrollment_repository=FakeCampaignEnrollmentRepository(),
         lead_workflow_repository=workflow_repository,
         workflow_transition_repository=transition_repository,
-        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(
+            WorkspaceOperationalControl(
+                workspace_id=WORKSPACE_ID,
+                recurring_paused_search_enabled=True,
+            )
+        ),
         temporal_workflow_starter=starter,
         lead_classification_artifact_repository=artifact_repository,
         paused_search_history_repository=lead_repository,
@@ -206,9 +212,7 @@ def _client_for_role(
     app.dependency_overrides[get_workspace_actor] = lambda: _actor(role)
     app.dependency_overrides[get_lead_manual_enrollment_bundle] = lambda: manual_bundle
     app.dependency_overrides[get_lead_paused_search_action_bundle] = lambda: paused_bundle
-    app.dependency_overrides[get_lead_classification_action_bundle] = (
-        lambda: classification_bundle
-    )
+    app.dependency_overrides[get_lead_classification_action_bundle] = lambda: classification_bundle
     return ReviewHoldResolutionTestClient(
         client=TestClient(app),
         starter=starter,

@@ -192,9 +192,7 @@ async def test_accepts_confidence_alias_string() -> None:
     result = await classify_inbound_reply(
         lead=_lead(),
         inbound_text="Can someone call me today?",
-        llm_client=FakeLLMClient(
-            _classification_json(confidence="high")
-        ),
+        llm_client=FakeLLMClient(_classification_json(confidence="high")),
     )
 
     assert result.status == ReplyClassificationStatus.CLASSIFIED
@@ -258,7 +256,6 @@ async def test_rejects_legacy_handoff_schema_without_structured_evidence_fields(
 
     assert result.status == ReplyClassificationStatus.REJECTED
     assert result.reasons == (ReplyClassificationReasonCode.INVALID_LLM_RESPONSE,)
-
 
 
 async def test_maps_asks_for_human_intent_alias_to_human_requested() -> None:

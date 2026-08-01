@@ -154,9 +154,7 @@ def _digests_visible_to_actor(
     digests: tuple[PreflightDigestRecord, ...],
     recipient_ids: frozenset[str],
 ) -> tuple[PreflightDigestRecord, ...]:
-    return tuple(
-        digest for digest in digests if _digest_has_visible_entry(digest, recipient_ids)
-    )
+    return tuple(digest for digest in digests if _digest_has_visible_entry(digest, recipient_ids))
 
 
 def _digest_has_visible_entry(
@@ -181,9 +179,7 @@ def _filtered_digest_for_actor(
         status=digest.status,
         entries=visible_entries,
         notification_records=tuple(
-            record
-            for record in digest.notification_records
-            if record.recipient_id in recipient_ids
+            record for record in digest.notification_records if record.recipient_id in recipient_ids
         ),
         digest_sent_at=digest.digest_sent_at,
         veto_window_expires_at=digest.veto_window_expires_at,
@@ -191,9 +187,7 @@ def _filtered_digest_for_actor(
     )
 
 
-def _summary_view(
-    digest: PreflightDigestRecord, *, now: datetime
-) -> PreflightDigestSummaryView:
+def _summary_view(digest: PreflightDigestRecord, *, now: datetime) -> PreflightDigestSummaryView:
     return PreflightDigestSummaryView(
         digest=digest,
         status=_view_status(digest, now=now),
@@ -203,9 +197,7 @@ def _summary_view(
     )
 
 
-def _view_status(
-    digest: PreflightDigestRecord, *, now: datetime
-) -> PreflightDigestViewStatus:
+def _view_status(digest: PreflightDigestRecord, *, now: datetime) -> PreflightDigestViewStatus:
     if digest.status == PreflightDigestIssueStatus.FAILED:
         return PreflightDigestViewStatus.FAILED
     if digest.status == PreflightDigestIssueStatus.UNCERTAIN:

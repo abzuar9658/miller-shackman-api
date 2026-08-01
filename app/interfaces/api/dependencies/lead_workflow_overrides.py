@@ -9,6 +9,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     LeadWorkflowOverrideAuditLogRepository,
     LeadWorkflowRepository,
+    PausedSearchOccurrenceRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     WorkspaceRepository,
@@ -18,6 +19,9 @@ from app.infrastructure.persistence.postgres.identity_repository import (
     PostgresWorkspaceRepository,
 )
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
+from app.infrastructure.persistence.postgres.paused_search_occurrence_repository import (
+    PostgresPausedSearchOccurrenceRepository,
+)
 from app.infrastructure.persistence.postgres.paused_search_track_repository import (
     PostgresPausedSearchTrackAdminRepository,
 )
@@ -45,6 +49,7 @@ class LeadWorkflowOverrideActionBundle:
     paused_search_track_repository: PausedSearchTrackMappingRepository
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository
     workspace_repository: WorkspaceRepository
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None
 
 
 async def get_lead_workflow_override_action_bundle(
@@ -61,4 +66,5 @@ async def get_lead_workflow_override_action_bundle(
         paused_search_track_repository=PostgresPausedSearchTrackAdminRepository(session),
         temporal_signal_outbox_repository=PostgresTemporalSignalOutboxRepository(session),
         workspace_repository=PostgresWorkspaceRepository(session),
+        paused_search_occurrence_repository=PostgresPausedSearchOccurrenceRepository(session),
     )

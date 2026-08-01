@@ -83,8 +83,9 @@ async def test_complete_outbound_message_crm_sync_updates_snapshot_fields() -> N
     assert getattr(repository.record, "crm_snapshot_updated_at", None) == NOW
 
 
-async def test_complete_outbound_message_crm_sync_skips_duplicate_note_after_partial_retry(
-) -> None:
+async def test_complete_outbound_message_crm_sync_skips_duplicate_note_after_partial_retry() -> (
+    None
+):
     repository = FakeOutboundMessageCRMCompletionRepository(
         OutboundMessageCRMCompletionRecord(
             outbound_message_id=MESSAGE_ID,
@@ -136,8 +137,9 @@ async def test_complete_outbound_message_crm_sync_publishes_sms_to_crm_conversat
     assert getattr(repository.record, "completed_at", None) == NOW
 
 
-async def test_complete_outbound_message_crm_sync_falls_back_to_note_when_publish_unavailable(
-) -> None:
+async def test_complete_outbound_message_crm_sync_falls_back_to_note_when_publish_unavailable() -> (
+    None
+):
     crm_client = FakeCRMClient()
     repository = FakeOutboundMessageCRMCompletionRepository()
     publisher = FakeCRMConversationPublisher(should_publish=False)
@@ -159,8 +161,7 @@ async def test_complete_outbound_message_crm_sync_falls_back_to_note_when_publis
     assert getattr(repository.record, "crm_note_written_at", None) == NOW
 
 
-async def test_complete_outbound_message_crm_sync_skips_duplicate_conversation_publish(
-) -> None:
+async def test_complete_outbound_message_crm_sync_skips_duplicate_conversation_publish() -> None:
     repository = FakeOutboundMessageCRMCompletionRepository(
         OutboundMessageCRMCompletionRecord(
             outbound_message_id=MESSAGE_ID,

@@ -31,13 +31,15 @@ from app.infrastructure.crm.follow_up_boss.webhook_event_people import (
 logger = structlog.get_logger(__name__)
 
 _PROVIDER = "follow_up_boss"
-_PEOPLE_EVENTS = frozenset({
-    "peopleUpdated",
-    "peopleCreated",
-    "peopleDeleted",
-    "peopleStageUpdated",
-    "peopleTagsCreated",
-})
+_PEOPLE_EVENTS = frozenset(
+    {
+        "peopleUpdated",
+        "peopleCreated",
+        "peopleDeleted",
+        "peopleStageUpdated",
+        "peopleTagsCreated",
+    }
+)
 
 
 @dataclass

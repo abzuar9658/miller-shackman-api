@@ -104,6 +104,7 @@ async def _handle_inbound_message_event(
         lead_workflow_repository=bundle.lead_workflow_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
         paused_search_track_repository=bundle.paused_search_track_repository,
+        paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
         llm_client=bundle.llm_client,
         event_bus=bundle.event_bus,
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
@@ -261,9 +262,7 @@ async def _handle_inbound_email_message(
         body_length=len(body),
         from_address_redacted=_redact_email_address(from_email_address),
         to_address_redacted=_redact_email_address(to_email_address),
-        configured_inbound_address_redacted=_redact_email_address(
-            configured_inbound_email_address
-        ),
+        configured_inbound_address_redacted=_redact_email_address(configured_inbound_email_address),
         lead_found=True,
         lead_resolution=lead_resolution,
         thread_message_ids_count=len(thread_message_ids),
@@ -707,6 +706,9 @@ async def receive_twilio_message_status_callback(
         callback=callback,
         message_repository=bundle.message_repository,
         provider_message_event_repository=bundle.provider_message_event_repository,
+        occurrence_repository=bundle.occurrence_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         event_bus=bundle.event_bus,
         now=datetime.now(UTC),
     )
@@ -768,6 +770,9 @@ async def receive_sendgrid_message_events(
                 ),
                 message_repository=bundle.message_repository,
                 provider_message_event_repository=bundle.provider_message_event_repository,
+                occurrence_repository=bundle.occurrence_repository,
+                lead_workflow_repository=bundle.lead_workflow_repository,
+                temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
                 event_bus=bundle.event_bus,
                 now=now,
             )
@@ -828,6 +833,9 @@ async def receive_mailgun_message_events(
                     ),
                     message_repository=bundle.message_repository,
                     provider_message_event_repository=bundle.provider_message_event_repository,
+                    occurrence_repository=bundle.occurrence_repository,
+                    lead_workflow_repository=bundle.lead_workflow_repository,
+                    temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
                     event_bus=bundle.event_bus,
                     now=datetime.now(UTC),
                 )
@@ -1254,9 +1262,7 @@ def _log_email_inbound_rejected(
         subject_present=payload.subject is not None,
         from_address_redacted=_redact_email_address(from_email_address),
         to_address_redacted=_redact_email_address(to_email_address),
-        configured_inbound_address_redacted=_redact_email_address(
-            configured_inbound_email_address
-        ),
+        configured_inbound_address_redacted=_redact_email_address(configured_inbound_email_address),
         thread_message_ids_count=thread_message_ids_count,
         matched_thread_message_id=matched_thread_message_id,
         has_reply_routing_token=has_reply_routing_token,

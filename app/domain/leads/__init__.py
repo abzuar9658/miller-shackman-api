@@ -16,6 +16,12 @@ from app.domain.leads.canonical import (
     PropertyEventType,
     lead_paused_search_profile,
 )
+from app.domain.leads.customer_timing import (
+    CustomerTimingCandidate,
+    CustomerTimingEvidenceType,
+    CustomerTimingStatus,
+    confirm_customer_timing,
+)
 from app.domain.leads.routing_reviews import (
     LeadRoutingReview,
     LeadRoutingReviewResolution,
@@ -27,6 +33,9 @@ __all__ = [
     "AssignmentResolutionStatus",
     "CRMProvider",
     "CanonicalLeadRecord",
+    "CustomerTimingCandidate",
+    "CustomerTimingEvidenceType",
+    "CustomerTimingStatus",
     "EffectiveOwnerSource",
     "LeadClassificationAppliedStatus",
     "LeadClassificationArtifact",
@@ -42,5 +51,6 @@ __all__ = [
     "PausedSearchReasonCode",
     "PausedSearchSource",
     "PropertyEventType",
+    "confirm_customer_timing",
     "lead_paused_search_profile",
 ]

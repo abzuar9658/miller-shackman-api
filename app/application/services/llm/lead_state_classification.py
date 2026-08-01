@@ -91,13 +91,9 @@ class _LLMLeadStateClassification(BaseModel):
 
         if self.outcome == _LLMLeadStateClassificationOutcome.HUMAN_HANDOFF:
             if self.handoff_reason_code is None:
-                raise ValueError(
-                    "handoff_reason_code is required when outcome is human_handoff"
-                )
+                raise ValueError("handoff_reason_code is required when outcome is human_handoff")
         elif self.handoff_reason_code is not None:
-            raise ValueError(
-                "handoff_reason_code is only allowed when outcome is human_handoff"
-            )
+            raise ValueError("handoff_reason_code is only allowed when outcome is human_handoff")
 
         return self
 
@@ -179,7 +175,9 @@ async def classify_lead_from_conversation(
         handoff_reason_code=classification.handoff_reason_code,
         pause_reason_code=classification.pause_reason_code,
         reengagement_not_before=_parse_iso_datetime(classification.reengagement_not_before),
-        reengagement_window_label=_normalized_optional_text(classification.reengagement_window_label),
+        reengagement_window_label=_normalized_optional_text(
+            classification.reengagement_window_label
+        ),
         confidence=classification.confidence,
         evidence=tuple(classification.evidence),
         summary=classification.summary,
@@ -393,15 +391,9 @@ def _freshness_context(
         (event.occurred_at for event in crm_conversation_events),
         default=None,
     )
-    latest_inbound_at = _latest_event_at(
-        crm_conversation_events, direction="inbound"
-    )
-    latest_outbound_at = _latest_event_at(
-        crm_conversation_events, direction="outbound"
-    )
-    latest_internal_at = _latest_event_at(
-        crm_conversation_events, direction="internal"
-    )
+    latest_inbound_at = _latest_event_at(crm_conversation_events, direction="inbound")
+    latest_outbound_at = _latest_event_at(crm_conversation_events, direction="outbound")
+    latest_internal_at = _latest_event_at(crm_conversation_events, direction="internal")
     latest_property_event_at = lead.latest_property_event_at
     has_observed_inbound_reply_after_latest_property_event = _has_observed_inbound_reply_after(
         crm_conversation_events,

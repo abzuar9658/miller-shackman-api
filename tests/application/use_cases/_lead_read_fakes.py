@@ -77,9 +77,7 @@ class FakeLeadRepository:
         *,
         limit: int = 100,
     ) -> tuple[CanonicalLeadRecord, ...]:
-        return tuple(
-            lead for (wid, _), lead in self._leads.items() if wid == workspace_id
-        )[:limit]
+        return tuple(lead for (wid, _), lead in self._leads.items() if wid == workspace_id)[:limit]
 
     async def get_by_primary_phone(
         self,
@@ -245,15 +243,27 @@ class FakeLeadWorkflowRepository:
     ) -> LeadWorkflow | None:
         return await self.get_latest_for_lead(workspace_id, lead_id)
 
+    async def list_active_paused_search_for_lead(
+        self,
+        workspace_id: UUID,
+        lead_id: UUID,
+    ) -> tuple[LeadWorkflow, ...]:
+        return ()
+
+    async def list_active_paused_search_for_lead_for_update(
+        self,
+        workspace_id: UUID,
+        lead_id: UUID,
+    ) -> tuple[LeadWorkflow, ...]:
+        return ()
+
     async def list_latest_for_workspace(
         self,
         workspace_id: UUID,
         *,
         limit: int = 100,
     ) -> tuple[LeadWorkflow, ...]:
-        return tuple(
-            wf for (wid, _), wf in self._latest.items() if wid == workspace_id
-        )[:limit]
+        return tuple(wf for (wid, _), wf in self._latest.items() if wid == workspace_id)[:limit]
 
     async def list_paused_for_workspace(
         self,
@@ -491,9 +501,7 @@ class FakeHandoffRepository:
         *,
         limit: int = 100,
     ) -> tuple[Handoff, ...]:
-        return tuple(
-            item for item in self._handoffs if item.workspace_id == workspace_id
-        )[:limit]
+        return tuple(item for item in self._handoffs if item.workspace_id == workspace_id)[:limit]
 
     async def list_for_lead(
         self,

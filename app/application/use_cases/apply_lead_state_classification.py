@@ -387,9 +387,7 @@ async def _save_artifact(
             workspace_id=workspace_id,
             lead_id=lead_id,
             source=artifact_source,
-            outcome=(
-                classification_result.outcome or LeadStateClassificationOutcome.REVIEW_HOLD
-            ),
+            outcome=(classification_result.outcome or LeadStateClassificationOutcome.REVIEW_HOLD),
             pause_reason_code=classification_result.pause_reason_code,
             reengagement_not_before=classification_result.reengagement_not_before,
             reengagement_window_label=classification_result.reengagement_window_label,
@@ -427,8 +425,6 @@ def _merge_crm_conversation_events(
         reverse=True,
     )
     return tuple(merged[:20])
-
-
 
 
 def _permission_allowed(actor: AuthenticatedActor, lead: CanonicalLeadRecord) -> bool:

@@ -1,6 +1,19 @@
+from enum import StrEnum
 from typing import Protocol
 
 from pydantic import BaseModel
+
+
+class ProviderFailureKind(StrEnum):
+    PERMANENT = "permanent"
+    TEMPORARY = "temporary"
+    UNCERTAIN = "uncertain"
+
+
+class ProviderSendFailure(Exception):
+    def __init__(self, kind: ProviderFailureKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class SMSMessage(BaseModel):

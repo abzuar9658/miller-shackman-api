@@ -105,8 +105,8 @@ def _client_for_role(role: WorkspaceMembershipRole) -> AttentionTestClient:
     session = RecordingSession()
 
     app.dependency_overrides[get_workspace_actor] = lambda: _actor(role)
-    app.dependency_overrides[get_attention_acknowledgement_bundle] = (
-        lambda: AttentionAcknowledgementBundle(session=session, repository=repository)
+    app.dependency_overrides[get_attention_acknowledgement_bundle] = lambda: (
+        AttentionAcknowledgementBundle(session=session, repository=repository)
     )
 
     return AttentionTestClient(

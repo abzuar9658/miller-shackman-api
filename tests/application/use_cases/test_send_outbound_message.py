@@ -4,7 +4,12 @@ from typing import cast
 from uuid import UUID
 
 from app.application.ports.crm import CRMActivity
-from app.application.ports.messaging import EmailMessage, SMSMessage
+from app.application.ports.messaging import (
+    EmailMessage,
+    ProviderFailureKind,
+    ProviderSendFailure,
+    SMSMessage,
+)
 from app.application.ports.repositories import (
     CRMAgentRepository,
     UserRepository,
@@ -50,9 +55,14 @@ MESSAGE_ID = UUID("44444444-4444-4444-4444-444444444444")
 
 
 class FakeLeadRepository:
-    def __init__(self, lead: CanonicalLeadRecord | None) -> None:
+    def __init__(
+        self,
+        lead: CanonicalLeadRecord | None,
+        call_order: list[str] | None = None,
+    ) -> None:
         self.lead = lead
         self.locked_ids: list[LeadId] = []
+        self.call_order = call_order
 
     async def get_by_id(
         self,
@@ -68,6 +78,8 @@ class FakeLeadRepository:
         workspace_id: WorkspaceId,
         lead_id: LeadId,
     ) -> CanonicalLeadRecord | None:
+        if self.call_order is not None:
+            self.call_order.append("lead_lock")
         self.locked_ids.append(lead_id)
         return await self.get_by_id(workspace_id, lead_id)
 
@@ -135,10 +147,15 @@ class FakeLeadRepository:
 
 
 class FakeOutboundMessageRepository:
-    def __init__(self, message: OutboundMessage | None) -> None:
+    def __init__(
+        self,
+        message: OutboundMessage | None,
+        call_order: list[str] | None = None,
+    ) -> None:
         self.message = message
         self.saved: list[OutboundMessage] = []
         self.locked_idempotency_keys: list[str] = []
+        self.call_order = call_order
 
     async def get_by_id(
         self,
@@ -158,6 +175,8 @@ class FakeOutboundMessageRepository:
         workspace_id: WorkspaceId,
         idempotency_key: str,
     ) -> OutboundMessage | None:
+        if self.call_order is not None:
+            self.call_order.append("message_lookup")
         if (
             self.message
             and self.message.workspace_id == workspace_id
@@ -171,6 +190,8 @@ class FakeOutboundMessageRepository:
         workspace_id: WorkspaceId,
         idempotency_key: str,
     ) -> OutboundMessage | None:
+        if self.call_order is not None:
+            self.call_order.append("message_lock")
         self.locked_idempotency_keys.append(idempotency_key)
         return await self.get_by_idempotency_key(workspace_id, idempotency_key)
 
@@ -226,11 +247,18 @@ class FakeOutboundMessageRepository:
 class FakeSMSProvider:
     provider_name = "twilio"
 
-    def __init__(self, result: str | Exception = "SM123") -> None:
+    def __init__(
+        self,
+        result: str | Exception = "SM123",
+        call_order: list[str] | None = None,
+    ) -> None:
         self.result = result
+        self.call_order = call_order
         self.messages: list[SMSMessage] = []
 
     async def send(self, message: SMSMessage) -> str:
+        if self.call_order is not None:
+            self.call_order.append("provider")
         self.messages.append(message)
         if isinstance(self.result, Exception):
             raise self.result
@@ -462,6 +490,54 @@ async def test_sends_pending_sms_message_and_persists_sent_state() -> None:
     assert lead_repository.locked_ids == [LEAD_ID]
     assert message_repository.locked_idempotency_keys == [result.message.idempotency_key]
     assert len(email_provider.messages) == 0
+
+
+async def test_commits_prepared_message_before_provider_dispatch() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    lead_repository = FakeLeadRepository(_lead())
+    commit_markers: list[str] = []
+    sms_provider = FakeSMSProvider("SM123", call_order=commit_markers)
+
+    async def commit_prepared_message() -> None:
+        commit_markers.append("committed")
+
+    assert message_repository.message is not None
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=lead_repository,
+        message_repository=message_repository,
+        sms_provider=sms_provider,
+        email_provider=FakeEmailProvider(),
+        now=NOW,
+        before_provider_dispatch=commit_prepared_message,
+    )
+
+    assert result.status is SendOutboundMessageStatus.SENT
+    assert commit_markers == ["committed", "provider"]
+    assert sms_provider.messages
+
+
+async def test_locks_lead_before_locked_outbound_message_read() -> None:
+    call_order: list[str] = []
+    message_repository = FakeOutboundMessageRepository(_message(), call_order=call_order)
+    lead_repository = FakeLeadRepository(_lead(), call_order=call_order)
+    assert message_repository.message is not None
+
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=lead_repository,
+        message_repository=message_repository,
+        sms_provider=FakeSMSProvider("SM123"),
+        email_provider=FakeEmailProvider(),
+        now=NOW,
+    )
+
+    assert result.status is SendOutboundMessageStatus.SENT
+    assert call_order.index("lead_lock") < call_order.index("message_lock")
 
 
 async def test_sends_message_after_successful_pre_send_crm_refresh() -> None:
@@ -891,3 +967,59 @@ async def test_sends_pending_email_message_via_sink_provider() -> None:
     assert email_provider.messages[0].to_email == "lead@example.com"
     assert email_provider.messages[0].subject == "Quick check-in"
     assert len(sms_provider.messages) == 0
+
+
+async def test_typed_permanent_provider_failure_is_returned_for_fallback_decision() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    assert message_repository.message is not None
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=FakeSMSProvider(
+            ProviderSendFailure(ProviderFailureKind.PERMANENT, "invalid destination")
+        ),
+        email_provider=FakeEmailProvider(),
+        now=NOW,
+    )
+
+    assert result.status is SendOutboundMessageStatus.FAILED
+    assert result.failure_kind is ProviderFailureKind.PERMANENT
+
+
+async def test_temporary_provider_failure_retries_once_with_same_idempotency_key() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    provider = _TemporaryThenSuccessSMSProvider()
+    assert message_repository.message is not None
+
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=provider,
+        email_provider=FakeEmailProvider(),
+        now=NOW,
+    )
+
+    assert result.status is SendOutboundMessageStatus.SENT
+    assert provider.calls == 2
+    assert provider.idempotency_keys == [message_repository.message.idempotency_key] * 2
+
+
+class _TemporaryThenSuccessSMSProvider:
+    provider_name = "test"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.idempotency_keys: list[str] = []
+
+    async def send(self, message: SMSMessage) -> str:
+        self.calls += 1
+        self.idempotency_keys.append(message.idempotency_key)
+        if self.calls == 1:
+            raise ProviderSendFailure(ProviderFailureKind.TEMPORARY, "provider busy")
+        return "provider-message-2"

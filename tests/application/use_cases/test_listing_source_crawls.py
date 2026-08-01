@@ -381,8 +381,9 @@ async def test_execute_listing_source_crawl_persists_snapshots_and_marks_complet
 
 
 @pytest.mark.asyncio
-async def test_execute_listing_source_crawl_marks_completed_with_errors_for_partial_failures(
-) -> None:
+async def test_execute_listing_source_crawl_marks_completed_with_errors_for_partial_failures() -> (
+    None
+):
     crawl_run_repository = FakeListingCrawlRunRepository(
         (_crawl_run(status=ListingCrawlStatus.PENDING),)
     )

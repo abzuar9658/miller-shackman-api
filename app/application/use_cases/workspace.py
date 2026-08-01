@@ -951,15 +951,12 @@ async def update_workspace_handoff_config(
         and current_config.crm_handoff_tag == normalized_tag
         and current_config.crm_review_tag == normalized_review_tag
         and dict(current_config.crm_custom_fields) == normalized_custom_fields
-        and current_config.lead_acknowledgment_sms_enabled
-        == lead_acknowledgment_sms_enabled
+        and current_config.lead_acknowledgment_sms_enabled == lead_acknowledgment_sms_enabled
         and current_config.lead_acknowledgment_sms_body == normalized_sms_body
-        and current_config.lead_acknowledgment_email_enabled
-        == lead_acknowledgment_email_enabled
+        and current_config.lead_acknowledgment_email_enabled == lead_acknowledgment_email_enabled
         and current_config.lead_acknowledgment_email_subject == normalized_email_subject
         and current_config.lead_acknowledgment_email_body == normalized_email_body
-        and current_config.lead_acknowledgment_prompt_text
-        == normalized_acknowledgment_prompt_text
+        and current_config.lead_acknowledgment_prompt_text == normalized_acknowledgment_prompt_text
         and current_config.crm_snapshot_summary_field == normalized_snapshot_summary_field
         and current_config.crm_snapshot_status_field == normalized_snapshot_status_field
         and current_config.crm_snapshot_latest_inbound_field
@@ -1266,8 +1263,7 @@ async def update_workspace_operational_control(
     if (
         current_control.automation_status == automation_status
         and current_control.pause_reason == normalized_reason
-        and current_control.recurring_paused_search_enabled
-        == recurring_paused_search_enabled
+        and current_control.recurring_paused_search_enabled == recurring_paused_search_enabled
     ):
         return UpdateWorkspaceOperationalControlResult(
             status=UpdateWorkspaceOperationalControlStatus.UPDATED,
@@ -1285,9 +1281,9 @@ async def update_workspace_operational_control(
     event_details: dict[str, str] = {
         "automation_status": saved_control.automation_status.value,
     }
-    event_details[
-        "recurring_paused_search_enabled"
-    ] = str(saved_control.recurring_paused_search_enabled).lower()
+    event_details["recurring_paused_search_enabled"] = str(
+        saved_control.recurring_paused_search_enabled
+    ).lower()
     if saved_control.pause_reason is not None:
         event_details["pause_reason"] = saved_control.pause_reason
 

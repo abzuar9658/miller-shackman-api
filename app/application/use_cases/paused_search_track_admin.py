@@ -1,16 +1,23 @@
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
-from uuid import uuid4
+from uuid import UUID, uuid4, uuid5
 
 from app.application.ports.event_bus import EventBus
 from app.application.ports.repositories import (
     PausedSearchTrackAdminAuditLogRepository,
     PausedSearchTrackAdminRepository,
+    TemplateRepository,
+)
+from app.application.use_cases.preview_paused_search_track import (
+    paused_search_preview_evidence,
+    paused_search_preview_reference,
 )
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchFallbackTimingPolicy,
+    PausedSearchTerminalBehavior,
+    PausedSearchTimingBasis,
     PausedSearchTrack,
     PausedSearchTrackAdminAuditAction,
     PausedSearchTrackAdminAuditLog,
@@ -21,13 +28,16 @@ from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
 )
+from app.domain.campaigns.paused_search_validation import (
+    PausedSearchTrackValidationReport,
+    validate_paused_search_track,
+)
+from app.domain.campaigns.template_registry import TemplateVersion
 from app.domain.common.ids import PausedSearchTrackId, PausedSearchTrackVersionId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
 from app.domain.identity import AuthenticatedActor, PermissionCapability, evaluate_permission
 from app.domain.leads import PausedSearchReasonCode
-
-MAX_AI_TOUCHES_PER_TRACK = 5
 
 
 class PausedSearchTrackAdminReasonCode(StrEnum):
@@ -39,6 +49,10 @@ class PausedSearchTrackAdminReasonCode(StrEnum):
     VERSION_NOT_IN_TRACK = "version_not_in_track"
     INVALID_CONFIGURATION = "invalid_configuration"
     INVALID_TRACK_STATUS = "invalid_track_status"
+    STALE_DRAFT_VERSION = "stale_draft_version"
+    PREVIEW_REFERENCE_REQUIRED = "preview_reference_required"
+    PREVIEW_REFERENCE_MISMATCH = "preview_reference_mismatch"
+    WARNINGS_NOT_ACKNOWLEDGED = "warnings_not_acknowledged"
 
 
 class PausedSearchTrackDraftStatus(StrEnum):
@@ -73,6 +87,11 @@ class PausedSearchTrackStepInput:
     template_key: str
     max_attempts: int
     review_required: bool = False
+    interval_days: int | None = None
+    max_occurrences: int = 1
+    template_version_id: UUID | None = None
+    timing_basis: PausedSearchTimingBasis = PausedSearchTimingBasis.CUSTOMER_REENGAGEMENT_DATE
+    fallback_channel: ContactChannel | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +106,11 @@ class PausedSearchTrackConfigInput:
     max_total_touches: int
     requires_review_before_publish: bool
     steps: tuple[PausedSearchTrackStepInput, ...]
+    default_pause_duration_days: int = 60
+    max_duration_days: int = 365
+    terminal_behavior: PausedSearchTerminalBehavior = (
+        PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED
+    )
 
 
 @dataclass(frozen=True)
@@ -94,6 +118,7 @@ class PausedSearchTrackDraftResult:
     status: PausedSearchTrackDraftStatus
     view: PausedSearchTrackAdminView | None = None
     reasons: tuple[PausedSearchTrackAdminReasonCode, ...] = ()
+    validation: PausedSearchTrackValidationReport | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +126,7 @@ class PausedSearchTrackPublishResult:
     status: PausedSearchTrackPublishStatus
     view: PausedSearchTrackAdminView | None = None
     reasons: tuple[PausedSearchTrackAdminReasonCode, ...] = ()
+    validation: PausedSearchTrackValidationReport | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +150,86 @@ class PausedSearchTrackRetireResult:
     reasons: tuple[PausedSearchTrackAdminReasonCode, ...] = ()
 
 
+async def build_unsaved_paused_search_track_view(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: WorkspaceId,
+    track: PausedSearchTrack,
+    track_key: str,
+    display_name: str,
+    config: PausedSearchTrackConfigInput,
+    repository: PausedSearchTrackAdminRepository,
+    template_repository: TemplateRepository | None = None,
+    now: datetime,
+) -> tuple[
+    PausedSearchTrackAdminView,
+    PausedSearchTrackValidationReport,
+    dict[UUID, TemplateVersion],
+]:
+    draft_version = await repository.get_latest_draft_version(workspace_id, track.track_id)
+    existing_step_ids: dict[int, UUID] = {}
+    if draft_version is None:
+        draft_version = _build_version(
+            workspace_id=workspace_id,
+            track_id=track.track_id,
+            track_version_id=uuid5(
+                track.track_id,
+                f"preview-version:{track_key.strip()}:{display_name.strip()}",
+            ),
+            version_number=(
+                await repository.get_latest_version_number(workspace_id, track.track_id) + 1
+            ),
+            actor=actor,
+            config=config,
+            now=now,
+        )
+    else:
+        draft_version = _replace_version_config(draft_version, config)
+        existing_step_ids = {
+            step.step_order: step.step_id
+            for step in await repository.get_steps(workspace_id, draft_version.track_version_id)
+        }
+    updated_track = replace(
+        track,
+        track_key=track_key.strip(),
+        display_name=display_name.strip(),
+        updated_at=now,
+    )
+    steps = _build_steps(
+        workspace_id=workspace_id,
+        version_id=draft_version.track_version_id,
+        config=config,
+        now=now,
+    )
+    steps = tuple(
+        replace(
+            step,
+            step_id=existing_step_ids.get(
+                step.step_order,
+                uuid5(draft_version.track_version_id, f"preview-step:{step.step_order}"),
+            ),
+        )
+        for step in steps
+    )
+    steps, templates = await _resolve_template_bindings(
+        workspace_id=workspace_id,
+        steps=steps,
+        template_repository=template_repository,
+    )
+    validation = validate_paused_search_track(
+        track=updated_track,
+        version=draft_version,
+        steps=steps,
+        for_publish=False,
+        templates=templates,
+    )
+    return (
+        PausedSearchTrackAdminView(updated_track, draft_version, steps),
+        validation,
+        templates or {},
+    )
+
+
 async def create_draft_paused_search_track(
     *,
     actor: AuthenticatedActor,
@@ -133,13 +239,12 @@ async def create_draft_paused_search_track(
     config: PausedSearchTrackConfigInput,
     repository: PausedSearchTrackAdminRepository,
     audit_log_repository: PausedSearchTrackAdminAuditLogRepository,
+    template_repository: TemplateRepository | None = None,
     now: datetime,
     event_bus: EventBus | None = None,
 ) -> PausedSearchTrackDraftResult:
     if not _can_administer_tracks(actor):
         return _draft_rejected(PausedSearchTrackAdminReasonCode.PERMISSION_DENIED)
-    if not _configuration_is_valid(track_key=track_key, display_name=display_name, config=config):
-        return _draft_rejected(PausedSearchTrackAdminReasonCode.INVALID_CONFIGURATION)
     if await repository.get_track_by_key(workspace_id, track_key.strip()) is not None:
         return _draft_rejected(PausedSearchTrackAdminReasonCode.TRACK_KEY_TAKEN)
 
@@ -166,6 +271,23 @@ async def create_draft_paused_search_track(
         now=now,
     )
     steps = _build_steps(workspace_id=workspace_id, version_id=version_id, config=config, now=now)
+    steps, templates = await _resolve_template_bindings(
+        workspace_id=workspace_id,
+        steps=steps,
+        template_repository=template_repository,
+    )
+    validation = validate_paused_search_track(
+        track=track,
+        version=version,
+        steps=steps,
+        for_publish=False,
+        templates=templates,
+    )
+    if not validation.publishable:
+        return _draft_rejected(
+            PausedSearchTrackAdminReasonCode.INVALID_CONFIGURATION,
+            validation=validation,
+        )
 
     saved_track = await repository.save_track(track)
     saved_version = await repository.save_version(version)
@@ -175,7 +297,11 @@ async def create_draft_paused_search_track(
         audit_log_repository, PausedSearchTrackAdminAuditAction.DRAFT_CREATED, actor, view, now
     )
     await _publish_event(event_bus, DomainEventType.PAUSED_SEARCH_TRACK_DRAFT_CREATED, view, actor)
-    return PausedSearchTrackDraftResult(status=PausedSearchTrackDraftStatus.CREATED, view=view)
+    return PausedSearchTrackDraftResult(
+        status=PausedSearchTrackDraftStatus.CREATED,
+        view=view,
+        validation=validation,
+    )
 
 
 async def update_draft_paused_search_track(
@@ -188,13 +314,12 @@ async def update_draft_paused_search_track(
     config: PausedSearchTrackConfigInput,
     repository: PausedSearchTrackAdminRepository,
     audit_log_repository: PausedSearchTrackAdminAuditLogRepository,
+    template_repository: TemplateRepository | None = None,
     now: datetime,
     event_bus: EventBus | None = None,
 ) -> PausedSearchTrackDraftResult:
     if not _can_administer_tracks(actor):
         return _draft_rejected(PausedSearchTrackAdminReasonCode.PERMISSION_DENIED)
-    if not _configuration_is_valid(track_key=track_key, display_name=display_name, config=config):
-        return _draft_rejected(PausedSearchTrackAdminReasonCode.INVALID_CONFIGURATION)
 
     track = await repository.get_track(workspace_id, track_id)
     if track is None:
@@ -233,6 +358,23 @@ async def update_draft_paused_search_track(
         config=config,
         now=now,
     )
+    steps, templates = await _resolve_template_bindings(
+        workspace_id=workspace_id,
+        steps=steps,
+        template_repository=template_repository,
+    )
+    validation = validate_paused_search_track(
+        track=updated_track,
+        version=draft_version,
+        steps=steps,
+        for_publish=False,
+        templates=templates,
+    )
+    if not validation.publishable:
+        return _draft_rejected(
+            PausedSearchTrackAdminReasonCode.INVALID_CONFIGURATION,
+            validation=validation,
+        )
     saved_track = await repository.save_track(updated_track)
     saved_version = await repository.save_version(draft_version)
     saved_steps = await repository.replace_steps(
@@ -243,7 +385,11 @@ async def update_draft_paused_search_track(
         audit_log_repository, PausedSearchTrackAdminAuditAction.DRAFT_UPDATED, actor, view, now
     )
     await _publish_event(event_bus, DomainEventType.PAUSED_SEARCH_TRACK_DRAFT_UPDATED, view, actor)
-    return PausedSearchTrackDraftResult(status=PausedSearchTrackDraftStatus.UPDATED, view=view)
+    return PausedSearchTrackDraftResult(
+        status=PausedSearchTrackDraftStatus.UPDATED,
+        view=view,
+        validation=validation,
+    )
 
 
 async def publish_paused_search_track_version(
@@ -254,12 +400,16 @@ async def publish_paused_search_track_version(
     track_version_id: PausedSearchTrackVersionId,
     repository: PausedSearchTrackAdminRepository,
     audit_log_repository: PausedSearchTrackAdminAuditLogRepository,
+    template_repository: TemplateRepository | None = None,
     now: datetime,
     event_bus: EventBus | None = None,
+    expected_version_number: int | None = None,
+    preview_reference: str | None = None,
+    confirm_warnings: bool = False,
 ) -> PausedSearchTrackPublishResult:
     if not _can_administer_tracks(actor):
         return _publish_rejected(PausedSearchTrackAdminReasonCode.PERMISSION_DENIED)
-    track = await repository.get_track(workspace_id, track_id)
+    track = await repository.get_track_for_update(workspace_id, track_id)
     if track is None:
         return _publish_rejected(PausedSearchTrackAdminReasonCode.TRACK_NOT_FOUND)
     version = await repository.get_version(workspace_id, track_version_id)
@@ -269,10 +419,58 @@ async def publish_paused_search_track_version(
         return _publish_rejected(PausedSearchTrackAdminReasonCode.VERSION_NOT_IN_TRACK)
     if version.status != CampaignVersionStatus.DRAFT:
         return _publish_rejected(PausedSearchTrackAdminReasonCode.VERSION_NOT_DRAFT)
+    contract_enforced = expected_version_number is not None or preview_reference is not None
+    if expected_version_number is not None and version.version_number != expected_version_number:
+        return _publish_rejected(PausedSearchTrackAdminReasonCode.STALE_DRAFT_VERSION)
 
     steps = await repository.get_steps(workspace_id, track_version_id)
-    if not _publishable(version, steps):
-        return _publish_rejected(PausedSearchTrackAdminReasonCode.INVALID_CONFIGURATION)
+    steps, templates = await _resolve_template_bindings(
+        workspace_id=workspace_id,
+        steps=steps,
+        template_repository=template_repository,
+    )
+    validation = validate_paused_search_track(
+        track=track,
+        version=version,
+        steps=steps,
+        for_publish=True,
+        templates=templates if template_repository is not None else {},
+    )
+    if not validation.publishable:
+        return _publish_rejected(
+            PausedSearchTrackAdminReasonCode.INVALID_CONFIGURATION,
+            validation=validation,
+        )
+
+    publish_templates = templates or {}
+    current_preview_reference = paused_search_preview_reference(
+        track,
+        version,
+        steps,
+        validation,
+        publish_templates,
+    )
+    if contract_enforced and preview_reference is None:
+        return _publish_rejected(
+            PausedSearchTrackAdminReasonCode.PREVIEW_REFERENCE_REQUIRED,
+            validation=validation,
+        )
+    if contract_enforced and preview_reference != current_preview_reference:
+        return _publish_rejected(
+            PausedSearchTrackAdminReasonCode.PREVIEW_REFERENCE_MISMATCH,
+            validation=validation,
+        )
+    if contract_enforced and validation.warnings and not confirm_warnings:
+        return _publish_rejected(
+            PausedSearchTrackAdminReasonCode.WARNINGS_NOT_ACKNOWLEDGED,
+            validation=validation,
+        )
+
+    if template_repository is not None and steps != await repository.get_steps(
+        workspace_id,
+        track_version_id,
+    ):
+        steps = await repository.replace_steps(workspace_id, track_version_id, steps)
 
     await repository.retire_published_versions(
         workspace_id, track_id, except_version_id=track_version_id
@@ -297,16 +495,35 @@ async def publish_paused_search_track_version(
         now=now,
     )
     view = PausedSearchTrackAdminView(active_track, published_version, steps, mappings)
+    preview_evidence = paused_search_preview_evidence(
+        track,
+        version,
+        steps,
+        validation,
+        publish_templates,
+    )
     await _append_audit(
         audit_log_repository,
         PausedSearchTrackAdminAuditAction.VERSION_PUBLISHED,
         actor,
         view,
         now,
+        additional_details={
+            "publish_evidence": preview_evidence,
+            "preview_reference": paused_search_preview_reference(
+                track,
+                version,
+                steps,
+                validation,
+                publish_templates,
+            ),
+        },
     )
     await _publish_event(event_bus, DomainEventType.PAUSED_SEARCH_TRACK_PUBLISHED, view, actor)
     return PausedSearchTrackPublishResult(
-        status=PausedSearchTrackPublishStatus.PUBLISHED, view=view
+        status=PausedSearchTrackPublishStatus.PUBLISHED,
+        view=view,
+        validation=validation,
     )
 
 
@@ -397,15 +614,27 @@ async def get_paused_search_track_view(
     return PausedSearchTrackDetailResult(status=PausedSearchTrackReadStatus.OK, view=view)
 
 
-def _draft_rejected(reason: PausedSearchTrackAdminReasonCode) -> PausedSearchTrackDraftResult:
+def _draft_rejected(
+    reason: PausedSearchTrackAdminReasonCode,
+    *,
+    validation: PausedSearchTrackValidationReport | None = None,
+) -> PausedSearchTrackDraftResult:
     return PausedSearchTrackDraftResult(
-        status=PausedSearchTrackDraftStatus.REJECTED, reasons=(reason,)
+        status=PausedSearchTrackDraftStatus.REJECTED,
+        reasons=(reason,),
+        validation=validation,
     )
 
 
-def _publish_rejected(reason: PausedSearchTrackAdminReasonCode) -> PausedSearchTrackPublishResult:
+def _publish_rejected(
+    reason: PausedSearchTrackAdminReasonCode,
+    *,
+    validation: PausedSearchTrackValidationReport | None = None,
+) -> PausedSearchTrackPublishResult:
     return PausedSearchTrackPublishResult(
-        status=PausedSearchTrackPublishStatus.REJECTED, reasons=(reason,)
+        status=PausedSearchTrackPublishStatus.REJECTED,
+        reasons=(reason,),
+        validation=validation,
     )
 
 
@@ -415,51 +644,6 @@ def _can_administer_tracks(actor: AuthenticatedActor) -> bool:
 
 def _can_view_tracks(actor: AuthenticatedActor) -> bool:
     return evaluate_permission(actor, PermissionCapability.VIEW_WORKSPACE_REPORTING).allowed
-
-
-def _configuration_is_valid(
-    *,
-    track_key: str,
-    display_name: str,
-    config: PausedSearchTrackConfigInput,
-) -> bool:
-    reason_codes = config.default_for_reason_codes
-    allowed_channels = set(config.allowed_channels)
-    return (
-        bool(track_key.strip())
-        and bool(display_name.strip())
-        and bool(config.allowed_channels)
-        and len(reason_codes) == len(set(reason_codes))
-        and config.maintenance_interval_days > 0
-        and config.reactivation_window_days > 0
-        and 0 < config.max_total_touches <= MAX_AI_TOUCHES_PER_TRACK
-        and bool(config.steps)
-        and all(_step_is_valid(step, allowed_channels) for step in config.steps)
-    )
-
-
-def _step_is_valid(step: PausedSearchTrackStepInput, allowed_channels: set[ContactChannel]) -> bool:
-    return (
-        step.channel in allowed_channels
-        and step.delay_hours >= 0
-        and bool(step.message_goal.strip())
-        and bool(step.template_key.strip())
-        and step.max_attempts > 0
-    )
-
-
-def _publishable(
-    version: PausedSearchTrackVersion,
-    steps: tuple[PausedSearchTrackStep, ...],
-) -> bool:
-    if version.requires_review_before_publish:
-        return False
-    if not version.enabled or not version.allowed_channels or not steps:
-        return False
-    if len(version.default_for_reason_codes) != len(set(version.default_for_reason_codes)):
-        return False
-    allowed_channels = set(version.allowed_channels)
-    return all(step.channel in allowed_channels for step in steps)
 
 
 def _build_version(
@@ -487,6 +671,9 @@ def _build_version(
         reactivation_window_days=config.reactivation_window_days,
         max_total_touches=config.max_total_touches,
         requires_review_before_publish=config.requires_review_before_publish,
+        default_pause_duration_days=config.default_pause_duration_days,
+        max_duration_days=config.max_duration_days,
+        terminal_behavior=config.terminal_behavior,
         created_by_user_id=actor.user_id,
         created_at=now,
     )
@@ -507,6 +694,9 @@ def _replace_version_config(
         reactivation_window_days=config.reactivation_window_days,
         max_total_touches=config.max_total_touches,
         requires_review_before_publish=config.requires_review_before_publish,
+        default_pause_duration_days=config.default_pause_duration_days,
+        max_duration_days=config.max_duration_days,
+        terminal_behavior=config.terminal_behavior,
     )
 
 
@@ -530,10 +720,41 @@ def _build_steps(
             template_key=step.template_key.strip(),
             max_attempts=step.max_attempts,
             review_required=step.review_required,
+            interval_days=step.interval_days,
+            max_occurrences=step.max_occurrences,
+            template_version_id=step.template_version_id,
+            timing_basis=step.timing_basis,
+            fallback_channel=step.fallback_channel,
             created_at=now,
         )
         for index, step in enumerate(config.steps)
     )
+
+
+async def _resolve_template_bindings(
+    *,
+    workspace_id: WorkspaceId,
+    steps: tuple[PausedSearchTrackStep, ...],
+    template_repository: TemplateRepository | None,
+) -> tuple[tuple[PausedSearchTrackStep, ...], dict[UUID, TemplateVersion] | None]:
+    if template_repository is None:
+        return steps, None
+    resolved: dict[UUID, TemplateVersion] = {}
+    bound_steps: list[PausedSearchTrackStep] = []
+    for step in steps:
+        template = (
+            await template_repository.get_by_id(workspace_id, step.template_version_id)
+            if step.template_version_id is not None
+            else await template_repository.get_latest_approved_by_key(
+                workspace_id,
+                step.template_key,
+            )
+        )
+        if template is not None:
+            resolved[template.template_version_id] = template
+            step = replace(step, template_version_id=template.template_version_id)
+        bound_steps.append(step)
+    return tuple(bound_steps), resolved
 
 
 async def _view_for_track(
@@ -561,6 +782,7 @@ async def _append_audit(
     actor: AuthenticatedActor,
     view: PausedSearchTrackAdminView,
     now: datetime,
+    additional_details: dict[str, object] | None = None,
 ) -> None:
     await audit_log_repository.append(
         PausedSearchTrackAdminAuditLog(
@@ -570,7 +792,7 @@ async def _append_audit(
             track_version_id=view.version.track_version_id,
             action=action,
             actor_user_id=actor.user_id,
-            details=_details_for_view(view),
+            details={**_details_for_view(view), **(additional_details or {})},
             created_at=now,
         ),
     )

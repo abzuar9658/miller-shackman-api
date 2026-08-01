@@ -44,6 +44,7 @@ from app.domain.leads import (
 )
 from app.domain.llm import WorkspaceLLMConfig
 from app.domain.workflows import WorkflowState
+from app.domain.workspace_automation import WorkspaceOperationalControl
 from tests.application.use_cases._campaign_admin_fakes import (
     FakeCampaignAdminRepository,
     FakeEventBus,
@@ -197,9 +198,7 @@ async def test_resolve_review_hold_requires_latest_review_hold_artifact() -> Non
     )
 
     assert result.status == LeadReviewHoldResolutionStatus.INVALID
-    assert result.reasons == (
-        LeadReviewHoldResolutionReasonCode.REVIEW_HOLD_REQUIRED,
-    )
+    assert result.reasons == (LeadReviewHoldResolutionReasonCode.REVIEW_HOLD_REQUIRED,)
     assert deps.routing_review_repository.saved[0].status == LeadRoutingReviewStatus.PENDING
 
 
@@ -242,9 +241,7 @@ async def test_resolve_review_hold_ignores_older_review_hold_artifacts() -> None
     )
 
     assert result.status == LeadReviewHoldResolutionStatus.INVALID
-    assert result.reasons == (
-        LeadReviewHoldResolutionReasonCode.REVIEW_HOLD_REQUIRED,
-    )
+    assert result.reasons == (LeadReviewHoldResolutionReasonCode.REVIEW_HOLD_REQUIRED,)
 
 
 @pytest.mark.asyncio
@@ -309,8 +306,11 @@ class _Deps:
         self.temporal_signal_outbox_repository = FakeTemporalSignalOutboxRepository()
         self.paused_search_track_repository = _track_repository()
         self.routing_review_repository = FakeLeadRoutingReviewRepository()
-        self.workspace_operational_control_repository = (
-            FakeWorkspaceOperationalControlRepository()
+        self.workspace_operational_control_repository = FakeWorkspaceOperationalControlRepository(
+            WorkspaceOperationalControl(
+                workspace_id=WORKSPACE_ID,
+                recurring_paused_search_enabled=True,
+            )
         )
         self.event_bus = FakeEventBus()
         self.routing_review_repository.saved.append(

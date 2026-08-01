@@ -1,8 +1,10 @@
 import base64
 import hmac
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from hashlib import sha256
+from typing import cast
 from uuid import UUID
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -11,16 +13,27 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from twilio.request_validator import RequestValidator
 
+from app.application.ports.repositories import (
+    PausedSearchOccurrenceRepository,
+    TemporalSignalOutboxRepository,
+)
 from app.core.config import Settings, get_settings
 from app.domain.campaigns.outbound_message import (
     OutboundMessage,
     OutboundMessageStatus,
+    ProviderDeliveryStatus,
     ProviderMessageEvent,
 )
+from app.domain.campaigns.paused_search_occurrences import (
+    RecurringOccurrence,
+    RecurringOccurrenceStatus,
+)
+from app.domain.campaigns.paused_search_tracks import PausedSearchTrackStepPhase
 from app.domain.campaigns.pre_send import ProviderSendStatus
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.events import DomainEvent
+from app.domain.workflows import LeadWorkflow, TemporalSignalOutboxEntry, WorkflowState
 from app.interfaces.api.dependencies.provider_delivery import (
     ProviderDeliveryServiceBundle,
     get_provider_delivery_service_bundle,
@@ -104,6 +117,76 @@ class FakeProviderMessageEventRepository:
     async def save(self, event: ProviderMessageEvent) -> ProviderMessageEvent:
         self.events[(event.provider, event.external_provider_event_id)] = event
         return event
+
+
+class FakeOccurrenceRepository:
+    def __init__(self, occurrence: RecurringOccurrence) -> None:
+        self.occurrence = occurrence
+
+    async def get_by_provider_message_id_for_update(
+        self, workspace_id: WorkspaceId, provider_message_id: str
+    ) -> RecurringOccurrence | None:
+        if (
+            self.occurrence.workspace_id == workspace_id
+            and self.occurrence.provider_message_id == provider_message_id
+        ):
+            return self.occurrence
+        return None
+
+    async def update_status(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+        status: str,
+        now: datetime,
+        provider_message_id: str | None = None,
+        provider_delivery_status: ProviderDeliveryStatus | None = None,
+        failure_reason: str | None = None,
+        fallback_used: bool | None = None,
+    ) -> RecurringOccurrence:
+        self.occurrence = replace(
+            self.occurrence,
+            status=RecurringOccurrenceStatus(status),
+            provider_message_id=provider_message_id,
+            provider_delivery_status=provider_delivery_status,
+            failure_reason=failure_reason,
+            logical_touch_count=1,
+        )
+        return self.occurrence
+
+
+class FakeLeadWorkflowRepository:
+    def __init__(self, workflow: LeadWorkflow) -> None:
+        self.workflow = workflow
+
+    async def get_latest_for_lead_for_update(
+        self, workspace_id: WorkspaceId, lead_id: LeadId
+    ) -> LeadWorkflow | None:
+        return self.workflow
+
+    async def list_active_paused_search_for_lead_for_update(
+        self, workspace_id: WorkspaceId, lead_id: LeadId
+    ) -> tuple[LeadWorkflow, ...]:
+        return ()
+
+    async def list_paused_for_workspace(
+        self, workspace_id: WorkspaceId, *, limit: int = 100
+    ) -> tuple[LeadWorkflow, ...]:
+        return (self.workflow,)[:limit]
+
+    async def save(self, workflow: LeadWorkflow) -> LeadWorkflow:
+        self.workflow = workflow
+        return workflow
+
+
+class FakeTemporalSignalOutboxRepository:
+    def __init__(self) -> None:
+        self.entries: list[TemporalSignalOutboxEntry] = []
+
+    async def append(self, entry: TemporalSignalOutboxEntry) -> TemporalSignalOutboxEntry:
+        self.entries.append(entry)
+        return entry
 
 
 def _message(
@@ -248,6 +331,86 @@ def test_sendgrid_batch_processes_delivery_events_and_ignores_non_delivery_event
     assert payload["processed_count"] == 1
     assert payload["ignored_count"] == 1
     assert payload["results"][1]["reasons"] == ["unsupported_event_type:open"]
+
+
+def test_sendgrid_delivery_reconciles_uncertain_occurrence_and_wakes_workflow() -> None:
+    provider_message_id = "msg-uncertain"
+    occurrence = RecurringOccurrence(
+        occurrence_id=UUID("66666666-6666-6666-6666-666666666666"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        workflow_id=UUID("77777777-7777-7777-7777-777777777777"),
+        track_version_id=UUID("88888888-8888-8888-8888-888888888888"),
+        step_id=UUID("99999999-9999-9999-9999-999999999999"),
+        phase=PausedSearchTrackStepPhase.MAINTENANCE,
+        occurrence_number=1,
+        scheduled_for=NOW,
+        due_at=NOW,
+        status=RecurringOccurrenceStatus.UNCERTAIN,
+        idempotency_key="occurrence:uncertain",
+        logical_touch_count=0,
+        provider_message_id=provider_message_id,
+        created_at=NOW,
+    )
+    occurrence_repository = FakeOccurrenceRepository(occurrence)
+    workflow_repository = FakeLeadWorkflowRepository(
+        LeadWorkflow(
+            workflow_id=occurrence.workflow_id,
+            temporal_workflow_id="lead-nurture:uncertain",
+            workspace_id=WORKSPACE_ID,
+            campaign_enrollment_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            campaign_id=UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+            lead_id=LEAD_ID,
+            state=WorkflowState.PAUSED,
+            last_transition_at=NOW,
+            state_version=1,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    signal_repository = FakeTemporalSignalOutboxRepository()
+    bundle = ProviderDeliveryServiceBundle(
+        session=FakeSession(),
+        message_repository=FakeOutboundMessageRepository(
+            _message(
+                provider_name="sendgrid",
+                provider_message_id=provider_message_id,
+                channel=ContactChannel.EMAIL,
+            )
+        ),
+        provider_message_event_repository=FakeProviderMessageEventRepository(),
+        occurrence_repository=cast(PausedSearchOccurrenceRepository, occurrence_repository),
+        lead_workflow_repository=workflow_repository,
+        temporal_signal_outbox_repository=cast(
+            TemporalSignalOutboxRepository, signal_repository
+        ),
+        event_bus=FakeEventBus(),
+    )
+    body = json.dumps(
+        [
+            {
+                "event": "delivered",
+                "timestamp": int(NOW.timestamp()),
+                "sg_event_id": "evt-uncertain",
+                "sg_message_id": provider_message_id,
+            }
+        ]
+    )
+
+    with _client(bundle) as client:
+        response = client.post(
+            "/api/v1/webhooks/sendgrid/message-events",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["processed_count"] == 1
+    assert occurrence_repository.occurrence.status == RecurringOccurrenceStatus.SENT
+    assert occurrence_repository.occurrence.logical_touch_count == 1
+    assert workflow_repository.workflow.logical_touch_count == 1
+    assert len(signal_repository.entries) == 1
+    assert signal_repository.entries[0].payload["reason"] == "provider_delivery_reconciled"
 
 
 def test_sendgrid_signature_validation_and_duplicate_event_handling() -> None:

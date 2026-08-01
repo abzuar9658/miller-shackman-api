@@ -249,10 +249,7 @@ async def run_dormant_selector_batch(
     )
 
     start_decision = evaluate_campaign_start_batch(
-        tuple(
-            candidate.start_candidate
-            for candidate in candidate_evaluation.routed_candidates
-        ),
+        tuple(candidate.start_candidate for candidate in candidate_evaluation.routed_candidates),
         start_policy,
         final_context,
         now,
@@ -309,28 +306,30 @@ async def run_dormant_selector_batch(
     else:
         started_count = 0
 
-    paused_search_started_count, paused_search_started_lead_ids = (
-        await _start_paused_search_candidates(
-            candidates=paused_search_selected_candidates,
-            workspace_id=workspace_id,
-            campaign_id=campaign_id,
-            campaign_version_id=config.campaign_version_id,
-            campaign_enrollment_repository=campaign_enrollment_repository,
-            lead_repository=lead_repository,
-            lead_workflow_repository=lead_workflow_repository,
-            workflow_transition_repository=workflow_transition_repository,
-            temporal_workflow_starter=temporal_workflow_starter,
-            paused_search_track_repository=paused_search_track_repository,
-            event_bus=event_bus,
-            workspace_operational_control_repository=workspace_operational_control_repository,
-            commit=commit,
-            now=now,
-        )
+    (
+        paused_search_started_count,
+        paused_search_started_lead_ids,
+    ) = await _start_paused_search_candidates(
+        candidates=paused_search_selected_candidates,
+        workspace_id=workspace_id,
+        campaign_id=campaign_id,
+        campaign_version_id=config.campaign_version_id,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        lead_repository=lead_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        temporal_workflow_starter=temporal_workflow_starter,
+        paused_search_track_repository=paused_search_track_repository,
+        event_bus=event_bus,
+        workspace_operational_control_repository=workspace_operational_control_repository,
+        commit=commit,
+        now=now,
     )
     started_lead_ids = tuple(
         lead_id
         for lead_id in selected_lead_ids
-        if lead_id in {
+        if lead_id
+        in {
             *dormant_started_or_enrolled_lead_ids,
             *paused_search_started_lead_ids,
         }

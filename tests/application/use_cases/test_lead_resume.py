@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from app.application.use_cases.lead_resume import (
@@ -72,6 +73,62 @@ async def test_resume_eligibility_returns_resumable_for_contactable_paused_workf
     assert result.eligibility.contactable_channels == (ContactChannel.SMS, ContactChannel.EMAIL)
 
 
+async def test_resume_eligibility_blocks_recent_human_activity() -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    workflow = _workflow(WorkflowState.PAUSED)
+    workflow_repository.workflows[workflow.workflow_id] = workflow
+    workflow_repository.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow
+
+    result = await get_lead_resume_eligibility(
+        actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        lead_repository=FakeLeadRepository(
+            _lead(last_agent_activity_at=NOW + timedelta(minutes=1))
+        ),
+        workflow_repository=workflow_repository,
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(_policy()),
+    )
+
+    assert result.eligibility is not None
+    assert result.eligibility.can_resume is False
+    assert result.eligibility.reasons == (
+        LeadResumeEligibilityReasonCode.RECENT_HUMAN_ACTIVITY,
+    )
+
+
+async def test_resume_eligibility_blocks_overlapping_active_paused_search_workflow() -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    paused_workflow = replace(
+        _workflow(WorkflowState.PAUSED),
+        paused_search_track_version_id=UUID("00000000-0000-0000-0000-000000000051"),
+    )
+    active_workflow = replace(
+        paused_workflow,
+        workflow_id=UUID("00000000-0000-0000-0000-000000000052"),
+        state=WorkflowState.ACTIVE_NURTURE,
+        last_transition_at=NOW - timedelta(minutes=1),
+    )
+    workflow_repository.workflows[paused_workflow.workflow_id] = paused_workflow
+    workflow_repository.workflows[active_workflow.workflow_id] = active_workflow
+    workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)] = paused_workflow
+
+    result = await get_lead_resume_eligibility(
+        actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        lead_repository=FakeLeadRepository(_lead()),
+        workflow_repository=workflow_repository,
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(_policy()),
+    )
+
+    assert result.eligibility is not None
+    assert result.eligibility.can_resume is False
+    assert result.eligibility.reasons == (
+        LeadResumeEligibilityReasonCode.OVERLAPPING_ACTIVE_WORKFLOW,
+    )
+
+
 async def test_resume_eligibility_blocks_assigned_agent_for_handoff_state() -> None:
     workflow_repository = FakeLeadWorkflowRepository()
     workflow = _workflow(WorkflowState.HUMAN_HANDOFF)
@@ -90,9 +147,7 @@ async def test_resume_eligibility_blocks_assigned_agent_for_handoff_state() -> N
     assert result.status == LeadResumeEligibilityStatus.OK
     assert result.eligibility is not None
     assert result.eligibility.can_resume is False
-    assert result.eligibility.reasons == (
-        LeadResumeEligibilityReasonCode.HANDOFF_REQUIRES_MANAGER,
-    )
+    assert result.eligibility.reasons == (LeadResumeEligibilityReasonCode.HANDOFF_REQUIRES_MANAGER,)
 
 
 async def test_resume_eligibility_blocks_assigned_agent_for_opt_out_pause() -> None:
@@ -190,9 +245,7 @@ async def test_resume_eligibility_blocks_active_workflow() -> None:
     assert result.status == LeadResumeEligibilityStatus.OK
     assert result.eligibility is not None
     assert result.eligibility.can_resume is False
-    assert result.eligibility.reasons == (
-        LeadResumeEligibilityReasonCode.WORKFLOW_ALREADY_ACTIVE,
-    )
+    assert result.eligibility.reasons == (LeadResumeEligibilityReasonCode.WORKFLOW_ALREADY_ACTIVE,)
 
 
 async def test_resume_eligibility_blocks_when_no_contactable_channels_exist() -> None:
@@ -322,6 +375,39 @@ async def test_resume_lead_workflow_records_transition_and_outbox_entry() -> Non
     assert len(outbox.entries) == 1
 
 
+async def test_resume_lead_workflow_rechecks_recent_human_activity_before_transition() -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    workflow = _workflow(WorkflowState.PAUSED)
+    workflow_repository.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow
+    workflow_repository.workflows[workflow.workflow_id] = workflow
+    transitions = FakeWorkflowTransitionRepository()
+
+    result = await resume_lead_workflow(
+        actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        reason="resume after review",
+        lead_repository=FakeLeadRepository(
+            _lead(last_agent_activity_at=NOW + timedelta(minutes=1))
+        ),
+        workflow_repository=workflow_repository,
+        lead_workflow_repository=workflow_repository,
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(_policy()),
+        workflow_transition_repository=transitions,
+        temporal_signal_outbox_repository=FakeTemporalSignalOutboxRepository(),
+        external_event_repository=FakeExternalEventRepository(),
+        commit=_noop_commit,
+        now=NOW,
+    )
+
+    assert result.status == LeadResumeActionStatus.NOT_RESUMABLE
+    assert result.eligibility is not None
+    assert result.eligibility.reasons == (
+        LeadResumeEligibilityReasonCode.RECENT_HUMAN_ACTIVITY,
+    )
+    assert len(transitions.transitions) == 0
+
+
 async def test_resume_lead_workflow_does_not_resume_handoff_for_assigned_agent() -> None:
     workflow_repository = FakeLeadWorkflowRepository()
     workflow = _workflow(WorkflowState.HUMAN_HANDOFF)
@@ -348,9 +434,7 @@ async def test_resume_lead_workflow_does_not_resume_handoff_for_assigned_agent()
 
     assert result.status == LeadResumeActionStatus.NOT_RESUMABLE
     assert result.eligibility is not None
-    assert result.eligibility.reasons == (
-        LeadResumeEligibilityReasonCode.HANDOFF_REQUIRES_MANAGER,
-    )
+    assert result.eligibility.reasons == (LeadResumeEligibilityReasonCode.HANDOFF_REQUIRES_MANAGER,)
     assert len(transitions.transitions) == 0
     assert len(outbox.entries) == 0
 
@@ -362,6 +446,7 @@ def _lead(
     has_email: bool = True,
     sms_permission_status: ContactPermissionStatus = ContactPermissionStatus.CONFIRMED,
     email_permission_status: ContactPermissionStatus = ContactPermissionStatus.CONFIRMED,
+    last_agent_activity_at: datetime | None = None,
 ) -> CanonicalLeadRecord:
     return CanonicalLeadRecord(
         workspace_id=WORKSPACE_ID,
@@ -381,6 +466,7 @@ def _lead(
         sms_permission_status=sms_permission_status,
         email_permission_status=email_permission_status,
         do_not_contact=False,
+        last_agent_activity_at=last_agent_activity_at,
     )
 
 

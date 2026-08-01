@@ -1,10 +1,17 @@
 import json
+from dataclasses import replace
+from datetime import datetime
 from uuid import UUID
 
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
 from app.application.ports.messaging import EmailMessage, SMSMessage
 from app.domain.campaigns.execution import CampaignExecutionConfig, CampaignVersionStatus
-from app.domain.campaigns.outbound_message import OutboundMessage
+from app.domain.campaigns.outbound_message import OutboundMessage, ProviderDeliveryStatus
+from app.domain.campaigns.paused_search_occurrences import (
+    RecurringOccurrence,
+    RecurringOccurrenceStatus,
+)
+from app.domain.campaigns.paused_search_reviews import PausedSearchReview
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import LeadId, WorkspaceId
@@ -73,6 +80,217 @@ class FakeCampaignExecutionRepository:
             if config.campaign_id == campaign_id:
                 return config
         return None
+
+
+class FakePausedSearchOccurrenceRepository:
+    def __init__(self, occurrence: RecurringOccurrence | None = None) -> None:
+        self.occurrence = occurrence
+        self.updated: list[RecurringOccurrence] = []
+
+    async def get_latest_for_step(
+        self,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        track_version_id: UUID,
+        step_id: UUID,
+    ) -> RecurringOccurrence | None:
+        return self.occurrence
+
+
+    async def get_by_identity(
+        self,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        track_version_id: UUID,
+        step_id: UUID,
+        occurrence_number: int,
+        scheduled_for: object,
+    ) -> RecurringOccurrence | None:
+        return self.occurrence
+
+    async def get_by_idempotency_key(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
+    ) -> RecurringOccurrence | None:
+        if (
+            self.occurrence is not None
+            and self.occurrence.workspace_id == workspace_id
+            and self.occurrence.idempotency_key == idempotency_key
+        ):
+            return self.occurrence
+        return None
+
+    async def create_or_get(self, occurrence: RecurringOccurrence) -> RecurringOccurrence:
+        self.occurrence = self.occurrence or occurrence
+        return self.occurrence
+
+    async def get_by_provider_message_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        provider_message_id: str,
+    ) -> RecurringOccurrence | None:
+        if self.occurrence and self.occurrence.provider_message_id == provider_message_id:
+            return self.occurrence
+        return None
+
+    async def update_status(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+        status: str,
+        now: datetime,
+        provider_message_id: str | None = None,
+        provider_delivery_status: ProviderDeliveryStatus | None = None,
+        failure_reason: str | None = None,
+        fallback_used: bool | None = None,
+    ) -> RecurringOccurrence | None:
+        if self.occurrence is None or self.occurrence.occurrence_id != occurrence_id:
+            return None
+        self.occurrence = replace(
+            self.occurrence,
+            status=RecurringOccurrenceStatus(status),
+            logical_touch_count=(
+                self.occurrence.logical_touch_count
+                + int(
+                    status == RecurringOccurrenceStatus.SENT.value
+                    and self.occurrence.status != RecurringOccurrenceStatus.SENT
+                )
+                if status == RecurringOccurrenceStatus.SENT.value
+                else self.occurrence.logical_touch_count
+            ),
+            provider_message_id=provider_message_id or self.occurrence.provider_message_id,
+            provider_delivery_status=(
+                provider_delivery_status or self.occurrence.provider_delivery_status
+            ),
+            failure_reason=failure_reason or self.occurrence.failure_reason,
+            fallback_used=(
+                fallback_used if fallback_used is not None else self.occurrence.fallback_used
+            ),
+        )
+        self.updated.append(self.occurrence)
+        return self.occurrence
+
+    async def cancel_open_for_workflow(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        now: datetime,
+        reason: str,
+    ) -> int:
+        if (
+            self.occurrence is None
+            or self.occurrence.workspace_id != workspace_id
+            or self.occurrence.workflow_id != workflow_id
+            or self.occurrence.status
+            not in {
+                RecurringOccurrenceStatus.PLANNED,
+                RecurringOccurrenceStatus.DEFERRED,
+                RecurringOccurrenceStatus.REVIEW_REQUESTED,
+                RecurringOccurrenceStatus.APPROVED,
+            }
+        ):
+            return 0
+        self.occurrence = replace(
+            self.occurrence,
+            status=RecurringOccurrenceStatus.CANCELLED,
+            closed_at=now,
+            failure_reason=reason,
+        )
+        self.updated.append(self.occurrence)
+        return 1
+
+    async def resolve_uncertain(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+        status: str,
+        now: datetime,
+        reason: str,
+    ) -> RecurringOccurrence | None:
+        if self.occurrence is None or self.occurrence.occurrence_id != occurrence_id:
+            return None
+        if self.occurrence.status != RecurringOccurrenceStatus.UNCERTAIN:
+            return None
+        self.occurrence = replace(
+            self.occurrence,
+            status=RecurringOccurrenceStatus(status),
+            logical_touch_count=1 if status == RecurringOccurrenceStatus.SENT.value else 0,
+            closed_at=now,
+            failure_reason=reason,
+        )
+        self.updated.append(self.occurrence)
+        return self.occurrence
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+    ) -> RecurringOccurrence | None:
+        if (
+            self.occurrence is None
+            or self.occurrence.workspace_id != workspace_id
+            or self.occurrence.occurrence_id != occurrence_id
+        ):
+            return None
+        return self.occurrence
+
+
+class FakePausedSearchReviewRepository:
+    def __init__(self) -> None:
+        self.reviews: dict[UUID, PausedSearchReview] = {}
+
+    async def list_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        lead_id: UUID | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> tuple[PausedSearchReview, ...]:
+        return tuple(self.reviews.values())[:limit]
+
+    async def get_by_id(
+        self, workspace_id: WorkspaceId, review_id: UUID
+    ) -> PausedSearchReview | None:
+        return self.reviews.get(review_id)
+
+    async def get_by_id_for_update(
+        self, workspace_id: WorkspaceId, review_id: UUID
+    ) -> PausedSearchReview | None:
+        return await self.get_by_id(workspace_id, review_id)
+
+    async def get_by_occurrence(
+        self, workspace_id: WorkspaceId, occurrence_id: UUID, kind: str
+    ) -> PausedSearchReview | None:
+        return next(
+            (
+                review
+                for review in self.reviews.values()
+                if review.workspace_id == workspace_id
+                and review.occurrence_id == occurrence_id
+                and review.kind.value == kind
+            ),
+            None,
+        )
+
+    async def create_or_get(self, review: PausedSearchReview) -> PausedSearchReview:
+        existing = await self.get_by_occurrence(
+            review.workspace_id,
+            review.occurrence_id or UUID(int=0),
+            review.kind.value,
+        )
+        if existing is not None:
+            return existing
+        self.reviews[review.review_id] = review
+        return review
+
+    async def save(self, review: PausedSearchReview) -> PausedSearchReview:
+        self.reviews[review.review_id] = review
+        return review
 
 
 class FakeWorkspaceRepository:
@@ -349,6 +567,40 @@ class FakeLeadWorkflowRepository:
     ) -> LeadWorkflow | None:
         return self.latest_by_lead.get((workspace_id, lead_id))
 
+    async def list_active_paused_search_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> tuple[LeadWorkflow, ...]:
+        return self._active_paused_search_for_lead(workspace_id, lead_id)
+
+    async def list_active_paused_search_for_lead_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> tuple[LeadWorkflow, ...]:
+        return self._active_paused_search_for_lead(workspace_id, lead_id)
+
+    def _active_paused_search_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> tuple[LeadWorkflow, ...]:
+        active_states = {
+            WorkflowState.QUEUED,
+            WorkflowState.ACTIVE_NURTURE,
+            WorkflowState.WAITING_FOR_RESPONSE,
+            WorkflowState.RESPONSE_PROCESSING,
+        }
+        return tuple(
+            workflow
+            for workflow in self.workflows.values()
+            if workflow.workspace_id == workspace_id
+            and workflow.lead_id == lead_id
+            and workflow.paused_search_track_version_id is not None
+            and workflow.state in active_states
+        )
+
     async def save(self, workflow: LeadWorkflow) -> LeadWorkflow:
         self.workflows[workflow.workflow_id] = workflow
         self.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow
@@ -376,8 +628,7 @@ class FakeLeadWorkflowRepository:
         matches = tuple(
             workflow
             for workflow in self.latest_by_lead.values()
-            if workflow.workspace_id == workspace_id
-            and workflow.state == WorkflowState.PAUSED
+            if workflow.workspace_id == workspace_id and workflow.state == WorkflowState.PAUSED
         )
         return matches[:limit]
 
@@ -616,7 +867,6 @@ class FakeLeadRoutingReviewRepository:
                 return review
         self.saved.append(review)
         return review
-
 
 
 class FakeRejectedDraftReviewRepository:

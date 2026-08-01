@@ -85,6 +85,17 @@ class LeadWorkflowModel(Base):
             "lead_id",
             "last_transition_at",
         ),
+        Index(
+            "uq_lead_workflows_active_paused_search_lead",
+            "workspace_id",
+            "lead_id",
+            unique=True,
+            postgresql_where=text(
+                "paused_search_track_version_id IS NOT NULL "
+                "AND state IN "
+                "('queued', 'active_nurture', 'waiting_for_response', 'response_processing')"
+            ),
+        ),
     )
 
     workflow_id: Mapped[UUID] = mapped_column(
@@ -122,6 +133,7 @@ class LeadWorkflowModel(Base):
     pause_reason: Mapped[str | None] = mapped_column(String(255))
     resume_reason: Mapped[str | None] = mapped_column(String(500))
     state_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    logical_touch_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -189,9 +201,7 @@ class RejectedDraftReviewModel(Base):
         ),
     )
 
-    review_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    review_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     workspace_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
     )

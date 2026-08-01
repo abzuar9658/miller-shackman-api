@@ -28,6 +28,7 @@ from app.application.services.llm.workspace_model_resolution import (
 )
 from app.application.services.paused_search_drafting_templates import (
     apply_paused_search_drafting_template,
+    apply_paused_search_template_version,
 )
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
 from app.domain.campaigns.pre_send import (
@@ -41,6 +42,7 @@ from app.domain.campaigns.pre_send import (
     evaluate_pre_send_safety,
 )
 from app.domain.campaigns.start_queue import CampaignStatus
+from app.domain.campaigns.template_registry import TemplateVersion
 from app.domain.common.ids import CampaignId, LeadId, WorkspaceId
 from app.domain.compliance.contactability import (
     ContactChannel,
@@ -97,6 +99,7 @@ class OutboundPlanningContext:
     brokerage_name: str
     cadence_step_id: str
     template_key: str | None = None
+    template_version: TemplateVersion | None = None
     assigned_agent_name: str | None = None
     scheduled_for: datetime | None = None
     message_version: int = 1
@@ -226,6 +229,11 @@ async def plan_outbound_message_for_lead_record(
             channel=selected.channel,
             template_key=context.template_key,
         )
+        drafting_config = apply_paused_search_template_version(
+            drafting_config=drafting_config,
+            channel=selected.channel,
+            template=context.template_version,
+        )
 
     draft_result = await draft_outbound_message(
         lead=lead,
@@ -250,7 +258,7 @@ async def plan_outbound_message_for_lead_record(
             channel_evaluations=selected.evaluations,
         )
 
-    idempotency_key = _outbound_idempotency_key(
+    idempotency_key = outbound_message_idempotency_key(
         workspace_id=workspace_id,
         campaign_id=campaign_id,
         lead_id=lead_id,
@@ -389,7 +397,7 @@ async def _select_channel(
             )
             continue
 
-        idempotency_key = _outbound_idempotency_key(
+        idempotency_key = outbound_message_idempotency_key(
             workspace_id=workspace_id,
             campaign_id=campaign_id,
             lead_id=lead.lead_id,
@@ -464,7 +472,7 @@ def _message_version_for_channel(
     return max(requested_message_version, latest_message.message_version)
 
 
-def _outbound_idempotency_key(
+def outbound_message_idempotency_key(
     *,
     workspace_id: WorkspaceId,
     campaign_id: CampaignId,

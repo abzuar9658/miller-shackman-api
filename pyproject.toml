@@ -69,3 +69,6 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "live_llm: calls the configured external LLM provider when explicitly enabled",
+]

@@ -243,6 +243,8 @@ def _acts_on_assigned_lead(
 
 def _can_view_workspace_handoffs(actor: AuthenticatedActor) -> bool:
     return bool(evaluate_permission(actor, PermissionCapability.VIEW_WORKSPACE_REPORTING).allowed)
+
+
 def _lead_display_name(lead: CanonicalLeadRecord) -> str:
     return str(
         lead.mapped_custom_fields.get("display_name")

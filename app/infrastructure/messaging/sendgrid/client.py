@@ -3,7 +3,12 @@ import asyncio
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Header, Mail
 
-from app.application.ports.messaging import EmailMessage
+from app.application.ports.messaging import (
+    EmailMessage,
+    ProviderFailureKind,
+    ProviderSendFailure,
+)
+from app.infrastructure.messaging.provider_errors import classify_http_status
 
 
 class SendGridEmailProvider:
@@ -39,7 +44,16 @@ class SendGridEmailProvider:
             response = self._client.send(mail)
             return str(response.headers.get("X-Message-Id", ""))
 
-        return await asyncio.to_thread(_send)
+        try:
+            return await asyncio.to_thread(_send)
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", None)
+            raise ProviderSendFailure(
+                classify_http_status(status_code)
+                if isinstance(status_code, int)
+                else ProviderFailureKind.UNCERTAIN,
+                str(exc),
+            ) from exc
 
 
 def _format_message_id_header(message_id: str) -> str:

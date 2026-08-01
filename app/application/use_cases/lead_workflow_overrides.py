@@ -8,6 +8,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     LeadWorkflowOverrideAuditLogRepository,
     LeadWorkflowRepository,
+    PausedSearchOccurrenceRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     WorkspaceRepository,
@@ -64,6 +65,7 @@ class PausedSearchWorkflowOverrideReasonCode(StrEnum):
     TRACK_VERSION_UNCHANGED = "track_version_unchanged"
     NO_PINNED_TRACK = "no_pinned_track"
     NO_NEXT_TOUCH_TO_SKIP = "no_next_touch_to_skip"
+    TOUCH_LIMIT_REACHED = "touch_limit_reached"
 
 
 @dataclass(frozen=True)
@@ -205,6 +207,7 @@ async def migrate_paused_search_track_version(
     paused_search_track_repository: PausedSearchTrackMappingRepository,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     workspace_repository: WorkspaceRepository,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
     now: datetime,
 ) -> PausedSearchWorkflowOverrideResult:
     if not evaluate_permission(
@@ -266,6 +269,13 @@ async def migrate_paused_search_track_version(
         return _result(
             PausedSearchWorkflowOverrideStatus.INVALID,
             PausedSearchWorkflowOverrideReasonCode.TRACK_VERSION_DISABLED,
+        )
+    if paused_search_occurrence_repository is not None:
+        await paused_search_occurrence_repository.cancel_open_for_workflow(
+            workspace_id=workspace_id,
+            workflow_id=workflow.workflow_id,
+            now=now,
+            reason="paused_search_track_version_migrated",
         )
     workspace = await workspace_repository.get_by_id(workspace_id)
     if workspace is None:
@@ -340,6 +350,7 @@ async def skip_paused_search_next_touch(
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     workspace_repository: WorkspaceRepository,
     now: datetime,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
 ) -> PausedSearchWorkflowOverrideResult:
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
     if lead is None:
@@ -385,6 +396,13 @@ async def skip_paused_search_next_touch(
         return _result(
             PausedSearchWorkflowOverrideStatus.INVALID,
             PausedSearchWorkflowOverrideReasonCode.NO_NEXT_TOUCH_TO_SKIP,
+        )
+    if paused_search_occurrence_repository is not None:
+        await paused_search_occurrence_repository.cancel_open_for_workflow(
+            workspace_id=workspace_id,
+            workflow_id=workflow.workflow_id,
+            now=now,
+            reason="paused_search_next_touch_skipped",
         )
     workspace = await workspace_repository.get_by_id(workspace_id)
     if workspace is None:

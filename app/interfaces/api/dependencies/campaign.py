@@ -171,9 +171,7 @@ async def get_campaign_service_bundle(
         temporal_workflow_starter=await build_temporal_workflow_starter(settings),
         crm_client=build_crm_client(settings),
         crm_agent_repository=PostgresCRMAgentRepository(session),
-        workspace_agent_crm_mapping_repository=PostgresWorkspaceAgentCRMMappingRepository(
-            session
-        ),
+        workspace_agent_crm_mapping_repository=PostgresWorkspaceAgentCRMMappingRepository(session),
         llm_client=build_llm_client(settings),
         default_openrouter_model=settings.openrouter_model,
         notification_provider=build_notification_provider(settings),

@@ -217,7 +217,9 @@ async def run_once(
                 crm_conversation_event_repository=PostgresCrmConversationEventRepository(session),
                 crm_sync_window_state_repository=PostgresCRMSyncWindowStateRepository(session),
                 campaign_execution_repository=PostgresCampaignExecutionRepository(session),
-                workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
+                workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(
+                    session
+                ),
                 campaign_enrollment_repository=PostgresCampaignEnrollmentRepository(session),
                 lead_workflow_repository=PostgresLeadWorkflowRepository(session),
                 workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
@@ -244,7 +246,9 @@ async def run_once(
                 user_repository=PostgresUserRepository(session),
                 temporal_signal_outbox_repository=PostgresTemporalSignalOutboxRepository(session),
                 outbound_message_repository=PostgresOutboundMessageRepository(session),
-                lead_classification_artifact_repository=PostgresLeadClassificationArtifactRepository(session),
+                lead_classification_artifact_repository=PostgresLeadClassificationArtifactRepository(
+                    session
+                ),
                 workspace_llm_config_repository=PostgresWorkspaceLLMConfigRepository(session),
                 llm_client=build_llm_client(resolved_settings),
                 default_openrouter_model=resolved_settings.openrouter_model,

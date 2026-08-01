@@ -171,9 +171,7 @@ async def test_upsert_crm_agent_mapping_reconciles_affected_leads() -> None:
         app_user_id=SECOND_USER_ID,
         crm_agent_repository=FakeCRMAgentRepository((_agent(),)),
         mapping_repository=mapping_repository,
-        user_repository=FakeUserRepository(
-            (_user(user_id=USER_ID), _user(user_id=SECOND_USER_ID))
-        ),
+        user_repository=FakeUserRepository((_user(user_id=USER_ID), _user(user_id=SECOND_USER_ID))),
         membership_repository=FakeMembershipRepository(
             (_membership_for(USER_ID), _membership_for(SECOND_USER_ID))
         ),
@@ -235,8 +233,7 @@ async def test_unlink_crm_agent_mapping_reconciles_affected_leads_to_fallback_ma
     assert updated_lead.effective_owner_user_id == FALLBACK_MANAGER_ID
     assert updated_lead.effective_owner_source == EffectiveOwnerSource.WORKSPACE_MANAGER_FALLBACK
     assert (
-        updated_lead.assignment_resolution_status
-        == AssignmentResolutionStatus.UNMAPPED_CRM_AGENT
+        updated_lead.assignment_resolution_status == AssignmentResolutionStatus.UNMAPPED_CRM_AGENT
     )
 
 

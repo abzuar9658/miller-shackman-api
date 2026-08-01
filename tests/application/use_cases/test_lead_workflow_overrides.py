@@ -16,6 +16,8 @@ from app.domain.campaigns import (
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
+    RecurringOccurrence,
+    RecurringOccurrenceStatus,
 )
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.compliance.contactability import ContactChannel
@@ -42,6 +44,7 @@ from app.domain.workflows import (
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeLeadRepository,
     FakeLeadWorkflowRepository,
+    FakePausedSearchOccurrenceRepository,
     FakeWorkspaceRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
@@ -160,6 +163,7 @@ async def test_migrate_paused_search_track_version_updates_pinned_version_and_re
     await workflow_repository.save(_workflow())
     audit_repository = FakeLeadWorkflowOverrideAuditLogRepository(())
     outbox = FakeTemporalSignalOutboxRepository()
+    occurrence_repository = FakePausedSearchOccurrenceRepository()
 
     result = await migrate_paused_search_track_version(
         actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
@@ -173,6 +177,7 @@ async def test_migrate_paused_search_track_version_updates_pinned_version_and_re
         paused_search_track_repository=_track_repository(),
         temporal_signal_outbox_repository=outbox,
         workspace_repository=FakeWorkspaceRepository(_workspace()),
+        paused_search_occurrence_repository=occurrence_repository,
         now=NOW,
     )
 
@@ -195,6 +200,7 @@ async def test_skip_paused_search_next_touch_advances_to_following_step() -> Non
     )
     audit_repository = FakeLeadWorkflowOverrideAuditLogRepository(())
     outbox = FakeTemporalSignalOutboxRepository()
+    occurrence_repository = FakePausedSearchOccurrenceRepository()
 
     result = await skip_paused_search_next_touch(
         actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
@@ -207,6 +213,7 @@ async def test_skip_paused_search_next_touch_advances_to_following_step() -> Non
         paused_search_track_repository=_track_repository(),
         temporal_signal_outbox_repository=outbox,
         workspace_repository=FakeWorkspaceRepository(_workspace()),
+        paused_search_occurrence_repository=occurrence_repository,
         now=NOW,
     )
 
@@ -247,6 +254,23 @@ async def test_skip_paused_search_next_touch_rejects_waiting_for_response_workfl
     assert result.reasons == (
         PausedSearchWorkflowOverrideReasonCode.WORKFLOW_STATE_NOT_OVERRIDABLE,
     )
+
+
+async def test_sent_occurrence_preserves_existing_logical_touch_count() -> None:
+    occurrence_repository = FakePausedSearchOccurrenceRepository(
+        replace(_occurrence(), logical_touch_count=3)
+    )
+    assert occurrence_repository.occurrence is not None
+
+    saved = await occurrence_repository.update_status(
+        workspace_id=WORKSPACE_ID,
+        occurrence_id=occurrence_repository.occurrence.occurrence_id,
+        status="sent",
+        now=NOW,
+    )
+
+    assert saved is not None
+    assert saved.logical_touch_count == 4
 
 
 def _lead() -> CanonicalLeadRecord:
@@ -400,6 +424,24 @@ def _workspace() -> Workspace:
         default_timezone="America/Chicago",
         created_at=NOW,
         updated_at=NOW,
+    )
+
+
+def _occurrence() -> RecurringOccurrence:
+    return RecurringOccurrence(
+        occurrence_id=UUID("00000000-0000-0000-0000-000000000021"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        workflow_id=WORKFLOW_ID,
+        track_version_id=TRACK_VERSION_ID,
+        step_id=STEP_ONE_ID,
+        phase=PausedSearchTrackStepPhase.MAINTENANCE,
+        occurrence_number=1,
+        scheduled_for=NOW,
+        due_at=NOW,
+        status=RecurringOccurrenceStatus.PLANNED,
+        idempotency_key="test-occurrence",
+        created_at=NOW,
     )
 
 

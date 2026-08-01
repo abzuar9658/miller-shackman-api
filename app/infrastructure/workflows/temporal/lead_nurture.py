@@ -1,9 +1,16 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from enum import StrEnum
 from uuid import UUID
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
+
+
+class LeadNurtureExecutionMode(StrEnum):
+    STANDARD_CADENCE = "standard_cadence"
+    PAUSED_SEARCH_RECURRING = "paused_search_recurring"
 
 
 @dataclass(frozen=True)
@@ -11,6 +18,9 @@ class LeadNurtureWorkflowInput:
     workspace_id: UUID
     lead_id: UUID
     campaign_version_id: UUID
+    workflow_id: UUID | None = None
+    execution_mode: LeadNurtureExecutionMode = LeadNurtureExecutionMode.STANDARD_CADENCE
+    paused_search_track_version_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -22,12 +32,25 @@ class ScheduleNextCadenceStepInput:
 
 
 @dataclass(frozen=True)
+class PausedSearchOccurrenceScheduleInput(ScheduleNextCadenceStepInput):
+    workflow_id: UUID | None = None
+    paused_search_track_version_id: UUID | None = None
+    current_occurrence_id: UUID | None = None
+
+
+@dataclass(frozen=True)
 class ScheduleNextCadenceStepResult:
     status: str
     workflow_id: UUID | None = None
     cadence_step_id: UUID | None = None
     scheduled_for: datetime | None = None
     skip_reason: str | None = None
+    occurrence_id: UUID | None = None
+    planner_outcome: str | None = None
+    phase: str | None = None
+    occurrence_number: int | None = None
+    terminal: bool = False
+    expired: bool = False
 
 
 @dataclass(frozen=True)
@@ -41,6 +64,12 @@ class ExecuteCadenceStepInput:
 
 
 @dataclass(frozen=True)
+class PausedSearchOccurrenceExecutionInput(ExecuteCadenceStepInput):
+    occurrence_id: UUID | None = None
+    revalidate_all_pre_send_rules: bool = True
+
+
+@dataclass(frozen=True)
 class ExecuteCadenceStepResult:
     status: str
     workflow_id: UUID | None = None
@@ -50,6 +79,19 @@ class ExecuteCadenceStepResult:
     provider_message_id: str | None = None
     skip_reason: str | None = None
     has_more_steps: bool = False
+    occurrence_id: UUID | None = None
+    occurrence_status: str | None = None
+    accepted_logical_touch: bool = False
+    next_cursor_decision: str | None = None
+    notification_events: tuple[str, ...] = ()
+    fallback_used: bool = False
+
+
+@dataclass(frozen=True)
+class TimeoutUncertainOccurrenceInput:
+    workspace_id: UUID
+    occurrence_id: UUID
+    occurred_at: datetime
 
 
 @dataclass(frozen=True)
@@ -106,6 +148,31 @@ class RescheduleWorkflowSignal:
 
 
 @dataclass(frozen=True)
+class PausedSearchTimingUpdatedSignal(RescheduleWorkflowSignal):
+    pass
+
+
+@dataclass(frozen=True)
+class PausedSearchReviewResolvedSignal(UnblockWorkflowSignal):
+    pass
+
+
+@dataclass(frozen=True)
+class PausedSearchMigrationRequestedSignal(RescheduleWorkflowSignal):
+    target_track_version_id: UUID | None = None
+
+
+@dataclass(frozen=True)
+class PausedSearchOccurrenceCancelledSignal(RescheduleWorkflowSignal):
+    occurrence_id: UUID | None = None
+
+
+@dataclass(frozen=True)
+class PausedSearchTerminalizedSignal(RescheduleWorkflowSignal):
+    terminal_behavior: str | None = None
+
+
+@dataclass(frozen=True)
 class LeadNurtureWorkflowSnapshot:
     workspace_id: UUID
     lead_id: UUID
@@ -120,6 +187,12 @@ class LeadNurtureWorkflowSnapshot:
     outbound_message_id: UUID | None = None
     provider_message_id: str | None = None
     skip_reason: str | None = None
+    occurrence_id: UUID | None = None
+    execution_mode: LeadNurtureExecutionMode = LeadNurtureExecutionMode.STANDARD_CADENCE
+    paused_search_track_version_id: UUID | None = None
+    occurrence_status: str | None = None
+    accepted_touch_count: int = 0
+    terminal_status: str | None = None
 
 
 @workflow.defn(name="lead-nurture-workflow")
@@ -129,6 +202,7 @@ class LeadNurtureWorkflow:
         self._closed = False
         self._send_blocked = False
         self._reschedule_requested = False
+        self._execution_mode = LeadNurtureExecutionMode.STANDARD_CADENCE
 
     @workflow.run
     async def run(self, input_: LeadNurtureWorkflowInput) -> LeadNurtureWorkflowSnapshot:
@@ -136,18 +210,47 @@ class LeadNurtureWorkflow:
             workspace_id=input_.workspace_id,
             lead_id=input_.lead_id,
             campaign_version_id=input_.campaign_version_id,
+            execution_mode=input_.execution_mode,
+            paused_search_track_version_id=input_.paused_search_track_version_id,
         )
+        self._execution_mode = input_.execution_mode
 
         while not self._closed:
             schedule_result = await self._execute_schedule_activity(
-                ScheduleNextCadenceStepInput(
+                (
+                    PausedSearchOccurrenceScheduleInput
+                    if self._execution_mode is LeadNurtureExecutionMode.PAUSED_SEARCH_RECURRING
+                    else ScheduleNextCadenceStepInput
+                )(
                     workspace_id=input_.workspace_id,
                     lead_id=input_.lead_id,
                     campaign_version_id=input_.campaign_version_id,
                     occurred_at=workflow.now(),
+                    **(
+                        {
+                            "workflow_id": input_.workflow_id,
+                            "paused_search_track_version_id": input_.paused_search_track_version_id,
+                            "current_occurrence_id": self._snapshot.occurrence_id,
+                        }
+                        if self._execution_mode is LeadNurtureExecutionMode.PAUSED_SEARCH_RECURRING
+                        else {}
+                    ),
                 )
             )
             self._record_schedule_result(schedule_result)
+            if schedule_result.status == "terminal":
+                self._snapshot = replace(
+                    self._snapshot,
+                    terminal_status=schedule_result.skip_reason or "terminal",
+                )
+                self._closed = True
+                return self._snapshot
+            if schedule_result.status in {"review", "hold"}:
+                self._send_blocked = True
+                await workflow.wait_condition(lambda: self._closed or not self._send_blocked)
+                if self._closed:
+                    return self._snapshot
+                continue
             if schedule_result.status != "scheduled" or schedule_result.scheduled_for is None:
                 return self._snapshot
 
@@ -166,18 +269,38 @@ class LeadNurtureWorkflow:
                 return self._snapshot
 
             execute_result = await self._execute_cadence_activity(
-                ExecuteCadenceStepInput(
+                (
+                    PausedSearchOccurrenceExecutionInput
+                    if self._execution_mode is LeadNurtureExecutionMode.PAUSED_SEARCH_RECURRING
+                    else ExecuteCadenceStepInput
+                )(
                     workspace_id=input_.workspace_id,
                     lead_id=input_.lead_id,
                     campaign_version_id=input_.campaign_version_id,
                     cadence_step_id=schedule_result.cadence_step_id,
                     scheduled_for=schedule_result.scheduled_for,
                     occurred_at=workflow.now(),
+                    **(
+                        {"occurrence_id": schedule_result.occurrence_id}
+                        if self._execution_mode is LeadNurtureExecutionMode.PAUSED_SEARCH_RECURRING
+                        else {}
+                    ),
                 )
             )
             self._record_execution_result(execute_result)
 
-            if execute_result.status in {"rejected", "failed", "uncertain"}:
+            if execute_result.status == "uncertain":
+                await self._wait_for_uncertain_resolution(execute_result)
+                continue
+
+            if execute_result.status == "review":
+                self._send_blocked = True
+                await workflow.wait_condition(lambda: self._closed or not self._send_blocked)
+                if self._closed:
+                    return self._snapshot
+                continue
+
+            if execute_result.status in {"rejected", "failed"}:
                 self._send_blocked = True
                 await workflow.wait_condition(lambda: self._closed or not self._send_blocked)
                 if self._closed:
@@ -235,6 +358,59 @@ class LeadNurtureWorkflow:
             skip_reason=signal.reason,
         )
 
+    @workflow.signal(name="paused-search-timing-updated")
+    def paused_search_timing_updated(self, signal: PausedSearchTimingUpdatedSignal) -> None:
+        self.reschedule_requested(signal)
+
+    @workflow.signal(name="paused-search-review-resolved")
+    def paused_search_review_resolved(self, signal: PausedSearchReviewResolvedSignal) -> None:
+        self.blocked_review_completed(signal)
+
+    @workflow.signal(name="paused-search-migration-requested")
+    def paused_search_migration_requested(
+        self,
+        signal: PausedSearchMigrationRequestedSignal,
+    ) -> None:
+        self._send_blocked = True
+        self._reschedule_requested = True
+        if self._snapshot is not None:
+            self._snapshot = replace(
+                self._snapshot,
+                last_signal="paused_search_migration_requested",
+                last_activity_status="blocked",
+                skip_reason=signal.reason,
+                paused_search_track_version_id=signal.target_track_version_id
+                or self._snapshot.paused_search_track_version_id,
+            )
+
+    @workflow.signal(name="paused-search-occurrence-cancelled")
+    def paused_search_occurrence_cancelled(
+        self,
+        signal: PausedSearchOccurrenceCancelledSignal,
+    ) -> None:
+        self._send_blocked = True
+        self._reschedule_requested = True
+        if self._snapshot is not None:
+            self._snapshot = replace(
+                self._snapshot,
+                last_signal="paused_search_occurrence_cancelled",
+                last_activity_status="cancelled",
+                occurrence_id=signal.occurrence_id or self._snapshot.occurrence_id,
+                skip_reason=signal.reason,
+            )
+
+    @workflow.signal(name="paused-search-terminalized")
+    def paused_search_terminalized(self, signal: PausedSearchTerminalizedSignal) -> None:
+        self._closed = True
+        if self._snapshot is not None:
+            self._snapshot = replace(
+                self._snapshot,
+                last_signal="paused_search_terminalized",
+                last_activity_status="terminal",
+                terminal_status=signal.terminal_behavior or signal.reason,
+                skip_reason=signal.reason,
+            )
+
     @workflow.signal(name="inbound-processed")
     def inbound_processed(self, signal: InboundProcessedWorkflowSignal) -> None:
         self._send_blocked = True
@@ -289,9 +465,14 @@ class LeadNurtureWorkflow:
         input_: ScheduleNextCadenceStepInput,
     ) -> ScheduleNextCadenceStepResult:
         result = await workflow.execute_activity(
-            "schedule-next-campaign-cadence-step",
+            (
+                "schedule-next-paused-search-occurrence"
+                if self._execution_mode is LeadNurtureExecutionMode.PAUSED_SEARCH_RECURRING
+                else "schedule-next-campaign-cadence-step"
+            ),
             input_,
             start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=_schedule_retry_policy(),
         )
         return _coerce_schedule_result(result)
 
@@ -300,11 +481,46 @@ class LeadNurtureWorkflow:
         input_: ExecuteCadenceStepInput,
     ) -> ExecuteCadenceStepResult:
         result = await workflow.execute_activity(
-            "execute-campaign-cadence-step",
+            (
+                "execute-paused-search-occurrence"
+                if self._execution_mode is LeadNurtureExecutionMode.PAUSED_SEARCH_RECURRING
+                else "execute-campaign-cadence-step"
+            ),
             input_,
             start_to_close_timeout=timedelta(minutes=2),
+            retry_policy=_execution_retry_policy(),
         )
         return _coerce_execution_result(result)
+
+    async def _wait_for_uncertain_resolution(
+        self,
+        result: ExecuteCadenceStepResult,
+    ) -> None:
+        if result.occurrence_id is None:
+            self._send_blocked = True
+            await workflow.wait_condition(lambda: self._closed or not self._send_blocked)
+            return
+        self._send_blocked = True
+        try:
+            await workflow.wait_condition(
+                lambda: self._closed or not self._send_blocked,
+                timeout=timedelta(hours=24),
+                timeout_summary="uncertain-send-resolution",
+            )
+        except TimeoutError:
+            assert self._snapshot is not None
+            await workflow.execute_activity(
+                "timeout-uncertain-paused-search-occurrence",
+                TimeoutUncertainOccurrenceInput(
+                    workspace_id=self._snapshot.workspace_id,
+                    occurrence_id=result.occurrence_id,
+                    occurred_at=workflow.now(),
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            if not self._closed:
+                await workflow.wait_condition(lambda: self._closed or not self._send_blocked)
 
     def _record_schedule_result(self, result: ScheduleNextCadenceStepResult) -> None:
         assert self._snapshot is not None
@@ -315,6 +531,7 @@ class LeadNurtureWorkflow:
             last_activity="schedule_next_cadence_step",
             last_activity_status=result.status,
             workflow_id=result.workflow_id,
+            occurrence_id=result.occurrence_id,
             skip_reason=result.skip_reason,
         )
 
@@ -330,8 +547,14 @@ class LeadNurtureWorkflow:
             transition_id=result.transition_id,
             outbound_message_id=result.outbound_message_id,
             provider_message_id=result.provider_message_id,
+            occurrence_id=result.occurrence_id,
             skip_reason=result.skip_reason,
+            occurrence_status=result.occurrence_status,
+            accepted_touch_count=(
+                self._snapshot.accepted_touch_count + (1 if result.accepted_logical_touch else 0)
+            ),
         )
+
 
 def _coerce_schedule_result(value: object) -> ScheduleNextCadenceStepResult:
     if isinstance(value, ScheduleNextCadenceStepResult):
@@ -343,6 +566,16 @@ def _coerce_schedule_result(value: object) -> ScheduleNextCadenceStepResult:
             cadence_step_id=_coerce_uuid(value.get("cadence_step_id")),
             scheduled_for=_coerce_datetime(value.get("scheduled_for")),
             skip_reason=_coerce_optional_str(value.get("skip_reason")),
+            occurrence_id=_coerce_uuid(value.get("occurrence_id")),
+            planner_outcome=_coerce_optional_str(value.get("planner_outcome")),
+            phase=_coerce_optional_str(value.get("phase")),
+            occurrence_number=(
+                int(value["occurrence_number"])
+                if value.get("occurrence_number") is not None
+                else None
+            ),
+            terminal=bool(value.get("terminal", False)),
+            expired=bool(value.get("expired", False)),
         )
     raise TypeError(f"Unsupported schedule result payload: {type(value)!r}")
 
@@ -360,10 +593,14 @@ def _coerce_execution_result(value: object) -> ExecuteCadenceStepResult:
             provider_message_id=_coerce_optional_str(value.get("provider_message_id")),
             skip_reason=_coerce_optional_str(value.get("skip_reason")),
             has_more_steps=bool(value.get("has_more_steps", False)),
+            occurrence_id=_coerce_uuid(value.get("occurrence_id")),
+            occurrence_status=_coerce_optional_str(value.get("occurrence_status")),
+            accepted_logical_touch=bool(value.get("accepted_logical_touch", False)),
+            next_cursor_decision=_coerce_optional_str(value.get("next_cursor_decision")),
+            notification_events=tuple(str(item) for item in value.get("notification_events", ())),
+            fallback_used=bool(value.get("fallback_used", False)),
         )
     raise TypeError(f"Unsupported execution result payload: {type(value)!r}")
-
-
 
 
 def _coerce_uuid(value: object) -> UUID | None:
@@ -386,3 +623,19 @@ def _coerce_optional_str(value: object) -> str | None:
     if value is None or isinstance(value, str):
         return value
     raise TypeError(f"Unsupported string payload: {type(value)!r}")
+
+
+def _schedule_retry_policy() -> RetryPolicy:
+    return RetryPolicy(
+        initial_interval=timedelta(seconds=2),
+        backoff_coefficient=2.0,
+        maximum_interval=timedelta(seconds=30),
+        maximum_attempts=3,
+    )
+
+
+def _execution_retry_policy() -> RetryPolicy:
+    # The activity owns an external provider side effect. Until dispatch is
+    # separated behind a committed outbox boundary, replaying it could create
+    # a duplicate send after an uncertain database failure.
+    return RetryPolicy(maximum_attempts=1)

@@ -50,6 +50,26 @@ class PostgresLeadWorkflowRepository:
         model = result.scalar_one_or_none()
         return _model_to_workflow(model) if model is not None else None
 
+    async def list_active_paused_search_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> tuple[LeadWorkflow, ...]:
+        result = await self._session.execute(
+            _active_paused_search_statement(workspace_id, lead_id, for_update=False),
+        )
+        return tuple(_model_to_workflow(model) for model in result.scalars().all())
+
+    async def list_active_paused_search_for_lead_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> tuple[LeadWorkflow, ...]:
+        result = await self._session.execute(
+            _active_paused_search_statement(workspace_id, lead_id, for_update=True),
+        )
+        return tuple(_model_to_workflow(model) for model in result.scalars().all())
+
     async def get_latest_for_lead_for_update(
         self,
         workspace_id: WorkspaceId,
@@ -167,6 +187,32 @@ def _latest_for_lead_statement(
     return statement.with_for_update() if for_update else statement
 
 
+def _active_paused_search_statement(
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    *,
+    for_update: bool,
+) -> Select[tuple[LeadWorkflowModel]]:
+    statement = (
+        select(LeadWorkflowModel)
+        .where(LeadWorkflowModel.workspace_id == workspace_id)
+        .where(LeadWorkflowModel.lead_id == lead_id)
+        .where(LeadWorkflowModel.paused_search_track_version_id.is_not(None))
+        .where(
+            LeadWorkflowModel.state.in_(
+                (
+                    WorkflowState.QUEUED.value,
+                    WorkflowState.ACTIVE_NURTURE.value,
+                    WorkflowState.WAITING_FOR_RESPONSE.value,
+                    WorkflowState.RESPONSE_PROCESSING.value,
+                )
+            )
+        )
+        .order_by(LeadWorkflowModel.last_transition_at.desc())
+    )
+    return statement.with_for_update() if for_update else statement
+
+
 def _workflow_to_values(workflow: LeadWorkflow) -> dict[str, object]:
     return {
         "workflow_id": workflow.workflow_id,
@@ -184,6 +230,7 @@ def _workflow_to_values(workflow: LeadWorkflow) -> dict[str, object]:
         "pause_reason": workflow.pause_reason,
         "resume_reason": workflow.resume_reason,
         "state_version": workflow.state_version,
+        "logical_touch_count": workflow.logical_touch_count,
         "created_at": workflow.created_at,
         "updated_at": workflow.updated_at,
     }
@@ -206,6 +253,7 @@ def _model_to_workflow(model: LeadWorkflowModel) -> LeadWorkflow:
         pause_reason=model.pause_reason,
         resume_reason=model.resume_reason,
         state_version=model.state_version,
+        logical_touch_count=getattr(model, "logical_touch_count", 0) or 0,
         created_at=model.created_at,
         updated_at=model.updated_at,
     )

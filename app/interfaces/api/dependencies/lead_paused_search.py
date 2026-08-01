@@ -8,11 +8,16 @@ from app.application.ports.repositories import (
     LeadPausedSearchHistoryRepository,
     LeadRepository,
     LeadWorkflowRepository,
+    PausedSearchOccurrenceRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
+    WorkflowTransitionRepository,
 )
 from app.core.database import get_session
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
+from app.infrastructure.persistence.postgres.paused_search_occurrence_repository import (
+    PostgresPausedSearchOccurrenceRepository,
+)
 from app.infrastructure.persistence.postgres.paused_search_track_repository import (
     PostgresPausedSearchTrackAdminRepository,
 )
@@ -21,6 +26,7 @@ from app.infrastructure.persistence.postgres.temporal_signal_outbox_repository i
 )
 from app.infrastructure.persistence.postgres.workflow_repository import (
     PostgresLeadWorkflowRepository,
+    PostgresWorkflowTransitionRepository,
 )
 
 
@@ -37,6 +43,8 @@ class LeadPausedSearchActionBundle:
     lead_workflow_repository: LeadWorkflowRepository
     paused_search_track_repository: PausedSearchTrackMappingRepository
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository
+    occurrence_repository: PausedSearchOccurrenceRepository | None = None
+    workflow_transition_repository: WorkflowTransitionRepository | None = None
 
 
 async def get_lead_paused_search_action_bundle(
@@ -49,4 +57,6 @@ async def get_lead_paused_search_action_bundle(
         lead_workflow_repository=PostgresLeadWorkflowRepository(session),
         paused_search_track_repository=PostgresPausedSearchTrackAdminRepository(session),
         temporal_signal_outbox_repository=PostgresTemporalSignalOutboxRepository(session),
+        occurrence_repository=PostgresPausedSearchOccurrenceRepository(session),
+        workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
     )

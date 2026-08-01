@@ -18,6 +18,11 @@ from app.application.services.paused_search_track_pinning import (
     pin_published_paused_search_track_on_latest_workflow,
     resolve_published_paused_search_track_version_id,
 )
+from app.application.services.workspace_automation_control import (
+    recurring_paused_search_block_reason,
+    recurring_paused_search_is_enabled,
+    resolve_workspace_operational_control,
+)
 from app.application.use_cases.apply_workflow_state_transition import (
     WorkflowStateTransitionStatus,
     apply_workflow_state_transition,
@@ -67,6 +72,24 @@ async def start_paused_search_campaign_enrollment(
     commit: Callable[[], Awaitable[None]] | None,
     now: datetime,
 ) -> PausedSearchCampaignEnrollmentResult:
+    if workspace_operational_control_repository is not None:
+        operational_control = await resolve_workspace_operational_control(
+            workspace_id=workspace_id,
+            workspace_operational_control_repository=workspace_operational_control_repository,
+        )
+        if not recurring_paused_search_is_enabled(
+            control=operational_control,
+            workspace_id=workspace_id,
+        ):
+            return PausedSearchCampaignEnrollmentResult(
+                status=PausedSearchCampaignEnrollmentStatus.REVIEW_HOLD,
+                reason_codes=reason_codes + ("recurring_paused_search_disabled",),
+                error=recurring_paused_search_block_reason(
+                    control=operational_control,
+                    workspace_id=workspace_id,
+                ),
+            )
+
     pinned_track_version_id = await resolve_published_paused_search_track_version_id(
         workspace_id=workspace_id,
         pause_reason_code=lead.pause_reason_code,

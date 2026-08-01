@@ -29,7 +29,9 @@ This ledger is updated after every implementation slice. A checked item means th
 code, migration, tests, and documentation for that item are complete; an unchecked
 item is not complete even if the design is specified elsewhere in this document.
 
-**Current status:** Phase 0 complete; Phase 1 is not started.
+**Current status:** Phase 1 occurrence accounting, interruption/callback control,
+terminal Temporal orchestration, and uncertain-send timeout/operator resolution
+control are complete.
 
 **Completed before this implementation sequence:**
 
@@ -59,7 +61,14 @@ item is not complete even if the design is specified elsewhere in this document.
 - [x] Slice 0B — verified with 46 combined targeted tests, Ruff, mypy, and
       `git diff --check` under the native arm64 Python environment.
 
-**Current slice:** Phase 0 complete; Phase 1 is the next controlled slice.
+**Completed implementation slices:**
+
+- [x] Phase 2 — terminal workflow behavior and durable Temporal execution
+      orchestration, including terminal/review outcomes, bounded schedule retries,
+      single-attempt send execution, and occurrence IDs in cadence snapshots.
+
+**Most recently completed slice:** Phase 2 provider-callback integration hardening,
+following uncertain-send timeout and operator resolution.
 
 - [x] Resolved the backend test-call-site type errors and aligned the review
       resolution assertion with the current supersession behavior.
@@ -70,15 +79,594 @@ item is not complete even if the design is specified elsewhere in this document.
       `format:check` all passed. The environment still reports the existing Node
       engine warning because it provides Node 20.14.0 while the project requests
       Node >=20.19.0.
-- [x] Phase 0 Definition of Done is satisfied; Phase 1 remains intentionally
-      not started.
+- [x] Phase 0 implementation baseline is satisfied. Phase 1 occurrence,
+      execution-state, timing-history, capability-profile, template, review,
+      notification-policy, and isolation slices are implemented; canonical
+      planner adoption and legacy recurring-loop migration remain later gates.
 
-**Not yet started:**
+**Phase 1 / Slice 1A — recurring occurrence foundation:**
+
+- [x] Added explicit recurring occurrence status, outcome, terminal behavior,
+      logical-touch, provider-identity, and idempotency domain contracts.
+- [x] Added bounded recurring step configuration: calendar-day interval,
+      maximum occurrences, maximum track duration, and terminal behavior, all
+      disabled or compatibility-defaulted for existing tracks.
+- [x] Added migration `0059_add_paused_search_occurrences.py`, tenant-scoped
+      uniqueness, indexes, and row-level security for occurrence records.
+- [x] Added an idempotent PostgreSQL occurrence repository and integrated it
+      into Temporal cadence scheduling and paused-search revalidation.
+- [x] Added domain and application coverage for calendar-day planning,
+      idempotent reuse, and occurrence-limit terminal behavior.
+- [x] Verified migration upgrade, targeted persistence/cadence tests, Ruff,
+      and mypy. Execution outcomes are completed in Slice 1B below.
+
+**Phase 1 / Slice 1B — execution state and touch accounting:**
+
+- [x] Added a row-locking occurrence execution update path for accepted,
+      failed, uncertain, cancelled, and post-acceptance delivery outcomes.
+- [x] Kept accepted logical touches separate from provider delivery status and
+      made terminal updates idempotent against stale or duplicate workers.
+- [x] Added durable workflow `logical_touch_count` persistence and incremented
+      it exactly once when a paused-search occurrence reaches `sent`.
+- [x] Linked accepted provider message IDs to occurrences and reconciled later
+      provider delivery callbacks without creating another touch or send.
+- [x] Added the track touch-limit guard and focused fake/Postgres/callback tests.
+- [x] Completed occurrence status persistence, logical-touch accounting, provider
+      callback reconciliation, and strict touch-limit enforcement.
+
+**Phase 2 — terminal workflow and Temporal orchestration (complete):**
+
+- [x] Terminal planner outcomes now apply the published terminal behavior to the
+      workflow (`completed`, `closed`, or an audited review pause) when the
+      transition repository is available.
+- [x] Terminal schedule results are returned explicitly to Temporal and close the
+      workflow without dispatching an execution activity.
+- [x] Schedule activity failures use bounded Temporal retries; execution activity
+      replay remains single-attempt until provider dispatch is separated behind a
+      committed outbox boundary, preventing blind duplicate sends.
+- [x] Occurrence IDs are carried through activity results and the workflow query
+      snapshot for durable readback.
+- [x] Added interruption-driven cancellation of open occurrences for pause,
+      suppression, handoff, reassignment, and other terminal workflow transitions.
+- [x] Added provider-callback reconciliation for uncertain occurrences, preserving
+      idempotent touch accounting and waking the durable workflow through the
+      Temporal signal outbox.
+- [x] Added the row-locked `resolve_uncertain` repository operation and application
+      use-case path for operator resolution to `sent`, `failed`, or `skipped`, with
+      explicit status handling, touch-accounting rules, workflow transitions, and
+      blocked-review wake-up metadata.
+- [x] Added the durable 24-hour Temporal wait/activity for unresolved uncertain
+      occurrences, including the row-locked timeout to `failed`, audited
+      pause-for-review transition, and timeout signal outbox entry.
+- [x] Added dedicated operator-action, timeout, duplicate-resolution, and
+      duplicate-timeout tests, including all three resolution outcomes and the
+      one-touch-only `sent` rule.
+- [x] Wired the authorized operator-resolution API with assigned-lead versus
+      manager/admin permission checks, and added the assigned-agent/fallback
+      review notification path for timeout outcomes.
+- [x] Wired the Twilio, SendGrid, and Mailgun delivery callback routes with the
+      occurrence, lead-workflow, and Temporal signal-outbox repositories required
+      for uncertain-occurrence reconciliation and workflow wake-up.
+- [x] Added API-level SendGrid regression coverage proving that an uncertain
+      occurrence becomes `sent`, consumes exactly one logical touch, increments
+      the workflow touch count, and creates one `provider_delivery_reconciled`
+      Temporal signal entry. The focused provider-callback suite passes 16 tests;
+      Ruff and `git diff --check` also pass under native arm64 Python.
+
+**Verification and remaining roadmap:**
 
 - [x] Phase 0 / Slice 0C full-gate verification.
 - [x] Baseline maintenance slice for the unrelated mypy/formatting blockers.
-- [ ] Phases 1–8, including recurring occurrences, Temporal execution, review,
-      notifications, templates, preview, UI, migration, and release hardening.
+- [x] Phase 1 / Slice 1B — occurrence execution state transitions and logical
+      touch accounting.
+- [x] Phase 2 — uncertain-send timeout and operator resolution; timeout
+      orchestration, repository/use-case behavior, signal handling, authorized API
+      wiring, review notifications, and dedicated tests are complete.
+- [x] R3-1A — strengthened the canonical occurrence-plan contract with explicit
+      send/hold/review/cancel/terminalize/expired outcomes, workspace contact-policy
+      quiet-hours inputs, compatibility defaults, and shared preview/runtime wiring.
+      Focused domain, application, API, Temporal-worker, Ruff, mypy, and diff checks
+      pass. This is an increment of R3, not completion of the R3 gate.
+- [x] R3-1B — made new occurrence idempotency keys stable across due-time
+      rescheduling by using workflow/version/step/occurrence/channel identity, with
+      an explicit fallback suffix and read compatibility for legacy timestamp-based
+      keys. PostgreSQL creation now resolves conflicts by idempotency key and falls
+      back to the historical identity lookup. Occurrences also persist the immutable
+      brokerage `timezone_snapshot` used by the planner; migration `0069` is applied
+      locally and legacy rows remain readable with a null snapshot.
+- [ ] R8-1 release evidence and pilot sign-off, including provider-reconciliation
+      replay/dispatch evidence, audited re-enable rehearsal, remaining browser
+      state inspection, and human approval before expanding the pilot allowlist.
+
+### 1.2 Slice R0 — formal gate reconciliation and gap matrix
+
+R0 reconciles the execution ledger above with the formal phase Definitions of
+Done below. A runtime slice being complete does not imply that the broader phase
+gate is complete: the gate also requires the documented contracts, persistence,
+integration layers, and verification evidence listed in that phase.
+
+| Phase/gate | Current classification | Evidence or gap | Next slice |
+|---|---|---|---|
+| Phase 0 — contract, baseline, harness | Partially complete | Engineering baseline, fixtures, migration audit, and automated gates are recorded. Product/engineering approval, formal rollback ownership, and complete contract sign-off remain human-owned evidence. | R8-1 release evidence |
+| Phase 1 — domain and persistence foundation | Implementation substantially complete; formal gate partial | R1-1 through R1-5, occurrence foundation, execution state, touch accounting, RLS, templates, reviews, notification policy, and isolation slices are implemented and tested. Canonical planner adoption, legacy recurring-loop migration, and final clean/legacy backfill evidence remain in later gates. | R3-1 canonical planner |
+| Phase 2 — validation, publish, preview | Implementation complete; formal gate partial | R2-1/R2-2 provide authoritative validation, shared preview/runtime planning, publish locking/evidence, and immutable template binding. Final cross-phase acceptance and release evidence remain outstanding. | R3-1 canonical planner |
+| Phase 3 — occurrence planning | Complete; release migration evidence remains | Basic scheduling, explicit planner outcomes, stable idempotency, touch limits, terminal behavior, timezone snapshots, callback reconciliation, explicit default-pause fallback, persisted step timing bases, and real PostgreSQL scheduler-concurrency evidence now exist. Legacy migration/backfill and non-production transaction-boundary rehearsal remain release evidence. | R3-1 canonical planner |
+| Phase 4 — Temporal execution | Implementation substantially complete; migration/release evidence remains | Native orchestration, recurring activity names, explicit recurring input/snapshot fields, interruption signals, terminal handling, signal outbox, uncertain-send timeout, idempotent legacy-baseline policy, recurring duplicate-wake coverage, and recurring 30-day time-skipping coverage now exist. Live migration-job orchestration and production-style restart/replay release evidence remain gaps. | R4-1 recurring-loop contract |
+| Phase 5 — send/review/notifications | Implementation substantially complete; release evidence remains | Pre-send checks, occurrence execution, review records/actions, uncertain resolution, callback reconciliation, timeout notification paths, idempotent persisted notification status, explicit commit-before-provider-dispatch, typed provider failure classification, one-fallback channel behavior, and bounded temporary-failure retry now exist. End-to-end notification release evidence remains. | R5-1 safe send and notification delivery |
+| Phase 6 — API/frontend/operator UI | Implementation complete; formal gate partial | R6-1 through R6-4 provide server-authoritative preview/publish, occurrence/review operations, policy actions, message review, typed clients, and lead readback. Authenticated browser-state and final cross-phase acceptance evidence remain outstanding. | R8-1 release evidence |
+| Phase 7 — migration/support operations | Implementation complete; formal gate partial | R7-1a through R7-1c provide authorized controls, overlap protection, operational reporting, and the support runbook. Live migration rehearsal and complete operator end-to-end evidence remain outstanding. | R8-1 release evidence |
+| Phase 8 — hardening/release | Implementation complete; release gate partial | Pilot allowlist/flag controls, hold behavior, structured logs, rollback documentation, and automated regression gates exist. Manual provider replay, audited re-enable, authenticated UI-state coverage, monitoring ownership, and human sign-off remain outstanding. | R8-1 release evidence |
+
+#### R0 ordered implementation slices
+
+The remaining work follows the phase dependencies and avoids extending the
+recent occurrence implementation with competing contracts:
+
+1. **[x] R0-1 — contract and evidence register:** planning reconciliation and
+   evidence separation are recorded; approval evidence remains human-owned.
+2. **[x] R1-1 through R1-5 — foundation:** timing history, capability profiles,
+   templates, reviews/notification policy, and persistence isolation are implemented.
+3. **[x] R2-1/R2-2 — validation, preview, publish, and template binding:** the
+   authoritative planner/validation and immutable publish evidence are implemented.
+4. **[ ] R3-1 — canonical occurrence planner:** complete timing, cursor, timezone,
+   customer-date, and transaction-boundary contracts.
+5. **[ ] R4-1 — recurring Temporal loop:** complete migration, restart/replay,
+   duplicate-wake, and long-duration integration coverage.
+6. **[ ] R5-1 — safe send and notification delivery:** complete fallback,
+   post-commit dispatch, notification delivery/retry, and end-to-end evidence.
+7. **[x] R6-1 through R6-4 — API, UI, and review operations:** server-authoritative
+   contracts, operator actions, policy decisions, and message reviews are implemented.
+8. **[x] R7-1 — live controls, reporting, and runbook:** authorized controls,
+   overlap protection, reporting, and support operations are implemented.
+9. **[x] R8-1 implementation hardening:** fail-closed pilot controls, rollback
+   documentation, structured logs, and automated regression gates are implemented.
+10. **[ ] R8-1 release evidence:** execute the non-production manual replay and
+    audited re-enable rehearsal, complete remaining UI-state checks, and collect
+    human sign-off before pilot expansion.
+
+R0 status: **complete as a planning reconciliation; no implementation slice is
+marked complete by this section alone.**
+
+#### R1-1 status
+
+- [x] Added canonical customer-timing status, evidence-type, source, date,
+      confidence, confirmation, and supersession fields in the domain model.
+- [x] Added workspace-scoped customer-timing repository port and PostgreSQL
+      model/adapter with a migration and indexed lead history lookup.
+- [x] Added `apply_customer_timing_update`; AI-derived timing remains a candidate
+      and operator timing is confirmed explicitly without changing live planning.
+- [x] Added domain and fake-application tests for confirmation and AI candidate
+      behavior.
+- [x] `arch -arm64 uv run mypy app tests` passed; focused tests passed; migration
+      head and `git diff --check` passed. Alembic database check remains blocked
+      until the local database is upgraded to migration `0061`.
+
+R1-1 is complete as an additive foundation. Compatibility projection into the
+legacy profile and planner adoption remain intentionally deferred to R2/R3.
+
+#### R1-2 status
+
+- [x] Added the versioned, code-defined capability profile registry for all
+      canonical paused-search reasons with interval, touch, duration, and safety
+      restrictions from the approved contract.
+- [x] Added single-reason resolution with explicit `resolved` and
+      `hold_for_review` outcomes for missing, ambiguous, and competing reasons;
+      no strictest-profile inference is performed.
+- [x] Added bounded override validation that permits only stricter limits and
+      requires preservation of profile safety tags.
+- [x] Added domain tests covering the complete registry, resolution outcomes,
+      and relaxed-override rejection.
+- [x] `arch -arm64 uv run mypy app tests`, the full backend test suite (1,028
+      tests), changed-file Ruff, and `git diff --check` passed.
+- [x] No migration or rollback is required: capability profiles are immutable,
+      code-defined policy and are not tenant-persisted in this slice.
+
+R1-2 is complete as a code-defined policy foundation. Track-version persistence,
+profile pinning at enrollment, and template-tag enforcement remain deferred to
+R2/R3 and R1-3.
+
+#### R1-3 status
+
+- [x] Added immutable workspace-scoped `TemplateVersion` records with approved
+      and deprecated lifecycle status, channel, purpose, prompt, content,
+      variables, and permitted-use safety tags.
+- [x] Added explicit template validation for versions, channels, variables,
+      content, purpose, and approved safety tags.
+- [x] Added a workspace-scoped PostgreSQL repository and migration
+      `0062_add_template_versions.py` with composite uniqueness and indexes.
+- [x] Added idempotent seeding from the existing paused-search template library;
+      unresolved source keys are returned instead of silently omitted.
+- [x] Added domain and fake-application tests for validation and idempotent
+      backfill behavior.
+- [x] Focused template, legacy-rendering, migration-head, Ruff, mypy, and
+      `git diff --check` verification passed; the full backend suite also passed
+      with 1,028 tests.
+
+R1-3 is complete as the registry and seed foundation. Track-step
+`template_version_id` references, published-track validation, and production
+legacy-row backfill reporting remain deferred to R2/R3. Migration rollback is
+the reversible drop of the additive `template_versions` table and indexes.
+
+#### R1-4 status
+
+- [x] Added immutable notification-policy, message/terminal/policy review, and
+      notification domain records with explicit review transitions and policy
+      resolution restrictions.
+- [x] Added workspace-scoped repository ports, PostgreSQL adapters, and migration
+      `0063_add_paused_search_reviews_notifications.py` for policies, reviews, and
+      notifications with indexes, uniqueness, and reversible downgrade behavior.
+- [x] Added idempotent workspace-default policy seeding and duplicate-safe review
+      and notification persistence. Notification idempotency is enforced by
+      workspace and idempotency key so nullable recipients cannot weaken it.
+- [x] Added domain, fake-application, and PostgreSQL round-trip tests covering
+      review transitions, default policy seeding, duplicate requests, and
+      workspace isolation.
+- [x] Focused R1-4 tests, the full backend suite, changed-file Ruff/formatting,
+      mypy, Alembic head validation, and `git diff --check` passed. The full
+      repository Ruff gate still reports six pre-existing line-length findings
+      in unrelated test files; no unrelated files were changed for this slice.
+
+#### R1-5 status
+
+- [x] Added additive migration `0064_enable_workspace_isolation.py` without
+      rewriting earlier migration history.
+- [x] Enabled and forced the existing workspace RLS policy on customer timing,
+      template, notification policy, review, and notification tables.
+- [x] Added a workspace-scoped composite policy identity and a composite
+      notification-to-policy foreign key so a notification cannot reference a
+      policy version from another workspace.
+- [x] Migration rollback removes the policy foreign key, composite uniqueness,
+      and RLS policies in reverse dependency order.
+- [x] Existing PostgreSQL RLS integration coverage verifies workspace-context
+      denial and service-access behavior; repository tests retain explicit
+      workspace-filter coverage for the new records.
+- [x] Focused PostgreSQL isolation tests, full backend tests, Ruff,
+      formatting, mypy, Alembic head validation, and `git diff --check` pass.
+      Migration head is `0064_enable_workspace_isolation`.
+
+#### R2-1 status
+
+- [x] Added one authoritative domain validator returning structured errors and
+      warnings for track identity, configuration, steps, platform limits, and
+      code-defined pause-reason capability profiles.
+- [x] Draft creation, draft update, publish, and non-persistent preview now use
+      the same validator. Invalid drafts expose the exact findings instead of a
+      second boolean-only rule set.
+- [x] Added deterministic timeline preview using the canonical paused-search
+      occurrence planner used by runtime scheduling, including local timestamps,
+      bounded logical-touch volume, expiration, and a stable SHA-256 preview
+      reference.
+- [x] Publish acquires a workspace-scoped PostgreSQL `SELECT ... FOR UPDATE` lock
+      on the track before reading publish state or applying retirement,
+      activation, and reason-mapping mutations.
+- [x] The append-only publish audit record now stores the exact validation
+      report, normalized step manifest, effective touch/duration bounds, terminal
+      behavior, and preview reference used for publication.
+- [x] Added domain, fake-application, API-regression, and PostgreSQL tests for
+      aggregated findings, profile limits, legacy review gating, deterministic
+      preview/runtime parity, locked publish ordering, immutable evidence, and
+      workspace-scoped `FOR UPDATE` SQL.
+- [x] No migration was required: locking uses the existing track row and publish
+      evidence uses the existing immutable audit-log JSONB details. The focused
+      suite, full backend suite, changed-file Ruff, mypy, Alembic head validation,
+      and `git diff --check` pass; migration head remains
+      `0064_enable_workspace_isolation`. The full repository Ruff gate retains
+      the six pre-existing unrelated test line-length findings documented in
+      R1-4.
+
+Approved-template-version resolution and the external preview/publish API
+acknowledgement contract remain in the later R2/R6 slices; R2-1 does not claim
+those surfaces.
+
+#### R2-2 status
+
+- [x] Added nullable workspace-scoped `template_version_id` binding on paused-
+      search steps, preserving `template_key` as the authored/library key.
+- [x] Added migration `0065_bind_paused_search_steps_to_templates.py` with a
+      reversible composite foreign key, template identity uniqueness, and a
+      lookup index. Existing unresolved legacy rows remain nullable rather than
+      being guessed or silently rewritten.
+- [x] Draft creation and updates resolve the latest approved workspace template
+      for an authored key when no explicit version is supplied; explicit IDs are
+      resolved by workspace. Publish persists safe legacy backfills and rejects
+      missing, cross-workspace, deprecated, purpose-incompatible, channel-
+      incompatible, unsafe, or unsupported template bindings.
+- [x] Runtime paused-search execution carries the immutable bound template
+      version through cadence planning and uses its content, subject, and prompt
+      instead of trusting mutable key-based template lookup. Missing runtime
+      bindings fail closed.
+- [x] Publish evidence and deterministic preview references include the bound
+      template identity and normalized immutable manifest (version, channel,
+      purpose, lifecycle status, variables, and permitted-use tags).
+- [x] Added domain, application, API, runtime drafting, and PostgreSQL migration
+      coverage for binding resolution, publish blocking, safe legacy backfill,
+      workspace-scoped persistence, runtime template selection, and evidence.
+- [x] Migration upgrade, changed-file Ruff, mypy, focused tests, Alembic head
+      validation, and `git diff --check` pass. Migration head is
+      `0069_snapshot_paused_occurrence_timezone`.
+
+#### R3-1A status — explicit planner outcomes and quiet-hours policy
+
+- [x] The occurrence planner now returns explicit outcome values for send, hold,
+      review, cancel, terminalize, and expiration paths. Legacy serialized outcome
+      values remain readable for occurrences created by the first implementation.
+- [x] Quiet-hours inputs are explicit on both the legacy next-action planner and
+      the occurrence planner. The default remains 10:00–17:00, while a workspace
+      contact policy can provide a narrower brokerage-local window or disable the
+      window explicitly.
+- [x] Recurring scheduling loads the workspace contact policy before planning, and
+      preview uses the same policy inputs so preview/runtime timing does not diverge.
+- [x] Added coverage for non-sendable cancellation, missing-timing review,
+      occurrence terminalization, custom quiet hours, disabled quiet hours, invalid
+      windows, application wiring, API preview wiring, and Temporal activity wiring.
+- [x] Focused verification passed: 34 timing tests, 58 application cadence/schedule/
+      preview tests, 35 API/Temporal-worker tests, changed-file Ruff, changed-file
+      mypy, and `git diff --check`.
+
+R3-1A is complete as the planner-contract increment. Customer-date/default-pause
+anchors, persisted timing bases, complete cursor/outcome persistence, and scheduler
+concurrency evidence are now complete. The remaining post-commit dispatch boundary
+belongs to R5, not R3.
+
+R3-1B is complete as the idempotency-key and timezone-snapshot increment. R3-1C now
+has real PostgreSQL evidence at the scheduler boundary: concurrent duplicate
+planners produce one occurrence 2 and one persisted paused-search cursor state after
+occurrence 1 is complete. Backfill/legacy workflow migration policy remains a later
+R4 slice.
+
+The customer-date/timing-basis matrix is now implemented. Track versions persist a
+validated default pause duration, tracks expose an explicit default-duration fallback
+policy, and each step persists a timing basis (customer re-engagement date, workflow
+creation, or previous occurrence). Legacy maintenance-interval fallback remains
+available and unchanged for existing published tracks.
+
+R4-1 contract increment is implemented: recurring workflows carry an explicit mode
+and pinned track version, expose timing/review/migration/cancellation/terminal signals,
+and use separately registered recurring schedule/execute activity names while sharing
+the locked planner and final pre-send path. Restart/replay and non-production
+migration evidence remain release gates.
+
+Recurring Temporal durability evidence now includes a real time-skipping worker test
+through the recurring activity names over a 30-day wait, plus the existing duplicate
+reschedule-signal and 365-day standard-cadence tests. This proves the contract at the
+Temporal worker boundary; a disposable-environment worker restart/replay rehearsal
+remains an operational release gate.
+
+The legacy migration boundary is now explicit and fail-closed. Complete legacy
+workflow facts produce a deterministic `migrated_legacy` occurrence with occurrence
+number zero, zero logical touches, an idempotency key, and a timezone snapshot.
+Incomplete pinned-track/cursor facts produce a review hold. Existing accepted-touch
+counts at the pinned limit produce a migrated baseline plus terminalization intent;
+the baseline never grants a new touch. Database batch enumeration and a disposable
+environment migration rehearsal remain separate release evidence.
+
+R5-1 notification durability increment is implemented: uncertain-send timeout review
+notifications are written as pending, deduplicated by workspace/idempotency key, and
+transitioned to accepted or failed around provider dispatch. The cadence execution
+path now commits prepared message/occurrence state before invoking an SMS or email
+provider, with an explicit unit test proving callback-before-provider ordering. The
+full provider fallback/retry matrix and non-production dispatch rehearsal remain
+release gates.
+
+The provider fallback matrix is now explicit. Adapter errors map to permanent,
+temporary, or uncertain outcomes; only a permanent pre-acceptance failure may select
+the one configured fallback channel. Temporary and uncertain failures stop without
+fallback, and fallback dispatch uses a distinct idempotency key while preserving one
+logical touch. Temporary failures retry once with the same provider idempotency key;
+uncertain failures never retry. Non-production provider replay remains operational
+release evidence.
+
+#### R6-1 server-authoritative API/UI contract status
+
+- [x] Added workspace/role-checked unsaved-draft validation and deterministic
+      preview routes. Preview responses separate blocking errors from warnings,
+      expose the immutable preview reference, and do not persist draft input.
+- [x] Added publish acknowledgement fields for draft version, preview reference,
+      and warning confirmation. The server recomputes the current reference and
+      rejects stale versions, forged references, and unacknowledged warnings.
+- [x] Added workspace-scoped approved-template and capability-profile reads, with
+      static routes registered before the UUID track-detail route.
+- [x] Updated the typed frontend client and paused-search editor to select approved
+      templates, render server preview output, require warning acknowledgement, and
+      publish only through the acknowledged server contract.
+- [x] Added API contract and frontend client tests. Full backend pytest/mypy and
+      frontend typecheck/lint/test verification pass; the backend repository Ruff
+      gate retains six pre-existing unrelated test line-length findings.
+
+#### R6-2 operator occurrence and review surface status
+
+**Approved approach:** add a dedicated paused-search operations API and adapt the
+existing review queue and lead-detail surfaces. Keep occurrence/review rules in
+application use cases and domain transitions; the frontend only renders server
+responses and submits authorized commands.
+
+- [x] Add workspace-scoped occurrence list/detail read contracts under the
+      existing `/paused-search-tracks` route family.
+- [x] Add workspace-scoped review list/detail and fixed action contracts for
+      message, terminal, and policy reviews. Policy reviews expose only
+      `skip`, `resume_after_revalidation`, `migrate`, and `terminalize`.
+- [x] Normalize uncertain-occurrence resolution under the documented route
+      family without introducing a parallel public `/paused-search` family.
+- [x] Enforce assignment/manager/admin authorization, idempotency, actor reason,
+      and readback of resulting occurrence/review/workflow state.
+- [x] Add typed frontend clients and integrate review queue filters/actions plus
+      lead-detail occurrence and terminal-state readback.
+- [x] Add focused API, application, frontend, tenant-isolation, and permission
+      tests; record migration/rollback impact and verification evidence here.
+
+Implementation notes: this slice is additive and uses the existing occurrence,
+review, and workflow tables; no migration or rollback operation is required.
+The API action state guard makes repeated commands safe by returning the already
+resolved review instead of applying a second transition. The narrow operations
+repository port avoids changing the shared cadence/delivery occurrence contract.
+
+Verification evidence: backend full pytest passes, backend mypy passes for 511
+source files, changed-file Ruff and `git diff --check` pass, and the focused
+PostgreSQL repository compatibility tests pass. Frontend format, typecheck,
+ESLint, and Vitest pass with 16 test files and 84 tests. No migration or rollback
+work is required for this additive slice. Repository-wide Ruff still reports the
+six pre-existing unrelated test line-length findings recorded under R6-1; the
+frontend commands still report the existing Node 20.14.0 versus `>=20.19.0`
+engine warning.
+
+#### R6-3 policy-review decision execution status
+
+- [x] Approved Approach A: compose existing workflow resume, paused-search
+      override, migration, and transition use cases rather than duplicating rules.
+- [x] Added migration target and terminal behavior request fields with server-side
+      validation for the corresponding policy actions.
+- [x] Policy resolution now executes the selected action before saving `resolved`,
+      preserving the existing eligibility, permission, audit, occurrence-cancel,
+      and Temporal outbox paths.
+- [x] Added typed frontend payload support for migration and terminalization data.
+- [x] Add focused action-path tests and complete full backend/frontend verification.
+
+Implementation note: the existing route transaction remains the commit boundary;
+the composed resume use case receives that commit callback so review and workflow
+changes are committed together where supported. No migration is required.
+
+Verification evidence: backend full pytest passes, focused Ruff and mypy checks
+pass, and frontend `pnpm check` passes with 16 test files and 85 tests. The known
+Node 20.14.0 versus `>=20.19.0` engine warning remains; no migration or rollback
+work is required for this additive slice.
+
+#### R6-4 durable message-review execution status
+
+- [x] Enforce `review_required` during paused-search cadence execution after draft
+      planning and before any provider call.
+- [x] Bind each message review to the exact pending outbound message ID and immutable
+      message version, with one review per workspace, occurrence, and review kind.
+- [x] Hold Temporal on `review_requested`; approval authorizes only the bound version
+      and rejection cancels the pending message without consuming a logical touch.
+- [x] Queue append-only review audit events and `blocked-review-completed` Temporal
+      signals in the same request transaction as the review and occurrence changes.
+- [x] Add message edit support that creates a new immutable outbound-message version,
+      cancels the superseded pending version, and remains pending for explicit approval.
+- [x] Add message/version readback, typed frontend contracts, an accessible reasoned
+      decision/edit dialog, and assigned-agent access to their scoped review queue.
+- [x] Add cadence, operation, API-client, route-navigation, and Review Queue page tests.
+
+Migration note: Alembic revision
+`0066_link_paused_search_reviews_to_messages` adds nullable message ID/version columns,
+an outbound-message foreign key, and a unique workspace/occurrence/kind constraint.
+Existing legacy reviews remain readable but cannot be approved as message reviews until
+they reference a valid pending message. Downgrade removes the constraint, foreign key,
+and columns; rollback should first pause review-required tracks so no held workflow loses
+its approved-version binding.
+
+Verification evidence: the full backend pytest suite passes, mypy passes for 513 source
+files, and focused Ruff checks pass. Frontend `pnpm check` and production build pass with
+17 test files and 87 tests. The existing Node 20.14.0 versus `>=20.19.0` warning and Vite
+bundle-size warning remain. Browser inspection at desktop, tablet, and mobile widths was
+attempted but blocked because the environment has no Chrome executable; no browser-review
+claim is made for this slice.
+
+#### R7-1 direct workflow controls and operational safety
+
+**Approved approach:** extend the existing pause, resume, override, transition, occurrence,
+and reporting paths. Do not introduce a generic workflow-action engine.
+
+##### R7-1a migration, skip, and terminalization safety
+
+- [x] Migration and skip-next-touch cancel stale open occurrences while preserving their
+      immutable history and the workflow's cumulative logical-touch count.
+- [x] Occurrence persistence increments `logical_touch_count` only on the first transition
+      into `sent`; duplicate delivery callbacks remain idempotent.
+- [x] Added direct paused-search terminalization for complete-keep-paused, pause-for-review,
+      and close-automation behaviors, using the existing workflow transition and occurrence
+      cancellation paths.
+- [x] Temporal `RESCHEDULE_REQUESTED` is queued only for pause-for-review; terminal states
+      do not receive a continuation signal.
+
+##### R7-1b resume revalidation and no-overlap enforcement
+
+- [x] Manual resume locks the current lead row and latest workflow before re-reading state,
+      ownership, suppression, consent, contactability, and current human-activity facts.
+- [x] Resume is blocked when CRM-recorded agent activity occurred after the workflow's last
+      transition, or when another active paused-search workflow exists for the same lead.
+- [x] Added workspace-scoped locked active-workflow reads and a PostgreSQL partial unique
+      index for one active paused-search workflow per lead/workspace.
+- [x] Added eligibility, action-path, workflow-lock, repository, API-regression, migration,
+      and no-overlap coverage.
+
+Migration note: Alembic revision `0067_enforce_active_paused_search_workflow_overlap`
+adds the partial unique index on `lead_workflows(workspace_id, lead_id)` for workflows with
+a pinned paused-search track in queued or active/recovering states. Downgrade drops only
+that index. If legacy data contains overlapping active paused-search workflows, the upgrade
+fails closed and requires operator reconciliation before applying the index.
+
+Verification evidence: focused resume/API/repository tests, the full backend pytest suite,
+full mypy, changed-file Ruff, `git diff --check`, migration compatibility, and
+`alembic heads` all pass. Frontend/browser verification is not part of this backend slice;
+the existing Node 20.14.0 versus `>=20.19.0` warning and missing Chrome limitation remain
+unchanged.
+
+##### R7-1c operational reporting and support operations
+
+- [x] Workspace operational reporting now includes due, held, review-pending, expired,
+      failed, uncertain, terminal, and fallback paused-search occurrence counts.
+- [x] Fallback use is persisted on the occurrence when the selected outbound channel differs
+      from the authored paused-search channel; this avoids inferring fallback from free text.
+- [x] Added the workspace operations dashboard health strip with warning states for due,
+      review, uncertain, failed, expired, and fallback work.
+- [x] Added the paused-search operations runbook covering stale timers, uncertain sends,
+      stuck reviews, provider failures, manual migration/resumption, and escalation data.
+
+Migration note: Alembic revision `0068_add_paused_occurrence_fallback_marker` adds a
+non-null `fallback_used` marker with a false backfill default, and revision
+`0069_snapshot_paused_occurrence_timezone` adds the nullable immutable timezone snapshot.
+Downgrades remove only their respective additive columns. Existing occurrences remain
+readable; legacy rows have `timezone_snapshot = null` until a later migration policy is
+approved.
+
+Verification evidence: full backend pytest, full mypy, focused backend Ruff, workspace
+reporting/API tests, frontend reporting API test, frontend typecheck, lint, and Prettier
+checks pass. The package manager continues to warn that the environment uses Node 20.14.0
+while the project requires `>=20.19.0`.
+
+##### R8-1 bounded rollout hardening status
+
+- [x] Added a configuration-based pilot allowlist through
+      `RECURRING_PAUSED_SEARCH_PILOT_WORKSPACE_IDS`; an empty allowlist is fail-closed.
+- [x] Enforced the persisted recurring-maintenance flag during paused-search enrollment,
+      occurrence planning, and cadence execution. Disabled or non-allowlisted work holds
+      without creating a new occurrence or sending a message.
+- [x] Mapped the hold result through the cadence and Temporal contracts so a held workflow
+      waits for an explicit resume/unblock signal instead of terminating or busy-looping.
+- [x] Added structured completion logs with workspace, lead, workflow, cadence-step,
+      occurrence, message, status, and reason identifiers; no message body is logged.
+- [x] Added focused coverage for disabled flags, pilot allowlist denial, DST calendar-day
+      scheduling, and paused-search enrollment hold behavior.
+- [x] Documented pilot activation, rollback, initial alert thresholds, and ownership in the
+      paused-search operations runbook.
+- [x] Closed the provider-callback wiring gap: Twilio, SendGrid, and Mailgun routes now
+      pass the occurrence, lead-workflow, and Temporal signal-outbox repositories into
+      callback processing. An API regression test verifies SendGrid uncertain-delivery
+      reconciliation, one logical touch, workflow touch accounting, and one
+      `provider_delivery_reconciled` signal entry.
+- [x] Re-ran the release-focused callback, dispatcher, and audited-settings suite:
+      38 tests passed. The full backend suite passed 1,084 tests, mypy passed for
+      514 files, and changed-file Ruff plus `git diff --check` passed under native
+      arm64 Python.
+
+Verification evidence: focused scheduling, enrollment, cadence, Temporal, and timing tests;
+changed-file Ruff; mypy for the backend and changed tests; and `git diff --check` pass.
+Full backend pytest and mypy pass. Frontend `pnpm check` passes across 18 test files and 88
+tests. Tenant/RLS/API authorization tests pass. The clean/legacy migration compatibility test
+passes, and the local development database was upgraded from revision `0065` to head
+`0068_add_paused_occurrence_fallback_marker`. Basic responsive sign-in inspection has been
+completed at desktop, tablet, and mobile widths; authenticated loading, empty, error,
+permission-denied, and reduced-motion states remain untested. Product, QA, security, and
+operations sign-off plus production pilot approval remain human-owned release evidence. The
+automated provider-callback route, Temporal signal-dispatch, and audited-settings regression
+coverage passes; no live provider replay or audited re-enable was performed, so the pilot
+remains disabled.
+The release checklist is maintained in
+`docs/release/paused-search-r8-release-checklist.md`. The local development database is
+currently at head `0069_snapshot_paused_occurrence_timezone`.
+It contains the ordered manual protocol for environment setup, browser inspection,
+fail-closed verification, allowlisted pilot smoke testing, interruption safety, rollback,
+and release decision evidence; execute those steps sequentially before widening rollout.
 
 Do not mark a slice complete until its implementation, tests, migration/rollback
 notes, and status evidence are recorded here.

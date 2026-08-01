@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from app.application.ports.lead_activity import LeadActivityItem, LeadActivityKind
+from app.application.services.lead_decision_tree import build_lead_decision_tree
 from app.application.use_cases.lead_read import (
     LeadReadReasonCode,
     LeadReadStatus,
@@ -279,6 +280,39 @@ def test_get_lead_detail_view_returns_messages_and_transitions() -> None:
     assert result.view.lead.ownership.crm_assigned_agent.name == "Jordan CRM Agent"
     assert result.view.lead.ownership.mapped_app_user is not None
     assert result.view.lead.ownership.mapped_app_user.email == "agent@example.com"
+
+
+def test_decision_tree_highlights_blocked_classifier_route() -> None:
+    artifact = replace(
+        _classification_artifact(),
+        outcome=LeadStateClassificationOutcome.BLOCKED,
+        pause_reason_code=None,
+        summary="Lead opted out of further communication.",
+        parsed_llm_response={"outcome": "blocked", "confidence": 0.9},
+        raw_llm_response_text='{"outcome":"blocked","confidence":0.9}',
+    )
+
+    decision_tree = build_lead_decision_tree(
+        lead=replace(_lead(), paused_search_active=True),
+        classification_artifact=artifact,
+        paused_search_track=None,
+        paused_search_track_version=None,
+        paused_search_steps=(),
+        paused_search_current_step=None,
+        paused_search_track_options=(),
+        latest_workflow=None,
+        latest_handoff=None,
+    )
+
+    blocked_node = next(node for node in decision_tree.nodes if node.node_id == "blocked")
+    blocked_edge = next(
+        edge
+        for edge in decision_tree.edges
+        if edge.edge_id == "route_decision->blocked"
+    )
+
+    assert blocked_node.status.value == "current"
+    assert blocked_edge.status.value == "current"
 
 
 def test_assigned_agent_list_lead_views_returns_only_owned_leads() -> None:

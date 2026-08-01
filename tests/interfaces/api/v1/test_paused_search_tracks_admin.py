@@ -24,6 +24,7 @@ from tests.application.use_cases.test_paused_search_track_admin import (
     FakeEventBus,
     FakePausedSearchTrackAdminRepository,
     FakePausedSearchTrackAuditLogRepository,
+    FakeTemplateRepository,
 )
 
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -86,9 +87,20 @@ def test_publish_and_retire_paused_search_track(
     )
     track_id = create_response.json()["track"]["track_id"]
     version_id = create_response.json()["version"]["track_version_id"]
+    version_number = create_response.json()["version"]["version_number"]
+
+    preview_response = paused_search_track_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks/{track_id}/draft/preview",
+        json={**_payload(), "as_of": "2026-01-01T12:00:00Z", "timezone": "UTC"},
+    )
 
     publish_response = paused_search_track_admin_client.client.post(
-        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks/{track_id}/versions/{version_id}/publish"
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks/{track_id}/versions/{version_id}/publish",
+        json={
+            "draft_version_number": version_number,
+            "preview_reference": preview_response.json()["preview_reference"],
+            "confirm_warnings": True,
+        },
     )
     retire_response = paused_search_track_admin_client.client.post(
         f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks/{track_id}/retire"
@@ -104,6 +116,67 @@ def test_publish_and_retire_paused_search_track(
     assert paused_search_track_admin_client.event_bus.events[-1].event_type.value == (
         "paused_search_track.retired"
     )
+
+
+def test_validate_and_preview_unsaved_draft_do_not_persist(
+    paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
+) -> None:
+    create_response = paused_search_track_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks",
+        json=_payload(),
+    )
+    track_id = create_response.json()["track"]["track_id"]
+    session = cast(_FakeSession, paused_search_track_admin_client.session)
+    commits_before_preview = session.commits
+
+    validate_response = paused_search_track_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks/{track_id}/draft/validate",
+        json=_payload(),
+    )
+    preview_response = paused_search_track_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks/{track_id}/draft/preview",
+        json={**_payload(), "as_of": "2026-01-01T12:00:00Z", "timezone": "UTC"},
+    )
+
+    assert validate_response.status_code == 200
+    assert validate_response.json()["validation"]["publishable"] is True
+    assert preview_response.status_code == 200
+    preview_body = preview_response.json()
+    assert preview_body["status"] == "ready"
+    assert preview_body["preview_reference"]
+    assert preview_body["occurrences"]
+    assert session.commits == commits_before_preview
+
+
+def test_preview_requires_admin_role() -> None:
+    client = _client_for_role(WorkspaceMembershipRole.ASSIGNED_AGENT)
+    response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks/{UUID(int=123)}/draft/preview",
+        json={**_payload(), "as_of": "2026-01-01T12:00:00Z", "timezone": "UTC"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == ["permission_denied"]
+
+
+def test_templates_and_profiles_are_readable_before_track_id_route(
+    paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
+) -> None:
+    paused_search_track_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks",
+        json=_payload(),
+    )
+    templates_response = paused_search_track_admin_client.client.get(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks/templates"
+    )
+    profiles_response = paused_search_track_admin_client.client.get(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks/profiles"
+    )
+
+    assert templates_response.status_code == 200
+    assert templates_response.json()["templates"]
+    assert profiles_response.status_code == 200
+    assert len(profiles_response.json()["profiles"]) >= 1
 
 
 def test_assigned_agent_cannot_view_or_create_paused_search_tracks() -> None:
@@ -132,23 +205,45 @@ def test_detail_returns_404_for_missing_track(
     assert response.json()["detail"] == ["track_not_found"]
 
 
+def test_uncertain_occurrence_resolution_route_is_registered() -> None:
+    paths = create_app().openapi()["paths"]
+
+    expected_paths = (
+        "/api/v1/workspaces/{workspace_id}/paused-search-tracks/occurrences",
+        "/api/v1/workspaces/{workspace_id}/paused-search-tracks/occurrences/{occurrence_id}",
+        "/api/v1/workspaces/{workspace_id}/paused-search-tracks/occurrences/{occurrence_id}/resolve",
+        "/api/v1/workspaces/{workspace_id}/paused-search-tracks/reviews",
+        "/api/v1/workspaces/{workspace_id}/paused-search-tracks/reviews/{review_id}",
+        "/api/v1/workspaces/{workspace_id}/paused-search-tracks/reviews/{review_id}/approve",
+        "/api/v1/workspaces/{workspace_id}/paused-search-tracks/reviews/{review_id}/reject",
+        "/api/v1/workspaces/{workspace_id}/paused-search-tracks/reviews/{review_id}/resolve",
+    )
+    assert all(path in paths for path in expected_paths)
+    assert (
+        "/api/v1/workspaces/{workspace_id}/paused-search/occurrences/{occurrence_id}/resolve"
+        not in paths
+    )
+
+
 def _client_for_role(role: WorkspaceMembershipRole) -> PausedSearchTrackAdminTestClient:
     repository = FakePausedSearchTrackAdminRepository()
     audit_repository = FakePausedSearchTrackAuditLogRepository()
     event_bus = FakeEventBus()
+    template_repository = FakeTemplateRepository()
     session = _FakeSession()
     actor = _actor(role=role)
     app = create_app()
     app.dependency_overrides[get_workspace_actor] = lambda: actor
-    app.dependency_overrides[get_paused_search_track_read_bundle] = (
-        lambda: PausedSearchTrackReadBundle(track_repository=repository)
+    app.dependency_overrides[get_paused_search_track_read_bundle] = lambda: (
+        PausedSearchTrackReadBundle(track_repository=repository)
     )
-    app.dependency_overrides[get_paused_search_track_service_bundle] = (
-        lambda: PausedSearchTrackServiceBundle(
+    app.dependency_overrides[get_paused_search_track_service_bundle] = lambda: (
+        PausedSearchTrackServiceBundle(
             session=session,
             track_repository=repository,
             audit_log_repository=audit_repository,
             event_bus=event_bus,
+            template_repository=template_repository,
         )
     )
     return PausedSearchTrackAdminTestClient(

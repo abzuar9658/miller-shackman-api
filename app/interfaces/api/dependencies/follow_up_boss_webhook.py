@@ -31,6 +31,7 @@ def get_follow_up_boss_webhook_event_handler(
             lead_classification_artifact_repository=bundle.lead_classification_artifact_repository,
             routing_review_repository=bundle.routing_review_repository,
             paused_search_track_repository=bundle.paused_search_track_repository,
+            paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
             crm_conversation_event_repository=bundle.crm_conversation_event_repository,
             workspace_llm_config_repository=bundle.workspace_llm_config_repository,
             crm_client=bundle.crm_client,

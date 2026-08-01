@@ -47,6 +47,17 @@ class HandoffStatusCountsResponse(BaseModel):
     cancelled: int = 0
 
 
+class PausedSearchOccurrenceHealthResponse(BaseModel):
+    due: int = 0
+    held: int = 0
+    review_pending: int = 0
+    expired: int = 0
+    failed: int = 0
+    uncertain: int = 0
+    terminal: int = 0
+    fallback: int = 0
+
+
 class WorkspaceOperationsSummaryResponse(BaseModel):
     workspace_id: UUID
     active_campaigns: int
@@ -55,6 +66,7 @@ class WorkspaceOperationsSummaryResponse(BaseModel):
     workflow_counts: WorkflowStateCountsResponse
     message_counts: MessageStatusCountsResponse
     handoff_counts: HandoffStatusCountsResponse
+    paused_search_occurrence_health: PausedSearchOccurrenceHealthResponse
     pending_external_events: int
     failed_external_events: int
     pending_outbox_events: int

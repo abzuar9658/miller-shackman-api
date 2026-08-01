@@ -120,10 +120,7 @@ async def reactivate_timing_blocked_workflow(
         },
         transition_id_factory=id_generator,
     )
-    if (
-        transition.status != WorkflowStateTransitionStatus.UPDATED
-        or transition.workflow is None
-    ):
+    if transition.status != WorkflowStateTransitionStatus.UPDATED or transition.workflow is None:
         return ReactivateTimingBlockedWorkflowResult(
             status=ReactivateTimingBlockedWorkflowStatus.TRANSITION_FAILED,
             workflow_id=workflow.workflow_id,
@@ -156,8 +153,7 @@ async def reactivate_timing_blocked_workflow(
 
 def _is_timing_only_pause(workflow: LeadWorkflow) -> bool:
     return (
-        workflow.state == WorkflowState.PAUSED
-        and workflow.pause_reason == "cadence_step_blocked"
+        workflow.state == WorkflowState.PAUSED and workflow.pause_reason == "cadence_step_blocked"
     )
 
 
@@ -172,6 +168,4 @@ def _is_outside_hours_only_block(
     ):
         return False
     pre_send_reasons = transition.metadata.get("pre_send_reasons")
-    return isinstance(pre_send_reasons, list) and pre_send_reasons == [
-        "outside_allowed_hours"
-    ]
+    return isinstance(pre_send_reasons, list) and pre_send_reasons == ["outside_allowed_hours"]

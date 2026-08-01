@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -17,19 +18,23 @@ from app.domain.campaigns import (
     PausedSearchTrackVersion,
 )
 from app.domain.campaigns.execution import CampaignVersionStatus
+from app.domain.campaigns.template_registry import TemplateChannel, TemplateStatus, TemplateVersion
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import PausedSearchReasonCode
 from app.infrastructure.persistence.postgres.models import UserModel, WorkspaceModel
 from app.infrastructure.persistence.postgres.paused_search_track_repository import (
     PostgresPausedSearchTrackAdminAuditLogRepository,
     PostgresPausedSearchTrackAdminRepository,
+    _track_statement,
 )
+from app.infrastructure.persistence.postgres.template_repository import PostgresTemplateRepository
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("11111111-1111-1111-1111-111111111111")
 TRACK_ID = UUID("22222222-2222-2222-2222-222222222222")
 VERSION_ID = UUID("33333333-3333-3333-3333-333333333333")
 STEP_ID = UUID("44444444-4444-4444-4444-444444444444")
+TEMPLATE_ID = UUID("77777777-7777-7777-7777-777777777777")
 USER_ID = UUID("55555555-5555-5555-5555-555555555555")
 AUDIT_ID = UUID("66666666-6666-6666-6666-666666666666")
 
@@ -61,6 +66,7 @@ async def test_paused_search_track_repository_saves_versions_steps_mappings_and_
     assert mappings == (_mapping(mappings[0].mapping_id),)
     assert audit_log.action == PausedSearchTrackAdminAuditAction.DRAFT_CREATED
     assert await repository.list_tracks(WORKSPACE_ID) == (track,)
+    assert await repository.get_track_for_update(WORKSPACE_ID, TRACK_ID) == track
     assert await repository.get_track_by_key(WORKSPACE_ID, "rented-year") == track
     assert await repository.get_latest_draft_version(WORKSPACE_ID, TRACK_ID) == version
     assert await repository.get_latest_version(WORKSPACE_ID, TRACK_ID) == version
@@ -76,6 +82,49 @@ async def test_paused_search_track_repository_saves_versions_steps_mappings_and_
 
     await repository.retire_published_versions(WORKSPACE_ID, TRACK_ID, except_version_id=None)
     assert await repository.get_version(WORKSPACE_ID, VERSION_ID) == version
+
+
+def test_paused_search_track_publish_read_is_workspace_scoped_and_locked() -> None:
+    statement = str(_track_statement(WORKSPACE_ID, TRACK_ID, for_update=True))
+
+    assert "paused_search_tracks.workspace_id" in statement
+    assert "paused_search_tracks.track_id" in statement
+    assert "FOR UPDATE" in statement
+
+
+@pytest.mark.asyncio
+async def test_paused_search_step_round_trips_workspace_template_binding(
+    postgres_session: AsyncSession,
+) -> None:
+    await _create_workspace_and_user(postgres_session)
+    template_repository = PostgresTemplateRepository(postgres_session)
+    await template_repository.save(
+        TemplateVersion(
+            template_version_id=TEMPLATE_ID,
+            workspace_id=WORKSPACE_ID,
+            template_key="paused-search-maintenance-email-1",
+            version=1,
+            channel=TemplateChannel.EMAIL,
+            purpose="paused_search",
+            content="{{message_body}}",
+            subject="Checking in",
+            prompt_text="Write a check-in.",
+            allowed_variables=("message_body",),
+            permitted_use_tags=("no_prohibited_advice",),
+            status=TemplateStatus.APPROVED,
+            approved_at=NOW,
+            created_at=NOW,
+        )
+    )
+    repository = PostgresPausedSearchTrackAdminRepository(postgres_session)
+    await repository.save_track(_track())
+    await repository.save_version(_version())
+    expected = replace(_step(), template_version_id=TEMPLATE_ID)
+
+    saved = await repository.replace_steps(WORKSPACE_ID, VERSION_ID, (expected,))
+
+    assert saved == (expected,)
+    assert await repository.get_steps(WORKSPACE_ID, VERSION_ID) == (expected,)
 
 
 def _track() -> PausedSearchTrack:

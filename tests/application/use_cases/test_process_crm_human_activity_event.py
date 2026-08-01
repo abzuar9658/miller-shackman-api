@@ -132,9 +132,7 @@ async def test_ignores_lead_reassigned_event() -> None:
     assert result.status == ProcessCRMHumanActivityEventStatus.IGNORED
     assert result.pause_requested is False
     assert result.signal_queued is False
-    assert result.reasons == (
-        ProcessCRMHumanActivityEventReasonCode.NOT_MEANINGFUL_HUMAN_ACTIVITY,
-    )
+    assert result.reasons == (ProcessCRMHumanActivityEventReasonCode.NOT_MEANINGFUL_HUMAN_ACTIVITY,)
 
 
 async def test_does_not_create_duplicate_outbox_row_for_duplicate_event() -> None:

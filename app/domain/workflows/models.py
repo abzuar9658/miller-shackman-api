@@ -46,6 +46,9 @@ class WorkflowTransitionReasonCode(StrEnum):
     MANUAL_PAUSE = "manual_pause"
     MANUAL_RESUME = "manual_resume"
     CONTACT_POLICY_UPDATED = "contact_policy_updated"
+    PAUSED_SEARCH_TERMINALIZED = "paused_search_terminalized"
+    UNCERTAIN_SEND_TIMEOUT = "uncertain_send_timeout"
+    UNCERTAIN_SEND_RESOLVED = "uncertain_send_resolved"
 
 
 class WorkflowTransitionError(ValueError):
@@ -69,6 +72,7 @@ class LeadWorkflow:
     state_version: int
     created_at: datetime
     updated_at: datetime
+    logical_touch_count: int = 0
     current_step_id: UUID | None = None
     next_action_at: datetime | None = None
     pause_reason: str | None = None
@@ -182,10 +186,10 @@ def _validate_transition(from_state: WorkflowState, to_state: WorkflowState) -> 
         and to_state == WorkflowState.WAITING_FOR_RESPONSE
     ):
         return
-    if (
-        from_state == WorkflowState.RESPONSE_PROCESSING
-        and to_state in {WorkflowState.PAUSED, WorkflowState.HUMAN_HANDOFF}
-    ):
+    if from_state == WorkflowState.RESPONSE_PROCESSING and to_state in {
+        WorkflowState.PAUSED,
+        WorkflowState.HUMAN_HANDOFF,
+    }:
         return
     if (
         from_state == WorkflowState.ACTIVE_NURTURE

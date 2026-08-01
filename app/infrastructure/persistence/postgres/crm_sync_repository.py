@@ -156,10 +156,13 @@ class PostgresCRMSyncJobRepository:
                 )
                 | (
                     (CRMSyncJobModel.status == CRMSyncJobStatus.RUNNING.value)
-                    & (func.coalesce(
-                        CRMSyncJobModel.last_heartbeat_at,
-                        CRMSyncJobModel.started_at,
-                    ) < running_cutoff)
+                    & (
+                        func.coalesce(
+                            CRMSyncJobModel.last_heartbeat_at,
+                            CRMSyncJobModel.started_at,
+                        )
+                        < running_cutoff
+                    )
                 )
             )
             .values(
@@ -193,9 +196,7 @@ class PostgresCRMSyncJobRepository:
 
     async def save_if_running(self, job: CRMSyncJob) -> CRMSyncJob | None:
         values = {
-            key: value
-            for key, value in _sync_job_to_values(job).items()
-            if key != "sync_job_id"
+            key: value for key, value in _sync_job_to_values(job).items() if key != "sync_job_id"
         }
         statement = (
             update(CRMSyncJobModel)

@@ -85,9 +85,7 @@ class FakeCRMAgentRepository(CRMAgentRepository):
     def __init__(self, agents: tuple[CRMAgent, ...]) -> None:
         self._agents = {agent.agent_record_id: agent for agent in agents}
 
-    async def get_by_record_id(
-        self, workspace_id: UUID, agent_record_id: UUID
-    ) -> CRMAgent | None:
+    async def get_by_record_id(self, workspace_id: UUID, agent_record_id: UUID) -> CRMAgent | None:
         agent = self._agents.get(agent_record_id)
         if agent is None or agent.workspace_id != workspace_id:
             return None
@@ -111,9 +109,7 @@ class FakeCRMAgentRepository(CRMAgentRepository):
         )
 
     async def list_for_workspace(self, workspace_id: UUID) -> tuple[CRMAgent, ...]:
-        return tuple(
-            agent for agent in self._agents.values() if agent.workspace_id == workspace_id
-        )
+        return tuple(agent for agent in self._agents.values() if agent.workspace_id == workspace_id)
 
     async def save(self, agent: CRMAgent) -> CRMAgent:
         self._agents[agent.agent_record_id] = agent
@@ -162,9 +158,7 @@ class FakeWorkspaceAgentCRMMappingRepository(WorkspaceAgentCRMMappingRepository)
         )
 
     async def list_for_workspace(self, workspace_id: UUID) -> tuple[WorkspaceAgentCRMMapping, ...]:
-        return tuple(
-            mapping for mapping in self._mappings if mapping.workspace_id == workspace_id
-        )
+        return tuple(mapping for mapping in self._mappings if mapping.workspace_id == workspace_id)
 
     async def save(self, mapping: WorkspaceAgentCRMMapping) -> WorkspaceAgentCRMMapping:
         self._mappings = tuple(m for m in self._mappings if m.mapping_id != mapping.mapping_id) + (
@@ -195,12 +189,8 @@ def test_preflight_routes_allow_assigned_agent_for_own_mapped_lead() -> None:
     client = _client_for_role(
         WorkspaceMembershipRole.ASSIGNED_AGENT,
         actor_id=actor_id,
-        crm_agents=(
-            _crm_agent(crm_agent_record_id=crm_agent_record_id, external_id="agent-1"),
-        ),
-        mappings=(
-            _mapping(actor_id=actor_id, crm_agent_record_id=crm_agent_record_id),
-        ),
+        crm_agents=(_crm_agent(crm_agent_record_id=crm_agent_record_id, external_id="agent-1"),),
+        mappings=(_mapping(actor_id=actor_id, crm_agent_record_id=crm_agent_record_id),),
     )
 
     list_response = client.client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/preflight-digests")

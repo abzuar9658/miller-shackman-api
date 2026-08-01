@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import sys
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import delete, func, inspect, select
 
@@ -12,16 +13,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-async def main(execute: bool) -> None:
-    from app.core.database import (
-        async_session_factory,
-        enable_postgres_service_access,
-    )
+def _delete_models() -> tuple[type[Any], ...]:
     from app.infrastructure.persistence.postgres.models import (
         ConversationModel,
         ConversationSummaryModel,
         CrmConversationEventModel,
         CRMSyncJobModel,
+        CustomerTimingModel,
         ExternalEventModel,
         HandoffCompletionModel,
         HandoffModel,
@@ -30,14 +28,16 @@ async def main(execute: bool) -> None:
         LeadClassificationArtifactModel,
         LeadModel,
         LeadPausedSearchHistoryModel,
+        LeadRoutingReviewModel,
         LeadWorkflowOverrideAuditLogModel,
         OutboundMessageCRMCompletionModel,
         OutboundMessageModel,
+        PausedSearchReviewModel,
         PreflightDigestModel,
         PreflightVetoModel,
         ProviderMessageEventModel,
+        RecurringOccurrenceModel,
         TemporalSignalOutboxModel,
-        WorkspaceModel,
     )
     from app.infrastructure.persistence.postgres.workflow_models import (
         CampaignEnrollmentModel,
@@ -46,7 +46,7 @@ async def main(execute: bool) -> None:
         WorkflowTransitionModel,
     )
 
-    delete_models = (
+    return (
         ProviderMessageEventModel,
         HandoffCompletionModel,
         RejectedDraftReviewModel,
@@ -58,12 +58,16 @@ async def main(execute: bool) -> None:
         CrmConversationEventModel,
         InboundMessageModel,
         ConversationModel,
+        PausedSearchReviewModel,
+        OutboundMessageModel,
+        LeadRoutingReviewModel,
         LeadClassificationArtifactModel,
         LeadPausedSearchHistoryModel,
+        CustomerTimingModel,
         PreflightVetoModel,
+        RecurringOccurrenceModel,
         TemporalSignalOutboxModel,
         PreflightDigestModel,
-        OutboundMessageModel,
         WorkflowTransitionModel,
         LeadWorkflowModel,
         CampaignEnrollmentModel,
@@ -71,6 +75,16 @@ async def main(execute: bool) -> None:
         CRMSyncJobModel,
         LeadModel,
     )
+
+
+async def main(execute: bool) -> None:
+    from app.core.database import (
+        async_session_factory,
+        enable_postgres_service_access,
+    )
+    from app.infrastructure.persistence.postgres.models import WorkspaceModel
+
+    delete_models = _delete_models()
     count_models = delete_models
 
     async with async_session_factory() as session:
@@ -110,7 +124,7 @@ async def main(execute: bool) -> None:
                 print(f"Skipped {model.__tablename__}: table missing")
                 continue
             result = await session.execute(delete(model).where(model.workspace_id == workspace_id))
-            print(f"Deleted {result.rowcount or 0:>4} from {model.__tablename__}")
+            print(f"Deleted {getattr(result, 'rowcount', 0) or 0:>4} from {model.__tablename__}")
 
         await session.commit()
         print("Delete committed.")

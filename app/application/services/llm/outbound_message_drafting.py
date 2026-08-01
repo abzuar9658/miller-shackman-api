@@ -661,9 +661,7 @@ def _listing_draft_directive(relevance_brief: ApprovedListingRelevanceBrief) -> 
         parts.append(f"If helpful, you may mention general areas like {areas}.")
     if relevance_brief.matching_property_types:
         property_types = ", ".join(relevance_brief.matching_property_types)
-        parts.append(
-            f"If helpful, you may mention general property types like {property_types}."
-        )
+        parts.append(f"If helpful, you may mention general property types like {property_types}.")
     parts.append(
         "Keep any listing reference general and never mention exact addresses or exact prices."
     )

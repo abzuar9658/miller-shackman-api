@@ -585,11 +585,7 @@ class _FakeUserRepository:
         allowed_roles: tuple[WorkspaceMembershipRole, ...],
     ) -> User | None:
         return next(
-            (
-                user
-                for user in self._users.values()
-                if user.email_normalized == email_normalized
-            ),
+            (user for user in self._users.values() if user.email_normalized == email_normalized),
             None,
         )
 

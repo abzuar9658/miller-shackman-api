@@ -61,6 +61,8 @@ class LeadResumeEligibilityReasonCode(StrEnum):
     SUPPRESSION_REQUIRES_MANAGER = "suppression_requires_manager"
     SUPPRESSION_NOT_RESUMABLE = "suppression_not_resumable"
     NO_CONTACTABLE_CHANNELS = "no_contactable_channels"
+    RECENT_HUMAN_ACTIVITY = "recent_human_activity"
+    OVERLAPPING_ACTIVE_WORKFLOW = "overlapping_active_workflow"
 
 
 class LeadResumeActionStatus(StrEnum):
@@ -132,6 +134,10 @@ async def get_lead_resume_eligibility(
         )
 
     workflow = await workflow_repository.get_latest_for_lead(workspace_id, lead_id)
+    active_workflows = await workflow_repository.list_active_paused_search_for_lead(
+        workspace_id,
+        lead_id,
+    )
     policy = await workspace_contact_policy_repository.get_by_workspace_id(workspace_id)
     return LeadResumeEligibilityResult(
         status=LeadResumeEligibilityStatus.OK,
@@ -140,6 +146,7 @@ async def get_lead_resume_eligibility(
             lead,
             workflow,
             policy or default_workspace_contact_policy(workspace_id),
+            active_workflows=active_workflows,
         ),
     )
 
@@ -161,7 +168,7 @@ async def resume_lead_workflow(
     now: datetime,
     id_generator: Callable[[], UUID] = uuid4,
 ) -> ResumeLeadWorkflowResult:
-    lead = await lead_repository.get_by_id(workspace_id, lead_id)
+    lead = await lead_repository.get_by_id_for_update(workspace_id, lead_id)
     if lead is None:
         return ResumeLeadWorkflowResult(
             status=LeadResumeActionStatus.NOT_FOUND,
@@ -180,13 +187,23 @@ async def resume_lead_workflow(
         )
 
     resume_reason = reason.strip()
-    workflow = await workflow_repository.get_latest_for_lead(workspace_id, lead_id)
+    workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
+        workspace_id,
+        lead_id,
+    )
+    active_workflows = (
+        await lead_workflow_repository.list_active_paused_search_for_lead_for_update(
+            workspace_id,
+            lead_id,
+        )
+    )
     policy = await workspace_contact_policy_repository.get_by_workspace_id(workspace_id)
     eligibility = _build_resume_eligibility(
         actor,
         lead,
         workflow,
         policy or default_workspace_contact_policy(workspace_id),
+        active_workflows=active_workflows,
     )
     if not eligibility.can_resume or workflow is None:
         return ResumeLeadWorkflowResult(
@@ -263,13 +280,21 @@ def _build_resume_eligibility(
     lead: CanonicalLeadRecord,
     workflow: LeadWorkflow | None,
     policy: WorkspaceContactPolicy,
+    active_workflows: tuple[LeadWorkflow, ...] = (),
 ) -> LeadResumeEligibility:
     reasons: list[LeadResumeEligibilityReasonCode] = []
 
     if workflow is None:
         reasons.append(LeadResumeEligibilityReasonCode.NO_WORKFLOW)
     else:
-        reasons.extend(_workflow_resume_reasons(actor, lead, workflow))
+        reasons.extend(
+            _workflow_resume_reasons(
+                actor,
+                lead,
+                workflow,
+                active_workflows=active_workflows,
+            )
+        )
 
     contactable_channels, blocked_reasons = _contactable_channels(lead, policy)
     if not contactable_channels:
@@ -317,27 +342,43 @@ def _workflow_resume_reasons(
     actor: AuthenticatedActor,
     lead: CanonicalLeadRecord,
     workflow: LeadWorkflow,
+    *,
+    active_workflows: tuple[LeadWorkflow, ...] = (),
 ) -> tuple[LeadResumeEligibilityReasonCode, ...]:
+    reasons: list[LeadResumeEligibilityReasonCode] = []
+    if any(active.workflow_id != workflow.workflow_id for active in active_workflows):
+        reasons.append(LeadResumeEligibilityReasonCode.OVERLAPPING_ACTIVE_WORKFLOW)
+    if (
+        lead.last_agent_activity_at is not None
+        and lead.last_agent_activity_at > workflow.last_transition_at
+    ):
+        reasons.append(LeadResumeEligibilityReasonCode.RECENT_HUMAN_ACTIVITY)
+
     if workflow.state == WorkflowState.SUPPRESSED:
-        return (LeadResumeEligibilityReasonCode.SUPPRESSION_NOT_RESUMABLE,)
+        reasons.append(LeadResumeEligibilityReasonCode.SUPPRESSION_NOT_RESUMABLE)
+        return tuple(reasons)
     if workflow.state in _active_or_recovering_states():
-        return (LeadResumeEligibilityReasonCode.WORKFLOW_ALREADY_ACTIVE,)
+        reasons.append(LeadResumeEligibilityReasonCode.WORKFLOW_ALREADY_ACTIVE)
+        return tuple(reasons)
     if workflow.state in {WorkflowState.HUMAN_HANDOFF, WorkflowState.HUMAN_OWNED}:
         if _has_global_resume_permission(actor, lead):
-            return ()
-        return (LeadResumeEligibilityReasonCode.HANDOFF_REQUIRES_MANAGER,)
+            return tuple(reasons)
+        reasons.append(LeadResumeEligibilityReasonCode.HANDOFF_REQUIRES_MANAGER)
+        return tuple(reasons)
     if workflow.state == WorkflowState.PAUSED:
         restriction = _paused_resume_restriction_reason(workflow.pause_reason)
         if restriction is None:
-            return ()
+            return tuple(reasons)
         if restriction == LeadResumeEligibilityReasonCode.SUPPRESSION_NOT_RESUMABLE:
-            return (restriction,)
+            reasons.append(restriction)
+            return tuple(reasons)
         if _has_global_resume_permission(actor, lead):
-            return ()
-        return (restriction,)
+            return tuple(reasons)
+        reasons.append(restriction)
+        return tuple(reasons)
     if workflow.state not in _resumable_states():
-        return (LeadResumeEligibilityReasonCode.WORKFLOW_STATE_NOT_RESUMABLE,)
-    return ()
+        reasons.append(LeadResumeEligibilityReasonCode.WORKFLOW_STATE_NOT_RESUMABLE)
+    return tuple(reasons)
 
 
 def _paused_resume_restriction_reason(
@@ -392,6 +433,8 @@ def _contactable_channels(
         blocked_reasons.extend(reason.value for reason in decision.reasons)
 
     return tuple(allowed), tuple(dict.fromkeys(blocked_reasons))
+
+
 def _resumable_states() -> frozenset[WorkflowState]:
     return frozenset({WorkflowState.PAUSED, WorkflowState.HUMAN_HANDOFF, WorkflowState.HUMAN_OWNED})
 

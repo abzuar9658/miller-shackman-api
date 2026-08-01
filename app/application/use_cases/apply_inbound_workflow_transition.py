@@ -4,7 +4,11 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from app.application.ports.repositories import LeadWorkflowRepository, WorkflowTransitionRepository
+from app.application.ports.repositories import (
+    LeadWorkflowRepository,
+    PausedSearchOccurrenceRepository,
+    WorkflowTransitionRepository,
+)
 from app.application.services.llm.reply_classification import InboundReplyIntent
 from app.application.use_cases.evaluate_inbound_action import InboundAction, InboundActionReasonCode
 from app.domain.common.ids import LeadId, WorkspaceId
@@ -39,6 +43,7 @@ async def apply_inbound_workflow_transition(
     decision_reason: InboundActionReasonCode,
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
     now: datetime,
     external_event_id: UUID | None = None,
     conversation_id: UUID | None = None,
@@ -83,6 +88,20 @@ async def apply_inbound_workflow_transition(
 
     saved_workflow = await lead_workflow_repository.save(result.workflow)
     saved_transition = await workflow_transition_repository.append(result.transition)
+    if paused_search_occurrence_repository is not None and saved_workflow.state in {
+        WorkflowState.PAUSED,
+        WorkflowState.HUMAN_HANDOFF,
+        WorkflowState.HUMAN_OWNED,
+        WorkflowState.SUPPRESSED,
+        WorkflowState.COMPLETED,
+        WorkflowState.CLOSED,
+    }:
+        await paused_search_occurrence_repository.cancel_open_for_workflow(
+            workspace_id=workspace_id,
+            workflow_id=saved_workflow.workflow_id,
+            now=now,
+            reason=reason_code.value,
+        )
     return InboundWorkflowTransitionOutcome(
         status=InboundWorkflowTransitionStatus.UPDATED,
         workflow=saved_workflow,

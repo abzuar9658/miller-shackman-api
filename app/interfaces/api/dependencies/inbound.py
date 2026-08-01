@@ -26,6 +26,7 @@ from app.application.ports.repositories import (
     LeadWorkflowRepository,
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
+    PausedSearchOccurrenceRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     UserRepository,
@@ -76,6 +77,9 @@ from app.infrastructure.persistence.postgres.outbound_message_repository import 
 from app.infrastructure.persistence.postgres.outbox_event_repository import (
     PostgresOutboxEventRepository,
     PostgresTransactionalEventBus,
+)
+from app.infrastructure.persistence.postgres.paused_search_occurrence_repository import (
+    PostgresPausedSearchOccurrenceRepository,
 )
 from app.infrastructure.persistence.postgres.paused_search_track_repository import (
     PostgresPausedSearchTrackAdminRepository,
@@ -154,6 +158,7 @@ class InboundServiceBundle:
     email_provider: EmailProvider
     user_repository: UserRepository | None = None
     routing_review_repository: LeadRoutingReviewRepository | None = None
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None
 
 
 async def get_inbound_service_bundle(
@@ -167,7 +172,9 @@ async def get_inbound_service_bundle(
         conversation_repository=PostgresConversationRepository(session),
         inbound_message_repository=PostgresInboundMessageRepository(session),
         crm_conversation_event_repository=PostgresCrmConversationEventRepository(session),
-        lead_classification_artifact_repository=PostgresLeadClassificationArtifactRepository(session),
+        lead_classification_artifact_repository=PostgresLeadClassificationArtifactRepository(
+            session
+        ),
         conversation_summary_repository=PostgresConversationSummaryRepository(session),
         handoff_repository=PostgresHandoffRepository(session),
         handoff_completion_repository=PostgresHandoffCompletionRepository(session),
@@ -179,6 +186,7 @@ async def get_inbound_service_bundle(
             session
         ),
         paused_search_track_repository=PostgresPausedSearchTrackAdminRepository(session),
+        paused_search_occurrence_repository=PostgresPausedSearchOccurrenceRepository(session),
         lead_workflow_repository=PostgresLeadWorkflowRepository(session),
         workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
         workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),

@@ -216,9 +216,7 @@ def _build_prompt(
         "task": "draft_human_handoff_acknowledgment",
         "channel": channel.value,
         "reply_mode": (
-            "threaded_email_reply"
-            if reply_in_existing_email_thread
-            else "standalone_message"
+            "threaded_email_reply" if reply_in_existing_email_thread else "standalone_message"
         ),
         "admin_prompt_text": admin_prompt_text,
         "brokerage_name": brokerage_name,

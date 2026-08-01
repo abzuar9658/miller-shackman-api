@@ -305,9 +305,7 @@ async def continue_ai_conversation_after_inbound(
             transition_id_factory=transition_id_factory,
         )
     cadence_step_id = (
-        f"ai-continuation:{inbound_message_id}"
-        if inbound_message_id
-        else str(step.cadence_step_id)
+        f"ai-continuation:{inbound_message_id}" if inbound_message_id else str(step.cadence_step_id)
     )
     campaign_goal = step.message_goal
 
@@ -330,9 +328,7 @@ async def continue_ai_conversation_after_inbound(
             brokerage_name=workspace.name,
             cadence_step_id=cadence_step_id,
             scheduled_for=now,
-            pre_send_policy=_pre_send_policy(
-                workspace_contact_policy, workspace.default_timezone
-            ),
+            pre_send_policy=_pre_send_policy(workspace_contact_policy, workspace.default_timezone),
             journey_kind=OutboundJourneyKind.DORMANT,
             conversation_summary=(
                 latest_summary.summary_text if latest_summary is not None else None

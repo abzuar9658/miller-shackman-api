@@ -53,7 +53,6 @@ class LeadPausedSearchHistoryEntryResponse(BaseModel):
     current_profile: LeadPausedSearchProfileResponse | None = None
 
 
-
 class LeadClassificationTraceResponse(BaseModel):
     prompt_text: str | None = None
     input_context: dict[str, object] = Field(default_factory=dict)
@@ -467,9 +466,7 @@ class ResolveLeadReviewHoldRequest(BaseModel):
                 self.reengagement_window_label,
             )
         ):
-            raise ValueError(
-                "paused-search fields are only allowed for paused_search resolution"
-            )
+            raise ValueError("paused-search fields are only allowed for paused_search resolution")
         return self
 
 
@@ -552,6 +549,20 @@ class SkipPausedSearchNextTouchResponse(BaseModel):
     skipped_step_id: UUID | None = None
     next_action_at: datetime | None = None
     reasons: list[str] = Field(default_factory=list)
+
+
+class TerminalizePausedSearchRequest(BaseModel):
+    terminal_behavior: str = Field(min_length=1, max_length=50)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class TerminalizePausedSearchResponse(BaseModel):
+    status: str
+    lead_id: UUID | None = None
+    workflow_id: UUID | None = None
+    workflow_state: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+    signal_queued: bool = False
 
 
 class ApproveRejectedDraftReviewRequest(BaseModel):

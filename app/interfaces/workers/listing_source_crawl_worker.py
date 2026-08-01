@@ -53,7 +53,9 @@ async def run_once(body: bytes, *, settings: Settings | None = None) -> None:
             snapshot_repository=PostgresListingSnapshotRepository(session),
             listing_search_client=build_listing_search_client(resolved_settings),
             now=datetime.now(UTC),
-            cache_ttl=timedelta(minutes=resolved_settings.listing_context_enrichment_cache_ttl_minutes),
+            cache_ttl=timedelta(
+                minutes=resolved_settings.listing_context_enrichment_cache_ttl_minutes
+            ),
             event_bus=PostgresTransactionalEventBus(PostgresOutboxEventRepository(session)),
         )
         await session.commit()

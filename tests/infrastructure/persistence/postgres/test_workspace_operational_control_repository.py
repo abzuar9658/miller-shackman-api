@@ -47,8 +47,9 @@ def test_get_maps_recurring_flag() -> None:
     session = _Session(_Result(model))
 
     result = _run(
-        PostgresWorkspaceOperationalControlRepository(cast(AsyncSession, session))
-        .get_by_workspace_id(WORKSPACE_ID)
+        PostgresWorkspaceOperationalControlRepository(
+            cast(AsyncSession, session)
+        ).get_by_workspace_id(WORKSPACE_ID)
     )
 
     assert result == _control(enabled=True)

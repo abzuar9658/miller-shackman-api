@@ -909,9 +909,7 @@ async def enqueue_due_follow_up_boss_crm_syncs(
             sync_type=sync_type,
             max_leads=target.max_leads_per_sync_cycle,
             latest_by=(
-                CRMSyncLeadSort.UPDATED
-                if target.max_leads_per_sync_cycle is not None
-                else None
+                CRMSyncLeadSort.UPDATED if target.max_leads_per_sync_cycle is not None else None
             ),
             crm_sync_job_repository=crm_sync_job_repository,
             event_bus=event_bus,

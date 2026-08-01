@@ -40,6 +40,7 @@ from app.domain.leads import (
     PausedSearchSource,
 )
 from app.domain.workflows import WorkflowState
+from app.domain.workspace_automation import WorkspaceOperationalControl
 from tests.application.use_cases._campaign_admin_fakes import FakeEventBus
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCampaignExecutionRepository,
@@ -252,6 +253,46 @@ async def test_routes_to_paused_search_when_existing_profile_beats_dormant() -> 
     transition = next(iter(transitions.transitions.values()))
     assert transition.to_state == WorkflowState.ACTIVE_NURTURE
     assert transition.metadata["route"] == "paused_search"
+
+
+@pytest.mark.asyncio
+async def test_paused_search_enrollment_holds_when_recurring_flag_is_disabled() -> None:
+    lead_repo = FakeLeadRepository()
+    routing_review_repository = FakeLeadRoutingReviewRepository()
+
+    result = await process_crm_tag_campaign_enrollment(
+        workspace_id=WORKSPACE_ID,
+        lead=await _lead(tags=("configured_tag",), repository=lead_repo, paused_search_active=True),
+        observed_at=NOW,
+        now=NOW,
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _config(
+                campaign_id=CAMPAIGN_ID,
+                version_id=VERSION_ID,
+                crm_enrollment_tag="configured_tag",
+            )
+        ),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(_contact_policy()),
+        campaign_enrollment_repository=FakeCampaignEnrollmentRepository(),
+        lead_workflow_repository=FakeLeadWorkflowRepository(),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        temporal_workflow_starter=FakeTemporalWorkflowStarter(),
+        lead_repository=lead_repo,
+        paused_search_history_repository=lead_repo,
+        paused_search_track_repository=_paused_search_track_repository(),
+        artifact_repository=FakeLeadClassificationArtifactRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
+        llm_client=FakeClassificationLLMClient(outcome="dormant"),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(
+            WorkspaceOperationalControl(workspace_id=WORKSPACE_ID)
+        ),
+        routing_review_repository=routing_review_repository,
+    )
+
+    assert result.status == CRMTagCampaignEnrollmentStatus.REVIEW_HOLD
+    assert result.route == "review_hold"
+    assert "recurring_paused_search_disabled" in result.reason_codes
 
 
 @pytest.mark.asyncio
@@ -873,7 +914,6 @@ async def test_future_month_year_note_still_uses_llm_first_routing() -> None:
     assert workflow.state == WorkflowState.QUEUED
     transition = next(iter(transitions.transitions.values()))
     assert transition.to_state == WorkflowState.QUEUED
-
 
 
 @pytest.mark.asyncio

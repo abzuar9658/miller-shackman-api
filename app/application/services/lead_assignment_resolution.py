@@ -58,9 +58,7 @@ async def load_workspace_lead_assignment_context(
     memberships = await workspace_membership_repository.list_by_workspace_id(workspace_id)
 
     relevant_user_ids = {
-        membership.user_id
-        for membership in memberships
-        if membership.role in _OWNER_ELIGIBLE_ROLES
+        membership.user_id for membership in memberships if membership.role in _OWNER_ELIGIBLE_ROLES
     }
     relevant_user_ids.update(
         mapping.app_user_id

@@ -20,6 +20,7 @@ from app.domain.reporting import (
     EnrollmentStatusCounts,
     HandoffStatusCounts,
     MessageStatusCounts,
+    PausedSearchOccurrenceHealth,
     WorkflowStateCounts,
     WorkspaceOperationsSummary,
 )
@@ -60,6 +61,16 @@ def test_workspace_operations_route_returns_200(reporting_client: ReportingTestC
     assert body["status"] == "ok"
     assert body["report"]["active_campaigns"] == 1
     assert body["report"]["message_counts"]["delivered"] == 3
+    assert body["report"]["paused_search_occurrence_health"] == {
+        "due": 0,
+        "held": 0,
+        "review_pending": 0,
+        "expired": 0,
+        "failed": 0,
+        "uncertain": 0,
+        "terminal": 0,
+        "fallback": 0,
+    }
 
 
 def test_assigned_agent_cannot_view_reporting() -> None:
@@ -103,6 +114,7 @@ def _client_for_role(role: WorkspaceMembershipRole) -> ReportingTestClient:
         failed_external_events=0,
         pending_outbox_events=1,
         failed_outbox_events=0,
+        paused_search_occurrence_health=PausedSearchOccurrenceHealth(),
     )
     reporting_repository.campaign_reports[(WORKSPACE_ID, CAMPAIGN_ID)] = CampaignOperationsSummary(
         workspace_id=WORKSPACE_ID,

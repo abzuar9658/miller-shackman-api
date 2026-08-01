@@ -83,6 +83,21 @@ def test_get_latest_for_lead_for_update_uses_lock_and_maps_domain() -> None:
     assert "FOR UPDATE" in statement
 
 
+def test_list_active_paused_search_for_lead_for_update_uses_lock_and_scope() -> None:
+    session = _FakeSession(_FakeResult(scalar_values=[_workflow_model()]))
+
+    result = _run(
+        PostgresLeadWorkflowRepository(cast(AsyncSession, session))
+        .list_active_paused_search_for_lead_for_update(WORKSPACE_ID, LEAD_ID)
+    )
+
+    assert result == (_workflow(),)
+    statement = str(session.statements[0])
+    assert "lead_workflows.paused_search_track_version_id IS NOT NULL" in statement
+    assert "lead_workflows.state IN" in statement
+    assert "FOR UPDATE" in statement
+
+
 def test_save_workflow_uses_primary_key_upsert() -> None:
     session = _FakeSession(_FakeResult(scalar_value=_workflow_model()))
 

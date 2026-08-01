@@ -6,7 +6,14 @@ from app.domain.attention import AttentionAcknowledgement
 from app.domain.campaigns.outbound_message import (
     OutboundMessage,
     OutboundMessageCRMCompletionRecord,
+    ProviderDeliveryStatus,
 )
+from app.domain.campaigns.paused_search_notifications import (
+    PausedSearchNotification,
+    PausedSearchNotificationPolicy,
+)
+from app.domain.campaigns.paused_search_occurrences import RecurringOccurrence
+from app.domain.campaigns.paused_search_reviews import PausedSearchReview
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchReasonMapping,
     PausedSearchTrack,
@@ -14,6 +21,7 @@ from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrackStep,
     PausedSearchTrackVersion,
 )
+from app.domain.campaigns.template_registry import TemplateVersion
 from app.domain.common.ids import (
     CRMAgentRecordId,
     LeadId,
@@ -53,6 +61,7 @@ from app.domain.identity import (
 from app.domain.leads import (
     CanonicalLeadRecord,
     CRMProvider,
+    CustomerTimingCandidate,
     LeadClassificationArtifact,
     LeadPausedSearchHistoryEntry,
     LeadRoutingReview,
@@ -137,6 +146,101 @@ class LeadPausedSearchHistoryRepository(Protocol):
         self,
         entry: LeadPausedSearchHistoryEntry,
     ) -> LeadPausedSearchHistoryEntry:
+        raise NotImplementedError
+
+
+class CustomerTimingRepository(Protocol):
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> tuple[CustomerTimingCandidate, ...]:
+        raise NotImplementedError
+
+    async def save(self, candidate: CustomerTimingCandidate) -> CustomerTimingCandidate:
+        raise NotImplementedError
+
+
+class TemplateRepository(Protocol):
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        template_version_id: UUID,
+    ) -> TemplateVersion | None:
+        raise NotImplementedError
+
+    async def get_by_key_and_version(
+        self,
+        workspace_id: WorkspaceId,
+        template_key: str,
+        version: int,
+    ) -> TemplateVersion | None:
+        raise NotImplementedError
+
+    async def get_latest_approved_by_key(
+        self,
+        workspace_id: WorkspaceId,
+        template_key: str,
+    ) -> TemplateVersion | None:
+        raise NotImplementedError
+
+    async def save(self, template: TemplateVersion) -> TemplateVersion:
+        raise NotImplementedError
+
+    async def list_approved(self, workspace_id: WorkspaceId) -> tuple[TemplateVersion, ...]:
+        raise NotImplementedError
+
+
+class PausedSearchNotificationPolicyRepository(Protocol):
+    async def get_latest(self, workspace_id: WorkspaceId) -> PausedSearchNotificationPolicy | None:
+        raise NotImplementedError
+
+    async def save(self, policy: PausedSearchNotificationPolicy) -> PausedSearchNotificationPolicy:
+        raise NotImplementedError
+
+
+class PausedSearchReviewRepository(Protocol):
+    async def list_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> tuple[PausedSearchReview, ...]:
+        raise NotImplementedError
+
+    async def get_by_id(
+        self, workspace_id: WorkspaceId, review_id: UUID
+    ) -> PausedSearchReview | None:
+        raise NotImplementedError
+
+    async def get_by_id_for_update(
+        self, workspace_id: WorkspaceId, review_id: UUID
+    ) -> PausedSearchReview | None:
+        raise NotImplementedError
+
+    async def get_by_occurrence(
+        self,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+        kind: str,
+    ) -> PausedSearchReview | None:
+        raise NotImplementedError
+
+    async def create_or_get(self, review: PausedSearchReview) -> PausedSearchReview:
+        raise NotImplementedError
+
+    async def save(self, review: PausedSearchReview) -> PausedSearchReview:
+        raise NotImplementedError
+
+
+class PausedSearchNotificationRepository(Protocol):
+    async def get_by_idempotency_key(
+        self, workspace_id: WorkspaceId, idempotency_key: str
+    ) -> PausedSearchNotification | None:
+        raise NotImplementedError
+
+    async def save(self, notification: PausedSearchNotification) -> PausedSearchNotification:
         raise NotImplementedError
 
 
@@ -704,11 +808,131 @@ class PausedSearchTrackMappingRepository(Protocol):
         raise NotImplementedError
 
 
+class PausedSearchOccurrenceRepository(Protocol):
+    async def get_latest_for_step(
+        self,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        track_version_id: PausedSearchTrackVersionId,
+        step_id: UUID,
+    ) -> RecurringOccurrence | None:
+        raise NotImplementedError
+
+    async def get_by_identity(
+        self,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        track_version_id: PausedSearchTrackVersionId,
+        step_id: UUID,
+        occurrence_number: int,
+        scheduled_for: datetime,
+    ) -> RecurringOccurrence | None:
+        raise NotImplementedError
+
+    async def get_by_idempotency_key(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
+    ) -> RecurringOccurrence | None:
+        raise NotImplementedError
+
+    async def create_or_get(self, occurrence: RecurringOccurrence) -> RecurringOccurrence:
+        raise NotImplementedError
+
+    async def get_by_provider_message_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        provider_message_id: str,
+    ) -> RecurringOccurrence | None:
+        raise NotImplementedError
+
+    async def update_status(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+        status: str,
+        now: datetime,
+        provider_message_id: str | None = None,
+        provider_delivery_status: ProviderDeliveryStatus | None = None,
+        failure_reason: str | None = None,
+        fallback_used: bool | None = None,
+    ) -> RecurringOccurrence | None:
+        raise NotImplementedError
+
+    async def cancel_open_for_workflow(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        now: datetime,
+        reason: str,
+    ) -> int:
+        raise NotImplementedError
+
+    async def resolve_uncertain(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+        status: str,
+        now: datetime,
+        reason: str,
+    ) -> RecurringOccurrence | None:
+        raise NotImplementedError
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+    ) -> RecurringOccurrence | None:
+        raise NotImplementedError
+
+class PausedSearchOccurrenceOperationsRepository(Protocol):
+    async def list_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        lead_id: UUID | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> tuple[RecurringOccurrence, ...]:
+        raise NotImplementedError
+
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+    ) -> RecurringOccurrence | None:
+        raise NotImplementedError
+
+    async def update_status(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+        status: str,
+        now: datetime,
+        provider_message_id: str | None = None,
+        provider_delivery_status: ProviderDeliveryStatus | None = None,
+        failure_reason: str | None = None,
+        fallback_used: bool | None = None,
+    ) -> RecurringOccurrence | None:
+        raise NotImplementedError
+
+
 class PausedSearchTrackAdminRepository(Protocol):
     async def list_tracks(self, workspace_id: WorkspaceId) -> tuple[PausedSearchTrack, ...]:
         raise NotImplementedError
 
     async def get_track(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+    ) -> PausedSearchTrack | None:
+        raise NotImplementedError
+
+    async def get_track_for_update(
         self,
         workspace_id: WorkspaceId,
         track_id: PausedSearchTrackId,
@@ -912,6 +1136,13 @@ class CampaignEnrollmentRepository(Protocol):
 
 
 class LeadWorkflowRepository(Protocol):
+    async def list_active_paused_search_for_lead_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> tuple[LeadWorkflow, ...]:
+        raise NotImplementedError
+
     async def get_latest_for_lead_for_update(
         self,
         workspace_id: WorkspaceId,
@@ -949,15 +1180,6 @@ class LeadWorkflowOverrideAuditLogRepository(Protocol):
         self,
         audit_log: LeadWorkflowOverrideAuditLog,
     ) -> LeadWorkflowOverrideAuditLog:
-        raise NotImplementedError
-
-    async def list_for_lead(
-        self,
-        workspace_id: WorkspaceId,
-        lead_id: LeadId,
-        *,
-        limit: int = 100,
-    ) -> tuple[LeadWorkflowOverrideAuditLog, ...]:
         raise NotImplementedError
 
 

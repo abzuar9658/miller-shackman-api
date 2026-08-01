@@ -1,6 +1,12 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID
 
+from app.application.ports.repositories import (
+    LeadWorkflowRepository,
+    TemporalSignalOutboxRepository,
+)
 from app.application.use_cases.process_provider_delivery_callback import (
     ProcessProviderDeliveryCallbackReasonCode,
     ProcessProviderDeliveryCallbackStatus,
@@ -13,10 +19,16 @@ from app.domain.campaigns.outbound_message import (
     ProviderDeliveryStatus,
     ProviderMessageEvent,
 )
+from app.domain.campaigns.paused_search_occurrences import (
+    RecurringOccurrence,
+    RecurringOccurrenceStatus,
+)
+from app.domain.campaigns.paused_search_tracks import PausedSearchTrackStepPhase
 from app.domain.campaigns.pre_send import ProviderSendStatus
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.events import DomainEvent, DomainEventType
+from app.domain.workflows import LeadWorkflow, TemporalSignalOutboxEntry, WorkflowState
 
 NOW = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
 WORKSPACE_ID = WorkspaceId("11111111-1111-1111-1111-111111111111")
@@ -94,6 +106,153 @@ class FakeEventBus:
 
     async def publish(self, event: DomainEvent) -> None:
         self.events.append(event)
+
+
+class FakeLeadWorkflowRepository:
+    def __init__(self, workflow: LeadWorkflow) -> None:
+        self.workflow = workflow
+        self.saved: list[LeadWorkflow] = []
+
+    async def get_latest_for_lead_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> LeadWorkflow | None:
+        return self.workflow
+
+    async def save(self, workflow: LeadWorkflow) -> LeadWorkflow:
+        self.workflow = workflow
+        self.saved.append(workflow)
+        return workflow
+
+
+class FakeTemporalSignalOutboxRepository:
+    def __init__(self) -> None:
+        self.entries: list[TemporalSignalOutboxEntry] = []
+
+    async def append(self, entry: TemporalSignalOutboxEntry) -> TemporalSignalOutboxEntry:
+        self.entries.append(entry)
+        return entry
+
+
+class FakeOccurrenceRepository:
+    def __init__(self, occurrence: RecurringOccurrence) -> None:
+        self.occurrence = occurrence
+        self.updated: list[RecurringOccurrence] = []
+
+    async def get_latest_for_step(
+        self,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        track_version_id: UUID,
+        step_id: UUID,
+    ) -> RecurringOccurrence | None:
+        return self.occurrence
+
+    async def get_by_identity(
+        self,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        track_version_id: UUID,
+        step_id: UUID,
+        occurrence_number: int,
+        scheduled_for: datetime,
+    ) -> RecurringOccurrence | None:
+        return self.occurrence
+
+    async def get_by_idempotency_key(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
+    ) -> RecurringOccurrence | None:
+        if (
+            self.occurrence.workspace_id == workspace_id
+            and self.occurrence.idempotency_key == idempotency_key
+        ):
+            return self.occurrence
+        return None
+
+    async def create_or_get(self, occurrence: RecurringOccurrence) -> RecurringOccurrence:
+        self.occurrence = occurrence
+        return occurrence
+
+    async def get_by_provider_message_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        provider_message_id: str,
+    ) -> RecurringOccurrence | None:
+        if self.occurrence.provider_message_id == provider_message_id:
+            return self.occurrence
+        return None
+
+    async def update_status(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+        status: str,
+        now: datetime,
+        provider_message_id: str | None = None,
+        provider_delivery_status: ProviderDeliveryStatus | None = None,
+        failure_reason: str | None = None,
+        fallback_used: bool | None = None,
+    ) -> RecurringOccurrence | None:
+        self.occurrence = replace(
+            self.occurrence,
+            status=RecurringOccurrenceStatus(status),
+            logical_touch_count=(
+                1
+                if RecurringOccurrenceStatus(status) == RecurringOccurrenceStatus.SENT
+                else self.occurrence.logical_touch_count
+            ),
+            closed_at=(
+                self.occurrence.closed_at or now
+                if RecurringOccurrenceStatus(status)
+                in {RecurringOccurrenceStatus.SENT, RecurringOccurrenceStatus.FAILED}
+                else self.occurrence.closed_at
+            ),
+            provider_message_id=provider_message_id or self.occurrence.provider_message_id,
+            provider_delivery_status=provider_delivery_status,
+            failure_reason=failure_reason,
+            fallback_used=(
+                fallback_used if fallback_used is not None else self.occurrence.fallback_used
+            ),
+        )
+        self.updated.append(self.occurrence)
+        return self.occurrence
+
+    async def cancel_open_for_workflow(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        now: datetime,
+        reason: str,
+    ) -> int:
+        return 0
+
+    async def resolve_uncertain(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+        status: str,
+        now: datetime,
+        reason: str,
+    ) -> RecurringOccurrence | None:
+        return None
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+    ) -> RecurringOccurrence | None:
+        if (
+            self.occurrence.workspace_id != workspace_id
+            or self.occurrence.occurrence_id != occurrence_id
+        ):
+            return None
+        return self.occurrence
 
 
 def _message(
@@ -212,6 +371,103 @@ async def test_records_delivery_event_and_updates_delivery_summary() -> None:
     assert len(events.saved) == 1
     assert len(event_bus.events) == 1
     assert event_bus.events[0].event_type == DomainEventType.MESSAGE_DELIVERED
+
+
+async def test_provider_callback_updates_linked_occurrence_without_new_touch() -> None:
+    occurrence_repository = FakeOccurrenceRepository(
+        RecurringOccurrence(
+            occurrence_id=UUID("66666666-6666-6666-6666-666666666666"),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            workflow_id=UUID("77777777-7777-7777-7777-777777777777"),
+            track_version_id=UUID("88888888-8888-8888-8888-888888888888"),
+            step_id=UUID("99999999-9999-9999-9999-999999999999"),
+            phase=PausedSearchTrackStepPhase.MAINTENANCE,
+            occurrence_number=1,
+            scheduled_for=NOW,
+            due_at=NOW,
+            status=RecurringOccurrenceStatus.SENT,
+            idempotency_key="occurrence:callback",
+            logical_touch_count=1,
+            provider_message_id="msg-123",
+            created_at=NOW,
+        )
+    )
+    result = await process_provider_delivery_callback(
+        callback=_callback(
+            event_type="delivered",
+            status=ProviderDeliveryStatus.DELIVERED,
+        ),
+        message_repository=FakeOutboundMessageRepository(_message()),
+        provider_message_event_repository=FakeProviderMessageEventRepository(),
+        occurrence_repository=occurrence_repository,
+        now=NOW,
+    )
+
+    assert result.status == ProcessProviderDeliveryCallbackStatus.PROCESSED
+    assert occurrence_repository.occurrence.status == RecurringOccurrenceStatus.SENT
+    assert occurrence_repository.occurrence.logical_touch_count == 1
+    assert occurrence_repository.occurrence.provider_delivery_status == (
+        ProviderDeliveryStatus.DELIVERED
+    )
+
+
+async def test_provider_callback_resolves_uncertain_occurrence_once_and_wakes_workflow() -> None:
+    workflow_id = UUID("77777777-7777-7777-7777-777777777777")
+    occurrence_repository = FakeOccurrenceRepository(
+        RecurringOccurrence(
+            occurrence_id=UUID("66666666-6666-6666-6666-666666666666"),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            workflow_id=workflow_id,
+            track_version_id=UUID("88888888-8888-8888-8888-888888888888"),
+            step_id=UUID("99999999-9999-9999-9999-999999999999"),
+            phase=PausedSearchTrackStepPhase.MAINTENANCE,
+            occurrence_number=1,
+            scheduled_for=NOW,
+            due_at=NOW,
+            status=RecurringOccurrenceStatus.UNCERTAIN,
+            idempotency_key="occurrence:uncertain",
+            logical_touch_count=0,
+            provider_message_id="msg-123",
+            provider_delivery_status=ProviderDeliveryStatus.UNKNOWN,
+            created_at=NOW,
+        )
+    )
+    workflow_repository = FakeLeadWorkflowRepository(
+        LeadWorkflow(
+            workflow_id=workflow_id,
+            temporal_workflow_id="lead-nurture:uncertain",
+            workspace_id=WORKSPACE_ID,
+            campaign_enrollment_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            campaign_id=UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+            lead_id=LEAD_ID,
+            state=WorkflowState.PAUSED,
+            last_transition_at=NOW,
+            state_version=1,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    signal_repository = FakeTemporalSignalOutboxRepository()
+
+    await process_provider_delivery_callback(
+        callback=_callback(status=ProviderDeliveryStatus.DELIVERED),
+        message_repository=FakeOutboundMessageRepository(
+            _message(provider_delivery_status=ProviderDeliveryStatus.UNKNOWN)
+        ),
+        provider_message_event_repository=FakeProviderMessageEventRepository(),
+        occurrence_repository=occurrence_repository,
+        lead_workflow_repository=cast(LeadWorkflowRepository, workflow_repository),
+        temporal_signal_outbox_repository=cast(TemporalSignalOutboxRepository, signal_repository),
+        now=NOW,
+    )
+
+    assert occurrence_repository.occurrence.status == RecurringOccurrenceStatus.SENT
+    assert occurrence_repository.occurrence.logical_touch_count == 1
+    assert workflow_repository.workflow.logical_touch_count == 1
+    assert len(signal_repository.entries) == 1
+    assert signal_repository.entries[0].payload["reason"] == "provider_delivery_reconciled"
 
 
 async def test_marks_delivery_failure_without_regressing_sent_message_status() -> None:

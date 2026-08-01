@@ -1,3 +1,5 @@
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
@@ -8,7 +10,14 @@ from uuid import UUID
 from app.application.ports.crm import CRMActivity
 from app.application.ports.crm_sync import CanonicalLeadRefreshSource
 from app.application.ports.event_bus import EventBus
-from app.application.ports.messaging import EmailMessage, EmailProvider, SMSMessage, SMSProvider
+from app.application.ports.messaging import (
+    EmailMessage,
+    EmailProvider,
+    ProviderFailureKind,
+    ProviderSendFailure,
+    SMSMessage,
+    SMSProvider,
+)
 from app.application.ports.repositories import (
     CRMAgentRepository,
     InboundMessageRepository,
@@ -43,6 +52,7 @@ from app.application.use_cases.reconcile_lead_assignment import (
 from app.domain.campaigns.outbound_message import (
     OutboundMessage,
     OutboundMessageStatus,
+    ProviderDeliveryStatus,
     build_outbound_email_message_id,
     build_outbound_reply_to_address,
 )
@@ -136,6 +146,7 @@ class SendOutboundMessageResult:
     message: OutboundMessage | None = None
     pre_send_decision: PreSendDecision | None = None
     reasons: tuple[SendOutboundMessageReasonCode, ...] = ()
+    failure_kind: ProviderFailureKind | None = None
 
 
 class _PreSendCRMRefreshStatus(StrEnum):
@@ -169,8 +180,9 @@ async def send_outbound_message(
     email_reference_message_ids: tuple[str, ...] = (),
     inbound_message_repository: InboundMessageRepository | None = None,
     email_thread_anchor_inbound_message_id: UUID | None = None,
+    before_provider_dispatch: Callable[[], Awaitable[None]] | None = None,
 ) -> SendOutboundMessageResult:
-    message = await message_repository.get_by_idempotency_key_for_update(
+    message = await message_repository.get_by_idempotency_key(
         workspace_id,
         idempotency_key,
     )
@@ -215,6 +227,37 @@ async def send_outbound_message(
             status=SendOutboundMessageStatus.REJECTED,
             message=message,
             reasons=(SendOutboundMessageReasonCode.LEAD_NOT_FOUND,),
+        )
+
+    # The lead row is the first mutable business row locked by this send path.
+    # This matches cadence execution and CRM/profile mutation paths, preventing
+    # a lead/workflow lock inversion during an interruption race.
+    message = await message_repository.get_by_idempotency_key_for_update(
+        workspace_id,
+        idempotency_key,
+    )
+    if message is None:
+        return SendOutboundMessageResult(
+            status=SendOutboundMessageStatus.REJECTED,
+            reasons=(SendOutboundMessageReasonCode.MESSAGE_NOT_FOUND,),
+        )
+
+    if message.status == OutboundMessageStatus.SENT:
+        return SendOutboundMessageResult(
+            status=SendOutboundMessageStatus.ALREADY_SENT,
+            message=message,
+        )
+
+    if message.status == OutboundMessageStatus.FAILED:
+        return SendOutboundMessageResult(
+            status=SendOutboundMessageStatus.FAILED,
+            message=message,
+        )
+
+    if message.status == OutboundMessageStatus.UNCERTAIN:
+        return SendOutboundMessageResult(
+            status=SendOutboundMessageStatus.UNCERTAIN,
+            message=message,
         )
 
     effective_context = context
@@ -295,6 +338,9 @@ async def send_outbound_message(
             reasons=(SendOutboundMessageReasonCode.PRE_SEND_BLOCKED,),
         )
 
+    if before_provider_dispatch is not None:
+        await before_provider_dispatch()
+
     if message.channel == ContactChannel.SMS:
         provider_name = _provider_name(sms_provider, default="sms")
         destination = lead.primary_phone if lead.has_sms_capable_phone else None
@@ -317,6 +363,7 @@ async def send_outbound_message(
                 message_repository=message_repository,
                 pre_send_decision=pre_send_decision,
                 failure_reason=str(exc),
+                failure_kind=exc.kind,
                 provider_name=provider_name,
                 event_bus=event_bus,
                 now=now,
@@ -374,6 +421,7 @@ async def send_outbound_message(
                 message_repository=message_repository,
                 pre_send_decision=pre_send_decision,
                 failure_reason=str(exc),
+                failure_kind=exc.kind,
                 provider_name=provider_name,
                 event_bus=event_bus,
                 now=now,
@@ -386,6 +434,7 @@ async def send_outbound_message(
             provider_send_status=ProviderSendStatus.ACCEPTED,
             provider_name=provider_name,
             provider_message_id=provider_message_id,
+            provider_delivery_status=ProviderDeliveryStatus.ACCEPTED,
             failure_reason=None,
             sent_at=now,
             updated_at=now,
@@ -407,6 +456,7 @@ async def send_outbound_message(
         message,
         status=OutboundMessageStatus.UNCERTAIN,
         provider_send_status=ProviderSendStatus.UNCERTAIN,
+        provider_delivery_status=ProviderDeliveryStatus.UNKNOWN,
         provider_name=provider_name,
         provider_message_id=None,
         failure_reason="provider_message_id_missing",
@@ -416,6 +466,7 @@ async def send_outbound_message(
     return SendOutboundMessageResult(
         status=SendOutboundMessageStatus.UNCERTAIN,
         message=saved,
+        failure_kind=ProviderFailureKind.UNCERTAIN,
         pre_send_decision=pre_send_decision,
     )
 
@@ -515,18 +566,25 @@ async def _send_sms(
     message: OutboundMessage,
     to_phone: str,
 ) -> str:
-    try:
-        return (
-            await provider.send(
-                SMSMessage(
-                    to_phone=to_phone,
-                    body=message.body,
-                    idempotency_key=message.idempotency_key,
-                ),
-            )
-        ).strip()
-    except Exception as exc:
-        raise _ProviderSendFailed(str(exc) or exc.__class__.__name__) from exc
+    for attempt in range(2):
+        try:
+            return (
+                await provider.send(
+                    SMSMessage(
+                        to_phone=to_phone,
+                        body=message.body,
+                        idempotency_key=message.idempotency_key,
+                    ),
+                )
+            ).strip()
+        except ProviderSendFailure as exc:
+            if exc.kind is ProviderFailureKind.TEMPORARY and attempt == 0:
+                await asyncio.sleep(0.1)
+                continue
+            raise _ProviderSendFailed(exc.kind, str(exc)) from exc
+        except Exception as exc:
+            raise _ProviderSendFailed(ProviderFailureKind.UNCERTAIN, str(exc)) from exc
+    raise AssertionError("temporary provider retry loop did not return or raise")
 
 
 async def _send_email(
@@ -539,24 +597,31 @@ async def _send_email(
     reference_message_ids: tuple[str, ...],
 ) -> str:
     assert message.subject is not None
-    try:
-        return (
-            await provider.send(
-                EmailMessage(
-                    to_email=to_email,
-                    subject=message.subject,
-                    body=message.body,
-                    html_body=message.html_body,
-                    idempotency_key=message.idempotency_key,
-                    message_id=build_outbound_email_message_id(message.message_id),
-                    reply_to=reply_to_address,
-                    in_reply_to_message_id=in_reply_to_message_id,
-                    reference_message_ids=reference_message_ids,
-                ),
-            )
-        ).strip()
-    except Exception as exc:
-        raise _ProviderSendFailed(str(exc) or exc.__class__.__name__) from exc
+    for attempt in range(2):
+        try:
+            return (
+                await provider.send(
+                    EmailMessage(
+                        to_email=to_email,
+                        subject=message.subject,
+                        body=message.body,
+                        html_body=message.html_body,
+                        idempotency_key=message.idempotency_key,
+                        message_id=build_outbound_email_message_id(message.message_id),
+                        reply_to=reply_to_address,
+                        in_reply_to_message_id=in_reply_to_message_id,
+                        reference_message_ids=reference_message_ids,
+                    ),
+                )
+            ).strip()
+        except ProviderSendFailure as exc:
+            if exc.kind is ProviderFailureKind.TEMPORARY and attempt == 0:
+                await asyncio.sleep(0.1)
+                continue
+            raise _ProviderSendFailed(exc.kind, str(exc)) from exc
+        except Exception as exc:
+            raise _ProviderSendFailed(ProviderFailureKind.UNCERTAIN, str(exc)) from exc
+    raise AssertionError("temporary provider retry loop did not return or raise")
 
 
 async def _resolve_email_threading_headers(
@@ -599,6 +664,7 @@ async def _failed_send_result(
     message_repository: OutboundMessageRepository,
     pre_send_decision: PreSendDecision,
     failure_reason: str,
+    failure_kind: ProviderFailureKind,
     provider_name: str,
     event_bus: EventBus | None,
     now: datetime,
@@ -621,11 +687,14 @@ async def _failed_send_result(
         status=SendOutboundMessageStatus.FAILED,
         message=saved,
         pre_send_decision=pre_send_decision,
+        failure_kind=failure_kind,
     )
 
 
 class _ProviderSendFailed(Exception):
-    pass
+    def __init__(self, kind: ProviderFailureKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 def _provider_name(provider: object, *, default: str) -> str:

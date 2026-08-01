@@ -41,6 +41,13 @@ class LeadReadLeadRepository(Protocol):
     ) -> CanonicalLeadRecord | None:
         raise NotImplementedError
 
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> CanonicalLeadRecord | None:
+        raise NotImplementedError
+
     async def list_for_workspace(
         self,
         workspace_id: WorkspaceId,
@@ -85,6 +92,13 @@ class LeadReadWorkflowRepository(Protocol):
         workspace_id: WorkspaceId,
         lead_id: LeadId,
     ) -> LeadWorkflow | None:
+        raise NotImplementedError
+
+    async def list_active_paused_search_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> tuple[LeadWorkflow, ...]:
         raise NotImplementedError
 
     async def list_latest_for_workspace(

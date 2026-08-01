@@ -1,7 +1,12 @@
 import httpx
 import structlog
 
-from app.application.ports.messaging import EmailMessage
+from app.application.ports.messaging import (
+    EmailMessage,
+    ProviderFailureKind,
+    ProviderSendFailure,
+)
+from app.infrastructure.messaging.provider_errors import classify_http_status
 
 logger = structlog.get_logger(__name__)
 _MAILGUN_RESPONSE_EXCERPT_LIMIT = 500
@@ -59,10 +64,9 @@ class MailgunEmailProvider:
                 has_in_reply_to=message.in_reply_to_message_id is not None,
                 has_references=bool(message.reference_message_ids),
             )
-            raise httpx.HTTPStatusError(
+            raise ProviderSendFailure(
+                classify_http_status(exc.response.status_code),
                 _build_http_error_message(exc, response_body_excerpt),
-                request=exc.request,
-                response=exc.response,
             ) from exc
         except httpx.RequestError as exc:
             logger.warning(
@@ -78,7 +82,10 @@ class MailgunEmailProvider:
                 has_in_reply_to=message.in_reply_to_message_id is not None,
                 has_references=bool(message.reference_message_ids),
             )
-            raise
+            raise ProviderSendFailure(
+                ProviderFailureKind.UNCERTAIN,
+                str(exc),
+            ) from exc
 
         payload = response.json()
         provider_message_id = str(payload.get("id", "")).strip("<>")

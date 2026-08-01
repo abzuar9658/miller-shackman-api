@@ -215,9 +215,7 @@ class FakeLeadRepository:
         self.lead = record
         return record
 
-    async def append(
-        self, entry: LeadPausedSearchHistoryEntry
-    ) -> LeadPausedSearchHistoryEntry:
+    async def append(self, entry: LeadPausedSearchHistoryEntry) -> LeadPausedSearchHistoryEntry:
         self.paused_search_history.append(entry)
         return entry
 
@@ -401,9 +399,7 @@ class FakeHandoffRepository:
         *,
         limit: int = 100,
     ) -> tuple[Handoff, ...]:
-        handoffs = tuple(
-            handoff for handoff in self.saved if handoff.workspace_id == workspace_id
-        )
+        handoffs = tuple(handoff for handoff in self.saved if handoff.workspace_id == workspace_id)
         return handoffs[:limit]
 
     async def get_by_id(self, workspace_id: WorkspaceId, handoff_id: UUID) -> Handoff | None:
@@ -423,8 +419,6 @@ class FakeEventBus:
 
     async def publish(self, event: DomainEvent) -> None:
         self.events.append(event)
-
-
 
 
 class FakeLLMClient:
@@ -1014,9 +1008,7 @@ async def test_returns_duplicate_when_external_event_already_exists() -> None:
         updated_at=NOW,
     )
     await external_events.save(existing)
-    llm = FakeLLMClient(
-        _classification_json(intent="human_requested")
-    )
+    llm = FakeLLMClient(_classification_json(intent="human_requested"))
 
     result = await process_inbound_message_event(
         event=_event(),
@@ -1114,9 +1106,7 @@ async def test_creates_handoff_for_property_or_advice_question_using_structured_
 
 
 async def test_uses_workspace_llm_model_for_classification() -> None:
-    llm = FakeLLMClient(
-        _classification_json(intent="human_requested")
-    )
+    llm = FakeLLMClient(_classification_json(intent="human_requested"))
 
     await process_inbound_message_event(
         event=_event(),
@@ -1210,8 +1200,7 @@ async def test_not_interested_completes_workflow_and_closes_conversation() -> No
     assert result.inbound_action_reason == InboundActionReasonCode.NOT_INTERESTED
     assert result.continue_ai_status is None
     assert (
-        workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)].state
-        == WorkflowState.COMPLETED
+        workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)].state == WorkflowState.COMPLETED
     )
     assert conversations.by_id[CONVERSATION_ID].status == ConversationStatus.CLOSED
     assert len(transition_repository.transitions) == 1
@@ -1681,9 +1670,7 @@ async def test_enqueues_inbound_processed_temporal_signal_when_workflow_exists()
         inbound_message_repository=FakeInboundMessageRepository(),
         conversation_summary_repository=FakeConversationSummaryRepository(),
         handoff_repository=FakeHandoffRepository(),
-        llm_client=FakeLLMClient(
-            _classification_json(intent="human_requested")
-        ),
+        llm_client=FakeLLMClient(_classification_json(intent="human_requested")),
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
         temporal_signal_outbox_repository=temporal_signal_outbox_repository,
@@ -2034,8 +2021,7 @@ async def test_continue_ai_pauses_when_turn_cap_is_reached() -> None:
     assert final_conversation.status == ConversationStatus.PAUSED
 
 
-async def test_continue_ai_is_not_blocked_when_sms_compliance_is_not_approved_in_v1(
-) -> None:
+async def test_continue_ai_is_not_blocked_when_sms_compliance_is_not_approved_in_v1() -> None:
     workflow = _workflow()
     dependencies = _continue_ai_dependencies(
         workflow=workflow, sms_compliance_state=SmsComplianceState.NOT_APPROVED
@@ -2190,7 +2176,6 @@ async def test_duplicate_inbound_event_does_not_send_duplicate_continuation() ->
     assert len(sms_provider.messages) == 0
     final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     assert final_workflow.state == WorkflowState.WAITING_FOR_RESPONSE
-
 
 
 async def test_processing_audit_persisted_for_continue_ai_success() -> None:
@@ -2350,9 +2335,7 @@ async def test_processing_audit_persisted_for_handoff_with_completion() -> None:
 
     result = await process_inbound_message_event(
         event=_event(),
-        lead_repository=FakeLeadRepository(
-            _lead(assigned_agent_user_id=assigned_user.user_id)
-        ),
+        lead_repository=FakeLeadRepository(_lead(assigned_agent_user_id=assigned_user.user_id)),
         external_event_repository=external_events,
         conversation_repository=FakeConversationRepository(),
         inbound_message_repository=FakeInboundMessageRepository(),
@@ -2482,9 +2465,7 @@ async def test_new_handoff_sends_configured_lead_acknowledgments() -> None:
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             _workspace_contact_policy()
         ),
-        campaign_execution_repository=FakeCampaignExecutionRepository(
-            _campaign_execution_config()
-        ),
+        campaign_execution_repository=FakeCampaignExecutionRepository(_campaign_execution_config()),
         workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
         message_repository=message_repository,
         sms_provider=sms_provider,
@@ -2510,8 +2491,7 @@ async def test_new_handoff_sends_configured_lead_acknowledgments() -> None:
     assert "lead [sms]: We are thinking about moving in October." in llm.requests[1].prompt
     assert (
         "brokerage [sms]: Thanks for reaching out about your move. "
-        "What timeline are you considering?"
-        in llm.requests[1].prompt
+        "What timeline are you considering?" in llm.requests[1].prompt
     )
 
 
@@ -2577,8 +2557,7 @@ async def test_new_email_handoff_threads_lead_acknowledgment_to_inbound_email() 
     assert len(email_provider.messages) == 1
     assert email_provider.messages[0].subject == "Re: Downtown condo inquiry"
     assert (
-        email_provider.messages[0].body
-        == "Thanks for your note. An agent will follow up shortly."
+        email_provider.messages[0].body == "Thanks for your note. An agent will follow up shortly."
     )
     assert email_provider.messages[0].in_reply_to_message_id == "msg-1"
     assert email_provider.messages[0].reference_message_ids == ("msg-1",)
@@ -2664,9 +2643,7 @@ async def test_new_handoff_uses_llm_acknowledgment_when_low_confidence_is_only_i
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             _workspace_contact_policy()
         ),
-        campaign_execution_repository=FakeCampaignExecutionRepository(
-            _campaign_execution_config()
-        ),
+        campaign_execution_repository=FakeCampaignExecutionRepository(_campaign_execution_config()),
         workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
         message_repository=message_repository,
         sms_provider=sms_provider,
@@ -2960,10 +2937,7 @@ async def test_handoff_notification_exception_does_not_abort_inbound_processing(
     saved_event = external_events.events[(WORKSPACE_ID, "mailgun", "evt-1")]
     audit = saved_event.payload_redacted["processing_audit"]
     assert audit["handoff"]["completion_status"] == "retryable_failure"
-    assert (
-        audit["handoff"]["completion_failure_reason"]
-        == "notification_exception:RuntimeError"
-    )
+    assert audit["handoff"]["completion_failure_reason"] == "notification_exception:RuntimeError"
 
 
 async def test_second_handoff_worthy_reply_reuses_existing_open_handoff() -> None:

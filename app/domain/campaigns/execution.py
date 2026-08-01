@@ -26,6 +26,7 @@ class CampaignCadenceStep:
     template_key: str
     max_attempts: int
     created_at: datetime
+    template_version_id: UUID | None = None
 
 
 @dataclass(frozen=True)

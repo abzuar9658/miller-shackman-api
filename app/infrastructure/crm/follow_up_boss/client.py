@@ -482,9 +482,7 @@ class FollowUpBossCRMClient:
             content=self._normalize_content(
                 payload.get("message") or payload.get("note") or payload.get("description"),
             ),
-            agent_id=(
-                str(payload.get("userId")) if payload.get("userId") is not None else None
-            ),
+            agent_id=(str(payload.get("userId")) if payload.get("userId") is not None else None),
             actor_name=self._first_non_empty(payload.get("userName"), payload.get("user")),
         )
 

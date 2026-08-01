@@ -9,9 +9,12 @@ from temporalio.worker import Worker
 from app.infrastructure.workflows.temporal.lead_nurture import (
     ExecuteCadenceStepResult,
     InboundProcessedWorkflowSignal,
+    LeadNurtureExecutionMode,
     LeadNurtureWorkflow,
     LeadNurtureWorkflowInput,
     LeadNurtureWorkflowSnapshot,
+    PausedSearchOccurrenceExecutionInput,
+    PausedSearchOccurrenceScheduleInput,
     PauseWorkflowSignal,
     RescheduleWorkflowSignal,
     ScheduleNextCadenceStepResult,
@@ -344,6 +347,51 @@ async def test_lead_nurture_workflow_accepts_dict_activity_payloads(
     assert snapshot.transition_id == TRANSITION_ID
     assert snapshot.outbound_message_id == MESSAGE_ID
     assert snapshot.provider_message_id == "email-1"
+
+
+async def test_lead_nurture_workflow_terminal_schedule_closes_without_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_instance = LeadNurtureWorkflow()
+    retry_attempts: list[int | None] = []
+    activity_calls: list[str] = []
+
+    async def fake_execute_activity(name: str, arg: object, **kwargs: object) -> object:
+        _ = arg
+        activity_calls.append(name)
+        retry_policy = kwargs.get("retry_policy")
+        retry_attempts.append(getattr(retry_policy, "maximum_attempts", None))
+        assert name == "schedule-next-campaign-cadence-step"
+        return {
+            "status": "terminal",
+            "workflow_id": str(WORKFLOW_ID),
+            "cadence_step_id": None,
+            "scheduled_for": None,
+            "skip_reason": "touch_limit_reached",
+            "occurrence_id": None,
+        }
+
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.execute_activity",
+        fake_execute_activity,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.now",
+        lambda: NOW,
+    )
+
+    snapshot = await workflow_instance.run(
+        LeadNurtureWorkflowInput(
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            campaign_version_id=CAMPAIGN_VERSION_ID,
+        )
+    )
+
+    assert activity_calls == ["schedule-next-campaign-cadence-step"]
+    assert retry_attempts == [3]
+    assert snapshot.last_activity_status == "terminal"
+    assert snapshot.skip_reason == "touch_limit_reached"
 
 
 async def test_lead_nurture_workflow_inbound_processed_signal_blocks_sends() -> None:
@@ -759,3 +807,207 @@ async def test_lead_nurture_workflow_inbound_signal_during_wait_blocks_due_step(
     assert snapshot.last_activity == "inbound_processed"
     assert snapshot.last_activity_status == "blocked"
     assert snapshot.skip_reason == "meaningful_reply_requires_reclassification"
+
+
+async def test_lead_nurture_workflow_times_out_uncertain_send_and_stays_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_instance = LeadNurtureWorkflow()
+    activity_calls: list[str] = []
+
+    async def fake_execute_activity(name: str, arg: object, **_: object) -> object:
+        del arg
+        activity_calls.append(name)
+        if name == "schedule-next-campaign-cadence-step":
+            return ScheduleNextCadenceStepResult(
+                status="scheduled",
+                workflow_id=WORKFLOW_ID,
+                cadence_step_id=STEP_ONE_ID,
+                scheduled_for=NOW,
+                occurrence_id=STEP_TWO_ID,
+            )
+        if name == "execute-campaign-cadence-step":
+            return ExecuteCadenceStepResult(
+                status="uncertain",
+                workflow_id=WORKFLOW_ID,
+                cadence_step_id=STEP_ONE_ID,
+                occurrence_id=STEP_TWO_ID,
+            )
+        if name == "timeout-uncertain-paused-search-occurrence":
+            return None
+        raise AssertionError(f"unexpected activity {name}")
+
+    async def fake_wait_condition(predicate: object, **kwargs: object) -> None:
+        _ = predicate
+        if kwargs.get("timeout") is not None:
+            raise TimeoutError
+        workflow_instance.close()
+
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.execute_activity",
+        fake_execute_activity,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.wait_condition",
+        fake_wait_condition,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.now",
+        lambda: NOW,
+    )
+
+    snapshot = await workflow_instance.run(
+        LeadNurtureWorkflowInput(
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            campaign_version_id=CAMPAIGN_VERSION_ID,
+        )
+    )
+
+    assert activity_calls == [
+        "schedule-next-campaign-cadence-step",
+        "execute-campaign-cadence-step",
+        "timeout-uncertain-paused-search-occurrence",
+    ]
+    assert snapshot.last_activity_status == "uncertain"
+    assert snapshot.occurrence_id == STEP_TWO_ID
+
+
+async def test_recurring_mode_uses_pinned_occurrence_activity_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_instance = LeadNurtureWorkflow()
+    activity_calls: list[str] = []
+
+    async def fake_execute_activity(name: str, arg: object, **_: object) -> object:
+        del arg
+        activity_calls.append(name)
+        if name == "schedule-next-paused-search-occurrence":
+            return {
+                "status": "scheduled",
+                "workflow_id": str(WORKFLOW_ID),
+                "cadence_step_id": str(STEP_ONE_ID),
+                "scheduled_for": NOW.isoformat(),
+                "occurrence_id": str(STEP_TWO_ID),
+            }
+        if name == "execute-paused-search-occurrence":
+            return {
+                "status": "sent",
+                "workflow_id": str(WORKFLOW_ID),
+                "cadence_step_id": str(STEP_ONE_ID),
+                "occurrence_id": str(STEP_TWO_ID),
+                "has_more_steps": False,
+                "accepted_logical_touch": True,
+            }
+        raise AssertionError(f"unexpected activity {name}")
+
+    async def fake_wait_condition(predicate: object, **kwargs: object) -> None:
+        _ = predicate
+        _ = kwargs
+        workflow_instance.close()
+
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.execute_activity",
+        fake_execute_activity,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.wait_condition",
+        fake_wait_condition,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.now",
+        lambda: NOW,
+    )
+
+    snapshot = await workflow_instance.run(
+        LeadNurtureWorkflowInput(
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            campaign_version_id=CAMPAIGN_VERSION_ID,
+            workflow_id=WORKFLOW_ID,
+            execution_mode=LeadNurtureExecutionMode.PAUSED_SEARCH_RECURRING,
+            paused_search_track_version_id=STEP_ONE_ID,
+        )
+    )
+
+    assert activity_calls == [
+        "schedule-next-paused-search-occurrence",
+        "execute-paused-search-occurrence",
+    ]
+    assert snapshot.execution_mode is LeadNurtureExecutionMode.PAUSED_SEARCH_RECURRING
+    assert snapshot.paused_search_track_version_id == STEP_ONE_ID
+    assert snapshot.accepted_touch_count == 1
+
+
+async def test_recurring_mode_survives_long_wait_and_replays_activity_contract() -> None:
+    state = {"scheduled": 0, "executed": 0}
+    task_queue = f"test-paused-search-recurring-{uuid4()}"
+    workflow_name = f"test-paused-search-recurring-{uuid4()}"
+
+    @activity.defn(name="schedule-next-paused-search-occurrence")
+    async def schedule_activity(
+        input_: PausedSearchOccurrenceScheduleInput,
+    ) -> dict[str, object]:
+        occurred_at = input_.occurred_at
+        state["scheduled"] += 1
+        return {
+            "status": "scheduled",
+            "workflow_id": str(WORKFLOW_ID),
+            "cadence_step_id": str(STEP_ONE_ID),
+            "scheduled_for": (occurred_at + timedelta(days=30)).isoformat(),
+            "occurrence_id": str(STEP_TWO_ID),
+        }
+
+    @activity.defn(name="execute-paused-search-occurrence")
+    async def execute_activity(
+        input_: PausedSearchOccurrenceExecutionInput,
+    ) -> dict[str, object]:
+        del input_
+        state["executed"] += 1
+        return {
+            "status": "sent",
+            "workflow_id": str(WORKFLOW_ID),
+            "cadence_step_id": str(STEP_ONE_ID),
+            "occurrence_id": str(STEP_TWO_ID),
+            "has_more_steps": False,
+            "accepted_logical_touch": True,
+        }
+
+    env = await WorkflowEnvironment.start_time_skipping()
+    async with env:
+        async with Worker(
+            env.client,
+            task_queue=task_queue,
+            workflows=[LeadNurtureWorkflow],
+            activities=[schedule_activity, execute_activity],
+        ):
+            handle = await env.client.start_workflow(
+                LeadNurtureWorkflow.run,
+                LeadNurtureWorkflowInput(
+                    workspace_id=WORKSPACE_ID,
+                    lead_id=LEAD_ID,
+                    campaign_version_id=CAMPAIGN_VERSION_ID,
+                    workflow_id=WORKFLOW_ID,
+                    execution_mode=LeadNurtureExecutionMode.PAUSED_SEARCH_RECURRING,
+                    paused_search_track_version_id=STEP_ONE_ID,
+                ),
+                id=workflow_name,
+                task_queue=task_queue,
+            )
+
+            with env.auto_time_skipping_disabled():
+                await env.sleep(1)
+                waiting_snapshot = await handle.query("snapshot")
+            assert waiting_snapshot["execution_mode"] == "paused_search_recurring"
+            assert waiting_snapshot["last_activity_status"] == "scheduled"
+
+            await env.sleep(timedelta(days=30, seconds=1))
+            await env.sleep(1)
+            sent_snapshot = await handle.query("snapshot")
+            assert sent_snapshot["last_activity_status"] == "sent"
+            await handle.signal("close")
+            result = await handle.result()
+
+    assert state == {"scheduled": 1, "executed": 1}
+    assert result.execution_mode is LeadNurtureExecutionMode.PAUSED_SEARCH_RECURRING
+    assert result.accepted_touch_count == 1

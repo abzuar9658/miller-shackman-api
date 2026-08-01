@@ -1,5 +1,8 @@
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, time, timedelta
 from uuid import UUID, uuid4
+
+import pytest
 
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
@@ -8,6 +11,9 @@ from app.domain.campaigns import (
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
+    RecurringOccurrenceOutcome,
+    occurrence_idempotency_key,
+    plan_next_paused_search_occurrence,
     plan_paused_search_next_action,
 )
 from app.domain.campaigns.execution import CampaignVersionStatus
@@ -40,6 +46,7 @@ def _track_version(
     ),
     maintenance_interval_days: int = 60,
     reactivation_window_days: int = 30,
+    default_pause_duration_days: int = 60,
 ) -> PausedSearchTrackVersion:
     return PausedSearchTrackVersion(
         track_version_id=TRACK_VERSION_ID,
@@ -54,6 +61,7 @@ def _track_version(
         fallback_timing_policy=fallback_timing_policy,
         maintenance_interval_days=maintenance_interval_days,
         reactivation_window_days=reactivation_window_days,
+        default_pause_duration_days=default_pause_duration_days,
         max_total_touches=5,
         requires_review_before_publish=False,
         created_by_user_id=USER_ID,
@@ -155,7 +163,77 @@ def test_workflow_not_sendable_returns_hold() -> None:
         now=NOW,
     )
     assert plan.reason_code == PausedSearchTimingReasonCode.WORKFLOW_NOT_SENDABLE
+
+
+def test_occurrence_idempotency_key_is_stable_across_rescheduled_due_times() -> None:
+    key = occurrence_idempotency_key(
+        workflow_id=UUID("00000000-0000-0000-0000-000000000001"),
+        track_version_id=UUID("00000000-0000-0000-0000-000000000002"),
+        step_id=UUID("00000000-0000-0000-0000-000000000003"),
+        occurrence_number=2,
+        channel="email",
+    )
+    fallback_key = occurrence_idempotency_key(
+        workflow_id=UUID("00000000-0000-0000-0000-000000000001"),
+        track_version_id=UUID("00000000-0000-0000-0000-000000000002"),
+        step_id=UUID("00000000-0000-0000-0000-000000000003"),
+        occurrence_number=2,
+        channel="email",
+        fallback=True,
+    )
+
+    assert key.endswith(":2:email")
+    assert fallback_key == f"{key}:fallback"
+
+
+def test_occurrence_plan_exposes_cancel_outcome_for_non_sendable_workflow() -> None:
+    step = replace(_steps()[0], delay_hours=0, interval_days=30, max_occurrences=2)
+    plan = plan_next_paused_search_occurrence(
+        profile=_profile(),
+        track_version=_track_version(),
+        step=step,
+        steps=(step,),
+        workflow=_workflow(state=WorkflowState.PAUSED),
+        timezone=TIMEZONE,
+        now=NOW,
+        occurrence_number=1,
+        previous_due_at=None,
+    )
+
+    assert plan.outcome is RecurringOccurrenceOutcome.CANCEL
+
+
+def test_occurrence_plan_exposes_review_outcome_for_missing_timing() -> None:
+    step = replace(_steps()[0], delay_hours=0, interval_days=30, max_occurrences=2)
+    plan = plan_next_paused_search_occurrence(
+        profile=_profile(reengagement_not_before=None),
+        track_version=_track_version(
+            fallback_timing_policy=PausedSearchFallbackTimingPolicy.HOLD_FOR_REVIEW
+        ),
+        step=step,
+        steps=(step,),
+        workflow=_workflow(),
+        timezone=TIMEZONE,
+        now=NOW,
+        occurrence_number=1,
+        previous_due_at=None,
+    )
+
+    assert plan.outcome is RecurringOccurrenceOutcome.REVIEW
+
+
+def test_touch_limit_returns_terminal_plan() -> None:
+    plan = plan_paused_search_next_action(
+        profile=_profile(),
+        track_version=_track_version(),
+        steps=_steps(),
+        workflow=replace(_workflow(), logical_touch_count=5),
+        timezone=TIMEZONE,
+        now=NOW,
+    )
+
     assert plan.next_action_at is None
+    assert plan.reason_code == PausedSearchTimingReasonCode.TOUCH_LIMIT_REACHED
 
 
 def test_profile_not_active_returns_hold() -> None:
@@ -215,6 +293,36 @@ def test_maintenance_interval_fallback_when_reengagement_unknown() -> None:
     assert plan.next_action_at == (NOW + timedelta(hours=24 * 60)).replace(hour=15, minute=0)
 
 
+def test_default_pause_duration_fallback_anchors_reactivation_in_brokerage_days() -> None:
+    track_version = _track_version(
+        fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_DEFAULT_PAUSE_DURATION,
+        default_pause_duration_days=180,
+    )
+    plan = plan_paused_search_next_action(
+        profile=_profile(reengagement_not_before=None),
+        track_version=track_version,
+        steps=_steps(),
+        workflow=_workflow(),
+        timezone=TIMEZONE,
+        now=NOW,
+    )
+
+    assert plan.phase == PausedSearchTrackStepPhase.MAINTENANCE
+    assert plan.step_id == STEP_ONE_ID
+
+    reactivation = plan_paused_search_next_action(
+        profile=_profile(reengagement_not_before=None),
+        track_version=track_version,
+        steps=_steps(),
+        workflow=_workflow(),
+        timezone=TIMEZONE,
+        now=NOW + timedelta(days=160),
+    )
+
+    assert reactivation.phase == PausedSearchTrackStepPhase.REACTIVATION
+    assert reactivation.step_id == STEP_REACTIVATION_ID
+
+
 def test_schedules_first_maintenance_step() -> None:
     plan = plan_paused_search_next_action(
         profile=_profile(reengagement_not_before=NOW + timedelta(days=120)),
@@ -228,6 +336,83 @@ def test_schedules_first_maintenance_step() -> None:
     assert plan.phase == PausedSearchTrackStepPhase.MAINTENANCE
     assert plan.step_id == STEP_ONE_ID
     assert plan.next_action_at == (NOW + timedelta(hours=24 * 60)).replace(hour=15, minute=0)
+
+
+def test_recurring_occurrence_uses_calendar_days_and_is_bounded() -> None:
+    step = replace(_steps()[0], delay_hours=0, interval_days=30, max_occurrences=2)
+    workflow = _workflow(paused_search_track_step_id=STEP_ONE_ID)
+    first = plan_next_paused_search_occurrence(
+        profile=_profile(),
+        track_version=_track_version(),
+        step=step,
+        steps=(step,),
+        workflow=workflow,
+        timezone=TIMEZONE,
+        now=NOW,
+        occurrence_number=1,
+        previous_due_at=None,
+    )
+    assert first.reason_code == PausedSearchTimingReasonCode.SCHEDULED
+    assert first.next_action_at == NOW.replace(hour=15)
+
+    second = plan_next_paused_search_occurrence(
+        profile=_profile(),
+        track_version=_track_version(),
+        step=step,
+        steps=(step,),
+        workflow=workflow,
+        timezone=TIMEZONE,
+        now=NOW,
+        occurrence_number=2,
+        previous_due_at=first.due_at,
+    )
+    assert second.reason_code == PausedSearchTimingReasonCode.SCHEDULED
+    assert second.next_action_at == datetime(2026, 7, 31, 15, 0, tzinfo=UTC)
+
+    terminal = plan_next_paused_search_occurrence(
+        profile=_profile(),
+        track_version=_track_version(),
+        step=step,
+        steps=(step,),
+        workflow=workflow,
+        timezone=TIMEZONE,
+        now=NOW,
+        occurrence_number=3,
+        previous_due_at=second.due_at,
+    )
+    assert terminal.reason_code == PausedSearchTimingReasonCode.OCCURRENCE_LIMIT_REACHED
+    assert terminal.outcome is RecurringOccurrenceOutcome.TERMINALIZE
+
+
+def test_recurring_occurrence_preserves_local_calendar_time_across_dst() -> None:
+    step = replace(_steps()[0], delay_hours=0, interval_days=30, max_occurrences=2)
+    march_first_ten_am_cst = datetime(2026, 3, 1, 16, 0, tzinfo=UTC)
+
+    first = plan_next_paused_search_occurrence(
+        profile=_profile(),
+        track_version=_track_version(),
+        step=step,
+        steps=(step,),
+        workflow=_workflow(paused_search_track_step_id=STEP_ONE_ID),
+        timezone=TIMEZONE,
+        now=march_first_ten_am_cst,
+        occurrence_number=1,
+        previous_due_at=None,
+    )
+    plan = plan_next_paused_search_occurrence(
+        profile=_profile(),
+        track_version=_track_version(),
+        step=step,
+        steps=(step,),
+        workflow=_workflow(paused_search_track_step_id=STEP_ONE_ID),
+        timezone=TIMEZONE,
+        now=march_first_ten_am_cst,
+        occurrence_number=2,
+        previous_due_at=first.due_at,
+    )
+
+    assert plan.due_at == datetime(2026, 3, 31, 15, 0, tzinfo=UTC)
+    assert plan.next_action_at == plan.due_at
 
 
 def test_reactivation_phase_before_reengagement_window() -> None:
@@ -283,9 +468,60 @@ def test_rolls_forward_to_allowed_window() -> None:
     )
     # 4 AM UTC = 11 PM previous day CDT, which is outside 10-17 window.
     # Candidate is 60 days later, then rolled forward to 10 AM CDT = 15:00 UTC.
-    assert plan.next_action_at == (late_night + timedelta(hours=24 * 60)).replace(
-        hour=15, minute=0
+    assert plan.next_action_at == (late_night + timedelta(hours=24 * 60)).replace(hour=15, minute=0)
+
+
+def test_custom_quiet_hours_are_used_by_occurrence_planner() -> None:
+    step = replace(_steps()[0], delay_hours=0, interval_days=30, max_occurrences=1)
+    candidate = datetime(2026, 7, 1, 15, 0, tzinfo=UTC)
+    plan = plan_next_paused_search_occurrence(
+        profile=_profile(),
+        track_version=_track_version(),
+        step=step,
+        steps=(step,),
+        workflow=_workflow(paused_search_track_step_id=STEP_ONE_ID),
+        timezone=TIMEZONE,
+        now=candidate,
+        occurrence_number=1,
+        previous_due_at=None,
+        quiet_hours_start=time(11, 30),
+        quiet_hours_end=time(16, 0),
     )
+
+    assert plan.next_action_at == datetime(2026, 7, 1, 16, 30, tzinfo=UTC)
+
+
+def test_disabled_quiet_hours_leave_due_time_unchanged() -> None:
+    step = replace(_steps()[0], delay_hours=0, interval_days=30, max_occurrences=1)
+    candidate = datetime(2026, 7, 1, 15, 0, tzinfo=UTC)
+    plan = plan_next_paused_search_occurrence(
+        profile=_profile(),
+        track_version=_track_version(),
+        step=step,
+        steps=(step,),
+        workflow=_workflow(paused_search_track_step_id=STEP_ONE_ID),
+        timezone=TIMEZONE,
+        now=candidate,
+        occurrence_number=1,
+        previous_due_at=None,
+        quiet_hours_enabled=False,
+    )
+
+    assert plan.next_action_at == candidate
+
+
+def test_invalid_quiet_hours_are_rejected() -> None:
+    with pytest.raises(ValueError, match="quiet-hours start"):
+        plan_paused_search_next_action(
+            profile=_profile(),
+            track_version=_track_version(),
+            steps=_steps(),
+            workflow=_workflow(),
+            timezone=TIMEZONE,
+            now=NOW,
+            quiet_hours_start=time(17, 0),
+            quiet_hours_end=time(10, 0),
+        )
 
 
 def test_reactivation_step_respects_window_start() -> None:

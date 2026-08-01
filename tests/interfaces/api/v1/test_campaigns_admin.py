@@ -203,10 +203,7 @@ def test_get_nurture_settings_prefers_latest_draft_over_active_version(
 
     assert update_response.status_code == 200
     assert update_response.json()["status"] == "updated"
-    assert (
-        update_response.json()["nurture_settings"]["nurture_settings_id"]
-        == nurture_settings_id
-    )
+    assert update_response.json()["nurture_settings"]["nurture_settings_id"] == nurture_settings_id
 
     detail_response = campaign_admin_client.client.get(
         f"/api/v1/workspaces/{WORKSPACE_ID}/nurture-settings"

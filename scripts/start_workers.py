@@ -5,9 +5,10 @@ Usage:
 
 Groups:
     all      - API, Temporal worker, signal dispatcher, outbox publisher,
-               CRM sync worker, CRM sync scheduler
+               CRM sync worker, CRM sync scheduler, CRM history import worker
     temporal - Temporal worker + signal dispatcher
-    workers  - API + outbox publisher + CRM sync worker + CRM sync scheduler
+    workers  - API + outbox publisher + CRM sync worker + CRM sync scheduler +
+               CRM history import worker
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ WORKER_DEFINITIONS: dict[str, list[tuple[str, list[str]]]] = {
         ("outbox-publisher", _worker_command("outbox_publisher_worker")),
         ("crm-sync-worker", _worker_command("crm_sync_worker")),
         ("crm-sync-scheduler", _worker_command("crm_sync_scheduler_worker")),
+        ("crm-history-import-worker", _worker_command("crm_history_import_worker")),
     ],
     "temporal": [
         ("temporal-worker", _worker_command("temporal_worker")),
@@ -52,6 +54,7 @@ WORKER_DEFINITIONS: dict[str, list[tuple[str, list[str]]]] = {
         ("outbox-publisher", _worker_command("outbox_publisher_worker")),
         ("crm-sync-worker", _worker_command("crm_sync_worker")),
         ("crm-sync-scheduler", _worker_command("crm_sync_scheduler_worker")),
+        ("crm-history-import-worker", _worker_command("crm_history_import_worker")),
     ],
 }
 
@@ -67,6 +70,7 @@ PROCESS_PATTERNS: list[tuple[str, str]] = [
     ("outbox-publisher", "outbox_publisher_worker import main"),
     ("crm-sync-worker", "crm_sync_worker import main"),
     ("crm-sync-scheduler", "crm_sync_scheduler_worker import main"),
+    ("crm-history-import-worker", "crm_history_import_worker import main"),
 ]
 
 

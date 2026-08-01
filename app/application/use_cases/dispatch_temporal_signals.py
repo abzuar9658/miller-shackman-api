@@ -214,7 +214,7 @@ def _resume_requested_signal(
         lead_id=_uuid_from_payload(payload, "lead_id"),
         occurred_at=datetime.fromisoformat(_string_from_payload(payload, "occurred_at")),
         reason=_string_from_payload(payload, "reason"),
-        actor_user_id=_uuid_from_payload(payload, "actor_user_id"),
+        actor_user_id=_optional_uuid_from_payload(payload, "actor_user_id"),
         external_event_id=_optional_uuid_from_payload(payload, "external_event_id"),
     )
 

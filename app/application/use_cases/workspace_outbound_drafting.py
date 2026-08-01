@@ -182,9 +182,7 @@ async def preview_workspace_outbound_drafting(
             model=model,
         ),
     )
-    listing_relevance_brief = build_listing_relevance_brief_payload(
-        lead_context.listing_context
-    )
+    listing_relevance_brief = build_listing_relevance_brief_payload(lead_context.listing_context)
     return OutboundDraftingPreviewResult(
         status=OutboundDraftingPreviewStatus.PREVIEWED,
         parsed_preferences=dict(lead_context.extracted_preferences),

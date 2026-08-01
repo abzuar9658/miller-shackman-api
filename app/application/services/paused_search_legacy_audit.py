@@ -57,9 +57,7 @@ class LegacyPausedSearchAuditReport:
     @property
     def blocking_findings(self) -> tuple[LegacyAuditFinding, ...]:
         return tuple(
-            finding
-            for finding in self.findings
-            if finding.severity is LegacyAuditSeverity.BLOCKING
+            finding for finding in self.findings if finding.severity is LegacyAuditSeverity.BLOCKING
         )
 
     @property
@@ -86,10 +84,7 @@ def audit_legacy_paused_search_data(
                     "Published legacy track version has no steps.",
                 )
             )
-        if (
-            version.fallback_timing_policy
-            is not PausedSearchFallbackTimingPolicy.HOLD_FOR_REVIEW
-        ):
+        if version.fallback_timing_policy is not PausedSearchFallbackTimingPolicy.HOLD_FOR_REVIEW:
             findings.append(
                 LegacyAuditFinding(
                     LegacyAuditFindingCode.LEGACY_FALLBACK_POLICY,

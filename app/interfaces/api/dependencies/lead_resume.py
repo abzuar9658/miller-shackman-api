@@ -8,6 +8,7 @@ from app.application.ports.lead_read import LeadReadLeadRepository, LeadReadWork
 from app.application.ports.repositories import (
     ExternalEventRepository,
     LeadWorkflowRepository,
+    PausedSearchOccurrenceRepository,
     TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
@@ -17,6 +18,9 @@ from app.infrastructure.persistence.postgres.crm_sync_repository import (
     PostgresExternalEventRepository,
 )
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
+from app.infrastructure.persistence.postgres.paused_search_occurrence_repository import (
+    PostgresPausedSearchOccurrenceRepository,
+)
 from app.infrastructure.persistence.postgres.temporal_signal_outbox_repository import (
     PostgresTemporalSignalOutboxRepository,
 )
@@ -51,6 +55,7 @@ class LeadResumeActionBundle:
     workflow_transition_repository: WorkflowTransitionRepository
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository
     external_event_repository: ExternalEventRepository
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None
 
 
 async def get_lead_resume_read_bundle(
@@ -75,4 +80,5 @@ async def get_lead_resume_action_bundle(
         workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
         temporal_signal_outbox_repository=PostgresTemporalSignalOutboxRepository(session),
         external_event_repository=PostgresExternalEventRepository(session),
+        paused_search_occurrence_repository=PostgresPausedSearchOccurrenceRepository(session),
     )

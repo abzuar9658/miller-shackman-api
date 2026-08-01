@@ -6,7 +6,10 @@ from temporalio.client import Client
 from app.core.config import Settings
 from app.infrastructure.workflows.temporal.activities import (
     execute_campaign_cadence_step_activity,
+    execute_paused_search_occurrence_activity,
     schedule_next_campaign_cadence_step_activity,
+    schedule_next_paused_search_occurrence_activity,
+    timeout_uncertain_paused_search_occurrence_activity,
 )
 from app.infrastructure.workflows.temporal.lead_nurture import LeadNurtureWorkflow
 from app.infrastructure.workflows.temporal.smoke import SmokePingWorkflow, smoke_ping_activity
@@ -74,6 +77,9 @@ def test_build_temporal_worker_registers_smoke_components(monkeypatch: pytest.Mo
             smoke_ping_activity,
             schedule_next_campaign_cadence_step_activity,
             execute_campaign_cadence_step_activity,
+            schedule_next_paused_search_occurrence_activity,
+            execute_paused_search_occurrence_activity,
+            timeout_uncertain_paused_search_occurrence_activity,
         ],
     }
 

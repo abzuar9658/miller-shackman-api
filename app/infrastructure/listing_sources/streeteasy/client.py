@@ -221,8 +221,6 @@ def _filter_number_text(value: Decimal | int | float) -> str:
     return format(parsed.normalize(), "f").rstrip("0").rstrip(".")
 
 
-
-
 def _is_block_page(html: str) -> bool:
     lowered = html.lower()
     return "access to this page has been denied" in lowered or "px-captcha" in lowered

@@ -9,6 +9,7 @@ from app.application.services.llm.outbound_query_extraction import (
 from app.application.use_cases.campaign_cadence_execution import (
     CadenceStepExecutionStatus,
     CadenceStepScheduleStatus,
+    _record_paused_search_occurrence_outcome,
     execute_campaign_cadence_step,
     schedule_next_campaign_cadence_step,
 )
@@ -16,6 +17,10 @@ from app.application.use_cases.process_inbound_message_event import (
     InboundMessageEvent,
     ProcessInboundMessageEventStatus,
     process_inbound_message_event,
+)
+from app.application.use_cases.send_outbound_message import (
+    SendOutboundMessageResult,
+    SendOutboundMessageStatus,
 )
 from app.domain.campaigns import (
     CampaignStatus,
@@ -28,6 +33,10 @@ from app.domain.campaigns import (
 )
 from app.domain.campaigns.execution import CampaignCadenceStep, CampaignExecutionConfig
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
+from app.domain.campaigns.paused_search_occurrences import (
+    RecurringOccurrence,
+    RecurringOccurrenceStatus,
+)
 from app.domain.campaigns.pre_send import ProviderSendStatus
 from app.domain.compliance.contactability import (
     ContactChannel,
@@ -53,6 +62,8 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeLeadWorkflowRepository,
     FakeLLMClient,
     FakeOutboundMessageRepository,
+    FakePausedSearchOccurrenceRepository,
+    FakePausedSearchReviewRepository,
     FakeRejectedDraftReviewRepository,
     FakeSMSProvider,
     FakeWorkflowTransitionRepository,
@@ -370,8 +381,7 @@ async def test_schedule_next_campaign_cadence_step_uses_paused_search_track_curs
     assert saved_workflow.next_action_at == result.scheduled_for
 
 
-async def test_schedule_next_campaign_cadence_step_does_not_fallback_to_dormant(
-) -> None:
+async def test_schedule_next_campaign_cadence_step_does_not_fallback_to_dormant() -> None:
     workflow_repository = FakeLeadWorkflowRepository()
     await workflow_repository.save(_workflow())
 
@@ -407,6 +417,7 @@ async def test_execute_campaign_cadence_step_sends_paused_search_step_and_advanc
     message_repository = FakeOutboundMessageRepository()
     llm_client = FakeLLMClient()
     email_provider = FakeEmailProvider("paused-email-1")
+    occurrence_repository = FakePausedSearchOccurrenceRepository()
 
     result = await execute_campaign_cadence_step(
         workspace_id=WORKSPACE_ID,
@@ -416,6 +427,7 @@ async def test_execute_campaign_cadence_step_sends_paused_search_step_and_advanc
         scheduled_for=send_now,
         campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
         paused_search_track_repository=_paused_search_track_repository(),
+        paused_search_occurrence_repository=occurrence_repository,
         workspace_repository=FakeWorkspaceRepository(_workspace()),
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             _workspace_contact_policy()
@@ -439,6 +451,10 @@ async def test_execute_campaign_cadence_step_sends_paused_search_step_and_advanc
     assert len(email_provider.messages) == 1
     assert message_repository.saved[-1].cadence_step_id == str(PAUSED_SEARCH_STEP_ONE_ID)
     assert message_repository.saved[-1].provider_message_id == "paused-email-1"
+    assert occurrence_repository.occurrence is not None
+    assert occurrence_repository.occurrence.status == RecurringOccurrenceStatus.SENT
+    assert occurrence_repository.occurrence.logical_touch_count == 1
+    assert workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)].logical_touch_count == 1
     assert message_repository.saved[-1].subject == "Still planning to wait on rates for now?"
     assert "Hi there," in message_repository.saved[-1].body
     assert "waiting on rates before reopening your search" in message_repository.saved[-1].body
@@ -474,8 +490,111 @@ async def test_execute_campaign_cadence_step_sends_paused_search_step_and_advanc
     assert len(email_provider.messages) == 1
 
 
-async def test_execute_campaign_cadence_step_skips_paused_search_email_step_until_sms_step(
-) -> None:
+async def test_execute_campaign_cadence_step_holds_review_required_message() -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    send_now = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
+    await workflow_repository.save(
+        replace(
+            _paused_search_workflow(),
+            paused_search_track_step_id=PAUSED_SEARCH_STEP_ONE_ID,
+            next_action_at=send_now,
+        )
+    )
+    occurrence_repository = FakePausedSearchOccurrenceRepository()
+    review_repository = FakePausedSearchReviewRepository()
+    message_repository = FakeOutboundMessageRepository()
+    email_provider = FakeEmailProvider("must-not-send")
+    track_repository = FakePausedSearchTrackAdminRepository(
+        versions=(_paused_search_track_version(),),
+        steps=(replace(_paused_search_steps()[0], review_required=True),),
+    )
+
+    result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=PAUSED_SEARCH_STEP_ONE_ID,
+        scheduled_for=send_now,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        paused_search_track_repository=track_repository,
+        paused_search_occurrence_repository=occurrence_repository,
+        paused_search_review_repository=review_repository,
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        lead_repository=FakeLeadRepository(_paused_search_lead()),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        message_repository=message_repository,
+        llm_client=FakeLLMClient(),
+        sms_provider=FakeSMSProvider(),
+        email_provider=email_provider,
+        now=send_now,
+    )
+
+    assert result.status is CadenceStepExecutionStatus.REVIEW
+    assert email_provider.messages == []
+    assert occurrence_repository.occurrence is not None
+    assert occurrence_repository.occurrence.status is RecurringOccurrenceStatus.REVIEW_REQUESTED
+    assert len(review_repository.reviews) == 1
+    review = next(iter(review_repository.reviews.values()))
+    assert review.outbound_message_id == message_repository.saved[-1].message_id
+
+
+async def test_paused_search_occurrence_outcome_updates_status_and_touch_once() -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    workflow = _paused_search_workflow()
+    await workflow_repository.save(workflow)
+    occurrence = RecurringOccurrence(
+        occurrence_id=UUID("00000000-0000-0000-0000-00000000000e"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        workflow_id=WORKFLOW_ID,
+        track_version_id=PAUSED_SEARCH_TRACK_VERSION_ID,
+        step_id=PAUSED_SEARCH_STEP_ONE_ID,
+        phase=PausedSearchTrackStepPhase.MAINTENANCE,
+        occurrence_number=1,
+        scheduled_for=NOW,
+        due_at=NOW,
+        status=RecurringOccurrenceStatus.PLANNED,
+        idempotency_key="occurrence-test",
+        created_at=NOW,
+    )
+    occurrence_repository = FakePausedSearchOccurrenceRepository(occurrence)
+
+    updated_workflow = await _record_paused_search_occurrence_outcome(
+        workspace_id=WORKSPACE_ID,
+        workflow=workflow,
+        occurrence=occurrence,
+        authored_channel=ContactChannel.SMS,
+        send_result=SendOutboundMessageResult(status=SendOutboundMessageStatus.SENT),
+        occurrence_repository=occurrence_repository,
+        lead_workflow_repository=workflow_repository,
+        now=NOW,
+    )
+
+    assert updated_workflow.logical_touch_count == 1
+    assert occurrence_repository.occurrence is not None
+    assert occurrence_repository.occurrence.status == RecurringOccurrenceStatus.SENT
+    assert occurrence_repository.occurrence.logical_touch_count == 1
+
+    duplicate_workflow = await _record_paused_search_occurrence_outcome(
+        workspace_id=WORKSPACE_ID,
+        workflow=updated_workflow,
+        occurrence=occurrence_repository.occurrence,
+        authored_channel=ContactChannel.SMS,
+        send_result=SendOutboundMessageResult(status=SendOutboundMessageStatus.ALREADY_SENT),
+        occurrence_repository=occurrence_repository,
+        lead_workflow_repository=workflow_repository,
+        now=NOW,
+    )
+    assert duplicate_workflow.logical_touch_count == 1
+
+
+async def test_execute_campaign_cadence_step_skips_paused_search_email_step_until_sms_step() -> (
+    None
+):
     workflow_repository = FakeLeadWorkflowRepository()
     transition_repository = FakeWorkflowTransitionRepository()
     send_now = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
@@ -628,8 +747,9 @@ async def test_execute_campaign_cadence_step_blocks_suppressed_paused_search_lea
     assert last_transition.metadata["block_stage"] == "planning"
 
 
-async def test_execute_campaign_cadence_step_blocks_paused_search_when_email_is_unsubscribed(
-) -> None:
+async def test_execute_campaign_cadence_step_blocks_paused_search_when_email_is_unsubscribed() -> (
+    None
+):
     workflow_repository = FakeLeadWorkflowRepository()
     transition_repository = FakeWorkflowTransitionRepository()
     send_now = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
@@ -1174,8 +1294,9 @@ async def test_execute_campaign_cadence_step_ignores_quiet_hour_window_when_disa
     assert result.workflow.state == WorkflowState.WAITING_FOR_RESPONSE
 
 
-async def test_execute_campaign_cadence_step_rejects_when_inbound_opt_out_arrives_before_send(
-) -> None:
+async def test_execute_campaign_cadence_step_rejects_when_inbound_opt_out_arrives_before_send() -> (
+    None
+):
     workflow_repository = FakeLeadWorkflowRepository()
     transition_repository = FakeWorkflowTransitionRepository()
     lead_repository = FakeLeadRepository(_lead())
@@ -1470,6 +1591,8 @@ def _step(
         max_attempts=1,
         created_at=NOW,
     )
+
+
 def _paused_search_track_version() -> PausedSearchTrackVersion:
     return PausedSearchTrackVersion(
         track_version_id=PAUSED_SEARCH_TRACK_VERSION_ID,

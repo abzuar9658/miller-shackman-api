@@ -29,6 +29,7 @@ from app.application.ports.repositories import (
     LeadWorkflowRepository,
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
+    PausedSearchOccurrenceRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     UserRepository,
@@ -265,6 +266,7 @@ async def process_inbound_message_event(
     lead_workflow_repository: LeadWorkflowRepository | None = None,
     workflow_transition_repository: WorkflowTransitionRepository | None = None,
     paused_search_track_repository: PausedSearchTrackMappingRepository | None = None,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
     event_bus: EventBus | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None = None,
@@ -438,6 +440,7 @@ async def process_inbound_message_event(
             decision_reason=inbound_decision.reason_code,
             lead_workflow_repository=lead_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
+            paused_search_occurrence_repository=paused_search_occurrence_repository,
             now=now,
             external_event_id=saved_event.external_event_id,
             conversation_id=conversation.conversation_id,
@@ -660,7 +663,7 @@ async def process_inbound_message_event(
 
     handoff: Handoff | None = existing_open_handoff
     created_handoff: Handoff | None = None
-    pending_handoff_id = ((handoff_id_factory or uuid4)() if handoff_required else None)
+    pending_handoff_id = (handoff_id_factory or uuid4)() if handoff_required else None
     continue_ai_result: ContinueAIResult | None = None
     if continue_ai_workflow is not None:
         assert lead_repository is not None
@@ -734,6 +737,7 @@ async def process_inbound_message_event(
             decision_reason=inbound_decision.reason_code,
             lead_workflow_repository=lead_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
+            paused_search_occurrence_repository=paused_search_occurrence_repository,
             now=now,
             external_event_id=saved_event.external_event_id,
             conversation_id=conversation.conversation_id,
@@ -1524,8 +1528,7 @@ def lead_handoff_acknowledgment_idempotency_key(
     channel: ContactChannel,
 ) -> str:
     return (
-        f"handoff:{handoff_id}:inbound:{inbound_message_id}:"
-        f"lead-acknowledgment:{channel.value}:v1"
+        f"handoff:{handoff_id}:inbound:{inbound_message_id}:lead-acknowledgment:{channel.value}:v1"
     )
 
 
@@ -1623,7 +1626,7 @@ async def _recent_handoff_acknowledgment_conversation_context(
         )
 
     recent_lines = sorted(lines, key=lambda item: item.occurred_at)[
-        -_HANDOFF_ACKNOWLEDGMENT_RECENT_TRANSCRIPT_LIMIT :
+        -_HANDOFF_ACKNOWLEDGMENT_RECENT_TRANSCRIPT_LIMIT:
     ]
     if not recent_lines:
         return None
@@ -1699,6 +1702,7 @@ async def _apply_workflow_transition_if_configured(
     decision_reason: InboundActionReasonCode,
     lead_workflow_repository: LeadWorkflowRepository | None,
     workflow_transition_repository: WorkflowTransitionRepository | None,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
     now: datetime,
     external_event_id: UUID | None,
     conversation_id: UUID | None,
@@ -1717,6 +1721,7 @@ async def _apply_workflow_transition_if_configured(
         decision_reason=decision_reason,
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
+        paused_search_occurrence_repository=paused_search_occurrence_repository,
         now=now,
         external_event_id=external_event_id,
         conversation_id=conversation_id,
@@ -1797,11 +1802,7 @@ async def _send_review_notification_if_configured(
         if assigned_agent is not None and assigned_agent.email
         else fallback_email
     )
-    recipient_id = (
-        assigned_agent.crm_agent_id
-        if assigned_agent is not None
-        else fallback_email
-    )
+    recipient_id = assigned_agent.crm_agent_id if assigned_agent is not None else fallback_email
     if recipient_destination is None or recipient_id is None:
         return ReviewNotificationResult(failure_reason="missing_notification_destination")
 
@@ -1957,7 +1958,6 @@ async def _enqueue_inbound_processed_signal_if_configured(
         )
     )
     return True
-
 
 
 async def _try_resolve_continue_ai_workflow(
@@ -2154,9 +2154,7 @@ def _build_inbound_processing_audit(
     return {
         "classifier": {
             "status": classification.status.value,
-            "intent": (
-                classification.intent.value if classification.intent is not None else None
-            ),
+            "intent": (classification.intent.value if classification.intent is not None else None),
             "confidence": classification.confidence,
             "prompt_version": classification.prompt_version,
             "model": classification.model,
@@ -2195,9 +2193,7 @@ def _build_inbound_processing_audit(
                 continue_ai_result.pause_reason if continue_ai_result is not None else None
             ),
             "block_explanation": (
-                continue_ai_result.block_explanation
-                if continue_ai_result is not None
-                else None
+                continue_ai_result.block_explanation if continue_ai_result is not None else None
             ),
             "send_block_reasons": (
                 [reason.value for reason in continue_ai_result.reasons]
@@ -2211,9 +2207,7 @@ def _build_inbound_processing_audit(
                 else None
             ),
             "provider_message_id": (
-                continue_ai_result.provider_message_id
-                if continue_ai_result is not None
-                else None
+                continue_ai_result.provider_message_id if continue_ai_result is not None else None
             ),
         },
         "workflow": {
@@ -2256,9 +2250,7 @@ def _build_inbound_processing_audit(
             "failure_reason": review_notification.failure_reason,
         },
         "handoff": {
-            "handoff_id": (
-                str(handoff.handoff_id) if handoff is not None else None
-            ),
+            "handoff_id": (str(handoff.handoff_id) if handoff is not None else None),
             "reused_existing_handoff": existing_handoff_reused,
             "completion_status": (
                 handoff_completion_result.status.value

@@ -333,9 +333,7 @@ class PostgresInboundMessageCRMCompletionRepository:
         record: InboundMessageCRMCompletionRecord,
     ) -> InboundMessageCRMCompletionRecord:
         values = _inbound_message_crm_completion_to_values(record)
-        update_values = {
-            key: value for key, value in values.items() if key != "inbound_message_id"
-        }
+        update_values = {key: value for key, value in values.items() if key != "inbound_message_id"}
         statement = (
             insert(InboundMessageCRMCompletionModel)
             .values(**values)
@@ -655,9 +653,7 @@ def _model_to_crm_conversation_event(model: CrmConversationEventModel) -> CrmCon
         crm_activity_id=model.crm_activity_id,
         activity_type=model.activity_type,
         direction=(
-            CrmConversationEventDirection(model.direction)
-            if model.direction is not None
-            else None
+            CrmConversationEventDirection(model.direction) if model.direction is not None else None
         ),
         occurred_at=model.occurred_at,
         content=model.content,

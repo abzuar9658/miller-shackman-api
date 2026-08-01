@@ -1,4 +1,5 @@
 from functools import lru_cache
+from uuid import UUID
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -41,11 +42,13 @@ class Settings(BaseSettings):
     listing_source_crawl_scheduler_source_limit: int = 100
     temporal_address: str = "localhost:57233"
     temporal_task_queue: str = "miller-schackman-task-queue"
+    recurring_paused_search_pilot_workspace_ids: list[UUID] = Field(default_factory=list)
 
     crm_provider: str = "follow_up_boss"
     fub_api_key: SecretStr | None = None
     fub_base_url: str = "https://api.followupboss.com/v1"
     fub_inbox_sync_enabled: bool = False
+    fub_history_import_enabled: bool = False
     fub_inbox_app_id: str = ""
     fub_inbox_sender_name: str = "AI Assistant"
 

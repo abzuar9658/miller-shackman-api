@@ -64,7 +64,12 @@ from app.application.use_cases.review_queue_read import (
     ReviewQueueReadStatus,
     list_pending_routing_reviews,
 )
+from app.application.use_cases.terminalize_paused_search import (
+    PausedSearchTerminalizationStatus,
+    terminalize_paused_search,
+)
 from app.domain.campaigns.outbound_message import OutboundMessage
+from app.domain.campaigns.paused_search_tracks import PausedSearchTerminalBehavior
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
 from app.domain.compliance import (
     ContactabilityDecision,
@@ -161,6 +166,8 @@ from app.interfaces.api.schemas.leads import (
     SkipPausedSearchNextTouchResponse,
     StartLeadManualEnrollmentRequest,
     StartLeadManualEnrollmentResponse,
+    TerminalizePausedSearchRequest,
+    TerminalizePausedSearchResponse,
     UpdateLeadPausedSearchRequest,
     UpdateLeadPausedSearchResponse,
     WorkflowTransitionResponse,
@@ -748,6 +755,7 @@ async def migrate_paused_search_track_route(
         paused_search_track_repository=bundle.paused_search_track_repository,
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         workspace_repository=bundle.workspace_repository,
+        paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
         now=datetime.now(UTC),
     )
     _raise_for_override_error(result.status, [reason.value for reason in result.reasons])
@@ -787,6 +795,7 @@ async def skip_paused_search_next_touch_route(
         paused_search_track_repository=bundle.paused_search_track_repository,
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         workspace_repository=bundle.workspace_repository,
+        paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
         now=datetime.now(UTC),
     )
     _raise_for_override_error(result.status, [reason.value for reason in result.reasons])
@@ -800,6 +809,64 @@ async def skip_paused_search_next_touch_route(
         reasons=[reason.value for reason in result.reasons],
     )
 
+
+@router.post(
+    "/{workspace_id}/leads/{lead_id}/paused-search/terminalize",
+    response_model=TerminalizePausedSearchResponse,
+)
+async def terminalize_paused_search_route(
+    workspace_id: UUID,
+    lead_id: UUID,
+    request: TerminalizePausedSearchRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[LeadResumeActionBundle, Depends(get_lead_resume_action_bundle)],
+) -> TerminalizePausedSearchResponse:
+    try:
+        terminal_behavior = PausedSearchTerminalBehavior(request.terminal_behavior)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=["invalid_target"],
+        ) from exc
+    assert bundle.paused_search_occurrence_repository is not None
+    result = await terminalize_paused_search(
+        actor=actor,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        terminal_behavior=terminal_behavior,
+        reason=request.reason,
+        lead_repository=bundle.lead_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        external_event_repository=bundle.external_event_repository,
+        commit=bundle.session.commit,
+        now=datetime.now(UTC),
+    )
+    if result.status is PausedSearchTerminalizationStatus.REJECTED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=[reason.value for reason in result.reasons],
+        )
+    if result.status is PausedSearchTerminalizationStatus.NOT_FOUND:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=[reason.value for reason in result.reasons],
+        )
+    if result.status is PausedSearchTerminalizationStatus.INVALID:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=[reason.value for reason in result.reasons],
+        )
+    return TerminalizePausedSearchResponse(
+        status=result.status.value,
+        lead_id=result.lead_id,
+        workflow_id=result.workflow_id,
+        workflow_state=result.workflow_state.value if result.workflow_state else None,
+        reasons=[reason.value for reason in result.reasons],
+        signal_queued=result.signal_queued,
+    )
 
 
 @router.post(
@@ -1057,9 +1124,7 @@ def _lead_detail_response(
         paused_search_history=[
             _paused_search_history_response(item) for item in view.paused_search_history
         ],
-        routing_reviews=[
-            _routing_review_response(item) for item in view.routing_reviews
-        ],
+        routing_reviews=[_routing_review_response(item) for item in view.routing_reviews],
         rejected_draft_reviews=[
             _rejected_draft_review_response(item) for item in view.rejected_draft_reviews
         ],
@@ -1353,9 +1418,7 @@ def _lead_sendability_response(
     return LeadSendabilityResponse(
         sms=_channel_sendability_response(sms_decision),
         email=_channel_sendability_response(email_decision),
-        sendable_channels=[
-            decision.channel.value for decision in decisions if decision.allowed
-        ],
+        sendable_channels=[decision.channel.value for decision in decisions if decision.allowed],
         blocked_reasons=_blocked_reason_values(decisions),
     )
 

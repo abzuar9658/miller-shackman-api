@@ -1,8 +1,10 @@
 import asyncio
 
+from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client
 
-from app.application.ports.messaging import SMSMessage
+from app.application.ports.messaging import ProviderSendFailure, SMSMessage
+from app.infrastructure.messaging.provider_errors import classify_http_status
 
 _WHATSAPP_PREFIX = "whatsapp:"
 
@@ -39,4 +41,10 @@ class TwilioSMSProvider:
             )
             return str(sent.sid)
 
-        return await asyncio.to_thread(_send)
+        try:
+            return await asyncio.to_thread(_send)
+        except TwilioRestException as exc:
+            raise ProviderSendFailure(
+                classify_http_status(exc.status),
+                str(exc),
+            ) from exc

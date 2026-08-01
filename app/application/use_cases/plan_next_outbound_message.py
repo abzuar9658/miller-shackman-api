@@ -33,6 +33,7 @@ from app.application.use_cases.plan_outbound_message import (
 )
 from app.domain.campaigns.pre_send import PreSendPolicy, WorkflowState
 from app.domain.campaigns.start_queue import CampaignStatus
+from app.domain.campaigns.template_registry import TemplateVersion
 from app.domain.common.ids import CampaignId, LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel, WorkspaceContactPolicy
 from app.domain.conversations import CrmConversationEvent
@@ -64,6 +65,7 @@ class PlanNextOutboundMessageContext:
     brokerage_name: str
     cadence_step_id: str
     template_key: str | None = None
+    template_version: TemplateVersion | None = None
     assigned_agent_name: str | None = None
     scheduled_for: datetime | None = None
     message_version: int = 1
@@ -154,6 +156,7 @@ async def plan_next_outbound_message_for_lead(
         brokerage_name=context.brokerage_name,
         cadence_step_id=context.cadence_step_id,
         template_key=context.template_key,
+        template_version=context.template_version,
         assigned_agent_name=context.assigned_agent_name or _assigned_agent_name_from_lead(lead),
         scheduled_for=context.scheduled_for,
         message_version=context.message_version,

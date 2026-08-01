@@ -8,6 +8,7 @@ from app.application.ports.lead_read import LeadReadLeadRepository, LeadReadWork
 from app.application.ports.repositories import (
     ExternalEventRepository,
     LeadWorkflowRepository,
+    PausedSearchOccurrenceRepository,
     TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
 )
@@ -68,6 +69,7 @@ async def pause_lead_workflow(
     workflow_repository: LeadReadWorkflowRepository,
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     external_event_repository: ExternalEventRepository,
     commit: Callable[[], Awaitable[None]],
@@ -114,6 +116,7 @@ async def pause_lead_workflow(
         reason_code=WorkflowTransitionReasonCode.MANUAL_PAUSE,
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
+        paused_search_occurrence_repository=paused_search_occurrence_repository,
         now=now,
         actor_user_id=actor.user_id,
         external_event_id=external_event.external_event_id,

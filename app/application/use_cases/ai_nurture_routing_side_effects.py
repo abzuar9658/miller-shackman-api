@@ -145,9 +145,7 @@ async def create_or_complete_ai_nurture_handoff(
     return AiNurtureHandoffResult(
         handoff_id=handoff.handoff_id,
         completion_status=(completion_result.status if completion_result else None),
-        completion_failure_reason=(
-            completion_result.failure_reason if completion_result else None
-        ),
+        completion_failure_reason=(completion_result.failure_reason if completion_result else None),
     )
 
 
@@ -180,9 +178,7 @@ def _handoff_summary(
     fallback_summary: str,
 ) -> str:
     classification_summary = (
-        route_result.classification_result.summary
-        if route_result.classification_result
-        else None
+        route_result.classification_result.summary if route_result.classification_result else None
     )
     artifact_summary = route_result.artifact.summary if route_result.artifact is not None else None
     latest_inbound = _latest_crm_inbound_text(crm_events)

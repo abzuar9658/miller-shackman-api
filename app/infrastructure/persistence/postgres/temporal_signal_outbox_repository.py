@@ -21,9 +21,7 @@ class PostgresTemporalSignalOutboxRepository:
         result = await self._session.execute(
             insert(TemporalSignalOutboxModel)
             .values(**_entry_to_values(entry))
-            .on_conflict_do_nothing(
-                constraint="uq_temporal_signal_outbox_workspace_idempotency"
-            )
+            .on_conflict_do_nothing(constraint="uq_temporal_signal_outbox_workspace_idempotency")
             .returning(TemporalSignalOutboxModel)
         )
         model = result.scalar_one_or_none()

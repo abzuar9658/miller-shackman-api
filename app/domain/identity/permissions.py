@@ -16,6 +16,7 @@ class PermissionCapability(StrEnum):
     MANAGE_CRM_AGENT_MAPPINGS = "manage_crm_agent_mappings"
     VIEW_WORKSPACE_REPORTING = "view_workspace_reporting"
     MANAGE_LISTING_SOURCES = "manage_listing_sources"
+    IMPORT_CRM_HISTORY = "import_crm_history"
     VIEW_OWN_ASSIGNED_LEAD = "view_own_assigned_lead"
     ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS = "enroll_own_lead_when_campaign_allows"
     ENROLL_ANY_ELIGIBLE_LEAD = "enroll_any_eligible_lead"
@@ -27,6 +28,12 @@ class PermissionCapability(StrEnum):
     EDIT_PAUSED_SEARCH_PROFILE_ANY_LEAD = "edit_paused_search_profile_any_lead"
     RESUME_AI_AFTER_HANDOFF_OWN_LEAD = "resume_ai_after_handoff_own_lead"
     RESUME_OR_REASSIGN_ANY_LEAD = "resume_or_reassign_any_lead"
+    RESOLVE_UNCERTAIN_PAUSED_SEARCH_OWN_LEAD = "resolve_uncertain_paused_search_own_lead"
+    RESOLVE_UNCERTAIN_PAUSED_SEARCH_ANY_LEAD = "resolve_uncertain_paused_search_any_lead"
+    VIEW_PAUSED_SEARCH_OWN = "view_paused_search_own"
+    VIEW_PAUSED_SEARCH_ANY = "view_paused_search_any"
+    ACT_ON_PAUSED_SEARCH_OWN = "act_on_paused_search_own"
+    ACT_ON_PAUSED_SEARCH_ANY = "act_on_paused_search_any"
     CHANGE_CONSENT_SUPPRESSION_POLICY = "change_consent_suppression_policy"
 
 
@@ -136,17 +143,22 @@ def _role_allows(
 ) -> bool:
     if role == WorkspaceMembershipRole.ASSIGNED_AGENT:
         return capability in {
+            PermissionCapability.IMPORT_CRM_HISTORY,
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
             PermissionCapability.ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS,
             PermissionCapability.VETO_OWN_PREFLIGHT_LEAD,
             PermissionCapability.VIEW_OWN_PREFLIGHT_LEAD,
             PermissionCapability.EDIT_PAUSED_SEARCH_PROFILE_OWN_LEAD,
             PermissionCapability.RESUME_AI_AFTER_HANDOFF_OWN_LEAD,
+            PermissionCapability.RESOLVE_UNCERTAIN_PAUSED_SEARCH_OWN_LEAD,
+            PermissionCapability.VIEW_PAUSED_SEARCH_OWN,
+            PermissionCapability.ACT_ON_PAUSED_SEARCH_OWN,
         }
 
     if role == WorkspaceMembershipRole.MANAGER:
         return capability in {
             PermissionCapability.VIEW_WORKSPACE_REPORTING,
+            PermissionCapability.IMPORT_CRM_HISTORY,
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
             PermissionCapability.ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS,
             PermissionCapability.ENROLL_ANY_ELIGIBLE_LEAD,
@@ -155,6 +167,9 @@ def _role_allows(
             PermissionCapability.EDIT_PAUSED_SEARCH_PROFILE_ANY_LEAD,
             PermissionCapability.RESUME_AI_AFTER_HANDOFF_OWN_LEAD,
             PermissionCapability.RESUME_OR_REASSIGN_ANY_LEAD,
+            PermissionCapability.RESOLVE_UNCERTAIN_PAUSED_SEARCH_ANY_LEAD,
+            PermissionCapability.VIEW_PAUSED_SEARCH_ANY,
+            PermissionCapability.ACT_ON_PAUSED_SEARCH_ANY,
         }
 
     if role == WorkspaceMembershipRole.BROKERAGE_ADMIN:
@@ -164,6 +179,7 @@ def _role_allows(
             PermissionCapability.MANAGE_CRM_AGENT_MAPPINGS,
             PermissionCapability.VIEW_WORKSPACE_REPORTING,
             PermissionCapability.MANAGE_LISTING_SOURCES,
+            PermissionCapability.IMPORT_CRM_HISTORY,
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
             PermissionCapability.ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS,
             PermissionCapability.ENROLL_ANY_ELIGIBLE_LEAD,
@@ -173,6 +189,9 @@ def _role_allows(
             PermissionCapability.EDIT_PAUSED_SEARCH_PROFILE_ANY_LEAD,
             PermissionCapability.RESUME_AI_AFTER_HANDOFF_OWN_LEAD,
             PermissionCapability.RESUME_OR_REASSIGN_ANY_LEAD,
+            PermissionCapability.RESOLVE_UNCERTAIN_PAUSED_SEARCH_ANY_LEAD,
+            PermissionCapability.VIEW_PAUSED_SEARCH_ANY,
+            PermissionCapability.ACT_ON_PAUSED_SEARCH_ANY,
             PermissionCapability.CHANGE_CONSENT_SUPPRESSION_POLICY,
         }
 
@@ -192,11 +211,15 @@ def _context_reasons(
     if (
         capability
         in {
+            PermissionCapability.IMPORT_CRM_HISTORY,
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
             PermissionCapability.ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS,
             PermissionCapability.VETO_OWN_PREFLIGHT_LEAD,
             PermissionCapability.EDIT_PAUSED_SEARCH_PROFILE_OWN_LEAD,
             PermissionCapability.RESUME_AI_AFTER_HANDOFF_OWN_LEAD,
+            PermissionCapability.RESOLVE_UNCERTAIN_PAUSED_SEARCH_OWN_LEAD,
+            PermissionCapability.VIEW_PAUSED_SEARCH_OWN,
+            PermissionCapability.ACT_ON_PAUSED_SEARCH_OWN,
         }
         and not context.acts_on_assigned_lead
     ):

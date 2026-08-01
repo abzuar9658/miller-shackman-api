@@ -11,6 +11,9 @@ from app.domain.leads import (
     AssignmentResolutionStatus,
     CanonicalLeadRecord,
     CRMProvider,
+    CustomerTimingCandidate,
+    CustomerTimingEvidenceType,
+    CustomerTimingStatus,
     EffectiveOwnerSource,
     LeadClassificationReason,
     LeadPausedSearchHistoryEntry,
@@ -21,7 +24,11 @@ from app.domain.leads import (
     PausedSearchSource,
     PropertyEventType,
 )
-from app.infrastructure.persistence.postgres.models import LeadModel, LeadPausedSearchHistoryModel
+from app.infrastructure.persistence.postgres.models import (
+    CustomerTimingModel,
+    LeadModel,
+    LeadPausedSearchHistoryModel,
+)
 
 
 class PostgresLeadRepository:
@@ -221,6 +228,72 @@ class PostgresLeadRepository:
         result = await self._session.execute(statement)
         model = result.scalar_one()
         return _history_model_to_entry(model)
+
+
+class PostgresCustomerTimingRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> tuple[CustomerTimingCandidate, ...]:
+        result = await self._session.execute(
+            select(CustomerTimingModel)
+            .where(
+                CustomerTimingModel.workspace_id == workspace_id,
+                CustomerTimingModel.lead_id == lead_id,
+            )
+            .order_by(CustomerTimingModel.created_at.desc()),
+        )
+        return tuple(_timing_model_to_candidate(model) for model in result.scalars().all())
+
+    async def save(self, candidate: CustomerTimingCandidate) -> CustomerTimingCandidate:
+        result = await self._session.execute(
+            insert(CustomerTimingModel)
+            .values(_timing_candidate_to_values(candidate))
+            .returning(CustomerTimingModel),
+        )
+        return _timing_model_to_candidate(result.scalar_one())
+
+
+def _timing_candidate_to_values(candidate: CustomerTimingCandidate) -> dict[str, object]:
+    return {
+        "timing_id": candidate.timing_id,
+        "workspace_id": candidate.workspace_id,
+        "lead_id": candidate.lead_id,
+        "reason_code": candidate.reason_code.value if candidate.reason_code else None,
+        "customer_date": candidate.customer_date,
+        "source": candidate.source.value,
+        "evidence_type": candidate.evidence_type.value,
+        "evidence": candidate.evidence,
+        "confidence": candidate.confidence,
+        "status": candidate.status.value,
+        "created_at": candidate.created_at,
+        "confirmed_at": candidate.confirmed_at,
+        "confirmed_by_user_id": candidate.confirmed_by_user_id,
+        "superseded_at": candidate.superseded_at,
+    }
+
+
+def _timing_model_to_candidate(model: CustomerTimingModel) -> CustomerTimingCandidate:
+    return CustomerTimingCandidate(
+        timing_id=model.timing_id,
+        workspace_id=model.workspace_id,
+        lead_id=model.lead_id,
+        reason_code=PausedSearchReasonCode(model.reason_code) if model.reason_code else None,
+        customer_date=model.customer_date,
+        source=PausedSearchSource(model.source),
+        evidence_type=CustomerTimingEvidenceType(model.evidence_type),
+        evidence=model.evidence,
+        confidence=model.confidence,
+        status=CustomerTimingStatus(model.status),
+        created_at=model.created_at,
+        confirmed_at=model.confirmed_at,
+        confirmed_by_user_id=model.confirmed_by_user_id,
+        superseded_at=model.superseded_at,
+    )
 
 
 def _record_to_values(

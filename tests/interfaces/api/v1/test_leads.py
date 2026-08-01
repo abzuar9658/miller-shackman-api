@@ -289,9 +289,7 @@ class FakeWorkspaceAgentCRMMappingRepository:
 
 
 class FakeWorkspaceAgentMappingConfigRepository:
-    async def get_by_workspace_id(
-        self, workspace_id: UUID
-    ) -> WorkspaceAgentMappingConfig | None:
+    async def get_by_workspace_id(self, workspace_id: UUID) -> WorkspaceAgentMappingConfig | None:
         return WorkspaceAgentMappingConfig(
             workspace_id=workspace_id,
             unmapped_assignment_fallback_user_id=USER_ID,
@@ -352,25 +350,27 @@ def test_lead_routes_return_list_and_detail() -> None:
     assert detail_response.json()["ownership"]["mapped_app_user"]["user_id"] == str(USER_ID)
     assert detail_response.json()["ownership"]["mapped_app_user"]["email"] == "agent@example.com"
     assert (
-        detail_response.json()["lead"]["paused_search"]["pause_reason_code"]
-        == "waiting_for_rates"
+        detail_response.json()["lead"]["paused_search"]["pause_reason_code"] == "waiting_for_rates"
     )
     assert detail_response.json()["qualification_plan"]["classification_artifact"]["outcome"] == (
         "paused_search"
     )
-    assert detail_response.json()["qualification_plan"]["classification_artifact"][
-        "pause_reason_code"
-    ] == "waiting_for_rates"
+    assert (
+        detail_response.json()["qualification_plan"]["classification_artifact"]["pause_reason_code"]
+        == "waiting_for_rates"
+    )
     trace = detail_response.json()["qualification_plan"]["classification_artifact"]["llm_trace"]
     assert trace["prompt_text"] == "Prompt text for paused-search classification."
     assert trace["input_context"]["conversation_summary"] == "Lead asked to wait for lower rates."
     assert trace["parsed_response"]["outcome"] == "paused_search"
-    assert detail_response.json()["qualification_plan"]["paused_search_plan"][
-        "display_name"
-    ] == "Rates Watch"
-    assert detail_response.json()["qualification_plan"]["paused_search_plan"][
-        "current_phase"
-    ] == "reactivation"
+    assert (
+        detail_response.json()["qualification_plan"]["paused_search_plan"]["display_name"]
+        == "Rates Watch"
+    )
+    assert (
+        detail_response.json()["qualification_plan"]["paused_search_plan"]["current_phase"]
+        == "reactivation"
+    )
     paused_search_edge = next(
         edge
         for edge in detail_response.json()["decision_tree"]["edges"]
@@ -907,11 +907,11 @@ def _client_for_role(
     app.dependency_overrides[get_lead_read_bundle] = lambda: bundle
     app.dependency_overrides[get_lead_resume_read_bundle] = lambda: resume_read_bundle
     app.dependency_overrides[get_lead_resume_action_bundle] = lambda: resume_action_bundle
-    app.dependency_overrides[get_lead_paused_search_action_bundle] = (
-        lambda: paused_search_action_bundle
+    app.dependency_overrides[get_lead_paused_search_action_bundle] = lambda: (
+        paused_search_action_bundle
     )
-    app.dependency_overrides[get_lead_workflow_override_action_bundle] = (
-        lambda: workflow_override_action_bundle
+    app.dependency_overrides[get_lead_workflow_override_action_bundle] = lambda: (
+        workflow_override_action_bundle
     )
     app.dependency_overrides[get_lead_draft_review_action_bundle] = lambda: (
         draft_review_action_bundle

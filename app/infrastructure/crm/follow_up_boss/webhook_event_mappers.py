@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.application.ports.crm_webhook import FollowUpBossWebhookEventBundle
 from app.application.use_cases.process_contact_suppression_event import (
@@ -12,6 +12,7 @@ from app.application.use_cases.process_crm_human_activity_event import (
     process_crm_human_activity_event,
 )
 from app.domain.compliance.contactability import ContactSuppressionKind
+from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
 from app.domain.leads import CRMProvider
 from app.infrastructure.crm.follow_up_boss.webhook_event_parsers import (
     extract_collection,
@@ -39,7 +40,7 @@ async def handle_notes_created(
         if not crm_lead_id or not note_id:
             continue
         note_at = parse_iso(str(note.get("created", ""))) or occurred_at
-        await process_crm_human_activity_event(
+        result = await process_crm_human_activity_event(
             event=CRMHumanActivityEvent(
                 workspace_id=workspace_id,
                 provider=_PROVIDER,
@@ -47,7 +48,7 @@ async def handle_notes_created(
                 crm_lead_id=crm_lead_id,
                 occurred_at=note_at,
                 event_type="note_created",
-                activity_type="note",
+                activity_type="Note",
                 crm_activity_id=note_id,
                 actor_agent_id=str(note.get("userId", "")) or None,
                 changed_field=None,
@@ -59,8 +60,18 @@ async def handle_notes_created(
             external_event_repository=bundle.external_event_repository,
             lead_workflow_repository=bundle.lead_workflow_repository,
             workflow_transition_repository=bundle.workflow_transition_repository,
+            paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
             temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
             now=occurred_at,
+        )
+        await _save_conversation_event(
+            workspace_id=workspace_id,
+            lead_id=result.lead_id,
+            crm_activity_id=f"note:{note_id}",
+            activity_type="note",
+            occurred_at=note_at,
+            resource=note,
+            bundle=bundle,
         )
         processed += 1
     return processed, len(notes) - processed
@@ -73,14 +84,14 @@ async def handle_text_messages_created(
     uri: str,
     bundle: FollowUpBossWebhookEventBundle,
 ) -> tuple[int, int]:
-    return await _handle_outbound_communication_created(
+    return await _handle_communication_created(
         workspace_id=workspace_id,
         event_id=event_id,
         occurred_at=occurred_at,
         uri=uri,
         bundle=bundle,
         collection_key="textMessages",
-        activity_type="text_message",
+        activity_type="Text message",
         crm_activity_prefix="text_message",
         timestamp_fields=("created", "sent", "updated"),
     )
@@ -93,14 +104,14 @@ async def handle_calls_created(
     uri: str,
     bundle: FollowUpBossWebhookEventBundle,
 ) -> tuple[int, int]:
-    return await _handle_outbound_communication_created(
+    return await _handle_communication_created(
         workspace_id=workspace_id,
         event_id=event_id,
         occurred_at=occurred_at,
         uri=uri,
         bundle=bundle,
         collection_key="calls",
-        activity_type="call",
+        activity_type="Call",
         crm_activity_prefix="call",
         timestamp_fields=("created", "called", "updated"),
     )
@@ -141,6 +152,7 @@ async def handle_em_events_unsubscribed(
             external_event_repository=bundle.external_event_repository,
             lead_workflow_repository=bundle.lead_workflow_repository,
             workflow_transition_repository=bundle.workflow_transition_repository,
+            paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
             workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
             temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
             now=occurred_at,
@@ -149,7 +161,7 @@ async def handle_em_events_unsubscribed(
     return processed, len(events) - processed
 
 
-async def _handle_outbound_communication_created(
+async def _handle_communication_created(
     *,
     workspace_id: UUID,
     event_id: str,
@@ -169,10 +181,10 @@ async def _handle_outbound_communication_created(
     for resource in resources:
         crm_lead_id = str(resource.get("personId", ""))
         resource_id = str(resource.get("id", ""))
-        if not crm_lead_id or not resource_id or not _is_explicitly_outbound(resource):
+        if not crm_lead_id or not resource_id:
             continue
         activity_at = _parse_first_timestamp(resource, timestamp_fields) or occurred_at
-        await process_crm_human_activity_event(
+        result = await process_crm_human_activity_event(
             event=CRMHumanActivityEvent(
                 workspace_id=workspace_id,
                 provider=_PROVIDER,
@@ -192,18 +204,101 @@ async def _handle_outbound_communication_created(
             external_event_repository=bundle.external_event_repository,
             lead_workflow_repository=bundle.lead_workflow_repository,
             workflow_transition_repository=bundle.workflow_transition_repository,
+            paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
             temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
             now=activity_at,
+        )
+        await _save_conversation_event(
+            workspace_id=workspace_id,
+            lead_id=result.lead_id,
+            crm_activity_id=f"{crm_activity_prefix}:{resource_id}",
+            activity_type=activity_type,
+            occurred_at=activity_at,
+            resource=resource,
+            bundle=bundle,
         )
         processed += 1
     return processed, len(resources) - processed
 
 
-def _is_explicitly_outbound(payload: dict[str, Any]) -> bool:
+async def _save_conversation_event(
+    *,
+    workspace_id: UUID,
+    lead_id: UUID | None,
+    crm_activity_id: str,
+    activity_type: str,
+    occurred_at: datetime,
+    resource: dict[str, Any],
+    bundle: FollowUpBossWebhookEventBundle,
+) -> None:
+    if lead_id is None:
+        return
+    await bundle.crm_conversation_event_repository.save(
+        CrmConversationEvent(
+            crm_conversation_event_id=uuid4(),
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            crm_provider=_PROVIDER,
+            crm_activity_id=crm_activity_id,
+            activity_type=activity_type,
+            occurred_at=occurred_at,
+            created_at=occurred_at,
+            updated_at=occurred_at,
+            direction=(
+                _communication_direction(resource)
+                or (
+                    CrmConversationEventDirection.INTERNAL
+                    if activity_type.lower() == "note"
+                    else None
+                )
+            ),
+            content=_communication_content(resource),
+            actor_agent_id=_optional_string(resource.get("userId")),
+            actor_name=_first_string(resource.get("userName"), resource.get("fromName")),
+            details={"source": "follow_up_boss_webhook"},
+        )
+    )
+
+
+def _communication_direction(
+    payload: dict[str, Any],
+) -> CrmConversationEventDirection | None:
     if isinstance(payload.get("isIncoming"), bool):
-        return not bool(payload["isIncoming"])
+        return (
+            CrmConversationEventDirection.INBOUND
+            if payload["isIncoming"]
+            else CrmConversationEventDirection.OUTBOUND
+        )
     direction = str(payload.get("direction", "")).strip().lower()
-    return direction == "outbound"
+    try:
+        return CrmConversationEventDirection(direction)
+    except ValueError:
+        return None
+
+
+def _communication_content(payload: dict[str, Any]) -> str | None:
+    return _first_string(
+        payload.get("message"),
+        payload.get("body"),
+        payload.get("content"),
+        payload.get("transcript"),
+        payload.get("summary"),
+        payload.get("note"),
+        payload.get("description"),
+    )
+
+
+def _first_string(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str):
+            normalized = " ".join(value.split())
+            if normalized:
+                return normalized
+    return None
+
+
+def _optional_string(value: Any) -> str | None:
+    return _first_string(value)
 
 
 def _parse_first_timestamp(

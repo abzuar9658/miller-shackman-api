@@ -145,6 +145,25 @@ def test_manager_can_enroll_any_eligible_lead() -> None:
     assert decision.reasons == ()
 
 
+def test_only_manager_and_brokerage_admin_can_import_crm_history() -> None:
+    for role in (WorkspaceMembershipRole.MANAGER, WorkspaceMembershipRole.BROKERAGE_ADMIN):
+        decision = evaluate_permission(
+            _actor(role=role),
+            PermissionCapability.IMPORT_CRM_HISTORY,
+        )
+        assert decision.allowed is True
+
+    for role in (
+        WorkspaceMembershipRole.ASSIGNED_AGENT,
+        WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN,
+    ):
+        decision = evaluate_permission(
+            _actor(role=role),
+            PermissionCapability.IMPORT_CRM_HISTORY,
+        )
+        assert decision.allowed is False
+
+
 def test_brokerage_admin_can_invite_workspace_user() -> None:
     decision = evaluate_permission(
         _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN),

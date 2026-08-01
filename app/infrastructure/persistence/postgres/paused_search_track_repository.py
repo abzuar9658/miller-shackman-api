@@ -4,11 +4,14 @@ from uuid import uuid4
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchReasonMapping,
+    PausedSearchTerminalBehavior,
+    PausedSearchTimingBasis,
     PausedSearchTrack,
     PausedSearchTrackAdminAuditAction,
     PausedSearchTrackAdminAuditLog,
@@ -54,10 +57,25 @@ class PostgresPausedSearchTrackAdminRepository:
         workspace_id: WorkspaceId,
         track_id: PausedSearchTrackId,
     ) -> PausedSearchTrack | None:
+        return await self._get_track(workspace_id, track_id, for_update=False)
+
+    async def get_track_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+    ) -> PausedSearchTrack | None:
+        return await self._get_track(workspace_id, track_id, for_update=True)
+
+    async def _get_track(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+        *,
+        for_update: bool,
+    ) -> PausedSearchTrack | None:
+        statement = _track_statement(workspace_id, track_id, for_update=for_update)
         result = await self._session.execute(
-            select(PausedSearchTrackModel)
-            .where(PausedSearchTrackModel.workspace_id == workspace_id)
-            .where(PausedSearchTrackModel.track_id == track_id),
+            statement,
         )
         model = result.scalar_one_or_none()
         return _track_from_model(model) if model is not None else None
@@ -302,6 +320,20 @@ class PostgresPausedSearchTrackAdminAuditLogRepository:
         return _audit_from_model(result.scalar_one())
 
 
+def _track_statement(
+    workspace_id: WorkspaceId,
+    track_id: PausedSearchTrackId,
+    *,
+    for_update: bool,
+) -> Select[tuple[PausedSearchTrackModel]]:
+    statement = (
+        select(PausedSearchTrackModel)
+        .where(PausedSearchTrackModel.workspace_id == workspace_id)
+        .where(PausedSearchTrackModel.track_id == track_id)
+    )
+    return statement.with_for_update() if for_update else statement
+
+
 def _track_to_values(track: PausedSearchTrack) -> dict[str, object]:
     return {
         "track_id": track.track_id,
@@ -348,6 +380,9 @@ def _version_to_values(version: PausedSearchTrackVersion) -> dict[str, object]:
         "reactivation_window_days": version.reactivation_window_days,
         "max_total_touches": version.max_total_touches,
         "requires_review_before_publish": version.requires_review_before_publish,
+        "default_pause_duration_days": version.default_pause_duration_days,
+        "max_duration_days": version.max_duration_days,
+        "terminal_behavior": version.terminal_behavior.value,
         "created_by_user_id": version.created_by_user_id,
         "published_at": version.published_at,
         "created_at": version.created_at,
@@ -372,6 +407,9 @@ def _version_from_model(model: PausedSearchTrackVersionModel) -> PausedSearchTra
         reactivation_window_days=model.reactivation_window_days,
         max_total_touches=model.max_total_touches,
         requires_review_before_publish=model.requires_review_before_publish,
+        default_pause_duration_days=model.default_pause_duration_days,
+        max_duration_days=model.max_duration_days,
+        terminal_behavior=PausedSearchTerminalBehavior(model.terminal_behavior),
         created_by_user_id=model.created_by_user_id,
         published_at=model.published_at,
         created_at=model.created_at,
@@ -385,12 +423,17 @@ def _step_to_values(step: PausedSearchTrackStep) -> dict[str, object]:
         "track_version_id": step.track_version_id,
         "step_order": step.step_order,
         "phase": step.phase.value,
+        "timing_basis": step.timing_basis.value,
+        "fallback_channel": step.fallback_channel.value if step.fallback_channel else None,
         "channel": step.channel.value,
         "delay_hours": step.delay_hours,
         "message_goal": step.message_goal,
         "template_key": step.template_key,
+        "template_version_id": step.template_version_id,
         "max_attempts": step.max_attempts,
         "review_required": step.review_required,
+        "interval_days": step.interval_days,
+        "max_occurrences": step.max_occurrences,
         "created_at": step.created_at,
     }
 
@@ -402,13 +445,20 @@ def _step_from_model(model: PausedSearchTrackStepModel) -> PausedSearchTrackStep
         track_version_id=model.track_version_id,
         step_order=model.step_order,
         phase=PausedSearchTrackStepPhase(model.phase),
+        timing_basis=PausedSearchTimingBasis(model.timing_basis),
+        fallback_channel=(
+            ContactChannel(model.fallback_channel) if model.fallback_channel is not None else None
+        ),
         channel=ContactChannel(model.channel),
         delay_hours=model.delay_hours,
         message_goal=model.message_goal,
         template_key=model.template_key,
+        template_version_id=model.template_version_id,
         max_attempts=model.max_attempts,
         review_required=model.review_required,
         created_at=model.created_at,
+        interval_days=model.interval_days,
+        max_occurrences=model.max_occurrences,
     )
 
 

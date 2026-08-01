@@ -8,6 +8,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.application.ports.reporting import ReportingRepository
 from app.domain.campaigns.admin import CampaignAdminAuditAction
+from app.domain.campaigns.paused_search_occurrences import RecurringOccurrenceStatus
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.crm_sync import CRMSyncJobStatus, ExternalEventStatus
 from app.domain.events import OutboxEventStatus
@@ -17,6 +18,7 @@ from app.domain.reporting import (
     EnrollmentStatusCounts,
     HandoffStatusCounts,
     MessageStatusCounts,
+    PausedSearchOccurrenceHealth,
     WorkflowStateCounts,
     WorkspaceOperationsSummary,
 )
@@ -28,6 +30,7 @@ from app.infrastructure.persistence.postgres.models import (
     HandoffModel,
     OutboundMessageModel,
     OutboxEventModel,
+    RecurringOccurrenceModel,
 )
 from app.infrastructure.persistence.postgres.workflow_models import (
     CampaignEnrollmentModel,
@@ -61,6 +64,7 @@ class PostgresReportingRepository(ReportingRepository):
             (OutboundMessageModel.workspace_id == workspace_id,)
         )
         handoff_counts = await self._handoff_counts((HandoffModel.workspace_id == workspace_id,))
+        occurrence_health = await self._paused_search_occurrence_health(workspace_id)
         last_successful_sync_at = await self._session.scalar(
             select(func.max(CRMSyncJobModel.finished_at)).where(
                 CRMSyncJobModel.workspace_id == workspace_id,
@@ -75,6 +79,7 @@ class PostgresReportingRepository(ReportingRepository):
             workflow_counts=workflow_counts,
             message_counts=message_counts,
             handoff_counts=handoff_counts,
+            paused_search_occurrence_health=occurrence_health,
             pending_external_events=await self._count_rows(
                 ExternalEventModel,
                 (
@@ -237,5 +242,45 @@ class PostgresReportingRepository(ReportingRepository):
             delivered=delivery_counts.get("delivered", 0),
             delivery_issues=sum(
                 delivery_counts.get(status, 0) for status in _DELIVERY_ISSUE_STATUSES
+            ),
+        )
+
+    async def _paused_search_occurrence_health(
+        self,
+        workspace_id: UUID,
+    ) -> PausedSearchOccurrenceHealth:
+        filters = (RecurringOccurrenceModel.workspace_id == workspace_id,)
+        counts = await self._counts_by_status(RecurringOccurrenceModel.status, filters)
+        return PausedSearchOccurrenceHealth(
+            due=await self._count_rows(
+                RecurringOccurrenceModel,
+                filters
+                + (
+                    RecurringOccurrenceModel.status.in_(
+                        (
+                            RecurringOccurrenceStatus.PLANNED.value,
+                            RecurringOccurrenceStatus.APPROVED.value,
+                        )
+                    ),
+                    RecurringOccurrenceModel.due_at <= func.now(),
+                ),
+            ),
+            held=counts.get(RecurringOccurrenceStatus.DEFERRED.value, 0),
+            review_pending=counts.get(RecurringOccurrenceStatus.REVIEW_REQUESTED.value, 0),
+            expired=counts.get(RecurringOccurrenceStatus.EXPIRED.value, 0),
+            failed=counts.get(RecurringOccurrenceStatus.FAILED.value, 0),
+            uncertain=counts.get(RecurringOccurrenceStatus.UNCERTAIN.value, 0),
+            terminal=sum(
+                counts.get(status.value, 0)
+                for status in (
+                    RecurringOccurrenceStatus.SENT,
+                    RecurringOccurrenceStatus.SKIPPED,
+                    RecurringOccurrenceStatus.CANCELLED,
+                    RecurringOccurrenceStatus.MIGRATED_LEGACY,
+                )
+            ),
+            fallback=await self._count_rows(
+                RecurringOccurrenceModel,
+                filters + (RecurringOccurrenceModel.fallback_used.is_(True),),
             ),
         )

@@ -32,10 +32,23 @@ class PausedSearchTrackStepPhase(StrEnum):
     REACTIVATION = "reactivation"
 
 
+class PausedSearchTimingBasis(StrEnum):
+    CUSTOMER_REENGAGEMENT_DATE = "customer_reengagement_date"
+    WORKFLOW_CREATED_AT = "workflow_created_at"
+    PREVIOUS_OCCURRENCE = "previous_occurrence"
+
+
 class PausedSearchFallbackTimingPolicy(StrEnum):
     HOLD_FOR_REVIEW = "hold_for_review"
     USE_REENGAGEMENT_NOT_BEFORE = "use_reengagement_not_before"
     USE_MAINTENANCE_INTERVAL = "use_maintenance_interval"
+    USE_DEFAULT_PAUSE_DURATION = "use_default_pause_duration"
+
+
+class PausedSearchTerminalBehavior(StrEnum):
+    COMPLETE_KEEP_PAUSED = "complete_keep_paused"
+    PAUSE_FOR_REVIEW = "pause_for_review"
+    CLOSE_AUTOMATION = "close_automation"
 
 
 class PausedSearchTrackAdminAuditAction(StrEnum):
@@ -93,6 +106,11 @@ class PausedSearchTrackVersion:
     created_by_user_id: UserId
     created_at: datetime
     published_at: datetime | None = None
+    default_pause_duration_days: int = 60
+    max_duration_days: int = 365
+    terminal_behavior: PausedSearchTerminalBehavior = (
+        PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED
+    )
 
 
 @dataclass(frozen=True)
@@ -109,6 +127,11 @@ class PausedSearchTrackStep:
     max_attempts: int
     review_required: bool
     created_at: datetime
+    timing_basis: PausedSearchTimingBasis = PausedSearchTimingBasis.CUSTOMER_REENGAGEMENT_DATE
+    fallback_channel: ContactChannel | None = None
+    interval_days: int | None = None
+    max_occurrences: int = 1
+    template_version_id: UUID | None = None
 
 
 @dataclass(frozen=True)

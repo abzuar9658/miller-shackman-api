@@ -80,6 +80,40 @@ class FakeLeadWorkflowRepository:
     ) -> LeadWorkflow | None:
         return self.latest_by_lead.get((workspace_id, lead_id))
 
+    async def list_active_paused_search_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> tuple[LeadWorkflow, ...]:
+        return self._active_paused_search_for_lead(workspace_id, lead_id)
+
+    async def list_active_paused_search_for_lead_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> tuple[LeadWorkflow, ...]:
+        return self._active_paused_search_for_lead(workspace_id, lead_id)
+
+    def _active_paused_search_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> tuple[LeadWorkflow, ...]:
+        active_states = {
+            WorkflowState.QUEUED,
+            WorkflowState.ACTIVE_NURTURE,
+            WorkflowState.WAITING_FOR_RESPONSE,
+            WorkflowState.RESPONSE_PROCESSING,
+        }
+        return tuple(
+            workflow
+            for workflow in self.workflows.values()
+            if workflow.workspace_id == workspace_id
+            and workflow.lead_id == lead_id
+            and workflow.paused_search_track_version_id is not None
+            and workflow.state in active_states
+        )
+
     async def list_paused_for_workspace(
         self,
         workspace_id: WorkspaceId,
@@ -89,8 +123,7 @@ class FakeLeadWorkflowRepository:
         matches = tuple(
             workflow
             for workflow in self.latest_by_lead.values()
-            if workflow.workspace_id == workspace_id
-            and workflow.state == WorkflowState.PAUSED
+            if workflow.workspace_id == workspace_id and workflow.state == WorkflowState.PAUSED
         )
         return matches[:limit]
 

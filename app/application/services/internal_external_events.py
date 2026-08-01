@@ -18,15 +18,24 @@ async def create_internal_external_event(
     event_type: str,
     now: datetime,
     payload_redacted: Mapping[str, object] | None = None,
+    provider_event_id: str | None = None,
     id_generator: Callable[[], UUID] = uuid4,
 ) -> ExternalEvent:
+    if provider_event_id is not None:
+        existing = await external_event_repository.get_by_provider_event_id(
+            workspace_id,
+            _INTERNAL_PROVIDER,
+            provider_event_id,
+        )
+        if existing is not None:
+            return existing
     external_event_id = id_generator()
     event = ExternalEvent(
         external_event_id=external_event_id,
         workspace_id=workspace_id,
         provider=_INTERNAL_PROVIDER,
         event_type=event_type,
-        provider_event_id=f"{event_type}:{lead_id}:{external_event_id}",
+        provider_event_id=(provider_event_id or f"{event_type}:{lead_id}:{external_event_id}"),
         crm_lead_id=None,
         lead_id=lead_id,
         received_at=now,

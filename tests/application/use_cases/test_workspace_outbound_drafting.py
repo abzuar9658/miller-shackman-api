@@ -60,23 +60,17 @@ class _FakeListingSourceRepository:
     def __init__(self, source: ListingSource) -> None:
         self._source = source
 
-    async def get_by_id(
-        self, workspace_id: UUID, source_id: UUID
-    ) -> ListingSource | None:
+    async def get_by_id(self, workspace_id: UUID, source_id: UUID) -> ListingSource | None:
         if self._source.workspace_id == workspace_id and self._source.source_id == source_id:
             return self._source
         return None
 
-    async def get_by_name(
-        self, workspace_id: UUID, name: str
-    ) -> ListingSource | None:
+    async def get_by_name(self, workspace_id: UUID, name: str) -> ListingSource | None:
         if self._source.workspace_id == workspace_id and self._source.name == name:
             return self._source
         return None
 
-    async def list_for_workspace(
-        self, workspace_id: UUID
-    ) -> tuple[ListingSource, ...]:
+    async def list_for_workspace(self, workspace_id: UUID) -> tuple[ListingSource, ...]:
         return (self._source,) if workspace_id == self._source.workspace_id else ()
 
     async def list_enabled(self, *, limit: int = 100) -> tuple[ListingSource, ...]:

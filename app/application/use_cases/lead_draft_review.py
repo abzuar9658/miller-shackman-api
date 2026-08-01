@@ -41,7 +41,7 @@ from app.application.use_cases.complete_outbound_message_crm_sync import (
     complete_outbound_message_crm_sync,
 )
 from app.application.use_cases.lead_resume import _resume_permission
-from app.application.use_cases.plan_outbound_message import _outbound_idempotency_key
+from app.application.use_cases.plan_outbound_message import outbound_message_idempotency_key
 from app.application.use_cases.send_outbound_message import (
     OutboundSendContext,
     PreSendCRMRefreshContext,
@@ -180,7 +180,7 @@ async def approve_rejected_draft_review_and_send(
             cadence_step_id=str(review.cadence_step_id),
             channel=review.channel,
             status=OutboundMessageStatus.PENDING,
-            idempotency_key=_outbound_idempotency_key(
+            idempotency_key=outbound_message_idempotency_key(
                 workspace_id=workspace_id,
                 campaign_id=review.campaign_id,
                 lead_id=lead_id,
@@ -194,9 +194,7 @@ async def approve_rejected_draft_review_and_send(
             created_at=now,
             updated_at=now,
             message_version=review.message_version,
-            reply_routing_token=(
-                token_hex(16) if review.channel == ContactChannel.EMAIL else None
-            ),
+            reply_routing_token=(token_hex(16) if review.channel == ContactChannel.EMAIL else None),
             draft_prompt_version=review.draft_prompt_version,
             draft_model=review.draft_model,
             draft_latency_ms=review.draft_latency_ms,

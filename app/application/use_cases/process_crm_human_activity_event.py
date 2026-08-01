@@ -8,6 +8,7 @@ from app.application.ports.repositories import (
     ExternalEventRepository,
     LeadRepository,
     LeadWorkflowRepository,
+    PausedSearchOccurrenceRepository,
     TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
 )
@@ -92,6 +93,7 @@ async def process_crm_human_activity_event(
     external_event_repository: ExternalEventRepository,
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     now: datetime,
     external_event_id_factory: Callable[[], UUID] | None = None,
@@ -191,6 +193,7 @@ async def process_crm_human_activity_event(
         reason_code=WorkflowTransitionReasonCode.CRM_HUMAN_ACTIVITY_DETECTED,
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
+        paused_search_occurrence_repository=paused_search_occurrence_repository,
         now=event.occurred_at,
         external_event_id=saved_event.external_event_id,
         metadata=_activity_metadata(event, activity_kind),

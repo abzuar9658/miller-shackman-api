@@ -182,7 +182,9 @@ def _activity_union(workspace_id: WorkspaceId, lead_ids: tuple[LeadId, ...]) -> 
 
 def _inbound_activity_status() -> Any:
     inbound_action = cast(
-        ExternalEventModel.payload_redacted["processing_audit"]["decision"]["inbound_action"].astext,
+        ExternalEventModel.payload_redacted["processing_audit"]["decision"][
+            "inbound_action"
+        ].astext,
         String,
     )
     workflow_to_state = cast(
@@ -232,7 +234,8 @@ def _row_to_summary(row: Any) -> LeadActivitySummary:
         crm_event_count=int(row.crm_event_count or 0),
         handoff_count=int(row.handoff_count or 0),
         latest_activity_at=row.occurred_at,
-        latest_activity_preview=_preview_text(row.preview) or _title_for(
+        latest_activity_preview=_preview_text(row.preview)
+        or _title_for(
             kind,
             activity_type=row.activity_type,
             direction=row.direction,

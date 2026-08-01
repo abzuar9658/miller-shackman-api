@@ -31,6 +31,143 @@ class Base(DeclarativeBase):
     pass
 
 
+class TemplateVersionModel(Base):
+    __tablename__ = "template_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "template_key",
+            "version",
+            name="uq_template_versions_workspace_key_version",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "template_version_id",
+            name="uq_template_versions_workspace_id_version_id",
+        ),
+        Index("ix_template_versions_workspace_channel", "workspace_id", "channel"),
+        Index("ix_template_versions_workspace_status", "workspace_id", "status"),
+    )
+
+    template_version_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    template_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    channel: Mapped[str] = mapped_column(String(50), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(100), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    subject: Mapped[str | None] = mapped_column(Text)
+    prompt_text: Mapped[str | None] = mapped_column(Text)
+    allowed_variables: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    permitted_use_tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PausedSearchNotificationPolicyModel(Base):
+    __tablename__ = "paused_search_notification_policies"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "version", name="uq_paused_search_notification_policy_workspace_version"
+        ),
+        Index(
+            "ix_paused_search_notification_policies_workspace_created",
+            "workspace_id",
+            "created_at",
+        ),
+    )
+
+    notification_policy_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled_events: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    recipient_roles: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    manager_escalation_hours: Mapped[int] = mapped_column(Integer, nullable=False)
+    repeated_failure_threshold: Mapped[int] = mapped_column(Integer, nullable=False)
+    digest_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    digest_cadence_hours: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PausedSearchReviewModel(Base):
+    __tablename__ = "paused_search_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "occurrence_id",
+            "kind",
+            name="uq_paused_search_reviews_workspace_occurrence_kind",
+        ),
+        Index(
+            "ix_paused_search_reviews_workspace_status_requested",
+            "workspace_id",
+            "status",
+            "requested_at",
+        ),
+        Index("ix_paused_search_reviews_workspace_workflow", "workspace_id", "workflow_id"),
+    )
+
+    review_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    lead_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    workflow_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    occurrence_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    reason: Mapped[str] = mapped_column(String(1000), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    review_expiry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewer_user_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    acted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    action_reason: Mapped[str | None] = mapped_column(String(1000))
+    outbound_message_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("outbound_messages.message_id"),
+    )
+    outbound_message_version: Mapped[int | None] = mapped_column(Integer)
+
+
+class PausedSearchNotificationModel(Base):
+    __tablename__ = "paused_search_notifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "idempotency_key",
+            name="uq_paused_search_notifications_workspace_idempotency",
+        ),
+        Index(
+            "ix_paused_search_notifications_workspace_status",
+            "workspace_id",
+            "status",
+        ),
+    )
+
+    notification_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    event: Mapped[str] = mapped_column(String(100), nullable=False)
+    channel: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    recipient_user_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    recipient_destination: Mapped[str | None] = mapped_column(String(320))
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    correlation_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(1000))
+
+
 class LeadModel(Base):
     __tablename__ = "leads"
     __table_args__ = (
@@ -200,6 +337,32 @@ class LeadPausedSearchHistoryModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class CustomerTimingModel(Base):
+    __tablename__ = "customer_timing_candidates"
+    __table_args__ = (
+        Index("ix_customer_timing_workspace_lead_created", "workspace_id", "lead_id", "created_at"),
+    )
+
+    timing_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    lead_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.lead_id"), nullable=False
+    )
+    reason_code: Mapped[str | None] = mapped_column(String(100))
+    customer_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str] = mapped_column(String(100), nullable=False)
+    evidence_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    evidence: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_by_user_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class LeadClassificationArtifactModel(Base):
     __tablename__ = "lead_classification_artifacts"
     __table_args__ = (
@@ -267,9 +430,7 @@ class LeadRoutingReviewModel(Base):
         ),
     )
 
-    review_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    review_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     workspace_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
     )
@@ -755,6 +916,15 @@ class PausedSearchTrackVersionModel(Base):
         nullable=False,
         default=False,
     )
+    max_duration_days: Mapped[int] = mapped_column(Integer, nullable=False, default=365)
+    default_pause_duration_days: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=60,
+    )
+    terminal_behavior: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="complete_keep_paused"
+    )
     created_by_user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
     )
@@ -771,6 +941,11 @@ class PausedSearchTrackStepModel(Base):
             "step_order",
             name="uq_paused_track_steps_workspace_version_order",
         ),
+        ForeignKeyConstraint(
+            ["workspace_id", "template_version_id"],
+            ["template_versions.workspace_id", "template_versions.template_version_id"],
+            name="fk_paused_track_steps_template_workspace",
+        ),
     )
 
     step_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -784,13 +959,88 @@ class PausedSearchTrackStepModel(Base):
     )
     step_order: Mapped[int] = mapped_column(Integer, nullable=False)
     phase: Mapped[str] = mapped_column(String(50), nullable=False)
+    timing_basis: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="customer_reengagement_date"
+    )
+    fallback_channel: Mapped[str | None] = mapped_column(String(20), nullable=True)
     channel: Mapped[str] = mapped_column(String(50), nullable=False)
     delay_hours: Mapped[int] = mapped_column(Integer, nullable=False)
     message_goal: Mapped[str] = mapped_column(String(500), nullable=False)
     template_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    template_version_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
     review_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    interval_days: Mapped[int | None] = mapped_column(Integer)
+    max_occurrences: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RecurringOccurrenceModel(Base):
+    __tablename__ = "paused_search_occurrences"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "workflow_id",
+            "track_version_id",
+            "step_id",
+            "occurrence_number",
+            "scheduled_for",
+            name="uq_paused_occurrences_workspace_identity",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "idempotency_key",
+            name="uq_paused_occurrences_workspace_idempotency",
+        ),
+        Index(
+            "ix_paused_occurrences_workspace_workflow_status",
+            "workspace_id",
+            "workflow_id",
+            "status",
+        ),
+        Index(
+            "ix_paused_occurrences_workspace_due",
+            "workspace_id",
+            "status",
+            "scheduled_for",
+        ),
+    )
+
+    occurrence_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    lead_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.lead_id"), nullable=False
+    )
+    workflow_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("lead_workflows.workflow_id"), nullable=False
+    )
+    track_version_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("paused_search_track_versions.track_version_id"),
+        nullable=False,
+    )
+    step_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("paused_search_track_steps.step_id"), nullable=False
+    )
+    phase: Mapped[str] = mapped_column(String(50), nullable=False)
+    occurrence_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    logical_touch_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fallback_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    provider_message_id: Mapped[str | None] = mapped_column(String(255))
+    provider_delivery_status: Mapped[str | None] = mapped_column(String(50))
+    correlation_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    timezone_snapshot: Mapped[str | None] = mapped_column(String(100))
 
 
 class PausedSearchReasonMappingModel(Base):
@@ -1013,9 +1263,7 @@ class WorkspaceAgentCRMMappingModel(Base):
         Index("ix_workspace_agent_crm_mappings_workspace_status", "workspace_id", "mapping_status"),
     )
 
-    mapping_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    mapping_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     workspace_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
     )
@@ -1386,6 +1634,124 @@ class CrmConversationEventModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class CrmHistoryImportJobModel(Base):
+    __tablename__ = "crm_history_import_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "import_job_id",
+            name="uq_crm_history_import_jobs_workspace_job",
+        ),
+        Index(
+            "uq_crm_history_import_jobs_one_active_lead",
+            "workspace_id",
+            "lead_id",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('pending', 'receiving', 'ready', 'running')"
+            ),
+        ),
+        Index(
+            "ix_crm_history_import_jobs_status_created",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "ix_crm_history_import_jobs_workspace_lead_created",
+            "workspace_id",
+            "lead_id",
+            "created_at",
+        ),
+    )
+
+    import_job_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    lead_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.lead_id"), nullable=False
+    )
+    crm_lead_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    requested_by_user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    upload_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    received_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    promoted_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duplicate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rejected_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    upload_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CrmHistoryImportEventModel(Base):
+    __tablename__ = "crm_history_import_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "import_job_id"],
+            [
+                "crm_history_import_jobs.workspace_id",
+                "crm_history_import_jobs.import_job_id",
+            ],
+            name="fk_crm_history_import_events_workspace_job",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "import_job_id",
+            "fingerprint",
+            name="uq_crm_history_import_events_workspace_job_fingerprint",
+        ),
+        Index(
+            "ix_crm_history_import_events_workspace_job_status",
+            "workspace_id",
+            "import_job_id",
+            "status",
+        ),
+        Index(
+            "ix_crm_history_import_events_workspace_lead_occurred",
+            "workspace_id",
+            "lead_id",
+            "occurred_at",
+        ),
+    )
+
+    import_event_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    import_job_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    lead_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.lead_id"), nullable=False
+    )
+    external_activity_id: Mapped[str | None] = mapped_column(String(255))
+    fingerprint: Mapped[str] = mapped_column(String(128), nullable=False)
+    activity_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    direction: Mapped[str | None] = mapped_column(String(50))
+    content: Mapped[str | None] = mapped_column(Text)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    actor_agent_id: Mapped[str | None] = mapped_column(String(255))
+    actor_name: Mapped[str | None] = mapped_column(String(255))
+    details: Mapped[dict[str, str | int | float | bool | None]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ConversationSummaryModel(Base):
     __tablename__ = "conversation_summaries"
 
@@ -1531,9 +1897,7 @@ class OutboundMessageCRMCompletionModel(Base):
     )
     crm_note_idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False)
     crm_note_written_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    crm_conversation_published_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
-    )
+    crm_conversation_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     crm_snapshot_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

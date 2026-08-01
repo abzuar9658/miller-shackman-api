@@ -170,9 +170,7 @@ class FakeCRMClient(CRMClient):
     async def subscribe_to_events(self, workspace_id: UUID, webhook_url: str) -> None:
         return None
 
-    async def fetch_resource_by_uri(
-        self, workspace_id: UUID, uri: str
-    ) -> dict[str, object] | None:
+    async def fetch_resource_by_uri(self, workspace_id: UUID, uri: str) -> dict[str, object] | None:
         return None
 
 
@@ -244,10 +242,7 @@ def _workspace_llm_config() -> WorkspaceLLMConfig:
 
 
 def _classification_json(**kwargs: object) -> str:
-    if (
-        kwargs.get("outcome") == "human_handoff"
-        and "handoff_reason_code" not in kwargs
-    ):
+    if kwargs.get("outcome") == "human_handoff" and "handoff_reason_code" not in kwargs:
         kwargs["handoff_reason_code"] = "human_requested"
     return json.dumps(kwargs)
 
@@ -334,9 +329,7 @@ async def _run(
     artifact_repository = artifact_repository or FakeLeadClassificationArtifactRepository()
     lead_workflow_repository = lead_workflow_repository or FakeLeadWorkflowRepository()
     notification_provider = notification_provider or FakeNotificationProvider()
-    preflight_digest_repository = (
-        preflight_digest_repository or FakePreflightDigestRepository()
-    )
+    preflight_digest_repository = preflight_digest_repository or FakePreflightDigestRepository()
     temporal_workflow_starter = temporal_workflow_starter or FakeTemporalWorkflowStarter()
     llm_client = llm_client or _StubLLMClient(
         _classification_json(
@@ -368,9 +361,7 @@ async def _run(
         paused_search_history_repository=lead_repository,
         artifact_repository=artifact_repository,
         crm_conversation_event_repository=FakeCrmConversationEventRepository(),
-        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(
-            _workspace_llm_config()
-        ),
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(_workspace_llm_config()),
         llm_client=llm_client,
         default_openrouter_model="openai/gpt-4o-mini",
         paused_search_track_repository=paused_search_track_repository,
@@ -632,8 +623,7 @@ async def test_review_hold_candidate_records_pending_routing_review() -> None:
     assert len(artifact_repository.saved) == 1
     assert len(routing_review_repository.saved) == 1
     assert (
-        routing_review_repository.saved[0].artifact_id
-        == artifact_repository.saved[0].artifact_id
+        routing_review_repository.saved[0].artifact_id == artifact_repository.saved[0].artifact_id
     )
     assert routing_review_repository.saved[0].reason_codes == ("ai_classified_review_hold",)
 

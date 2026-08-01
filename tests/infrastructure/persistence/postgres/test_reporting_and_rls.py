@@ -19,6 +19,10 @@ from app.infrastructure.persistence.postgres.models import (
     LeadModel,
     OutboundMessageModel,
     OutboxEventModel,
+    PausedSearchTrackModel,
+    PausedSearchTrackStepModel,
+    PausedSearchTrackVersionModel,
+    RecurringOccurrenceModel,
     UserModel,
     WorkspaceModel,
 )
@@ -38,6 +42,9 @@ LEAD_ID = UUID("66666666-6666-6666-6666-666666666666")
 ENROLLMENT_ID = UUID("77777777-7777-7777-7777-777777777777")
 WORKFLOW_ID = UUID("88888888-8888-8888-8888-888888888888")
 MESSAGE_ID = UUID("99999999-9999-9999-9999-999999999999")
+TRACK_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+TRACK_VERSION_ID = UUID("abababab-abab-abab-abab-abababababab")
+STEP_ID = UUID("acacacac-acac-acac-acac-acacacacacac")
 AUDIT_ID = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 SYNC_JOB_ID = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
 EXTERNAL_EVENT_ID = UUID("dddddddd-dddd-dddd-dddd-dddddddddddd")
@@ -64,6 +71,14 @@ async def test_reporting_repository_builds_workspace_and_campaign_summaries(
     assert workspace_report.pending_external_events == 1
     assert workspace_report.failed_outbox_events == 1
     assert workspace_report.last_successful_sync_at == NOW
+    assert workspace_report.paused_search_occurrence_health.due == 1
+    assert workspace_report.paused_search_occurrence_health.held == 1
+    assert workspace_report.paused_search_occurrence_health.review_pending == 1
+    assert workspace_report.paused_search_occurrence_health.expired == 1
+    assert workspace_report.paused_search_occurrence_health.failed == 1
+    assert workspace_report.paused_search_occurrence_health.uncertain == 1
+    assert workspace_report.paused_search_occurrence_health.terminal == 2
+    assert workspace_report.paused_search_occurrence_health.fallback == 1
 
     assert campaign_report is not None
     assert campaign_report.campaign_name == "Dormant Buyers"
@@ -263,6 +278,38 @@ async def _seed_reporting_fixture(session: AsyncSession) -> None:
                 created_at=NOW,
                 updated_at=NOW,
             ),
+            PausedSearchTrackModel(
+                track_id=TRACK_ID,
+                workspace_id=WORKSPACE_ID,
+                track_key="maintenance",
+                display_name="Maintenance",
+                status="published",
+                active_version_id=TRACK_VERSION_ID,
+                created_by_user_id=USER_ID,
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+            PausedSearchTrackVersionModel(
+                track_version_id=TRACK_VERSION_ID,
+                workspace_id=WORKSPACE_ID,
+                track_id=TRACK_ID,
+                version_number=1,
+                status="published",
+                track_family="maintenance",
+                enabled=True,
+                allowed_channels=["email"],
+                default_for_reason_codes=[],
+                fallback_timing_policy="use_maintenance_interval",
+                maintenance_interval_days=30,
+                reactivation_window_days=30,
+                max_total_touches=5,
+                requires_review_before_publish=False,
+                max_duration_days=365,
+                terminal_behavior="complete_keep_paused",
+                created_by_user_id=USER_ID,
+                published_at=NOW,
+                created_at=NOW,
+            ),
             LeadWorkflowModel(
                 workflow_id=WORKFLOW_ID,
                 temporal_workflow_id="workflow-1",
@@ -313,6 +360,65 @@ async def _seed_reporting_fixture(session: AsyncSession) -> None:
                 created_at=NOW,
                 updated_at=NOW,
             ),
+        ]
+    )
+    await session.flush()
+
+    session.add(
+        PausedSearchTrackStepModel(
+            step_id=STEP_ID,
+            workspace_id=WORKSPACE_ID,
+            track_version_id=TRACK_VERSION_ID,
+            step_order=1,
+            phase="maintenance",
+            channel="email",
+            delay_hours=0,
+            message_goal="Check in",
+            template_key="maintenance-1",
+            max_attempts=1,
+            review_required=False,
+            interval_days=30,
+            max_occurrences=10,
+            created_at=NOW,
+        )
+    )
+    session.add_all(
+        [
+            RecurringOccurrenceModel(
+                occurrence_id=UUID(f"{index + 10:032x}"),
+                workspace_id=WORKSPACE_ID,
+                lead_id=LEAD_ID,
+                workflow_id=WORKFLOW_ID,
+                track_version_id=TRACK_VERSION_ID,
+                step_id=STEP_ID,
+                phase="maintenance",
+                occurrence_number=index,
+                scheduled_for=NOW,
+                due_at=NOW,
+                status=occurrence_status,
+                idempotency_key=f"occurrence-{index}",
+                logical_touch_count=1 if occurrence_status == "sent" else 0,
+                fallback_used=occurrence_status == "sent",
+                provider_message_id=None,
+                provider_delivery_status=None,
+                correlation_id=None,
+                failure_reason=None,
+                created_at=NOW,
+                closed_at=NOW if occurrence_status in {"sent", "cancelled"} else None,
+            )
+            for index, occurrence_status in enumerate(
+                (
+                    "planned",
+                    "deferred",
+                    "review_requested",
+                    "expired",
+                    "failed",
+                    "uncertain",
+                    "sent",
+                    "cancelled",
+                ),
+                start=1,
+            )
         ]
     )
     await session.flush()

@@ -101,9 +101,7 @@ def _render_review_body(notification: ReviewNotification) -> str:
     if notification.lead_primary_phone:
         lead_contacts.append(f"phone: {notification.lead_primary_phone}")
     contacts_text = ", ".join(lead_contacts) if lead_contacts else "no direct contact found"
-    recommended_action = (
-        "Review the latest reply and resume AI outreach only if appropriate."
-    )
+    recommended_action = "Review the latest reply and resume AI outreach only if appropriate."
     return (
         f"Lead review required for {notification.lead_display_name}.\n"
         f"Contact details: {contacts_text}\n"

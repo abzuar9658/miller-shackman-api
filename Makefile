@@ -1,4 +1,4 @@
-.PHONY: infra-up infra-down infra-logs infra-ps db-ui-up db-ui-down db-ui-logs run worker outbox-publisher temporal-signal-dispatcher crm-sync-worker crm-sync-scheduler crm-sync-publisher listing-crawl-worker listing-crawl-scheduler start-all start-temporal start-workers stop-all tail-logs test lint format typecheck check migrate revision
+.PHONY: infra-up infra-down infra-logs infra-ps db-ui-up db-ui-down db-ui-logs run worker outbox-publisher temporal-signal-dispatcher crm-sync-worker crm-sync-scheduler crm-sync-publisher crm-history-import-worker listing-crawl-worker listing-crawl-scheduler start-all start-temporal start-workers stop-all tail-logs test lint format typecheck check migrate revision
 
 infra-up:
 	docker compose up -d postgres cloudbeaver rabbitmq redis temporal temporal-ui mailpit
@@ -40,6 +40,9 @@ crm-sync-scheduler:
 	uv run python -c "import asyncio; from app.interfaces.workers.crm_sync_scheduler_worker import main; asyncio.run(main())"
 
 crm-sync-publisher: outbox-publisher
+
+crm-history-import-worker:
+	uv run python -c "import asyncio; from app.interfaces.workers.crm_history_import_worker import main; asyncio.run(main())"
 
 listing-crawl-worker:
 	uv run python -c "import asyncio; from app.interfaces.workers.listing_source_crawl_worker import main; asyncio.run(main())"

@@ -2,7 +2,7 @@ from collections.abc import Coroutine
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from app.application.use_cases.paused_search_track_admin import (
     PausedSearchTrackConfigInput,
@@ -26,6 +26,7 @@ from app.domain.campaigns import (
     PausedSearchTrackVersion,
 )
 from app.domain.campaigns.execution import CampaignVersionStatus
+from app.domain.campaigns.template_registry import TemplateChannel, TemplateStatus, TemplateVersion
 from app.domain.common.ids import PausedSearchTrackId, PausedSearchTrackVersionId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.events import DomainEvent, DomainEventType
@@ -62,6 +63,7 @@ def test_create_draft_paused_search_track_persists_audit_and_event() -> None:
             repository=repo,
             audit_log_repository=audit_repo,
             event_bus=event_bus,
+            template_repository=FakeTemplateRepository(),
             now=NOW,
         )
     )
@@ -133,6 +135,7 @@ def test_publish_track_version_creates_reason_mappings_and_retires_previous_vers
             repository=repo,
             audit_log_repository=audit_repo,
             event_bus=event_bus,
+            template_repository=FakeTemplateRepository(),
             now=NOW,
         )
     )
@@ -143,6 +146,24 @@ def test_publish_track_version_creates_reason_mappings_and_retires_previous_vers
     assert repo.versions[PREVIOUS_VERSION_ID].status == CampaignVersionStatus.RETIRED
     assert repo.versions[PREVIOUS_VERSION_ID].track_version_id == PREVIOUS_VERSION_ID
     assert repo.mappings[PausedSearchReasonCode.RENTED_TEMPORARILY].track_version_id == VERSION_ID
+    assert repo.locked_track_ids == [TRACK_ID]
+    assert repo.publish_operations == [
+        "lock_track",
+        "replace_steps",
+        "retire_versions",
+        "save_version",
+        "save_track",
+        "replace_reason_mappings",
+    ]
+    evidence = audit_repo.logs[-1].details["publish_evidence"]
+    assert isinstance(evidence, dict)
+    assert evidence["steps"][0]["template_version_id"]
+    assert result.validation is not None
+    assert result.validation.publishable
+    publish_evidence = audit_repo.logs[-1].details["publish_evidence"]
+    assert isinstance(publish_evidence, dict)
+    assert publish_evidence["track_version_id"] == str(VERSION_ID)
+    assert len(str(audit_repo.logs[-1].details["preview_reference"])) == 64
     assert event_bus.events[-1].event_type == DomainEventType.PAUSED_SEARCH_TRACK_PUBLISHED
 
 
@@ -208,6 +229,8 @@ class FakePausedSearchTrackAdminRepository:
         self.versions: dict[PausedSearchTrackVersionId, PausedSearchTrackVersion] = {}
         self.steps: dict[PausedSearchTrackVersionId, tuple[PausedSearchTrackStep, ...]] = {}
         self.mappings: dict[PausedSearchReasonCode, PausedSearchReasonMapping] = {}
+        self.locked_track_ids: list[PausedSearchTrackId] = []
+        self.publish_operations: list[str] = []
 
     async def list_tracks(self, workspace_id: WorkspaceId) -> tuple[PausedSearchTrack, ...]:
         return tuple(track for track in self.tracks.values() if track.workspace_id == workspace_id)
@@ -219,6 +242,15 @@ class FakePausedSearchTrackAdminRepository:
     ) -> PausedSearchTrack | None:
         track = self.tracks.get(track_id)
         return track if track is not None and track.workspace_id == workspace_id else None
+
+    async def get_track_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+    ) -> PausedSearchTrack | None:
+        self.locked_track_ids.append(track_id)
+        self.publish_operations.append("lock_track")
+        return await self.get_track(workspace_id, track_id)
 
     async def get_track_by_key(
         self,
@@ -235,6 +267,7 @@ class FakePausedSearchTrackAdminRepository:
         )
 
     async def save_track(self, track: PausedSearchTrack) -> PausedSearchTrack:
+        self.publish_operations.append("save_track")
         self.tracks[track.track_id] = track
         return track
 
@@ -296,6 +329,7 @@ class FakePausedSearchTrackAdminRepository:
         self,
         version: PausedSearchTrackVersion,
     ) -> PausedSearchTrackVersion:
+        self.publish_operations.append("save_version")
         self.versions[version.track_version_id] = version
         return version
 
@@ -316,6 +350,7 @@ class FakePausedSearchTrackAdminRepository:
         track_version_id: PausedSearchTrackVersionId,
         steps: tuple[PausedSearchTrackStep, ...],
     ) -> tuple[PausedSearchTrackStep, ...]:
+        self.publish_operations.append("replace_steps")
         saved = tuple(step for step in steps if step.workspace_id == workspace_id)
         self.steps[track_version_id] = saved
         return saved
@@ -326,6 +361,7 @@ class FakePausedSearchTrackAdminRepository:
         track_id: PausedSearchTrackId,
         except_version_id: PausedSearchTrackVersionId | None,
     ) -> None:
+        self.publish_operations.append("retire_versions")
         for version_id, version in tuple(self.versions.items()):
             if (
                 version.workspace_id == workspace_id
@@ -345,6 +381,7 @@ class FakePausedSearchTrackAdminRepository:
         actor_user_id: UUID,
         now: datetime,
     ) -> tuple[PausedSearchReasonMapping, ...]:
+        self.publish_operations.append("replace_reason_mappings")
         self.mappings = {
             reason_code: mapping
             for reason_code, mapping in self.mappings.items()
@@ -411,6 +448,87 @@ class FakeEventBus:
 
     async def publish(self, event: DomainEvent) -> None:
         self.events.append(event)
+
+
+class FakeTemplateRepository:
+    def __init__(self) -> None:
+        self.templates: dict[UUID, TemplateVersion] = {}
+
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        template_version_id: UUID,
+    ) -> TemplateVersion | None:
+        template = self.templates.get(template_version_id)
+        return template if template is not None and template.workspace_id == workspace_id else None
+
+    async def get_by_key_and_version(
+        self,
+        workspace_id: WorkspaceId,
+        template_key: str,
+        version: int,
+    ) -> TemplateVersion | None:
+        return next(
+            (
+                template
+                for template in self.templates.values()
+                if template.workspace_id == workspace_id
+                and template.template_key == template_key
+                and template.version == version
+            ),
+            None,
+        )
+
+    async def get_latest_approved_by_key(
+        self,
+        workspace_id: WorkspaceId,
+        template_key: str,
+    ) -> TemplateVersion:
+        existing = next(
+            (
+                template
+                for template in self.templates.values()
+                if template.workspace_id == workspace_id
+                and template.template_key == template_key
+                and template.status is TemplateStatus.APPROVED
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+        template = TemplateVersion(
+            template_version_id=uuid5(WORKSPACE_ID, template_key),
+            workspace_id=workspace_id,
+            template_key=template_key,
+            version=1,
+            channel=TemplateChannel.EMAIL,
+            purpose="paused_search",
+            content="{{message_body}}",
+            subject="Checking in",
+            prompt_text="Write a concise check-in.",
+            allowed_variables=("agent_name", "brokerage_name", "lead_first_name", "message_body"),
+            permitted_use_tags=(
+                "no_prohibited_advice",
+                "no_financial_advice",
+                "listing_context_allowed",
+            ),
+            status=TemplateStatus.APPROVED,
+            approved_at=NOW,
+            created_at=NOW,
+        )
+        self.templates[template.template_version_id] = template
+        return template
+
+    async def save(self, template: TemplateVersion) -> TemplateVersion:
+        self.templates[template.template_version_id] = template
+        return template
+
+    async def list_approved(self, workspace_id: WorkspaceId) -> tuple[TemplateVersion, ...]:
+        return tuple(
+            template
+            for template in self.templates.values()
+            if template.workspace_id == workspace_id and template.status is TemplateStatus.APPROVED
+        )
 
 
 def _config(

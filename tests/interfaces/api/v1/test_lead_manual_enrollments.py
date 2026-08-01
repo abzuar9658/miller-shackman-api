@@ -24,6 +24,7 @@ from app.domain.identity import (
     WorkspaceStatus,
 )
 from app.domain.leads import CanonicalLeadRecord, CRMProvider, PausedSearchReasonCode
+from app.domain.workspace_automation import WorkspaceOperationalControl
 from app.interfaces.api.dependencies.lead_manual_enrollment import (
     LeadManualEnrollmentBundle,
     get_lead_manual_enrollment_bundle,
@@ -176,9 +177,7 @@ def test_assigned_agent_sees_no_options_when_campaign_disallows_agent_manual_sta
 
     assert response.status_code == 200
     assert response.json()["campaigns"] == []
-    assert response.json()["reasons"] == [
-        "campaigns_disallow_agent_manual_enrollment"
-    ]
+    assert response.json()["reasons"] == ["campaigns_disallow_agent_manual_enrollment"]
 
 
 def test_admin_sees_reason_when_no_active_campaign_exists() -> None:
@@ -210,9 +209,7 @@ def test_admin_sees_reason_when_lead_already_enrolled() -> None:
 
     assert response.status_code == 200
     assert response.json()["campaigns"] == []
-    assert response.json()["reasons"] == [
-        "lead_already_enrolled_in_available_campaigns"
-    ]
+    assert response.json()["reasons"] == ["lead_already_enrolled_in_available_campaigns"]
     assert response.json()["already_enrolled_campaign_count"] == 1
 
 
@@ -286,9 +283,7 @@ def _client_for_role(
 
         enrollment_repository.enrollments[(WORKSPACE_ID, LEAD_ID, CAMPAIGN_ID)] = (
             CampaignEnrollment(
-                campaign_enrollment_id=UUID(
-                    "00000000-0000-0000-0000-000000000099"
-                ),
+                campaign_enrollment_id=UUID("00000000-0000-0000-0000-000000000099"),
                 workspace_id=WORKSPACE_ID,
                 campaign_id=CAMPAIGN_ID,
                 campaign_version_id=VERSION_ID,
@@ -314,7 +309,12 @@ def _client_for_role(
         campaign_enrollment_repository=enrollment_repository,
         lead_workflow_repository=FakeLeadWorkflowRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
-        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(
+            WorkspaceOperationalControl(
+                workspace_id=WORKSPACE_ID,
+                recurring_paused_search_enabled=True,
+            )
+        ),
         temporal_workflow_starter=starter,
         lead_classification_artifact_repository=FakeLeadClassificationArtifactRepository(),
         paused_search_history_repository=lead_repository,
@@ -364,6 +364,8 @@ class _FakeSession:
 
     async def commit(self) -> None:
         self.commits += 1
+
+
 def _track_repository() -> FakePausedSearchTrackAdminRepository:
     return FakePausedSearchTrackAdminRepository(
         mappings=(

@@ -83,12 +83,8 @@ class LeadManualEnrollmentReasonCode(StrEnum):
     NO_CAMPAIGNS_CONFIGURED = "no_campaigns_configured"
     NO_ACTIVE_CAMPAIGNS = "no_active_campaigns"
     NO_ACTIVE_PUBLISHED_CAMPAIGNS = "no_active_published_campaigns"
-    LEAD_ALREADY_ENROLLED_IN_AVAILABLE_CAMPAIGNS = (
-        "lead_already_enrolled_in_available_campaigns"
-    )
-    CAMPAIGNS_DISALLOW_AGENT_MANUAL_ENROLLMENT = (
-        "campaigns_disallow_agent_manual_enrollment"
-    )
+    LEAD_ALREADY_ENROLLED_IN_AVAILABLE_CAMPAIGNS = "lead_already_enrolled_in_available_campaigns"
+    CAMPAIGNS_DISALLOW_AGENT_MANUAL_ENROLLMENT = "campaigns_disallow_agent_manual_enrollment"
     NO_STARTABLE_CAMPAIGNS = "no_startable_campaigns"
 
 
@@ -203,16 +199,12 @@ async def list_lead_manual_enrollment_options(
         elif active_published_campaign_count == 0:
             reasons = (LeadManualEnrollmentReasonCode.NO_ACTIVE_PUBLISHED_CAMPAIGNS,)
         elif permission_blocked_campaign_count == active_published_campaign_count:
-            reasons = (
-                LeadManualEnrollmentReasonCode.CAMPAIGNS_DISALLOW_AGENT_MANUAL_ENROLLMENT,
-            )
+            reasons = (LeadManualEnrollmentReasonCode.CAMPAIGNS_DISALLOW_AGENT_MANUAL_ENROLLMENT,)
         elif already_enrolled_campaign_count > 0 and (
             already_enrolled_campaign_count + permission_blocked_campaign_count
             >= active_published_campaign_count
         ):
-            reasons = (
-                LeadManualEnrollmentReasonCode.LEAD_ALREADY_ENROLLED_IN_AVAILABLE_CAMPAIGNS,
-            )
+            reasons = (LeadManualEnrollmentReasonCode.LEAD_ALREADY_ENROLLED_IN_AVAILABLE_CAMPAIGNS,)
         else:
             reasons = (LeadManualEnrollmentReasonCode.NO_STARTABLE_CAMPAIGNS,)
 
@@ -443,8 +435,7 @@ async def start_lead_manual_enrollment(
             event_bus=event_bus,
             now=now,
             fallback_summary=(
-                "AI classification routed this manually started lead "
-                "to human handoff."
+                "AI classification routed this manually started lead to human handoff."
             ),
             handoff_id_factory=handoff_id_factory or uuid4,
         )

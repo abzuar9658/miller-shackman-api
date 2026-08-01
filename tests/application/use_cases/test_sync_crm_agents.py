@@ -59,9 +59,7 @@ class FakeCRMAgentRepository:
 
     async def list_for_workspace(self, workspace_id: UUID) -> tuple[CRMAgent, ...]:
         return tuple(
-            agent
-            for agent in self.by_external_id.values()
-            if agent.workspace_id == workspace_id
+            agent for agent in self.by_external_id.values() if agent.workspace_id == workspace_id
         )
 
     async def save(self, agent: CRMAgent) -> CRMAgent:
@@ -113,9 +111,7 @@ class FakeWorkspaceAgentCRMMappingRepository:
 
     async def list_for_workspace(self, workspace_id: UUID) -> tuple[WorkspaceAgentCRMMapping, ...]:
         return tuple(
-            mapping
-            for mapping in self.by_agent_id.values()
-            if mapping.workspace_id == workspace_id
+            mapping for mapping in self.by_agent_id.values() if mapping.workspace_id == workspace_id
         )
 
     async def save(self, mapping: WorkspaceAgentCRMMapping) -> WorkspaceAgentCRMMapping:
@@ -133,11 +129,7 @@ class FakeUserRepository:
 
     async def get_by_email_normalized(self, email_normalized: str) -> User | None:
         return next(
-            (
-                user
-                for (_, email), user in self.matches.items()
-                if email == email_normalized
-            ),
+            (user for (_, email), user in self.matches.items() if email == email_normalized),
             None,
         )
 
@@ -163,7 +155,9 @@ async def test_sync_crm_agents_creates_suggested_mapping_for_workspace_email_mat
 
     result = await sync_crm_agents_for_workspace(
         workspace_id=WORKSPACE_ID,
-        crm_agent_directory_source=FakeCRMAgentDirectorySource((_source_agent(email="Agent@example.com"),)),
+        crm_agent_directory_source=FakeCRMAgentDirectorySource(
+            (_source_agent(email="Agent@example.com"),)
+        ),
         crm_agent_repository=agent_repository,
         workspace_agent_crm_mapping_repository=mapping_repository,
         user_repository=user_repository,
@@ -183,14 +177,17 @@ async def test_sync_crm_agents_creates_suggested_mapping_for_workspace_email_mat
     assert saved_mapping.resolution_source == CRMAgentMappingResolutionSource.AUTO_EMAIL_MATCH
 
 
-async def test_sync_crm_agents_creates_unmapped_record_when_no_active_workspace_match_exists(
-) -> None:
+async def test_sync_crm_agents_creates_unmapped_record_when_no_active_workspace_match_exists() -> (
+    None
+):
     agent_repository = FakeCRMAgentRepository()
     mapping_repository = FakeWorkspaceAgentCRMMappingRepository()
 
     result = await sync_crm_agents_for_workspace(
         workspace_id=WORKSPACE_ID,
-        crm_agent_directory_source=FakeCRMAgentDirectorySource((_source_agent(email="nomatch@example.com"),)),
+        crm_agent_directory_source=FakeCRMAgentDirectorySource(
+            (_source_agent(email="nomatch@example.com"),)
+        ),
         crm_agent_repository=agent_repository,
         workspace_agent_crm_mapping_repository=mapping_repository,
         user_repository=FakeUserRepository(),
@@ -219,7 +216,9 @@ async def test_sync_crm_agents_preserves_verified_mapping() -> None:
 
     await sync_crm_agents_for_workspace(
         workspace_id=WORKSPACE_ID,
-        crm_agent_directory_source=FakeCRMAgentDirectorySource((_source_agent(email="agent@example.com"),)),
+        crm_agent_directory_source=FakeCRMAgentDirectorySource(
+            (_source_agent(email="agent@example.com"),)
+        ),
         crm_agent_repository=agent_repository,
         workspace_agent_crm_mapping_repository=mapping_repository,
         user_repository=FakeUserRepository({(WORKSPACE_ID, "agent@example.com"): _user()}),
@@ -244,7 +243,9 @@ async def test_sync_crm_agents_preserves_system_unlinked_mapping() -> None:
 
     await sync_crm_agents_for_workspace(
         workspace_id=WORKSPACE_ID,
-        crm_agent_directory_source=FakeCRMAgentDirectorySource((_source_agent(email="agent@example.com"),)),
+        crm_agent_directory_source=FakeCRMAgentDirectorySource(
+            (_source_agent(email="agent@example.com"),)
+        ),
         crm_agent_repository=FakeCRMAgentRepository((existing_agent,)),
         workspace_agent_crm_mapping_repository=mapping_repository,
         user_repository=FakeUserRepository({(WORKSPACE_ID, "agent@example.com"): _user()}),

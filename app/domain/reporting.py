@@ -55,6 +55,18 @@ class HandoffStatusCounts:
 
 
 @dataclass(frozen=True)
+class PausedSearchOccurrenceHealth:
+    due: int = 0
+    held: int = 0
+    review_pending: int = 0
+    expired: int = 0
+    failed: int = 0
+    uncertain: int = 0
+    terminal: int = 0
+    fallback: int = 0
+
+
+@dataclass(frozen=True)
 class CampaignAuditLogEntry:
     audit_log_id: UUID
     workspace_id: WorkspaceId
@@ -79,6 +91,7 @@ class WorkspaceOperationsSummary:
     failed_external_events: int
     pending_outbox_events: int
     failed_outbox_events: int
+    paused_search_occurrence_health: PausedSearchOccurrenceHealth = PausedSearchOccurrenceHealth()
 
 
 @dataclass(frozen=True)

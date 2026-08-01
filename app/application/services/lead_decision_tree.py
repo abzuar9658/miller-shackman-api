@@ -280,6 +280,11 @@ def _current_route(
     }:
         return "human_handoff"
     if (
+        classification_artifact
+        and classification_artifact.outcome == LeadStateClassificationOutcome.BLOCKED
+    ):
+        return "blocked"
+    if (
         (latest_workflow is not None and latest_workflow.paused_search_track_version_id is not None)
         or lead.paused_search_active
         or (
@@ -716,8 +721,7 @@ def _paused_search_track_edge_description(
 ) -> str:
     if selected:
         return (
-            f"The workflow selected {option.track.display_name} as this lead's "
-            "paused-search track."
+            f"The workflow selected {option.track.display_name} as this lead's paused-search track."
         )
     return (
         f"{option.track.display_name} exists as an active admin-created "
@@ -834,8 +838,7 @@ def _paused_search_branch_specs(
                 edge_label="Review",
                 column=columns[column_index],
                 node_description=(
-                    "Fall back to human review when the track cannot resolve a "
-                    "valid timed step."
+                    "Fall back to human review when the track cannot resolve a valid timed step."
                 ),
                 edge_description=(
                     "This fallback path prevents automated sends when paused-search "

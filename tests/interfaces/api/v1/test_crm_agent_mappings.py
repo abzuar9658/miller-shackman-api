@@ -152,9 +152,7 @@ def _client_for_role(
         user_repository=user_repository,
         membership_repository=membership_repository,
         lead_repository=FakeLeadRepository((_lead_record(owner_user_id=USER_ID),)),
-        workspace_agent_mapping_config_repository=FakeWorkspaceAgentMappingConfigRepository(
-            None
-        ),
+        workspace_agent_mapping_config_repository=FakeWorkspaceAgentMappingConfigRepository(None),
         lead_workflow_repository=FakeLeadWorkflowRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
         temporal_signal_outbox_repository=FakeTemporalSignalOutboxRepository(),
@@ -168,9 +166,7 @@ def _client_for_role(
         user_repository=user_repository,
         membership_repository=membership_repository,
         lead_repository=FakeLeadRepository(()),
-        workspace_agent_mapping_config_repository=FakeWorkspaceAgentMappingConfigRepository(
-            None
-        ),
+        workspace_agent_mapping_config_repository=FakeWorkspaceAgentMappingConfigRepository(None),
         lead_workflow_repository=FakeLeadWorkflowRepository(),
         workflow_transition_repository=FakeWorkflowTransitionRepository(),
         temporal_signal_outbox_repository=FakeTemporalSignalOutboxRepository(),

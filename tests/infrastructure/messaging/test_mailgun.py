@@ -3,7 +3,11 @@ from typing import cast
 import httpx
 import pytest
 
-from app.application.ports.messaging import EmailMessage
+from app.application.ports.messaging import (
+    EmailMessage,
+    ProviderFailureKind,
+    ProviderSendFailure,
+)
 from app.infrastructure.messaging.mailgun import client as mailgun_client
 from app.infrastructure.messaging.mailgun.client import MailgunEmailProvider
 
@@ -204,7 +208,7 @@ async def test_send_logs_http_status_failures_with_mailgun_response(
     monkeypatch.setattr(provider._client, "post", _post)
     monkeypatch.setattr(mailgun_client.logger, "warning", _warning)
 
-    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+    with pytest.raises(ProviderSendFailure) as exc_info:
         await provider.send(
             EmailMessage(
                 to_email="lead@example.com",
@@ -215,6 +219,7 @@ async def test_send_logs_http_status_failures_with_mailgun_response(
         )
 
     assert "sandbox domain is not allowed to send to this recipient" in str(exc_info.value)
+    assert exc_info.value.kind is ProviderFailureKind.PERMANENT
     assert logged["event"] == "mailgun_send_failed"
     assert logged["kwargs"] == {
         "status_code": 403,
@@ -251,7 +256,7 @@ async def test_send_logs_request_errors(
     monkeypatch.setattr(provider._client, "post", _post)
     monkeypatch.setattr(mailgun_client.logger, "warning", _warning)
 
-    with pytest.raises(httpx.ConnectError, match="dns failed"):
+    with pytest.raises(ProviderSendFailure, match="dns failed") as exc_info:
         await provider.send(
             EmailMessage(
                 to_email="lead@example.com",
@@ -261,6 +266,7 @@ async def test_send_logs_request_errors(
             )
         )
 
+    assert exc_info.value.kind is ProviderFailureKind.UNCERTAIN
     assert logged["event"] == "mailgun_send_request_error"
     assert logged["kwargs"] == {
         "request_url": "https://api.mailgun.net/v3/example.test/messages",

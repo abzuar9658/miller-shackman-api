@@ -15,6 +15,7 @@ from app.domain.reporting import (
     EnrollmentStatusCounts,
     HandoffStatusCounts,
     MessageStatusCounts,
+    PausedSearchOccurrenceHealth,
     WorkflowStateCounts,
     WorkspaceOperationsSummary,
 )
@@ -31,6 +32,7 @@ from app.interfaces.api.schemas.reporting import (
     EnrollmentStatusCountsResponse,
     HandoffStatusCountsResponse,
     MessageStatusCountsResponse,
+    PausedSearchOccurrenceHealthResponse,
     WorkflowStateCountsResponse,
     WorkspaceOperationsReportResponse,
     WorkspaceOperationsSummaryResponse,
@@ -154,6 +156,12 @@ def _handoff_counts_response(counts: HandoffStatusCounts) -> HandoffStatusCounts
     return HandoffStatusCountsResponse.model_validate(counts.__dict__)
 
 
+def _paused_search_occurrence_health_response(
+    health: PausedSearchOccurrenceHealth,
+) -> PausedSearchOccurrenceHealthResponse:
+    return PausedSearchOccurrenceHealthResponse.model_validate(health.__dict__)
+
+
 def _enrollment_counts_response(counts: EnrollmentStatusCounts) -> EnrollmentStatusCountsResponse:
     return EnrollmentStatusCountsResponse.model_validate(counts.__dict__)
 
@@ -169,6 +177,9 @@ def _workspace_report_response(
         workflow_counts=_workflow_counts_response(report.workflow_counts),
         message_counts=_message_counts_response(report.message_counts),
         handoff_counts=_handoff_counts_response(report.handoff_counts),
+        paused_search_occurrence_health=_paused_search_occurrence_health_response(
+            report.paused_search_occurrence_health
+        ),
         pending_external_events=report.pending_external_events,
         failed_external_events=report.failed_external_events,
         pending_outbox_events=report.pending_outbox_events,

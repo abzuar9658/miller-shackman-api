@@ -36,10 +36,7 @@ def _empty_string_tuple() -> tuple[str, ...]:
 
 
 def build_outbound_email_message_id(message_id: UUID) -> str:
-    return (
-        f"{_OUTBOUND_EMAIL_MESSAGE_ID_PREFIX}.{message_id}"
-        f"@{_OUTBOUND_EMAIL_MESSAGE_ID_DOMAIN}"
-    )
+    return f"{_OUTBOUND_EMAIL_MESSAGE_ID_PREFIX}.{message_id}@{_OUTBOUND_EMAIL_MESSAGE_ID_DOMAIN}"
 
 
 def parse_outbound_email_message_id(value: str) -> UUID | None:

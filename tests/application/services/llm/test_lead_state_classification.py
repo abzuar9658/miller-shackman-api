@@ -297,17 +297,14 @@ async def test_includes_freshness_context_for_stale_property_interest_without_re
     assert freshness_context["dormant_threshold_days"] == 60
     assert freshness_context["latest_observed_message_at"] == property_inquiry_at.isoformat()
     assert freshness_context["days_since_latest_observed_message"] == 95
-    assert (
-        freshness_context["latest_observed_message_older_than_dormant_threshold"] is True
-    )
+    assert freshness_context["latest_observed_message_older_than_dormant_threshold"] is True
     assert freshness_context["days_since_latest_property_event"] == 95
     assert freshness_context["has_observed_inbound_reply_after_latest_property_event"] is False
     assert freshness_context["property_interest_is_stale_by_threshold"] is True
     assert freshness_context["stale_property_interest_without_observed_reply"] is True
     assert "Do not choose human_handoff from a stale property inquiry alone." in result.prompt_text
     assert (
-        "If a property inquiry is older than the configured dormant threshold"
-        in result.prompt_text
+        "If a property inquiry is older than the configured dormant threshold" in result.prompt_text
     )
     assert (
         "If the newest observed message in the available context window is older"
@@ -357,9 +354,7 @@ async def test_uses_latest_observed_message_freshness_when_property_fields_are_m
     assert result.prompt_text is not None
     assert freshness_context["latest_observed_message_at"] == internal_at.isoformat()
     assert freshness_context["days_since_latest_observed_message"] == 60
-    assert (
-        freshness_context["latest_observed_message_older_than_dormant_threshold"] is True
-    )
+    assert freshness_context["latest_observed_message_older_than_dormant_threshold"] is True
     assert freshness_context["latest_observed_inbound_message_at"] is None
     assert freshness_context["days_since_last_meaningful_communication"] is None
     assert freshness_context["property_interest_is_stale_by_threshold"] is None
@@ -410,9 +405,7 @@ async def test_marks_recent_property_interest_with_reply_as_not_stale() -> None:
     assert result.prompt_text is not None
     assert freshness_context["latest_observed_message_at"] == (NOW - timedelta(days=1)).isoformat()
     assert freshness_context["days_since_latest_observed_message"] == 1
-    assert (
-        freshness_context["latest_observed_message_older_than_dormant_threshold"] is False
-    )
+    assert freshness_context["latest_observed_message_older_than_dormant_threshold"] is False
     assert freshness_context["property_interest_is_stale_by_threshold"] is False
     assert freshness_context["has_observed_inbound_reply_after_latest_property_event"] is True
     assert freshness_context["stale_property_interest_without_observed_reply"] is False

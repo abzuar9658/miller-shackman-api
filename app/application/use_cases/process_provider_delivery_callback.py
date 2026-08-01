@@ -6,15 +6,20 @@ from uuid import UUID, uuid4
 
 from app.application.ports.event_bus import EventBus
 from app.application.ports.repositories import (
+    LeadWorkflowRepository,
+    PausedSearchOccurrenceRepository,
     ProviderDeliveryMessageRepository,
     ProviderMessageEventRepository,
+    TemporalSignalOutboxRepository,
 )
 from app.domain.campaigns.outbound_message import (
     OutboundMessage,
     ProviderDeliveryStatus,
     ProviderMessageEvent,
 )
+from app.domain.campaigns.paused_search_occurrences import RecurringOccurrenceStatus
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
+from app.domain.workflows import TemporalSignalName, TemporalSignalOutboxEntry
 
 _FAILURE_STATUSES = frozenset(
     {
@@ -67,6 +72,9 @@ async def process_provider_delivery_callback(
     callback: ProviderDeliveryCallback,
     message_repository: ProviderDeliveryMessageRepository,
     provider_message_event_repository: ProviderMessageEventRepository,
+    occurrence_repository: PausedSearchOccurrenceRepository | None = None,
+    lead_workflow_repository: LeadWorkflowRepository | None = None,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     now: datetime,
     event_bus: EventBus | None = None,
     provider_message_event_id_factory: Callable[[], UUID] | None = None,
@@ -119,12 +127,102 @@ async def process_provider_delivery_callback(
             now=now,
         )
 
+    if occurrence_repository is not None:
+        occurrence = await occurrence_repository.get_by_provider_message_id_for_update(
+            message.workspace_id,
+            callback.provider_message_id,
+        )
+        if occurrence is not None:
+            was_uncertain = occurrence.status == RecurringOccurrenceStatus.UNCERTAIN
+            occurrence_status = _occurrence_status_after_delivery(
+                occurrence.status,
+                callback.status,
+            )
+            updated_occurrence = await occurrence_repository.update_status(
+                workspace_id=message.workspace_id,
+                occurrence_id=occurrence.occurrence_id,
+                status=occurrence_status.value,
+                now=now,
+                provider_message_id=callback.provider_message_id,
+                provider_delivery_status=updated_message.provider_delivery_status,
+                failure_reason=updated_message.failure_reason,
+            )
+            workflow = None
+            if lead_workflow_repository is not None:
+                workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
+                    message.workspace_id,
+                    occurrence.lead_id,
+                )
+            if (
+                was_uncertain
+                and occurrence_status == RecurringOccurrenceStatus.SENT
+                and updated_occurrence is not None
+                and updated_occurrence.logical_touch_count == 1
+                and workflow is not None
+                and workflow.workflow_id == occurrence.workflow_id
+            ):
+                assert lead_workflow_repository is not None
+                await lead_workflow_repository.save(
+                    replace(
+                        workflow,
+                        logical_touch_count=workflow.logical_touch_count + 1,
+                        updated_at=now,
+                    )
+                )
+            if (
+                was_uncertain
+                and temporal_signal_outbox_repository is not None
+                and workflow is not None
+                and workflow.workflow_id == occurrence.workflow_id
+            ):
+                await temporal_signal_outbox_repository.append(
+                    TemporalSignalOutboxEntry(
+                        temporal_signal_id=uuid4(),
+                        workspace_id=message.workspace_id,
+                        workflow_id=workflow.workflow_id,
+                        temporal_workflow_id=workflow.temporal_workflow_id,
+                        signal_name=TemporalSignalName.BLOCKED_REVIEW_COMPLETED,
+                        payload={
+                            "lead_id": str(occurrence.lead_id),
+                            "occurrence_id": str(occurrence.occurrence_id),
+                            "provider_message_id": callback.provider_message_id,
+                            "status": occurrence_status.value,
+                            "occurred_at": callback.occurred_at.isoformat(),
+                            "reason": "provider_delivery_reconciled",
+                        },
+                        idempotency_key=(
+                            "provider-delivery-reconciled:"
+                            f"{message.workspace_id}:{occurrence.occurrence_id}:"
+                            f"{callback.provider_event_id}"
+                        ),
+                        available_at=now,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+
     return ProcessProviderDeliveryCallbackResult(
         status=ProcessProviderDeliveryCallbackStatus.PROCESSED,
         provider_event_id=saved_event.provider_event_id,
         message_id=updated_message.message_id,
         provider_delivery_status=updated_message.provider_delivery_status,
     )
+
+
+def _occurrence_status_after_delivery(
+    current: RecurringOccurrenceStatus,
+    delivery_status: ProviderDeliveryStatus,
+) -> RecurringOccurrenceStatus:
+    if current != RecurringOccurrenceStatus.UNCERTAIN:
+        return current
+    if delivery_status in {
+        ProviderDeliveryStatus.ACCEPTED,
+        ProviderDeliveryStatus.DELIVERED,
+    }:
+        return RecurringOccurrenceStatus.SENT
+    if delivery_status in _FAILURE_STATUSES:
+        return RecurringOccurrenceStatus.FAILED
+    return RecurringOccurrenceStatus.UNCERTAIN
 
 
 def _reconcile_message(

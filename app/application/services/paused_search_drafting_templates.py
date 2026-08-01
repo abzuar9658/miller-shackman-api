@@ -1,5 +1,6 @@
 from dataclasses import dataclass, replace
 
+from app.domain.campaigns.template_registry import TemplateVersion
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
 
@@ -203,8 +204,7 @@ _TEMPLATES = {
         template_key="paused-search-other-known-pause-reactivation-email-1",
         subject="Would you like to restart the conversation?",
         intro=(
-            "I wanted to check back in in case now is a better time to reopen the "
-            "conversation."
+            "I wanted to check back in in case now is a better time to reopen the conversation."
         ),
         prompt=(
             "Write one or two short sentences for a simple reactivation email to a lead whose "
@@ -240,4 +240,22 @@ def apply_paused_search_drafting_template(
         email_template=template.email_template,
         email_subject_template=template.email_subject_template,
         email_prompt_text=template.email_prompt_text,
+    )
+
+
+def apply_paused_search_template_version(
+    *,
+    drafting_config: WorkspaceOutboundDraftingConfig,
+    channel: ContactChannel,
+    template: TemplateVersion | None,
+) -> WorkspaceOutboundDraftingConfig:
+    if template is None or template.channel.value != channel.value:
+        return drafting_config
+    if channel is not ContactChannel.EMAIL:
+        return drafting_config
+    return replace(
+        drafting_config,
+        email_template=template.content,
+        email_subject_template=template.subject or drafting_config.email_subject_template,
+        email_prompt_text=template.prompt_text or drafting_config.email_prompt_text,
     )

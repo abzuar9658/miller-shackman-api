@@ -360,9 +360,7 @@ async def get_lead_detail_view(
             workflow_transitions=transitions,
             workflow_override_audits=tuple(workflow_override_audit_views),
             paused_search_history=tuple(paused_search_history_views),
-            routing_reviews=await routing_review_repository.list_for_lead(
-                workspace_id, lead_id
-            ),
+            routing_reviews=await routing_review_repository.list_for_lead(workspace_id, lead_id),
             rejected_draft_reviews=await rejected_draft_review_repository.list_for_lead(
                 workspace_id, lead_id
             ),

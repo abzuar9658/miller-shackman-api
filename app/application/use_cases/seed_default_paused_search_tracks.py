@@ -7,6 +7,7 @@ from app.application.ports.event_bus import EventBus
 from app.application.ports.repositories import (
     PausedSearchTrackAdminAuditLogRepository,
     PausedSearchTrackAdminRepository,
+    TemplateRepository,
 )
 from app.application.use_cases.paused_search_track_admin import (
     PausedSearchTrackConfigInput,
@@ -20,6 +21,7 @@ from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchTrackFamily,
     PausedSearchTrackStepPhase,
+    capability_profile_for_reason,
 )
 from app.domain.common.ids import WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
@@ -74,12 +76,9 @@ DEFAULT_PAUSED_SEARCH_TRACK_TEMPLATES = (
         reactivation_window_days=45,
         max_total_touches=3,
         maintenance_message_goal=(
-            "Check in lightly while the lead finishes their current rental "
-            "timeline."
+            "Check in lightly while the lead finishes their current rental timeline."
         ),
-        reactivation_message_goal=(
-            "Reconnect as the lead's likely return window approaches."
-        ),
+        reactivation_message_goal=("Reconnect as the lead's likely return window approaches."),
     ),
     _DefaultPausedSearchTrackTemplate(
         reason_code=PausedSearchReasonCode.TIMING_NOT_RIGHT,
@@ -89,8 +88,7 @@ DEFAULT_PAUSED_SEARCH_TRACK_TEMPLATES = (
         max_total_touches=3,
         maintenance_message_goal="Check whether the lead's timing has changed.",
         reactivation_message_goal=(
-            "Offer a soft reactivation check-in as the expected timing "
-            "window approaches."
+            "Offer a soft reactivation check-in as the expected timing window approaches."
         ),
     ),
     _DefaultPausedSearchTrackTemplate(
@@ -100,8 +98,7 @@ DEFAULT_PAUSED_SEARCH_TRACK_TEMPLATES = (
         reactivation_window_days=21,
         max_total_touches=4,
         maintenance_message_goal=(
-            "Send a low-pressure readiness check while the lead watches "
-            "rates."
+            "Send a low-pressure readiness check while the lead watches rates."
         ),
         reactivation_message_goal="Reconnect when the lead may be closer to acting again.",
     ),
@@ -112,8 +109,7 @@ DEFAULT_PAUSED_SEARCH_TRACK_TEMPLATES = (
         reactivation_window_days=14,
         max_total_touches=4,
         maintenance_message_goal=(
-            "Check whether the lead still wants help staying aware of the "
-            "market."
+            "Check whether the lead still wants help staying aware of the market."
         ),
         reactivation_message_goal="Reconnect as the lead approaches a renewed search window.",
     ),
@@ -124,8 +120,7 @@ DEFAULT_PAUSED_SEARCH_TRACK_TEMPLATES = (
         reactivation_window_days=30,
         max_total_touches=3,
         maintenance_message_goal=(
-            "Offer a supportive, non-advisory check-in while the lead "
-            "prepares financially."
+            "Offer a supportive, non-advisory check-in while the lead prepares financially."
         ),
         reactivation_message_goal="Reconnect once the lead may be nearing readiness again.",
     ),
@@ -136,8 +131,7 @@ DEFAULT_PAUSED_SEARCH_TRACK_TEMPLATES = (
         reactivation_window_days=30,
         max_total_touches=3,
         maintenance_message_goal=(
-            "Keep in touch respectfully while the lead handles personal "
-            "timing constraints."
+            "Keep in touch respectfully while the lead handles personal timing constraints."
         ),
         reactivation_message_goal="Reconnect as the lead's stated timing window approaches.",
     ),
@@ -148,12 +142,10 @@ DEFAULT_PAUSED_SEARCH_TRACK_TEMPLATES = (
         reactivation_window_days=30,
         max_total_touches=3,
         maintenance_message_goal=(
-            "Use a gentle check-in for a known paused-search lead with "
-            "custom context."
+            "Use a gentle check-in for a known paused-search lead with custom context."
         ),
         reactivation_message_goal=(
-            "Reconnect when the lead may be open to restarting the "
-            "conversation."
+            "Reconnect when the lead may be open to restarting the conversation."
         ),
     ),
 )
@@ -165,6 +157,7 @@ async def seed_default_paused_search_tracks(
     workspace_id: WorkspaceId,
     repository: PausedSearchTrackAdminRepository,
     audit_log_repository: PausedSearchTrackAdminAuditLogRepository,
+    template_repository: TemplateRepository | None = None,
     now: datetime,
     event_bus: EventBus | None = None,
 ) -> SeedDefaultPausedSearchTracksResult:
@@ -211,6 +204,7 @@ async def seed_default_paused_search_tracks(
             config=_config_for_template(template),
             repository=repository,
             audit_log_repository=audit_log_repository,
+            template_repository=template_repository,
             now=now,
             event_bus=event_bus,
         )
@@ -234,6 +228,7 @@ async def seed_default_paused_search_tracks(
             track_version_id=draft.view.version.track_version_id,
             repository=repository,
             audit_log_repository=audit_log_repository,
+            template_repository=template_repository,
             now=now,
             event_bus=event_bus,
         )
@@ -270,6 +265,8 @@ def _config_for_template(
     template: _DefaultPausedSearchTrackTemplate,
 ) -> PausedSearchTrackConfigInput:
     base_key = template.track_key
+    profile = capability_profile_for_reason(template.reason_code)
+    assert profile is not None
     return PausedSearchTrackConfigInput(
         track_family=PausedSearchTrackFamily.MAINTENANCE,
         enabled=True,
@@ -279,6 +276,7 @@ def _config_for_template(
         maintenance_interval_days=template.maintenance_interval_days,
         reactivation_window_days=template.reactivation_window_days,
         max_total_touches=template.max_total_touches,
+        max_duration_days=profile.max_duration_days,
         requires_review_before_publish=False,
         steps=(
             PausedSearchTrackStepInput(

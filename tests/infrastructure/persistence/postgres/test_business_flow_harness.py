@@ -645,7 +645,9 @@ async def test_business_flow_harness_runs_continue_ai_path_against_real_postgres
         handoff_repository=PostgresHandoffRepository(postgres_session),
         crm_client=cast(CRMClient, FakeCRMClient()),
         notification_provider=cast(NotificationProvider, FakeNotificationProvider()),
-        workspace_handoff_config_repository=PostgresWorkspaceHandoffConfigRepository(postgres_session),
+        workspace_handoff_config_repository=PostgresWorkspaceHandoffConfigRepository(
+            postgres_session
+        ),
         handoff_completion_repository=PostgresHandoffCompletionRepository(postgres_session),
         llm_client=_FakeLLMClientForContinuation(
             classification_text=_classification_json(

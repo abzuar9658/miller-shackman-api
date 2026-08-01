@@ -1,3 +1,5 @@
+from dataclasses import replace
+from datetime import UTC, datetime
 from uuid import UUID
 
 from app.application.services.paused_search_legacy_audit import (
@@ -7,7 +9,17 @@ from app.application.services.paused_search_legacy_audit import (
     LegacyPausedSearchWorkflowRecord,
     audit_legacy_paused_search_data,
 )
-from app.domain.campaigns import PausedSearchFallbackTimingPolicy
+from app.application.services.paused_search_legacy_migration import (
+    LegacyMigrationOutcome,
+    LegacyMigrationReason,
+    LegacyPausedSearchMigrationInput,
+    plan_legacy_paused_search_migration,
+)
+from app.domain.campaigns import (
+    PausedSearchFallbackTimingPolicy,
+    PausedSearchTrackStepPhase,
+)
+from app.domain.compliance.contactability import ContactChannel
 
 VERSION_ID = UUID("00000000-0000-0000-0000-000000000701")
 STEP_ID = UUID("00000000-0000-0000-0000-000000000702")
@@ -78,3 +90,67 @@ def test_legacy_audit_blocks_workflow_without_pinned_version() -> None:
 
     assert report.ready_for_recurring_execution is False
     assert report.blocking_findings[0].code is LegacyAuditFindingCode.INCOMPLETE_WORKFLOW_CURSOR
+
+
+def test_legacy_migration_creates_idempotent_non_touching_baseline() -> None:
+    migration_input = LegacyPausedSearchMigrationInput(
+        workspace_id=UUID("00000000-0000-0000-0000-000000000704"),
+        lead_id=UUID("00000000-0000-0000-0000-000000000705"),
+        workflow_id=WORKFLOW_ID,
+        track_version_id=VERSION_ID,
+        step_id=STEP_ID,
+        phase=PausedSearchTrackStepPhase.MAINTENANCE,
+        channel=ContactChannel.EMAIL,
+        next_action_at=datetime(2026, 8, 1, 15, tzinfo=UTC),
+        logical_touch_count=1,
+        max_total_touches=5,
+        timezone="America/Chicago",
+    )
+
+    first = plan_legacy_paused_search_migration(input_=migration_input, now=datetime.now(UTC))
+    second = plan_legacy_paused_search_migration(input_=migration_input, now=datetime.now(UTC))
+
+    assert first.outcome is LegacyMigrationOutcome.MIGRATED
+    assert first.reason is LegacyMigrationReason.MIGRATED_BASELINE
+    assert first.terminalize_workflow is False
+    assert first.occurrence is not None
+    assert first.occurrence.status.value == "migrated_legacy"
+    assert first.occurrence.occurrence_number == 0
+    assert first.occurrence.logical_touch_count == 0
+    assert second.occurrence is not None
+    assert first.occurrence.occurrence_id == second.occurrence.occurrence_id
+    assert first.occurrence.idempotency_key == second.occurrence.idempotency_key
+
+
+def test_legacy_migration_holds_incomplete_cursor_and_terminalizes_touch_limit() -> None:
+    incomplete = LegacyPausedSearchMigrationInput(
+        workspace_id=UUID("00000000-0000-0000-0000-000000000704"),
+        lead_id=UUID("00000000-0000-0000-0000-000000000705"),
+        workflow_id=WORKFLOW_ID,
+        track_version_id=None,
+        step_id=None,
+        phase=None,
+        channel=None,
+        next_action_at=None,
+        logical_touch_count=0,
+        max_total_touches=5,
+        timezone="UTC",
+    )
+    at_limit = replace(
+        incomplete,
+        track_version_id=VERSION_ID,
+        step_id=STEP_ID,
+        phase=PausedSearchTrackStepPhase.MAINTENANCE,
+        channel=ContactChannel.EMAIL,
+        next_action_at=datetime(2026, 8, 1, 15, tzinfo=UTC),
+        logical_touch_count=5,
+    )
+
+    held = plan_legacy_paused_search_migration(input_=incomplete, now=datetime.now(UTC))
+    migrated = plan_legacy_paused_search_migration(input_=at_limit, now=datetime.now(UTC))
+
+    assert held.outcome is LegacyMigrationOutcome.HOLD_FOR_REVIEW
+    assert held.reason is LegacyMigrationReason.INCOMPLETE_CURSOR
+    assert held.occurrence is None
+    assert migrated.reason is LegacyMigrationReason.TOUCH_LIMIT_AT_MIGRATION
+    assert migrated.terminalize_workflow is True

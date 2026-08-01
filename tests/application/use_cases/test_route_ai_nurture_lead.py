@@ -42,9 +42,7 @@ LEAD_ID = UUID("22222222-2222-2222-2222-222222222222")
 def _lead(
     *, paused_search_active: bool = False, do_not_contact: bool = False
 ) -> CanonicalLeadRecord:
-    pause_reason_code = (
-        PausedSearchReasonCode.WAITING_FOR_RATES if paused_search_active else None
-    )
+    pause_reason_code = PausedSearchReasonCode.WAITING_FOR_RATES if paused_search_active else None
     paused_search_source = (
         PausedSearchSource.AI_CONVERSATION_CLASSIFICATION if paused_search_active else None
     )
@@ -180,9 +178,7 @@ async def test_fresh_paused_search_keeps_existing_paused_search() -> None:
     lead = _lead(paused_search_active=True)
     result = await _route(
         lead,
-        FakeClassificationLLMClient(
-            outcome="paused_search", pause_reason_code="waiting_for_rates"
-        ),
+        FakeClassificationLLMClient(outcome="paused_search", pause_reason_code="waiting_for_rates"),
     )
     assert result.route == AiNurtureRoute.PAUSED_SEARCH
 
@@ -198,9 +194,7 @@ async def test_existing_paused_search_fallback_beats_dormant_classification() ->
 @pytest.mark.asyncio
 async def test_existing_paused_search_fallback_beats_rejected_classification() -> None:
     lead = _lead(paused_search_active=True)
-    result = await _route(
-        lead, FakeClassificationLLMClient(outcome="dormant", confidence=0.5)
-    )
+    result = await _route(lead, FakeClassificationLLMClient(outcome="dormant", confidence=0.5))
     assert result.route == AiNurtureRoute.PAUSED_SEARCH
 
 
@@ -214,9 +208,7 @@ async def test_dormant_classification_without_profile_returns_dormant() -> None:
 @pytest.mark.asyncio
 async def test_rejected_classification_without_profile_returns_review_hold() -> None:
     lead = _lead(paused_search_active=False)
-    result = await _route(
-        lead, FakeClassificationLLMClient(outcome="dormant", confidence=0.5)
-    )
+    result = await _route(lead, FakeClassificationLLMClient(outcome="dormant", confidence=0.5))
     assert result.route == AiNurtureRoute.REVIEW_HOLD
 
 
@@ -299,9 +291,7 @@ async def test_route_passes_configured_dormant_threshold_to_classifier() -> None
     result = await _route(
         lead,
         llm_client,
-        crm_events=(
-            _crm_event("I am interested in this listing."),
-        ),
+        crm_events=(_crm_event("I am interested in this listing."),),
         dormant_threshold_days=45,
     )
 

@@ -74,6 +74,7 @@ from app.domain.leads import (
     PausedSearchReasonCode,
 )
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
+from app.domain.workspace_automation import WorkspaceOperationalControl
 from tests.application.use_cases._campaign_admin_fakes import FakeEventBus
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCampaignExecutionRepository,
@@ -420,9 +421,7 @@ class FakeHandoffRepository:
         *,
         limit: int = 100,
     ) -> tuple[Handoff, ...]:
-        handoffs = tuple(
-            handoff for handoff in self.saved if handoff.workspace_id == workspace_id
-        )
+        handoffs = tuple(handoff for handoff in self.saved if handoff.workspace_id == workspace_id)
         return handoffs[:limit]
 
     async def get_by_id(self, workspace_id: WorkspaceId, handoff_id: UUID) -> Handoff | None:
@@ -785,7 +784,12 @@ async def test_business_flow_harness_runs_crm_tag_to_paused_search_send_to_hando
             summary="Lead wants to wait for better mortgage rates.",
         ),
         event_bus=FakeEventBus(),
-        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(None),
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(
+            WorkspaceOperationalControl(
+                workspace_id=WORKSPACE_ID,
+                recurring_paused_search_enabled=True,
+            )
+        ),
     )
 
     assert enrollment_result.status == CRMTagCampaignEnrollmentStatus.STARTED
