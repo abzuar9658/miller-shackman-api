@@ -8,6 +8,18 @@ ownership of safety, workflow state, and send eligibility.
 This plan extends the existing paused-search track model. It does not create a
 generic workflow or rules engine.
 
+## Lead assignment and admin catalog authority
+
+An active `paused_search_track_assignments` row is the single source of truth for
+which paused-search track and immutable version a lead uses. Lead detail reads the
+assigned track, version, and ordered steps from the admin-configured records and
+uses that same read model for the decision flowchart; workflow rows contribute
+only workflow state and current timing.
+
+Retired tracks are excluded from the admin track catalog and cannot receive new
+assignments. Existing durable assignments remain readable so their historical
+configuration and audit context are not lost.
+
 ## Product decision
 
 Paused-search tracks are **bounded, versioned configurations**.

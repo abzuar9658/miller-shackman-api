@@ -19,6 +19,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     UserRepository,
@@ -124,6 +125,7 @@ async def resolve_lead_review_hold(
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
     paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     temporal_workflow_starter: TemporalWorkflowStarter,
     event_bus: EventBus | None,
@@ -225,6 +227,7 @@ async def resolve_lead_review_hold(
             lead_workflow_repository=lead_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
             paused_search_track_repository=paused_search_track_repository,
+            paused_search_track_assignment_repository=paused_search_track_assignment_repository,
             temporal_workflow_starter=temporal_workflow_starter,
             event_bus=event_bus,
             workspace_operational_control_repository=workspace_operational_control_repository,
@@ -253,6 +256,7 @@ async def resolve_lead_review_hold(
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         temporal_signal_outbox_repository=temporal_signal_outbox_repository,
         temporal_workflow_starter=temporal_workflow_starter,
         event_bus=event_bus,
@@ -287,6 +291,7 @@ async def _resolve_to_dormant(
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
     paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
     temporal_workflow_starter: TemporalWorkflowStarter,
     event_bus: EventBus | None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
@@ -318,6 +323,7 @@ async def _resolve_to_dormant(
         llm_client=llm_client,
         crm_conversation_event_repository=crm_conversation_event_repository,
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         routing_review_repository=routing_review_repository,
         event_bus=event_bus,
         now=now,
@@ -424,6 +430,7 @@ async def _resolve_to_paused_search(
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
     paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     temporal_workflow_starter: TemporalWorkflowStarter,
     event_bus: EventBus | None,
@@ -461,6 +468,15 @@ async def _resolve_to_paused_search(
             artifact=artifact,
             reasons=(LeadReviewHoldResolutionReasonCode.PAUSED_SEARCH_TRACK_UNAVAILABLE,),
         )
+    if paused_search_track_assignment_repository is None:
+        return _result(
+            LeadReviewHoldResolutionStatus.REVIEW_REQUIRED,
+            resolution=LeadReviewHoldResolution.PAUSED_SEARCH,
+            lead_id=lead_id,
+            campaign_id=campaign_id,
+            artifact=artifact,
+            reasons=(LeadReviewHoldResolutionReasonCode.PAUSED_SEARCH_TRACK_UNAVAILABLE,),
+        )
 
     paused_result = await update_lead_paused_search(
         actor=actor,
@@ -475,6 +491,7 @@ async def _resolve_to_paused_search(
         paused_search_history_repository=paused_search_history_repository,
         lead_workflow_repository=lead_workflow_repository,
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         temporal_signal_outbox_repository=temporal_signal_outbox_repository,
         now=now,
     )
@@ -522,6 +539,7 @@ async def _resolve_to_paused_search(
         workflow_transition_repository=workflow_transition_repository,
         temporal_workflow_starter=temporal_workflow_starter,
         paused_search_track_repository=paused_search_track_repository,
+            paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         event_bus=event_bus,
         workspace_operational_control_repository=workspace_operational_control_repository,
         commit=commit,

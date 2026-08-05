@@ -2,6 +2,9 @@ from app.domain.identity.models import (
     AuthAuditEventType,
     AuthAuditLog,
     AuthenticatedActor,
+    AuthenticatedExtensionDevice,
+    ExtensionDevice,
+    ExtensionPairingCode,
     PasswordCredential,
     PasswordResetToken,
     RefreshSession,
@@ -31,8 +34,11 @@ from app.domain.identity.permissions import (
 
 __all__ = [
     "AuthenticatedActor",
+    "AuthenticatedExtensionDevice",
     "AuthAuditEventType",
     "AuthAuditLog",
+    "ExtensionDevice",
+    "ExtensionPairingCode",
     "PasswordPolicy",
     "PasswordPolicyDecision",
     "PasswordPolicyReasonCode",

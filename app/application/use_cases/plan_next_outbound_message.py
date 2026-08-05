@@ -38,7 +38,11 @@ from app.domain.common.ids import CampaignId, LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel, WorkspaceContactPolicy
 from app.domain.conversations import CrmConversationEvent
 from app.domain.leads import CanonicalLeadRecord
-from app.domain.outbound_drafting import OutboundJourneyKind
+from app.domain.outbound_drafting import (
+    DormantStepTemplateProfile,
+    OutboundJourneyKind,
+    WorkspaceOutboundDraftingConfig,
+)
 
 OUTBOUND_CONTEXT_ACTIVITY_HISTORY_LIMIT = 24
 
@@ -85,6 +89,8 @@ class PlanNextOutboundMessageContext:
     extracted_preferences: Mapping[str, str] = field(default_factory=_empty_preferences)
     allowed_mapped_custom_field_keys: tuple[str, ...] = ()
     activity_items: tuple[LeadActivityItem, ...] = ()
+    drafting_config: WorkspaceOutboundDraftingConfig | None = None
+    template_profile: DormantStepTemplateProfile | None = None
 
 
 async def plan_next_outbound_message_for_lead(
@@ -139,13 +145,14 @@ async def plan_next_outbound_message_for_lead(
             limit=OUTBOUND_CONTEXT_ACTIVITY_HISTORY_LIMIT,
         )
 
-    enabled_query_extraction_fields: tuple[str, ...] | None = None
-    if workspace_outbound_drafting_config_repository is not None:
+    drafting_config = context.drafting_config
+    if drafting_config is None and workspace_outbound_drafting_config_repository is not None:
         drafting_config = await workspace_outbound_drafting_config_repository.get_by_workspace_id(
             workspace_id,
         )
-        if drafting_config is not None:
-            enabled_query_extraction_fields = drafting_config.enabled_extraction_fields
+    enabled_query_extraction_fields = (
+        drafting_config.enabled_extraction_fields if drafting_config is not None else None
+    )
 
     preflight_context = OutboundPlanningContext(
         campaign_status=context.campaign_status,
@@ -162,6 +169,8 @@ async def plan_next_outbound_message_for_lead(
         message_version=context.message_version,
         pre_send_policy=context.pre_send_policy,
         journey_kind=context.journey_kind,
+        drafting_config=context.drafting_config,
+        template_profile=context.template_profile,
         preflight_vetoed=context.preflight_vetoed,
         handoff_active=context.handoff_active,
         human_owned=context.human_owned,
@@ -242,6 +251,8 @@ async def plan_next_outbound_message_for_lead(
         pre_send_policy=context.pre_send_policy,
         lead_context=lead_context,
         journey_kind=context.journey_kind,
+        drafting_config=context.drafting_config,
+        template_profile=context.template_profile,
         preflight_vetoed=context.preflight_vetoed,
         handoff_active=context.handoff_active,
         human_owned=context.human_owned,

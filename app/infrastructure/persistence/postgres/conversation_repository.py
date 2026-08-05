@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +22,7 @@ from app.domain.conversations import (
     InboundMessage,
     InboundMessageClassificationStatus,
     InboundMessageCRMCompletionRecord,
+    canonical_crm_event_identity,
 )
 from app.infrastructure.persistence.postgres.models import (
     ConversationModel,
@@ -595,31 +596,97 @@ class PostgresCrmConversationEventRepository:
 
     async def save(self, event: CrmConversationEvent) -> CrmConversationEvent:
         values = _crm_conversation_event_to_values(event)
+        inserted = await self._session.execute(
+            insert(CrmConversationEventModel)
+            .values(**values)
+            .on_conflict_do_nothing()
+            .returning(CrmConversationEventModel)
+        )
+        inserted_model = inserted.scalar_one_or_none()
+        if inserted_model is not None:
+            return _model_to_crm_conversation_event(inserted_model)
+
+        existing_result = await self._session.execute(
+            select(CrmConversationEventModel)
+            .where(
+                CrmConversationEventModel.workspace_id == event.workspace_id,
+                CrmConversationEventModel.crm_provider == event.crm_provider,
+                CrmConversationEventModel.lead_id == event.lead_id,
+                or_(
+                    CrmConversationEventModel.crm_activity_id == event.crm_activity_id,
+                    CrmConversationEventModel.canonical_identity
+                    == values["canonical_identity"],
+                ),
+            )
+            .order_by(
+                case(
+                    (CrmConversationEventModel.crm_activity_id == event.crm_activity_id, 0),
+                    else_=1,
+                )
+            )
+            .with_for_update()
+        )
+        matching_rows = tuple(existing_result.scalars().all())
+        if not matching_rows:
+            retried = await self._session.execute(
+                insert(CrmConversationEventModel)
+                .values(**values)
+                .on_conflict_do_nothing()
+                .returning(CrmConversationEventModel)
+            )
+            retried_model = retried.scalar_one_or_none()
+            if retried_model is None:
+                raise RuntimeError("CRM conversation event conflict could not be reconciled")
+            return _model_to_crm_conversation_event(retried_model)
+        existing = next(
+            (
+                row
+                for row in matching_rows
+                if not row.source_payload_version.startswith("extension/")
+            ),
+            matching_rows[0],
+        )
+        duplicate_ids = [
+            row.crm_conversation_event_id
+            for row in matching_rows
+            if row.crm_conversation_event_id != existing.crm_conversation_event_id
+        ]
+        if duplicate_ids:
+            await self._session.execute(
+                delete(CrmConversationEventModel).where(
+                    CrmConversationEventModel.crm_conversation_event_id.in_(duplicate_ids)
+                )
+            )
+        if _is_extension_event(event) and not existing.source_payload_version.startswith(
+            "extension/"
+        ):
+            return _model_to_crm_conversation_event(existing)
+
         update_values = {
             key: value
             for key, value in values.items()
             if key
-            not in (
-                "crm_conversation_event_id",
-                "workspace_id",
-                "crm_provider",
-                "crm_activity_id",
-            )
+            not in {"crm_conversation_event_id", "workspace_id", "lead_id", "crm_provider"}
         }
-        statement = (
-            insert(CrmConversationEventModel)
-            .values(**values)
-            .on_conflict_do_update(
-                index_elements=["workspace_id", "crm_provider", "crm_activity_id"],
-                set_=update_values,
+        updated = await self._session.execute(
+            update(CrmConversationEventModel)
+            .where(
+                CrmConversationEventModel.crm_conversation_event_id
+                == existing.crm_conversation_event_id
             )
+            .values(**update_values)
             .returning(CrmConversationEventModel)
         )
-        result = await self._session.execute(statement)
-        return _model_to_crm_conversation_event(result.scalar_one())
+        return _model_to_crm_conversation_event(updated.scalar_one())
 
 
 def _crm_conversation_event_to_values(event: CrmConversationEvent) -> dict[str, object]:
+    canonical_identity = canonical_crm_event_identity(
+        activity_type=event.activity_type,
+        occurred_at=event.occurred_at,
+        content=event.content,
+        direction=event.direction,
+    )
     return {
         "crm_conversation_event_id": event.crm_conversation_event_id,
         "workspace_id": event.workspace_id,
@@ -627,6 +694,7 @@ def _crm_conversation_event_to_values(event: CrmConversationEvent) -> dict[str, 
         "conversation_id": event.conversation_id,
         "crm_provider": event.crm_provider,
         "crm_activity_id": event.crm_activity_id,
+        "canonical_identity": canonical_identity,
         "activity_type": event.activity_type,
         "direction": event.direction.value if event.direction is not None else None,
         "occurred_at": event.occurred_at,
@@ -651,6 +719,7 @@ def _model_to_crm_conversation_event(model: CrmConversationEventModel) -> CrmCon
         conversation_id=model.conversation_id,
         crm_provider=model.crm_provider,
         crm_activity_id=model.crm_activity_id,
+        canonical_identity=model.canonical_identity,
         activity_type=model.activity_type,
         direction=(
             CrmConversationEventDirection(model.direction) if model.direction is not None else None
@@ -667,6 +736,10 @@ def _model_to_crm_conversation_event(model: CrmConversationEventModel) -> CrmCon
         created_at=model.created_at,
         updated_at=model.updated_at,
     )
+
+
+def _is_extension_event(event: CrmConversationEvent) -> bool:
+    return event.source_payload_version.startswith("extension/")
 
 
 def _transcript_segment_to_record(

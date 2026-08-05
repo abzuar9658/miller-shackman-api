@@ -19,6 +19,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     UserRepository,
     WorkflowTransitionRepository,
@@ -54,6 +55,7 @@ from app.infrastructure.persistence.postgres.outbox_event_repository import (
 )
 from app.infrastructure.persistence.postgres.paused_search_track_repository import (
     PostgresPausedSearchTrackAdminRepository,
+    PostgresPausedSearchTrackAssignmentRepository,
 )
 from app.infrastructure.persistence.postgres.workflow_repository import (
     PostgresLeadWorkflowRepository,
@@ -106,6 +108,7 @@ class LeadManualEnrollmentBundle:
     notification_provider: NotificationProvider
     user_repository: UserRepository
     event_bus: EventBus
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None
 
 
 async def get_lead_manual_enrollment_bundle(
@@ -132,6 +135,9 @@ async def get_lead_manual_enrollment_bundle(
         llm_client=build_llm_client(settings),
         crm_conversation_event_repository=PostgresCrmConversationEventRepository(session),
         paused_search_track_repository=PostgresPausedSearchTrackAdminRepository(session),
+        paused_search_track_assignment_repository=PostgresPausedSearchTrackAssignmentRepository(
+            session
+        ),
         routing_review_repository=PostgresLeadRoutingReviewRepository(session),
         default_openrouter_model=settings.openrouter_model,
         handoff_repository=PostgresHandoffRepository(session),

@@ -107,7 +107,7 @@ def validate_paused_search_track(
     _validate_steps(version, steps, findings)
     _validate_profiles(version, steps, findings)
     if templates is not None:
-        _validate_templates(version, steps, templates, findings, for_publish=for_publish)
+        _validate_templates(version, steps, templates, findings)
     configured_touches = sum(step.max_occurrences for step in steps)
     if configured_touches > version.max_total_touches:
         _add(
@@ -285,20 +285,16 @@ def _validate_templates(
     steps: tuple[PausedSearchTrackStep, ...],
     templates: Mapping[UUID, TemplateVersion],
     findings: list[PausedSearchValidationFinding],
-    *,
-    for_publish: bool,
 ) -> None:
     for index, step in enumerate(steps):
         field = f"steps[{index}].template_version_id"
+        severity = PausedSearchValidationSeverity.ERROR
+        if step.template_profile is not None:
+            continue
         template = (
             templates.get(step.template_version_id)
             if step.template_version_id is not None
             else None
-        )
-        severity = (
-            PausedSearchValidationSeverity.ERROR
-            if for_publish
-            else PausedSearchValidationSeverity.WARNING
         )
         if step.template_version_id is None:
             _add(

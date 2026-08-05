@@ -116,7 +116,7 @@ class CrmHistoryImportCapabilityResponse(BaseModel):
 class CreateCrmHistoryImportResponse(BaseModel):
     status: str
     job: CrmHistoryImportJobResponse
-    upload_token: str
+    upload_token: str | None
 
 
 class CrmHistoryImportReadResponse(BaseModel):

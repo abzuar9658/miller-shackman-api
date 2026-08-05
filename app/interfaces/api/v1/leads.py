@@ -141,6 +141,7 @@ from app.interfaces.api.schemas.leads import (
     LeadPausedSearchHistoryEntryResponse,
     LeadPausedSearchProfileResponse,
     LeadPausedSearchTrackPlanResponse,
+    LeadPausedSearchTrackStepPlanResponse,
     LeadQualificationPlanResponse,
     LeadResponse,
     LeadResumeEligibilityResponse,
@@ -266,6 +267,7 @@ async def get_lead_route(
         workflow_override_audit_repository=bundle.workflow_override_audit_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
         paused_search_track_repository=bundle.paused_search_track_repository,
+        paused_search_track_assignment_repository=bundle.paused_search_track_assignment_repository,
         activity_repository=bundle.activity_repository,
         rejected_draft_review_repository=bundle.rejected_draft_review_repository,
         inbound_message_repository=bundle.inbound_message_repository,
@@ -366,6 +368,9 @@ async def start_lead_manual_enrollment_route(
         llm_client=bundle.llm_client,
         crm_conversation_event_repository=bundle.crm_conversation_event_repository,
         paused_search_track_repository=bundle.paused_search_track_repository,
+        paused_search_track_assignment_repository=(
+            bundle.paused_search_track_assignment_repository
+        ),
         routing_review_repository=bundle.routing_review_repository,
         commit=bundle.session.commit,
         event_bus=bundle.event_bus,
@@ -439,6 +444,9 @@ async def resolve_lead_review_hold_route(
         lead_workflow_repository=manual_bundle.lead_workflow_repository,
         workflow_transition_repository=manual_bundle.workflow_transition_repository,
         paused_search_track_repository=paused_bundle.paused_search_track_repository,
+        paused_search_track_assignment_repository=(
+            paused_bundle.paused_search_track_assignment_repository
+        ),
         temporal_signal_outbox_repository=paused_bundle.temporal_signal_outbox_repository,
         temporal_workflow_starter=manual_bundle.temporal_workflow_starter,
         event_bus=manual_bundle.event_bus,
@@ -658,6 +666,9 @@ async def update_lead_paused_search_route(
         paused_search_history_repository=bundle.paused_search_history_repository,
         lead_workflow_repository=bundle.lead_workflow_repository,
         paused_search_track_repository=bundle.paused_search_track_repository,
+        paused_search_track_assignment_repository=(
+            bundle.paused_search_track_assignment_repository
+        ),
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         now=datetime.now(UTC),
     )
@@ -713,6 +724,9 @@ async def override_paused_search_timing_route(
         lead_workflow_repository=bundle.lead_workflow_repository,
         lead_workflow_override_audit_repository=bundle.lead_workflow_override_audit_repository,
         paused_search_track_repository=bundle.paused_search_track_repository,
+        paused_search_track_assignment_repository=(
+            bundle.paused_search_track_assignment_repository
+        ),
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         workspace_repository=bundle.workspace_repository,
         now=datetime.now(UTC),
@@ -753,6 +767,9 @@ async def migrate_paused_search_track_route(
         lead_workflow_repository=bundle.lead_workflow_repository,
         lead_workflow_override_audit_repository=bundle.lead_workflow_override_audit_repository,
         paused_search_track_repository=bundle.paused_search_track_repository,
+        paused_search_track_assignment_repository=(
+            bundle.paused_search_track_assignment_repository
+        ),
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         workspace_repository=bundle.workspace_repository,
         paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
@@ -893,6 +910,9 @@ async def classify_lead_route(
         workspace_llm_config_repository=bundle.workspace_llm_config_repository,
         lead_workflow_repository=bundle.lead_workflow_repository,
         paused_search_track_repository=bundle.paused_search_track_repository,
+        paused_search_track_assignment_repository=(
+            bundle.paused_search_track_assignment_repository
+        ),
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         llm_client=bundle.llm_client,
         now=datetime.now(UTC),
@@ -1195,9 +1215,44 @@ def _paused_search_plan_response(
         track_id=plan.track.track_id,
         track_key=plan.track.track_key,
         display_name=plan.track.display_name,
+        track_status=plan.track.status.value,
         track_version_id=plan.version.track_version_id,
         version_number=plan.version.version_number,
+        version_status=plan.version.status.value,
         track_family=plan.version.track_family.value,
+        enabled=plan.version.enabled,
+        allowed_channels=[channel.value for channel in plan.version.allowed_channels],
+        default_for_reason_codes=[
+            reason_code.value for reason_code in plan.version.default_for_reason_codes
+        ],
+        fallback_timing_policy=plan.version.fallback_timing_policy.value,
+        maintenance_interval_days=plan.version.maintenance_interval_days,
+        reactivation_window_days=plan.version.reactivation_window_days,
+        max_total_touches=plan.version.max_total_touches,
+        requires_review_before_publish=plan.version.requires_review_before_publish,
+        default_pause_duration_days=plan.version.default_pause_duration_days,
+        max_duration_days=plan.version.max_duration_days,
+        terminal_behavior=plan.version.terminal_behavior.value,
+        steps=[
+            LeadPausedSearchTrackStepPlanResponse(
+                step_id=step.step_id,
+                track_version_id=step.track_version_id,
+                step_order=step.step_order,
+                phase=step.phase.value,
+                channel=step.channel.value,
+                delay_hours=step.delay_hours,
+                message_goal=step.message_goal,
+                template_key=step.template_key,
+                max_attempts=step.max_attempts,
+                review_required=step.review_required,
+                timing_basis=step.timing_basis.value,
+                fallback_channel=step.fallback_channel.value if step.fallback_channel else None,
+                interval_days=step.interval_days,
+                max_occurrences=step.max_occurrences,
+                template_version_id=step.template_version_id,
+            )
+            for step in plan.steps
+        ],
         current_step_id=(plan.current_step.step_id if plan.current_step is not None else None),
         current_step_order=(
             plan.current_step.step_order if plan.current_step is not None else None

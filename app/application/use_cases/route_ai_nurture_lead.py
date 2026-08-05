@@ -10,6 +10,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     WorkspaceLLMConfigRepository,
@@ -70,6 +71,7 @@ async def route_ai_nurture_lead(
     supplemental_crm_conversation_events: tuple[CrmConversationEvent, ...] = (),
     lead_workflow_repository: LeadWorkflowRepository | None = None,
     paused_search_track_repository: PausedSearchTrackMappingRepository | None = None,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     routing_review_repository: LeadRoutingReviewRepository | None = None,
 ) -> AiNurtureRouteResult:
@@ -108,6 +110,7 @@ async def route_ai_nurture_lead(
         supplemental_crm_conversation_events=supplemental_crm_conversation_events,
         lead_workflow_repository=lead_workflow_repository,
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         temporal_signal_outbox_repository=temporal_signal_outbox_repository,
         crm_conversation_events=stored_crm_events,
     )

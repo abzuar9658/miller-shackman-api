@@ -10,6 +10,7 @@ from app.domain.crm_history_imports import (
     CrmHistoryImportEventStatus,
     CrmHistoryImportJob,
     CrmHistoryImportJobStatus,
+    CrmHistoryImportSource,
     StagedCrmHistoryImportEvent,
 )
 from app.infrastructure.persistence.postgres.models import (
@@ -70,6 +71,25 @@ class PostgresCrmHistoryImportJobRepository:
             )
             .order_by(CrmHistoryImportJobModel.created_at.desc())
             .limit(1)
+        )
+        model = result.scalar_one_or_none()
+        return _job_from_model(model) if model is not None else None
+
+    async def get_by_batch_fingerprint(
+        self, workspace_id: UUID, lead_id: UUID, batch_fingerprint: str
+    ) -> CrmHistoryImportJob | None:
+        result = await self._session.execute(
+            select(CrmHistoryImportJobModel).where(
+                CrmHistoryImportJobModel.workspace_id == workspace_id,
+                CrmHistoryImportJobModel.lead_id == lead_id,
+                CrmHistoryImportJobModel.batch_fingerprint == batch_fingerprint,
+                CrmHistoryImportJobModel.status.not_in(
+                    (
+                        CrmHistoryImportJobStatus.FAILED.value,
+                        CrmHistoryImportJobStatus.CANCELLED.value,
+                    )
+                ),
+            )
         )
         model = result.scalar_one_or_none()
         return _job_from_model(model) if model is not None else None
@@ -189,6 +209,9 @@ def _job_values(job: CrmHistoryImportJob) -> dict[str, object]:
         "lead_id": job.lead_id,
         "crm_lead_id": job.crm_lead_id,
         "requested_by_user_id": job.requested_by_user_id,
+        "source": job.source.value,
+        "batch_fingerprint": job.batch_fingerprint,
+        "source_device_id": job.source_device_id,
         "status": job.status.value,
         "upload_token_hash": job.upload_token_hash,
         "token_expires_at": job.token_expires_at,
@@ -213,6 +236,9 @@ def _job_from_model(model: CrmHistoryImportJobModel) -> CrmHistoryImportJob:
         lead_id=model.lead_id,
         crm_lead_id=model.crm_lead_id,
         requested_by_user_id=model.requested_by_user_id,
+        source=CrmHistoryImportSource(model.source or CrmHistoryImportSource.MANUAL.value),
+        batch_fingerprint=model.batch_fingerprint,
+        source_device_id=model.source_device_id,
         status=CrmHistoryImportJobStatus(model.status),
         upload_token_hash=model.upload_token_hash,
         token_expires_at=model.token_expires_at,

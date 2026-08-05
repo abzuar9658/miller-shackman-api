@@ -38,11 +38,14 @@ from app.domain.compliance.contactability import ContactChannel
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
 from app.domain.identity import AuthenticatedActor, PermissionCapability, evaluate_permission
 from app.domain.leads import PausedSearchReasonCode
+from app.domain.outbound_drafting import DormantStepTemplateProfile
 
 
 class PausedSearchTrackAdminReasonCode(StrEnum):
     PERMISSION_DENIED = "permission_denied"
     TRACK_NOT_FOUND = "track_not_found"
+    TRACK_NOT_RETIRED = "track_not_retired"
+    LEADS_ASSIGNED = "leads_assigned"
     TRACK_KEY_TAKEN = "track_key_taken"
     VERSION_NOT_FOUND = "version_not_found"
     VERSION_NOT_DRAFT = "version_not_draft"
@@ -78,6 +81,17 @@ class PausedSearchTrackRetireStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class PausedSearchTrackRestoreStatus(StrEnum):
+    RESTORED = "restored"
+    REJECTED = "rejected"
+
+
+class PausedSearchTrackDeleteStatus(StrEnum):
+    DELETED = "deleted"
+    BLOCKED = "blocked_leads_assigned"
+    REJECTED = "rejected"
+
+
 @dataclass(frozen=True)
 class PausedSearchTrackStepInput:
     phase: PausedSearchTrackStepPhase
@@ -92,6 +106,7 @@ class PausedSearchTrackStepInput:
     template_version_id: UUID | None = None
     timing_basis: PausedSearchTimingBasis = PausedSearchTimingBasis.CUSTOMER_REENGAGEMENT_DATE
     fallback_channel: ContactChannel | None = None
+    template_profile: DormantStepTemplateProfile | None = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +161,20 @@ class PausedSearchTrackDetailResult:
 @dataclass(frozen=True)
 class PausedSearchTrackRetireResult:
     status: PausedSearchTrackRetireStatus
+    view: PausedSearchTrackAdminView | None = None
+    reasons: tuple[PausedSearchTrackAdminReasonCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class PausedSearchTrackRestoreResult:
+    status: PausedSearchTrackRestoreStatus
+    view: PausedSearchTrackAdminView | None = None
+    reasons: tuple[PausedSearchTrackAdminReasonCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class PausedSearchTrackDeleteResult:
+    status: PausedSearchTrackDeleteStatus
     view: PausedSearchTrackAdminView | None = None
     reasons: tuple[PausedSearchTrackAdminReasonCode, ...] = ()
 
@@ -588,9 +617,158 @@ async def list_paused_search_track_views(
     views = [
         view
         for track in await repository.list_tracks(workspace_id)
-        if (view := await _view_for_track(repository, track))
+        if track.status != PausedSearchTrackStatus.RETIRED
+        and (view := await _view_for_track(repository, track))
     ]
     return PausedSearchTrackListResult(status=PausedSearchTrackReadStatus.OK, views=tuple(views))
+
+
+async def list_retired_paused_search_track_views(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: WorkspaceId,
+    repository: PausedSearchTrackAdminRepository,
+) -> PausedSearchTrackListResult:
+    if not _can_view_tracks(actor):
+        return PausedSearchTrackListResult(
+            status=PausedSearchTrackReadStatus.REJECTED,
+            reasons=(PausedSearchTrackAdminReasonCode.PERMISSION_DENIED,),
+        )
+    views = [
+        view
+        for track in await repository.list_tracks(workspace_id)
+        if track.status == PausedSearchTrackStatus.RETIRED
+        and (view := await _view_for_track(repository, track))
+    ]
+    return PausedSearchTrackListResult(status=PausedSearchTrackReadStatus.OK, views=tuple(views))
+
+
+async def delete_retired_paused_search_track(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: WorkspaceId,
+    track_id: PausedSearchTrackId,
+    repository: PausedSearchTrackAdminRepository,
+    audit_log_repository: PausedSearchTrackAdminAuditLogRepository,
+    now: datetime,
+) -> PausedSearchTrackDeleteResult:
+    if not _can_administer_tracks(actor):
+        return PausedSearchTrackDeleteResult(
+            status=PausedSearchTrackDeleteStatus.REJECTED,
+            reasons=(PausedSearchTrackAdminReasonCode.PERMISSION_DENIED,),
+        )
+    track = await repository.get_track_for_update(workspace_id, track_id)
+    if track is None:
+        return PausedSearchTrackDeleteResult(
+            status=PausedSearchTrackDeleteStatus.REJECTED,
+            reasons=(PausedSearchTrackAdminReasonCode.TRACK_NOT_FOUND,),
+        )
+    if track.status is not PausedSearchTrackStatus.RETIRED:
+        return PausedSearchTrackDeleteResult(
+            status=PausedSearchTrackDeleteStatus.REJECTED,
+            reasons=(PausedSearchTrackAdminReasonCode.TRACK_NOT_RETIRED,),
+        )
+    assigned_leads = await repository.list_assigned_leads(
+        workspace_id,
+        track_id,
+        lock=True,
+    )
+    view = await _view_for_track(repository, track)
+    if view is None:
+        return PausedSearchTrackDeleteResult(
+            status=PausedSearchTrackDeleteStatus.REJECTED,
+            reasons=(PausedSearchTrackAdminReasonCode.TRACK_NOT_FOUND,),
+        )
+    view = replace(view, assigned_leads=assigned_leads)
+    if assigned_leads:
+        return PausedSearchTrackDeleteResult(
+            status=PausedSearchTrackDeleteStatus.BLOCKED,
+            view=view,
+            reasons=(PausedSearchTrackAdminReasonCode.LEADS_ASSIGNED,),
+        )
+    await _append_audit(
+        audit_log_repository,
+        PausedSearchTrackAdminAuditAction.TRACK_DELETED,
+        actor,
+        view,
+        now,
+        additional_details={"deleted_track_id": str(track_id)},
+    )
+    await repository.delete_retired_track(workspace_id, track_id)
+    return PausedSearchTrackDeleteResult(
+        status=PausedSearchTrackDeleteStatus.DELETED,
+        view=view,
+    )
+
+
+async def restore_retired_paused_search_track(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: WorkspaceId,
+    track_id: PausedSearchTrackId,
+    repository: PausedSearchTrackAdminRepository,
+    audit_log_repository: PausedSearchTrackAdminAuditLogRepository,
+    now: datetime,
+    event_bus: EventBus | None = None,
+) -> PausedSearchTrackRestoreResult:
+    if not _can_administer_tracks(actor):
+        return PausedSearchTrackRestoreResult(
+            status=PausedSearchTrackRestoreStatus.REJECTED,
+            reasons=(PausedSearchTrackAdminReasonCode.PERMISSION_DENIED,),
+        )
+    track = await repository.get_track_for_update(workspace_id, track_id)
+    if track is None:
+        return PausedSearchTrackRestoreResult(
+            status=PausedSearchTrackRestoreStatus.REJECTED,
+            reasons=(PausedSearchTrackAdminReasonCode.TRACK_NOT_FOUND,),
+        )
+    if track.status is not PausedSearchTrackStatus.RETIRED:
+        return PausedSearchTrackRestoreResult(
+            status=PausedSearchTrackRestoreStatus.REJECTED,
+            reasons=(PausedSearchTrackAdminReasonCode.TRACK_NOT_RETIRED,),
+        )
+    version = await repository.get_latest_version(workspace_id, track_id)
+    if version is None:
+        return PausedSearchTrackRestoreResult(
+            status=PausedSearchTrackRestoreStatus.REJECTED,
+            reasons=(PausedSearchTrackAdminReasonCode.VERSION_NOT_FOUND,),
+        )
+
+    restored_version = await repository.save_version(
+        replace(version, status=CampaignVersionStatus.DRAFT, published_at=None),
+    )
+    restored_track = await repository.save_track(
+        replace(
+            track,
+            status=PausedSearchTrackStatus.DRAFT,
+            active_version_id=None,
+            updated_at=now,
+        ),
+    )
+    view = await _view_for_track(repository, restored_track)
+    if view is None:
+        return PausedSearchTrackRestoreResult(
+            status=PausedSearchTrackRestoreStatus.REJECTED,
+            reasons=(PausedSearchTrackAdminReasonCode.VERSION_NOT_FOUND,),
+        )
+    view = replace(view, version=restored_version)
+    await _append_audit(
+        audit_log_repository,
+        PausedSearchTrackAdminAuditAction.TRACK_RESTORED,
+        actor,
+        view,
+        now,
+    )
+    await _publish_event(
+        event_bus,
+        DomainEventType.PAUSED_SEARCH_TRACK_RESTORED,
+        view,
+        actor,
+    )
+    return PausedSearchTrackRestoreResult(
+        status=PausedSearchTrackRestoreStatus.RESTORED,
+        view=view,
+    )
 
 
 async def get_paused_search_track_view(
@@ -725,6 +903,7 @@ def _build_steps(
             template_version_id=step.template_version_id,
             timing_basis=step.timing_basis,
             fallback_channel=step.fallback_channel,
+            template_profile=step.template_profile,
             created_at=now,
         )
         for index, step in enumerate(config.steps)
@@ -742,6 +921,9 @@ async def _resolve_template_bindings(
     resolved: dict[UUID, TemplateVersion] = {}
     bound_steps: list[PausedSearchTrackStep] = []
     for step in steps:
+        if step.template_profile is not None:
+            bound_steps.append(replace(step, template_version_id=None))
+            continue
         template = (
             await template_repository.get_by_id(workspace_id, step.template_version_id)
             if step.template_version_id is not None
@@ -761,8 +943,10 @@ async def _view_for_track(
     repository: PausedSearchTrackAdminRepository,
     track: PausedSearchTrack,
 ) -> PausedSearchTrackAdminView | None:
-    version = None
-    if track.active_version_id is not None:
+    # Admin editing must read back the current draft. A published track keeps
+    # its active version pinned while edits are stored in a newer draft version.
+    version = await repository.get_latest_draft_version(track.workspace_id, track.track_id)
+    if version is None and track.active_version_id is not None:
         version = await repository.get_version(track.workspace_id, track.active_version_id)
     if version is None:
         version = await repository.get_latest_version(track.workspace_id, track.track_id)
@@ -773,7 +957,8 @@ async def _view_for_track(
         track.workspace_id,
         version.track_version_id,
     )
-    return PausedSearchTrackAdminView(track, version, steps, mappings)
+    assigned_leads = await repository.list_assigned_leads(track.workspace_id, track.track_id)
+    return PausedSearchTrackAdminView(track, version, steps, mappings, assigned_leads)
 
 
 async def _append_audit(

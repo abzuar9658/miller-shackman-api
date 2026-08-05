@@ -8,6 +8,10 @@ from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import CampaignId, CampaignVersionId, UserId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
+from app.domain.outbound_drafting import (
+    DormantStepTemplateProfile,
+    WorkspaceOutboundDraftingConfig,
+)
 
 
 class CampaignAdminAuditAction(StrEnum):
@@ -69,6 +73,7 @@ class CampaignAdminVersion:
     created_by_user_id: UserId
     created_at: datetime
     published_at: datetime | None = None
+    outbound_drafting_config: WorkspaceOutboundDraftingConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,7 @@ class CampaignAdminCadenceStep:
     template_key: str
     max_attempts: int
     created_at: datetime
+    template_profile: DormantStepTemplateProfile | None = None
 
 
 @dataclass(frozen=True)

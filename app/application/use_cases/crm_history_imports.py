@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -17,18 +18,24 @@ from app.application.ports.repositories import (
     LeadRepository,
 )
 from app.application.services.lead_assignment import is_actor_assigned_to_lead
-from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
+from app.domain.conversations import (
+    CrmConversationEvent,
+    CrmConversationEventDirection,
+    canonical_crm_event_identity,
+)
 from app.domain.crm_history_imports import (
     CrmHistoryImportEventPayload,
     CrmHistoryImportEventStatus,
     CrmHistoryImportJob,
     CrmHistoryImportJobStatus,
+    CrmHistoryImportSource,
     StagedCrmHistoryImportEvent,
 )
 from app.domain.identity import (
     AuthAuditEventType,
     AuthAuditLog,
     AuthenticatedActor,
+    AuthenticatedExtensionDevice,
     PermissionCapability,
     PermissionContext,
     evaluate_permission,
@@ -54,6 +61,7 @@ class CrmHistoryImportReasonCode(StrEnum):
 
 class CrmHistoryImportMutationStatus(StrEnum):
     CREATED = "created"
+    DUPLICATE = "duplicate"
     ACCEPTED = "accepted"
     READY = "ready"
     REJECTED = "rejected"
@@ -124,23 +132,112 @@ async def create_crm_history_import(
     token_ttl: timedelta = timedelta(hours=24),
     token_factory: Callable[[], str] | None = None,
 ) -> CreateCrmHistoryImportResult:
+    return await _create_crm_history_import(
+        actor=actor,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        enabled=enabled,
+        lead_repository=lead_repository,
+        job_repository=job_repository,
+        now=now,
+        audit_log_repository=audit_log_repository,
+        token_ttl=token_ttl,
+        token_factory=token_factory,
+        capability=PermissionCapability.IMPORT_CRM_HISTORY,
+        require_assigned_lead=True,
+        source=CrmHistoryImportSource.MANUAL,
+    )
+
+
+async def create_extension_crm_history_import(
+    *,
+    extension_device: AuthenticatedExtensionDevice,
+    workspace_id: UUID,
+    lead_id: UUID,
+    batch_fingerprint: str,
+    enabled: bool,
+    lead_repository: LeadRepository,
+    job_repository: CrmHistoryImportJobRepository,
+    now: datetime,
+    audit_log_repository: AuthAuditLogRepository | None = None,
+    token_ttl: timedelta = timedelta(hours=24),
+    token_factory: Callable[[], str] | None = None,
+) -> CreateCrmHistoryImportResult:
+    return await _create_crm_history_import(
+        actor=extension_device.actor,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        enabled=enabled,
+        lead_repository=lead_repository,
+        job_repository=job_repository,
+        now=now,
+        audit_log_repository=audit_log_repository,
+        token_ttl=token_ttl,
+        token_factory=token_factory,
+        capability=PermissionCapability.EXPORT_CRM_HISTORY_FROM_EXTENSION,
+        require_assigned_lead=False,
+        source=CrmHistoryImportSource.EXTENSION,
+        batch_fingerprint=batch_fingerprint,
+        source_device_id=extension_device.device_id,
+    )
+
+
+async def _create_crm_history_import(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: UUID,
+    lead_id: UUID,
+    enabled: bool,
+    lead_repository: LeadRepository,
+    job_repository: CrmHistoryImportJobRepository,
+    now: datetime,
+    audit_log_repository: AuthAuditLogRepository | None,
+    token_ttl: timedelta,
+    token_factory: Callable[[], str] | None,
+    capability: PermissionCapability,
+    require_assigned_lead: bool,
+    source: CrmHistoryImportSource,
+    batch_fingerprint: str | None = None,
+    source_device_id: UUID | None = None,
+) -> CreateCrmHistoryImportResult:
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
     if lead is None:
         return _create_rejection(CrmHistoryImportReasonCode.LEAD_NOT_FOUND)
-    capability = evaluate_permission(
+    permission = evaluate_permission(
         actor,
-        PermissionCapability.IMPORT_CRM_HISTORY,
-        PermissionContext(acts_on_assigned_lead=is_actor_assigned_to_lead(actor, lead)),
+        capability,
+        PermissionContext(
+            acts_on_assigned_lead=(
+                is_actor_assigned_to_lead(actor, lead) if require_assigned_lead else False
+            )
+        ),
     )
-    if not enabled or not capability.allowed:
+    if not enabled or not permission.allowed:
         reasons = ([] if enabled else [CrmHistoryImportReasonCode.FEATURE_DISABLED.value])
-        reasons.extend(reason.value for reason in capability.reasons)
+        reasons.extend(reason.value for reason in permission.reasons)
         return CreateCrmHistoryImportResult(
             status=CrmHistoryImportMutationStatus.REJECTED,
             reasons=tuple(reasons),
         )
     if lead.crm_provider is not CRMProvider.FOLLOW_UP_BOSS:
         return _create_rejection(CrmHistoryImportReasonCode.UNSUPPORTED_CRM_PROVIDER)
+    if batch_fingerprint is not None:
+        existing_batch = await job_repository.get_by_batch_fingerprint(
+            workspace_id, lead_id, batch_fingerprint
+        )
+        if existing_batch is not None:
+            await _append_audit(
+                audit_log_repository,
+                event_type=AuthAuditEventType.CRM_HISTORY_EXTENSION_EXPORT_REQUESTED,
+                job=existing_batch,
+                now=now,
+                actor_user_id=actor.user_id,
+                request_status=CrmHistoryImportMutationStatus.DUPLICATE,
+            )
+            return CreateCrmHistoryImportResult(
+                status=CrmHistoryImportMutationStatus.DUPLICATE,
+                job=existing_batch,
+            )
     if await job_repository.get_active_for_lead(workspace_id, lead_id) is not None:
         return _create_rejection(CrmHistoryImportReasonCode.ACTIVE_JOB_EXISTS)
 
@@ -156,13 +253,37 @@ async def create_crm_history_import(
         token_expires_at=now + token_ttl,
         created_at=now,
         updated_at=now,
+        source=source,
+        batch_fingerprint=batch_fingerprint,
+        source_device_id=source_device_id,
     )
     created = await job_repository.create(job)
     if created is None:
+        if batch_fingerprint is not None:
+            existing_batch = await job_repository.get_by_batch_fingerprint(
+                workspace_id, lead_id, batch_fingerprint
+            )
+            if existing_batch is not None:
+                await _append_audit(
+                    audit_log_repository,
+                    event_type=AuthAuditEventType.CRM_HISTORY_EXTENSION_EXPORT_REQUESTED,
+                    job=existing_batch,
+                    now=now,
+                    actor_user_id=actor.user_id,
+                    request_status=CrmHistoryImportMutationStatus.DUPLICATE,
+                )
+                return CreateCrmHistoryImportResult(
+                    status=CrmHistoryImportMutationStatus.DUPLICATE,
+                    job=existing_batch,
+                )
         return _create_rejection(CrmHistoryImportReasonCode.ACTIVE_JOB_EXISTS)
     await _append_audit(
         audit_log_repository,
-        event_type=AuthAuditEventType.CRM_HISTORY_IMPORT_JOB_REQUESTED,
+        event_type=(
+            AuthAuditEventType.CRM_HISTORY_EXTENSION_EXPORT_REQUESTED
+            if source is CrmHistoryImportSource.EXTENSION
+            else AuthAuditEventType.CRM_HISTORY_IMPORT_JOB_REQUESTED
+        ),
         job=created,
         now=now,
         actor_user_id=actor.user_id,
@@ -450,6 +571,12 @@ def _canonical_event(staged: StagedCrmHistoryImportEvent, *, now: datetime) -> C
         source_payload_version="extension/v1",
         created_at=now,
         updated_at=now,
+        canonical_identity=canonical_crm_event_identity(
+            activity_type=staged.activity_type,
+            occurred_at=staged.occurred_at,
+            content=staged.content,
+            direction=direction,
+        ),
     )
 
 
@@ -461,6 +588,24 @@ def _crm_activity_id(staged: StagedCrmHistoryImportEvent) -> str:
         return namespaced
     external_hash = hashlib.sha256(staged.external_activity_id.encode("utf-8")).hexdigest()
     return f"extension:{external_hash}"
+
+
+def crm_history_export_batch_fingerprint(
+    payloads: tuple[CrmHistoryImportEventPayload, ...],
+) -> str:
+    identities = sorted(
+        {
+            canonical_crm_event_identity(
+                activity_type=payload.activity_type,
+                occurred_at=payload.occurred_at,
+                content=payload.content,
+                direction=payload.direction.value if payload.direction is not None else None,
+            )
+            for payload in payloads
+        }
+    )
+    encoded = json.dumps(identities, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _create_rejection(reason: CrmHistoryImportReasonCode) -> CreateCrmHistoryImportResult:
@@ -477,6 +622,7 @@ async def _append_audit(
     job: CrmHistoryImportJob,
     now: datetime,
     actor_user_id: UUID | None,
+    request_status: CrmHistoryImportMutationStatus | None = None,
 ) -> None:
     if repository is None:
         return
@@ -495,6 +641,11 @@ async def _append_audit(
                 "duplicate_count": str(job.duplicate_count),
                 "rejected_count": str(job.rejected_count),
                 "failure_count": str(job.failure_count),
+                "source": job.source.value,
+                "source_device_id": str(job.source_device_id) if job.source_device_id else "",
+                "request_status": (
+                    request_status.value if request_status is not None else "created"
+                ),
             },
             created_at=now,
         )

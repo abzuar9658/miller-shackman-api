@@ -14,6 +14,8 @@ class PermissionCapability(StrEnum):
     CREATE_WORKSPACE = "create_workspace"
     INVITE_WORKSPACE_USER = "invite_workspace_user"
     MANAGE_CRM_AGENT_MAPPINGS = "manage_crm_agent_mappings"
+    MANAGE_EXTENSION_DEVICES = "manage_extension_devices"
+    EXPORT_CRM_HISTORY_FROM_EXTENSION = "export_crm_history_from_extension"
     VIEW_WORKSPACE_REPORTING = "view_workspace_reporting"
     MANAGE_LISTING_SOURCES = "manage_listing_sources"
     IMPORT_CRM_HISTORY = "import_crm_history"
@@ -143,6 +145,7 @@ def _role_allows(
 ) -> bool:
     if role == WorkspaceMembershipRole.ASSIGNED_AGENT:
         return capability in {
+            PermissionCapability.EXPORT_CRM_HISTORY_FROM_EXTENSION,
             PermissionCapability.IMPORT_CRM_HISTORY,
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
             PermissionCapability.ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS,
@@ -157,6 +160,7 @@ def _role_allows(
 
     if role == WorkspaceMembershipRole.MANAGER:
         return capability in {
+            PermissionCapability.EXPORT_CRM_HISTORY_FROM_EXTENSION,
             PermissionCapability.VIEW_WORKSPACE_REPORTING,
             PermissionCapability.IMPORT_CRM_HISTORY,
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
@@ -174,9 +178,11 @@ def _role_allows(
 
     if role == WorkspaceMembershipRole.BROKERAGE_ADMIN:
         return capability in {
+            PermissionCapability.EXPORT_CRM_HISTORY_FROM_EXTENSION,
             PermissionCapability.CREATE_WORKSPACE,
             PermissionCapability.INVITE_WORKSPACE_USER,
             PermissionCapability.MANAGE_CRM_AGENT_MAPPINGS,
+            PermissionCapability.MANAGE_EXTENSION_DEVICES,
             PermissionCapability.VIEW_WORKSPACE_REPORTING,
             PermissionCapability.MANAGE_LISTING_SOURCES,
             PermissionCapability.IMPORT_CRM_HISTORY,

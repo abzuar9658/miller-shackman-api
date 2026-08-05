@@ -1,6 +1,6 @@
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from app.domain.common.ids import WorkspaceId
@@ -61,6 +61,96 @@ class OutboundJourneyKind(StrEnum):
     PAUSED_SEARCH = "paused_search"
 
 
+class DormantMessageTone(StrEnum):
+    WARM = "warm"
+    CONVERSATIONAL = "conversational"
+    PROFESSIONAL = "professional"
+    EMPATHETIC = "empathetic"
+    CONFIDENT = "confident"
+    LOW_PRESSURE = "low_pressure"
+
+
+class DormantMessageStyle(StrEnum):
+    SHORT_CHECK_IN = "short_check_in"
+    FRIENDLY_FOLLOW_UP = "friendly_follow_up"
+    CONSULTATIVE = "consultative"
+    DIRECT_CONCISE = "direct_concise"
+    HELPFUL_UPDATE = "helpful_update"
+    REENGAGEMENT_QUESTION = "reengagement_question"
+
+
+class DormantMessageLength(StrEnum):
+    VERY_SHORT = "very_short"
+    SHORT = "short"
+    MODERATE = "moderate"
+    DETAILED = "detailed"
+
+
+class DormantCallToAction(StrEnum):
+    ASK_SIMPLE_QUESTION = "ask_simple_question"
+    INVITE_REPLY = "invite_reply"
+    ASK_IF_PLANS_CHANGED = "ask_if_plans_changed"
+    OFFER_AGENT_HELP = "offer_agent_help"
+    REQUEST_UPDATED_CRITERIA = "request_updated_criteria"
+    OFFER_HUMAN_FOLLOW_UP = "offer_human_follow_up"
+
+
+class DormantGreeting(StrEnum):
+    NONE = "none"
+    LEAD_FIRST_NAME = "lead_first_name"
+    HELLO_FIRST_NAME = "hello_first_name"
+    HI_THERE = "hi_there"
+
+
+class DormantSignOff(StrEnum):
+    NONE = "none"
+    BEST_BROKERAGE = "best_brokerage"
+    REGARDS_AGENT = "regards_agent"
+
+
+class DormantListingContextBehavior(StrEnum):
+    NEVER = "never"
+    WHEN_AVAILABLE = "when_available"
+    GENERAL_CRITERIA_ONLY = "general_criteria_only"
+
+
+class DormantPersonalizationField(StrEnum):
+    LEAD_FIRST_NAME = "lead_first_name"
+    LOCATION = "location"
+    PROPERTY_TYPE = "property_type"
+    BEDROOMS = "bedrooms"
+    BUDGET = "budget"
+    TIMELINE = "timeline"
+    RECENT_CONVERSATION = "recent_conversation"
+    APPROVED_LISTING_CONTEXT = "approved_listing_context"
+
+
+def _default_dormant_personalization_fields() -> tuple[DormantPersonalizationField, ...]:
+    return (
+        DormantPersonalizationField.LEAD_FIRST_NAME,
+        DormantPersonalizationField.LOCATION,
+        DormantPersonalizationField.RECENT_CONVERSATION,
+        DormantPersonalizationField.APPROVED_LISTING_CONTEXT,
+    )
+
+
+@dataclass(frozen=True)
+class DormantStepTemplateProfile:
+    tone: DormantMessageTone = DormantMessageTone.WARM
+    style: DormantMessageStyle = DormantMessageStyle.FRIENDLY_FOLLOW_UP
+    length: DormantMessageLength = DormantMessageLength.SHORT
+    call_to_action: DormantCallToAction = DormantCallToAction.INVITE_REPLY
+    greeting: DormantGreeting = DormantGreeting.LEAD_FIRST_NAME
+    sign_off: DormantSignOff = DormantSignOff.NONE
+    listing_context: DormantListingContextBehavior = (
+        DormantListingContextBehavior.WHEN_AVAILABLE
+    )
+    personalization_fields: tuple[DormantPersonalizationField, ...] = field(
+        default_factory=_default_dormant_personalization_fields
+    )
+    custom_instructions: str | None = None
+
+
 def _default_enabled_extraction_fields() -> tuple[str, ...]:
     return SUPPORTED_QUERY_EXTRACTION_FIELDS
 
@@ -84,6 +174,159 @@ def default_workspace_outbound_drafting_config(
     workspace_id: WorkspaceId,
 ) -> WorkspaceOutboundDraftingConfig:
     return WorkspaceOutboundDraftingConfig(workspace_id=workspace_id)
+
+
+def apply_dormant_step_template_profile(
+    drafting_config: WorkspaceOutboundDraftingConfig,
+    profile: DormantStepTemplateProfile,
+    *,
+    channel: str,
+) -> WorkspaceOutboundDraftingConfig:
+    channel_prompt = (
+        drafting_config.sms_prompt_text
+        if channel == "sms"
+        else drafting_config.email_prompt_text
+    )
+    profiled_prompt = f"{channel_prompt}\n\n{_dormant_profile_prompt(profile)}"
+    template = _dormant_profile_template(profile)
+    if channel == "sms":
+        return replace(
+            drafting_config,
+            sms_prompt_text=profiled_prompt,
+            sms_template=template,
+        )
+    return replace(
+        drafting_config,
+        email_prompt_text=profiled_prompt,
+        email_template=template,
+    )
+
+
+def dormant_step_template_profile_to_mapping(
+    profile: DormantStepTemplateProfile,
+) -> dict[str, object]:
+    return {
+        "tone": profile.tone.value,
+        "style": profile.style.value,
+        "length": profile.length.value,
+        "call_to_action": profile.call_to_action.value,
+        "greeting": profile.greeting.value,
+        "sign_off": profile.sign_off.value,
+        "listing_context": profile.listing_context.value,
+        "personalization_fields": [value.value for value in profile.personalization_fields],
+        "custom_instructions": profile.custom_instructions,
+    }
+
+
+def dormant_step_template_profile_from_mapping(
+    value: Mapping[str, object] | None,
+) -> DormantStepTemplateProfile | None:
+    if value is None:
+        return None
+    try:
+        raw_fields = value.get("personalization_fields", [])
+        fields = (
+            tuple(DormantPersonalizationField(str(item)) for item in raw_fields)
+            if isinstance(raw_fields, list)
+            else ()
+        )
+        raw_custom_instructions = value.get("custom_instructions")
+        custom_instructions = (
+            str(raw_custom_instructions).strip() or None
+            if raw_custom_instructions is not None
+            else None
+        )
+        return DormantStepTemplateProfile(
+            tone=DormantMessageTone(str(value["tone"])),
+            style=DormantMessageStyle(str(value["style"])),
+            length=DormantMessageLength(str(value["length"])),
+            call_to_action=DormantCallToAction(str(value["call_to_action"])),
+            greeting=DormantGreeting(str(value["greeting"])),
+            sign_off=DormantSignOff(str(value["sign_off"])),
+            listing_context=DormantListingContextBehavior(str(value["listing_context"])),
+            personalization_fields=fields,
+            custom_instructions=custom_instructions,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def dormant_template_profile_is_valid_for_channel(
+    profile: DormantStepTemplateProfile | None,
+    *,
+    channel: str,
+) -> bool:
+    if profile is None:
+        return True
+    if channel == "sms" and profile.length == DormantMessageLength.DETAILED:
+        return False
+    return len(profile.custom_instructions or "") <= 1000
+
+
+def _dormant_profile_prompt(profile: DormantStepTemplateProfile) -> str:
+    personalization = ", ".join(
+        value.value.replace("_", " ") for value in profile.personalization_fields
+    )
+    directives = [
+        "Apply this validated dormant-step writing profile:",
+        f"- Tone: {profile.tone.value.replace('_', ' ')}.",
+        f"- Style: {profile.style.value.replace('_', ' ')}.",
+        f"- Length: {_length_directive(profile.length)}.",
+        f"- Call to action: {_cta_directive(profile.call_to_action)}.",
+        f"- Personalize only with these categories when present: {personalization or 'none'}.",
+        f"- Listing context: {_listing_context_directive(profile.listing_context)}.",
+        "- Ask no more than one question and never add pressure or urgency.",
+    ]
+    if profile.custom_instructions:
+        directives.append(f"- Additional admin guidance: {profile.custom_instructions.strip()}")
+    return "\n".join(directives)
+
+
+def _length_directive(length: DormantMessageLength) -> str:
+    return {
+        DormantMessageLength.VERY_SHORT: "one or two brief sentences",
+        DormantMessageLength.SHORT: "two or three concise sentences",
+        DormantMessageLength.MODERATE: "one short paragraph",
+        DormantMessageLength.DETAILED: "two short email paragraphs",
+    }[length]
+
+
+def _cta_directive(call_to_action: DormantCallToAction) -> str:
+    return {
+        DormantCallToAction.ASK_SIMPLE_QUESTION: "end with one simple question",
+        DormantCallToAction.INVITE_REPLY: "invite a brief reply",
+        DormantCallToAction.ASK_IF_PLANS_CHANGED: "ask whether their plans have changed",
+        DormantCallToAction.OFFER_AGENT_HELP: "offer help from their assigned agent",
+        DormantCallToAction.REQUEST_UPDATED_CRITERIA: "invite updated search criteria",
+        DormantCallToAction.OFFER_HUMAN_FOLLOW_UP: "offer a human follow-up",
+    }[call_to_action]
+
+
+def _listing_context_directive(behavior: DormantListingContextBehavior) -> str:
+    return {
+        DormantListingContextBehavior.NEVER: "do not mention listings or current matches",
+        DormantListingContextBehavior.WHEN_AVAILABLE: (
+            "mention approved current context only when the application provides it"
+        ),
+        DormantListingContextBehavior.GENERAL_CRITERIA_ONLY: (
+            "when approved context is present, mention only general areas or property types"
+        ),
+    }[behavior]
+
+
+def _dormant_profile_template(profile: DormantStepTemplateProfile) -> str:
+    greeting = {
+        DormantGreeting.NONE: "",
+        DormantGreeting.LEAD_FIRST_NAME: "Hi {{lead_first_name}},",
+        DormantGreeting.HELLO_FIRST_NAME: "Hello {{lead_first_name}},",
+        DormantGreeting.HI_THERE: "Hi there,",
+    }[profile.greeting]
+    sign_off = {
+        DormantSignOff.NONE: "",
+        DormantSignOff.BEST_BROKERAGE: "Best,\n{{brokerage_name}}",
+        DormantSignOff.REGARDS_AGENT: "Regards,\n{{agent_name}}",
+    }[profile.sign_off]
+    return "\n\n".join(part for part in (greeting, "{{message_body}}", sign_off) if part)
 
 
 def normalize_enabled_extraction_fields(fields: tuple[str, ...] | list[str]) -> tuple[str, ...]:
@@ -237,12 +480,22 @@ def _strip_matching_wrapper_from_start(body: str, wrapper: str) -> str:
     if not wrapper_lines:
         return body
 
+    if _is_greeting_line(wrapper_lines[0]):
+        stripped_greeting = _strip_greeting_prefix(body, wrapper_lines[0])
+        if stripped_greeting is not None:
+            body = stripped_greeting
+
     body_lines = body.split("\n")
     start_index = _leading_blank_line_count(body_lines)
     cursor = start_index
     for wrapper_line in wrapper_lines:
         cursor = _skip_blank_lines(body_lines, cursor, step=1)
-        if cursor >= len(body_lines) or not _wrapper_lines_match(body_lines[cursor], wrapper_line):
+        if cursor >= len(body_lines):
+            return body
+        lines_match = _wrapper_lines_match(body_lines[cursor], wrapper_line)
+        if cursor == start_index and _is_greeting_line(wrapper_line):
+            lines_match = lines_match or _is_greeting_line(body_lines[cursor])
+        if not lines_match:
             return body
         cursor += 1
 
@@ -299,6 +552,37 @@ def _skip_blank_lines(lines: list[str], index: int, *, step: int) -> int:
 
 def _wrapper_lines_match(body_line: str, wrapper_line: str) -> bool:
     return _normalize_wrapper_line(body_line) == _normalize_wrapper_line(wrapper_line)
+
+
+def _strip_greeting_prefix(body: str, wrapper_line: str) -> str | None:
+    body_lines = body.split("\n")
+    start_index = _leading_blank_line_count(body_lines)
+    if start_index >= len(body_lines):
+        return None
+
+    greeting = _normalize_wrapper_line(wrapper_line)
+    greeting_words = greeting.split()
+    if not greeting_words:
+        return None
+    candidates = [greeting, greeting_words[0]]
+    for candidate in sorted(set(candidates), key=len, reverse=True):
+        match = re.match(
+            rf"(?i)^\s*{re.escape(candidate)}(?:\s*[,;:!?]|\s+|$)",
+            body_lines[start_index],
+        )
+        if match is None:
+            continue
+        remainder = body_lines[start_index][match.end() :].lstrip()
+        if not remainder:
+            return None
+        body_lines[start_index] = remainder
+        return "\n".join(body_lines)
+    return None
+
+
+def _is_greeting_line(value: str) -> bool:
+    normalized = _normalize_wrapper_line(value)
+    return bool(re.match(r"^(?:hi|hello|hey|dear)(?:\s|$)", normalized))
 
 
 def _normalize_wrapper_line(value: str) -> str:

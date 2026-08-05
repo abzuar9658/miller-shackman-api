@@ -22,6 +22,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
@@ -66,6 +67,7 @@ from app.infrastructure.persistence.postgres.outbox_event_repository import (
 )
 from app.infrastructure.persistence.postgres.paused_search_track_repository import (
     PostgresPausedSearchTrackAdminRepository,
+    PostgresPausedSearchTrackAssignmentRepository,
 )
 from app.infrastructure.persistence.postgres.preflight_digest_repository import (
     PostgresPreflightDigestRepository,
@@ -128,6 +130,7 @@ class CampaignServiceBundle:
     notification_provider: NotificationProvider
     event_bus: EventBus
     routing_review_repository: LeadRoutingReviewRepository | None = None
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None
 
 
 @dataclass
@@ -166,6 +169,9 @@ async def get_campaign_service_bundle(
         workspace_llm_config_repository=PostgresWorkspaceLLMConfigRepository(session),
         lead_workflow_repository=PostgresLeadWorkflowRepository(session),
         paused_search_track_repository=PostgresPausedSearchTrackAdminRepository(session),
+        paused_search_track_assignment_repository=PostgresPausedSearchTrackAssignmentRepository(
+            session
+        ),
         temporal_signal_outbox_repository=PostgresTemporalSignalOutboxRepository(session),
         workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
         temporal_workflow_starter=await build_temporal_workflow_starter(settings),

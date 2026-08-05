@@ -22,6 +22,19 @@ from app.domain.common.ids import CampaignId, CampaignVersionId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
 from app.domain.identity import AuthenticatedActor, PermissionCapability, evaluate_permission
+from app.domain.outbound_drafting import (
+    DEFAULT_EMAIL_PROMPT_TEXT,
+    DEFAULT_SMS_PROMPT_TEXT,
+    DormantStepTemplateProfile,
+    WorkspaceOutboundDraftingConfig,
+    dormant_template_profile_is_valid_for_channel,
+    normalize_config_prompt_text,
+    normalize_email_subject_template,
+    normalize_email_template,
+    normalize_enabled_extraction_fields,
+    normalize_outbound_prompt_text,
+    normalize_sms_template,
+)
 
 
 class CampaignAdminReasonCode(StrEnum):
@@ -75,6 +88,7 @@ class CampaignCadenceStepInput:
     message_goal: str
     template_key: str
     max_attempts: int
+    template_profile: DormantStepTemplateProfile | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +106,7 @@ class CampaignConfigInput:
     prompt_version: str
     approved_model: str
     cadence_steps: tuple[CampaignCadenceStepInput, ...]
+    outbound_drafting_config: WorkspaceOutboundDraftingConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -627,6 +642,9 @@ def _can_view_campaigns(actor: AuthenticatedActor) -> bool:
 
 
 def _configuration_is_valid(*, name: str, config: CampaignConfigInput) -> bool:
+    normalized_template_keys = {
+        step.template_key.strip() for step in config.cadence_steps
+    }
     return (
         bool(name.strip())
         and bool(config.enabled_channels)
@@ -636,7 +654,9 @@ def _configuration_is_valid(*, name: str, config: CampaignConfigInput) -> bool:
         and bool(config.timezone.strip())
         and bool(config.prompt_version.strip())
         and bool(config.approved_model.strip())
+        and config.outbound_drafting_config is not None
         and bool(config.cadence_steps)
+        and len(normalized_template_keys) == len(config.cadence_steps)
         and all(_step_is_valid(step) for step in config.cadence_steps)
     )
 
@@ -647,6 +667,10 @@ def _step_is_valid(step: CampaignCadenceStepInput) -> bool:
         and bool(step.message_goal.strip())
         and bool(step.template_key.strip())
         and step.max_attempts > 0
+        and dormant_template_profile_is_valid_for_channel(
+            step.template_profile,
+            channel=step.channel.value,
+        )
     )
 
 
@@ -660,6 +684,11 @@ def _build_version(
     config: CampaignConfigInput,
     now: datetime,
 ) -> CampaignAdminVersion:
+    drafting_config = _resolved_drafting_config(
+        config.outbound_drafting_config,
+        workspace_id=workspace_id,
+        revision=version_number,
+    )
     return CampaignAdminVersion(
         campaign_version_id=campaign_version_id,
         workspace_id=workspace_id,
@@ -680,6 +709,7 @@ def _build_version(
         approved_model=config.approved_model.strip(),
         created_by_user_id=actor.user_id,
         created_at=now,
+        outbound_drafting_config=drafting_config,
     )
 
 
@@ -687,6 +717,11 @@ def _replace_version_config(
     version: CampaignAdminVersion,
     config: CampaignConfigInput,
 ) -> CampaignAdminVersion:
+    drafting_config = _resolved_drafting_config(
+        config.outbound_drafting_config,
+        workspace_id=version.workspace_id,
+        revision=version.version_number,
+    )
     return replace(
         version,
         enabled_channels=tuple(config.enabled_channels),
@@ -701,6 +736,39 @@ def _replace_version_config(
         allow_assigned_agent_manual_enrollment=config.allow_assigned_agent_manual_enrollment,
         prompt_version=config.prompt_version.strip(),
         approved_model=config.approved_model.strip(),
+        outbound_drafting_config=drafting_config,
+    )
+
+
+def _resolved_drafting_config(
+    config: WorkspaceOutboundDraftingConfig | None,
+    *,
+    workspace_id: WorkspaceId,
+    revision: int,
+) -> WorkspaceOutboundDraftingConfig:
+    if config is None:
+        raise ValueError("Admin outbound drafting configuration is required.")
+    resolved = config
+    return WorkspaceOutboundDraftingConfig(
+        workspace_id=workspace_id,
+        revision=revision,
+        prompt_text=normalize_config_prompt_text(resolved.prompt_text),
+        sms_prompt_text=normalize_outbound_prompt_text(
+            resolved.sms_prompt_text,
+            default_text=DEFAULT_SMS_PROMPT_TEXT,
+        ),
+        sms_template=normalize_sms_template(resolved.sms_template),
+        email_prompt_text=normalize_outbound_prompt_text(
+            resolved.email_prompt_text,
+            default_text=DEFAULT_EMAIL_PROMPT_TEXT,
+        ),
+        email_template=normalize_email_template(resolved.email_template),
+        email_subject_template=normalize_email_subject_template(
+            resolved.email_subject_template,
+        ),
+        enabled_extraction_fields=normalize_enabled_extraction_fields(
+            resolved.enabled_extraction_fields,
+        ),
     )
 
 
@@ -730,6 +798,7 @@ def _build_steps(
             template_key=step.template_key.strip(),
             max_attempts=step.max_attempts,
             created_at=now,
+            template_profile=step.template_profile,
         )
         for index, step in enumerate(config.cadence_steps)
     )

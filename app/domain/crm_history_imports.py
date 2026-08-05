@@ -18,6 +18,11 @@ class CrmHistoryImportJobStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class CrmHistoryImportSource(StrEnum):
+    MANUAL = "manual"
+    EXTENSION = "extension"
+
+
 class CrmHistoryImportEventStatus(StrEnum):
     RECEIVED = "received"
     PROMOTED = "promoted"
@@ -47,6 +52,9 @@ class CrmHistoryImportJob:
     token_expires_at: datetime
     created_at: datetime
     updated_at: datetime
+    source: CrmHistoryImportSource = CrmHistoryImportSource.MANUAL
+    batch_fingerprint: str | None = None
+    source_device_id: UUID | None = None
     received_count: int = 0
     promoted_count: int = 0
     duplicate_count: int = 0

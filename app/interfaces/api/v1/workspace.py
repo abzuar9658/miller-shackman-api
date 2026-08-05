@@ -50,6 +50,7 @@ from app.domain.outbound_drafting import (
     SUPPORTED_QUERY_EXTRACTION_FIELDS,
     SUPPORTED_TEMPLATE_PLACEHOLDERS,
     WorkspaceOutboundDraftingConfig,
+    default_workspace_outbound_drafting_config,
 )
 from app.domain.workspace_automation import WorkspaceOperationalControl
 from app.interfaces.api.dependencies.auth import (
@@ -230,8 +231,12 @@ def _operational_control_response(
 
 
 def _outbound_drafting_config_response(
-    config: WorkspaceOutboundDraftingConfig,
+    config: WorkspaceOutboundDraftingConfig | None,
+    *,
+    workspace_id: UUID,
 ) -> WorkspaceOutboundDraftingConfigResponse:
+    if config is None:
+        config = default_workspace_outbound_drafting_config(workspace_id)
     return WorkspaceOutboundDraftingConfigResponse(
         workspace_id=config.workspace_id,
         revision=config.revision,
@@ -324,7 +329,10 @@ async def get_workspace_settings_route(
             _handoff_config_response(result.view.handoff_config) if result.view else None
         ),
         outbound_drafting_config=(
-            _outbound_drafting_config_response(result.view.outbound_drafting_config)
+            _outbound_drafting_config_response(
+                result.view.outbound_drafting_config,
+                workspace_id=workspace_id,
+            )
             if result.view
             else None
         ),
@@ -480,7 +488,10 @@ async def update_workspace_outbound_drafting_config_route(
     return UpdateWorkspaceOutboundDraftingConfigResponse(
         status=result.status.value,
         outbound_drafting_config=(
-            _outbound_drafting_config_response(result.outbound_drafting_config)
+            _outbound_drafting_config_response(
+                result.outbound_drafting_config,
+                workspace_id=workspace_id,
+            )
             if result.outbound_drafting_config is not None
             else None
         ),

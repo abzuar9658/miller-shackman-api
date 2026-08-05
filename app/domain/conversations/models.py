@@ -201,6 +201,7 @@ class CrmConversationEvent:
     occurred_at: datetime
     created_at: datetime
     updated_at: datetime
+    canonical_identity: str | None = None
     conversation_id: UUID | None = None
     direction: CrmConversationEventDirection | None = None
     content: str | None = None

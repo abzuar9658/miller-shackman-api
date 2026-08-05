@@ -9,6 +9,10 @@ from app.domain.campaigns.execution import (
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import CampaignId, CampaignVersionId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
+from app.domain.outbound_drafting import (
+    WorkspaceOutboundDraftingConfig,
+    dormant_step_template_profile_from_mapping,
+)
 from app.infrastructure.persistence.postgres.models import (
     CampaignCadenceStepModel,
     CampaignModel,
@@ -110,6 +114,17 @@ class PostgresCampaignExecutionRepository:
             cadence_steps=steps,
             created_at=version.created_at,
             published_at=version.published_at,
+            outbound_drafting_config=WorkspaceOutboundDraftingConfig(
+                workspace_id=version.workspace_id,
+                revision=version.version_number,
+                prompt_text=version.prompt_text,
+                sms_prompt_text=version.sms_prompt_text,
+                sms_template=version.sms_template,
+                email_prompt_text=version.email_prompt_text,
+                email_template=version.email_template,
+                email_subject_template=version.email_subject_template,
+                enabled_extraction_fields=tuple(version.enabled_extraction_fields),
+            ),
         )
 
 
@@ -152,6 +167,7 @@ def _model_to_step(model: CampaignCadenceStepModel) -> CampaignCadenceStep:
         template_key=model.template_key,
         max_attempts=model.max_attempts,
         created_at=model.created_at,
+        template_profile=dormant_step_template_profile_from_mapping(model.template_profile),
     )
 
 

@@ -20,6 +20,7 @@ from app.application.ports.repositories import (
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
     PausedSearchOccurrenceRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     UserRepository,
@@ -60,6 +61,7 @@ class FollowUpBossWebhookEventBundle:
     default_openrouter_model: str = "openai/gpt-4o-mini"
     commit: Callable[[], Awaitable[None]] | None = None
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None
 
 
 @dataclass

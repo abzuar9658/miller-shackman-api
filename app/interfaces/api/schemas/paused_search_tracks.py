@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.domain.campaigns import (
     CampaignVersionStatus,
@@ -12,9 +12,11 @@ from app.domain.campaigns import (
     PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackStepPhase,
+    generate_paused_search_track_key,
 )
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import PausedSearchReasonCode
+from app.interfaces.api.schemas.campaigns import DormantStepTemplateProfileSchema
 
 
 class PausedSearchTrackStepRequest(BaseModel):
@@ -30,6 +32,7 @@ class PausedSearchTrackStepRequest(BaseModel):
     template_version_id: UUID | None = None
     timing_basis: PausedSearchTimingBasis = PausedSearchTimingBasis.CUSTOMER_REENGAGEMENT_DATE
     fallback_channel: ContactChannel | None = None
+    template_profile: DormantStepTemplateProfileSchema | None = None
 
 
 class PausedSearchTrackConfigRequest(BaseModel):
@@ -51,8 +54,14 @@ class PausedSearchTrackConfigRequest(BaseModel):
 
 
 class PausedSearchTrackDraftRequest(PausedSearchTrackConfigRequest):
-    track_key: str = Field(min_length=1, max_length=255)
+    track_key: str = Field(default="", max_length=255)
     display_name: str = Field(min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def populate_track_key(self) -> "PausedSearchTrackDraftRequest":
+        if not self.track_key.strip():
+            self.track_key = generate_paused_search_track_key(self.display_name)
+        return self
 
 
 class PausedSearchTrackDraftValidateRequest(PausedSearchTrackDraftRequest):
@@ -63,6 +72,13 @@ class PausedSearchTrackDraftPreviewRequest(PausedSearchTrackDraftRequest):
     as_of: datetime
     timezone: str = Field(min_length=1, max_length=64)
     reengagement_not_before: datetime | None = None
+
+
+class PausedSearchTrackStepPreviewRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=1000)
+    channel: ContactChannel
+    message_goal: str = Field(min_length=1, max_length=500)
+    template_profile: DormantStepTemplateProfileSchema | None = None
 
 
 class PausedSearchValidationFindingResponse(BaseModel):
@@ -200,6 +216,7 @@ class PausedSearchTrackStepResponse(BaseModel):
     template_version_id: UUID | None
     timing_basis: PausedSearchTimingBasis
     fallback_channel: ContactChannel | None
+    template_profile: DormantStepTemplateProfileSchema | None
 
 
 class PausedSearchReasonMappingResponse(BaseModel):
@@ -212,12 +229,23 @@ class PausedSearchReasonMappingResponse(BaseModel):
     created_at: datetime
 
 
+class PausedSearchTrackLeadAssignmentResponse(BaseModel):
+    lead_id: UUID
+    workflow_id: UUID | None
+    track_version_id: UUID | None
+    crm_lead_id: str
+    primary_email: str | None
+    lead_stage: str
+    workflow_state: str | None
+
+
 class PausedSearchTrackAdminResponse(BaseModel):
     status: str
     track: PausedSearchTrackResponse | None
     version: PausedSearchTrackVersionResponse | None
     steps: list[PausedSearchTrackStepResponse]
     reason_mappings: list[PausedSearchReasonMappingResponse]
+    assigned_leads: list[PausedSearchTrackLeadAssignmentResponse]
     reasons: list[str]
 
 
@@ -226,6 +254,7 @@ class PausedSearchTrackSummaryResponse(BaseModel):
     version: PausedSearchTrackVersionResponse
     step_count: int
     reason_mappings: list[PausedSearchReasonMappingResponse]
+    assigned_leads: list[PausedSearchTrackLeadAssignmentResponse]
 
 
 class PausedSearchTrackListResponse(BaseModel):
@@ -239,6 +268,7 @@ class PausedSearchTrackDetailResponse(BaseModel):
     version: PausedSearchTrackVersionResponse
     steps: list[PausedSearchTrackStepResponse]
     reason_mappings: list[PausedSearchReasonMappingResponse]
+    assigned_leads: list[PausedSearchTrackLeadAssignmentResponse]
 
 
 class UncertainOccurrenceResolutionRequest(BaseModel):

@@ -6,6 +6,10 @@ from uuid import UUID
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import CampaignId, CampaignVersionId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
+from app.domain.outbound_drafting import (
+    DormantStepTemplateProfile,
+    WorkspaceOutboundDraftingConfig,
+)
 
 
 class CampaignVersionStatus(StrEnum):
@@ -27,6 +31,7 @@ class CampaignCadenceStep:
     max_attempts: int
     created_at: datetime
     template_version_id: UUID | None = None
+    template_profile: DormantStepTemplateProfile | None = None
 
 
 @dataclass(frozen=True)
@@ -51,3 +56,4 @@ class CampaignExecutionConfig:
     cadence_steps: tuple[CampaignCadenceStep, ...]
     created_at: datetime
     published_at: datetime | None = None
+    outbound_drafting_config: WorkspaceOutboundDraftingConfig | None = None

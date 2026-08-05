@@ -92,13 +92,45 @@ class LeadRoutingReviewResponse(BaseModel):
     updated_at: datetime
 
 
+class LeadPausedSearchTrackStepPlanResponse(BaseModel):
+    step_id: UUID
+    track_version_id: UUID
+    step_order: int
+    phase: str
+    channel: str
+    delay_hours: int
+    message_goal: str
+    template_key: str
+    max_attempts: int
+    review_required: bool
+    timing_basis: str
+    fallback_channel: str | None = None
+    interval_days: int | None = None
+    max_occurrences: int
+    template_version_id: UUID | None = None
+
+
 class LeadPausedSearchTrackPlanResponse(BaseModel):
     track_id: UUID
     track_key: str
     display_name: str
+    track_status: str
     track_version_id: UUID
     version_number: int
+    version_status: str
     track_family: str
+    enabled: bool
+    allowed_channels: list[str] = Field(default_factory=list)
+    default_for_reason_codes: list[str] = Field(default_factory=list)
+    fallback_timing_policy: str
+    maintenance_interval_days: int
+    reactivation_window_days: int
+    max_total_touches: int
+    requires_review_before_publish: bool
+    default_pause_duration_days: int
+    max_duration_days: int
+    terminal_behavior: str
+    steps: list[LeadPausedSearchTrackStepPlanResponse] = Field(default_factory=list)
     current_step_id: UUID | None = None
     current_step_order: int | None = None
     current_phase: str | None = None

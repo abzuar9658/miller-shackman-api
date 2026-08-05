@@ -24,6 +24,11 @@ class CrmHistoryImportJobRepository(Protocol):
     ) -> CrmHistoryImportJob | None:
         raise NotImplementedError
 
+    async def get_by_batch_fingerprint(
+        self, workspace_id: UUID, lead_id: UUID, batch_fingerprint: str
+    ) -> CrmHistoryImportJob | None:
+        raise NotImplementedError
+
     async def create(self, job: CrmHistoryImportJob) -> CrmHistoryImportJob | None:
         """Create a job, returning None if the active-job guard conflicts."""
         raise NotImplementedError

@@ -5,6 +5,10 @@ from app.interfaces.api.v1.auth import router as auth_router
 from app.interfaces.api.v1.campaigns import router as campaigns_router
 from app.interfaces.api.v1.crm_agent_mappings import router as crm_agent_mappings_router
 from app.interfaces.api.v1.crm_history_imports import router as crm_history_imports_router
+from app.interfaces.api.v1.extension_devices import (
+    public_router as extension_auth_router,
+)
+from app.interfaces.api.v1.extension_devices import router as extension_devices_router
 from app.interfaces.api.v1.handoffs import router as handoffs_router
 from app.interfaces.api.v1.health import router as health_router
 from app.interfaces.api.v1.leads import router as leads_router
@@ -20,10 +24,12 @@ from app.interfaces.api.v1.workspace import router as workspace_router
 api_router = APIRouter()
 api_router.include_router(health_router, tags=["health"])
 api_router.include_router(auth_router, prefix="/auth")
+api_router.include_router(extension_auth_router, prefix="/extension-auth")
 api_router.include_router(webhook_router, prefix="/webhooks")
 api_router.include_router(workspace_router, prefix="/workspaces")
 api_router.include_router(crm_agent_mappings_router, prefix="/workspaces")
 api_router.include_router(crm_history_imports_router, prefix="/workspaces")
+api_router.include_router(extension_devices_router, prefix="/workspaces")
 api_router.include_router(campaigns_router, prefix="/workspaces")
 api_router.include_router(attention_router, prefix="/workspaces")
 api_router.include_router(handoffs_router, prefix="/workspaces")

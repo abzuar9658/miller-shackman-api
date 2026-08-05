@@ -103,7 +103,11 @@ from app.domain.compliance.contactability import (
 )
 from app.domain.conversations import CrmConversationEventDirection, WorkspaceHandoffConfig
 from app.domain.leads import CanonicalLeadRecord
-from app.domain.outbound_drafting import OutboundJourneyKind
+from app.domain.outbound_drafting import (
+    OutboundJourneyKind,
+    WorkspaceOutboundDraftingConfig,
+    default_workspace_outbound_drafting_config,
+)
 from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransitionReasonCode
 
 
@@ -394,18 +398,19 @@ async def execute_campaign_cadence_step(
 
     template_version: TemplateVersion | None = None
     if is_paused_search_step and template_repository is not None:
-        if step.template_version_id is None:
+        if step.template_version_id is None and step.template_profile is None:
             return CadenceStepExecutionResult(
                 status=CadenceStepExecutionStatus.NO_CADENCE_STEP,
                 workflow=workflow,
                 cadence_step_id=cadence_step_id,
                 skip_reason="Paused-search step has no immutable template binding.",
             )
-        template_version = await template_repository.get_by_id(
-            workspace_id,
-            step.template_version_id,
-        )
-        if template_version is None:
+        if step.template_version_id is not None:
+            template_version = await template_repository.get_by_id(
+                workspace_id,
+                step.template_version_id,
+            )
+        if step.template_version_id is not None and template_version is None:
             return CadenceStepExecutionResult(
                 status=CadenceStepExecutionStatus.NO_CADENCE_STEP,
                 workflow=workflow,
@@ -523,6 +528,22 @@ async def execute_campaign_cadence_step(
         workspace.default_timezone,
     )
 
+    drafting_config: WorkspaceOutboundDraftingConfig | None = (
+        config.outbound_drafting_config
+        if journey_kind == OutboundJourneyKind.DORMANT
+        else None
+    )
+    if journey_kind == OutboundJourneyKind.PAUSED_SEARCH:
+        if workspace_outbound_drafting_config_repository is not None:
+            drafting_config = (
+                await workspace_outbound_drafting_config_repository.get_by_workspace_id(
+                    workspace_id
+                )
+            )
+        drafting_config = drafting_config or default_workspace_outbound_drafting_config(
+            workspace_id
+        )
+
     if cursor_step_id != step.cadence_step_id or (
         not is_paused_search_step and workflow.next_action_at != scheduled_for
     ):
@@ -572,6 +593,8 @@ async def execute_campaign_cadence_step(
         scheduled_for=scheduled_for,
         pre_send_policy=pre_send_policy,
         journey_kind=journey_kind,
+        drafting_config=drafting_config,
+        template_profile=step.template_profile,
     )
     plan_result = await plan_next_outbound_message_for_lead(
         workspace_id=workspace_id,
@@ -1427,6 +1450,7 @@ def _paused_search_steps_as_cadence_steps(
             max_attempts=step.max_attempts,
             created_at=step.created_at,
             template_version_id=step.template_version_id,
+            template_profile=step.template_profile,
         )
         for step in steps
     )

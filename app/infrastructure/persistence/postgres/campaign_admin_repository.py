@@ -13,6 +13,12 @@ from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import CampaignId, CampaignVersionId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
+from app.domain.outbound_drafting import (
+    WorkspaceOutboundDraftingConfig,
+    default_workspace_outbound_drafting_config,
+    dormant_step_template_profile_from_mapping,
+    dormant_step_template_profile_to_mapping,
+)
 from app.infrastructure.persistence.postgres.models import (
     CampaignAdminAuditLogModel,
     CampaignCadenceStepModel,
@@ -236,6 +242,9 @@ def _campaign_from_model(model: CampaignModel) -> CampaignAdminCampaign:
 
 
 def _version_to_values(version: CampaignAdminVersion) -> dict[str, object]:
+    drafting_config = version.outbound_drafting_config or (
+        default_workspace_outbound_drafting_config(version.workspace_id)
+    )
     return {
         "campaign_version_id": version.campaign_version_id,
         "workspace_id": version.workspace_id,
@@ -254,6 +263,13 @@ def _version_to_values(version: CampaignAdminVersion) -> dict[str, object]:
         "allow_assigned_agent_manual_enrollment": version.allow_assigned_agent_manual_enrollment,
         "prompt_version": version.prompt_version,
         "approved_model": version.approved_model,
+        "prompt_text": drafting_config.prompt_text,
+        "sms_prompt_text": drafting_config.sms_prompt_text,
+        "sms_template": drafting_config.sms_template,
+        "email_prompt_text": drafting_config.email_prompt_text,
+        "email_template": drafting_config.email_template,
+        "email_subject_template": drafting_config.email_subject_template,
+        "enabled_extraction_fields": list(drafting_config.enabled_extraction_fields),
         "created_by_user_id": version.created_by_user_id,
         "published_at": version.published_at,
         "created_at": version.created_at,
@@ -282,6 +298,17 @@ def _version_from_model(model: CampaignVersionModel) -> CampaignAdminVersion:
         created_by_user_id=model.created_by_user_id,
         published_at=model.published_at,
         created_at=model.created_at,
+        outbound_drafting_config=WorkspaceOutboundDraftingConfig(
+            workspace_id=model.workspace_id,
+            revision=model.version_number,
+            prompt_text=model.prompt_text,
+            sms_prompt_text=model.sms_prompt_text,
+            sms_template=model.sms_template,
+            email_prompt_text=model.email_prompt_text,
+            email_template=model.email_template,
+            email_subject_template=model.email_subject_template,
+            enabled_extraction_fields=tuple(model.enabled_extraction_fields),
+        ),
     )
 
 
@@ -295,6 +322,11 @@ def _step_to_values(step: CampaignAdminCadenceStep) -> dict[str, object]:
         "delay_hours": step.delay_hours,
         "message_goal": step.message_goal,
         "template_key": step.template_key,
+        "template_profile": (
+            dormant_step_template_profile_to_mapping(step.template_profile)
+            if step.template_profile is not None
+            else None
+        ),
         "max_attempts": step.max_attempts,
         "created_at": step.created_at,
     }
@@ -312,6 +344,7 @@ def _step_from_model(model: CampaignCadenceStepModel) -> CampaignAdminCadenceSte
         template_key=model.template_key,
         max_attempts=model.max_attempts,
         created_at=model.created_at,
+        template_profile=dormant_step_template_profile_from_mapping(model.template_profile),
     )
 
 

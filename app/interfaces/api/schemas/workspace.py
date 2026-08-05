@@ -331,8 +331,9 @@ class WorkspaceOutboundDraftingPreviewRequest(BaseModel):
     query: str = Field(min_length=1, max_length=1000)
     agent_name: str | None = Field(default=None, max_length=255)
     brokerage_name: str | None = Field(default=None, max_length=255)
+    template_key: str | None = Field(default=None, max_length=255)
 
-    @field_validator("agent_name", "brokerage_name")
+    @field_validator("agent_name", "brokerage_name", "template_key")
     @classmethod
     def normalize_preview_placeholder_value(cls, value: str | None) -> str | None:
         if value is None:

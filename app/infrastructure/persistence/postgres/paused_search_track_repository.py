@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select
@@ -15,13 +15,17 @@ from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrack,
     PausedSearchTrackAdminAuditAction,
     PausedSearchTrackAdminAuditLog,
+    PausedSearchTrackAssignment,
+    PausedSearchTrackAssignmentSource,
     PausedSearchTrackFamily,
+    PausedSearchTrackLeadAssignment,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
 )
 from app.domain.common.ids import (
+    LeadId,
     PausedSearchTrackId,
     PausedSearchTrackVersionId,
     UserId,
@@ -29,13 +33,21 @@ from app.domain.common.ids import (
 )
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import PausedSearchReasonCode
+from app.domain.outbound_drafting import (
+    dormant_step_template_profile_from_mapping,
+    dormant_step_template_profile_to_mapping,
+)
 from app.infrastructure.persistence.postgres.models import (
+    LeadModel,
     PausedSearchReasonMappingModel,
     PausedSearchTrackAdminAuditLogModel,
+    PausedSearchTrackAssignmentModel,
     PausedSearchTrackModel,
     PausedSearchTrackStepModel,
     PausedSearchTrackVersionModel,
+    RecurringOccurrenceModel,
 )
+from app.infrastructure.persistence.postgres.workflow_models import LeadWorkflowModel
 
 
 class PostgresPausedSearchTrackAdminRepository:
@@ -51,6 +63,103 @@ class PostgresPausedSearchTrackAdminRepository:
             ),
         )
         return tuple(_track_from_model(model) for model in result.scalars().all())
+
+    async def list_assigned_leads(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+        *,
+        limit: int = 100,
+        lock: bool = False,
+    ) -> tuple[PausedSearchTrackLeadAssignment, ...]:
+        statement = (
+            select(PausedSearchTrackAssignmentModel, LeadModel, LeadWorkflowModel)
+            .join(
+                LeadModel,
+                and_(
+                    LeadModel.workspace_id == PausedSearchTrackAssignmentModel.workspace_id,
+                    LeadModel.lead_id == PausedSearchTrackAssignmentModel.lead_id,
+                ),
+            )
+            .outerjoin(
+                LeadWorkflowModel,
+                and_(
+                    LeadWorkflowModel.workspace_id == PausedSearchTrackAssignmentModel.workspace_id,
+                    LeadWorkflowModel.lead_id == PausedSearchTrackAssignmentModel.lead_id,
+                ),
+            )
+            .where(PausedSearchTrackAssignmentModel.workspace_id == workspace_id)
+            .where(PausedSearchTrackAssignmentModel.track_id == track_id)
+            .where(PausedSearchTrackAssignmentModel.released_at.is_(None))
+        )
+        if lock:
+            statement = statement.order_by(
+                PausedSearchTrackAssignmentModel.assigned_at.desc()
+            ).with_for_update(of=(PausedSearchTrackAssignmentModel, LeadModel))
+        else:
+            statement = statement.order_by(
+                PausedSearchTrackAssignmentModel.assigned_at.desc()
+            ).limit(limit)
+        result = await self._session.execute(statement)
+        assignments: list[PausedSearchTrackLeadAssignment] = []
+        for assignment, lead, workflow in result.all():
+            assignments.append(
+                PausedSearchTrackLeadAssignment(
+                    lead_id=assignment.lead_id,
+                    workflow_id=workflow.workflow_id if workflow is not None else None,
+                    track_version_id=assignment.track_version_id,
+                    crm_lead_id=lead.crm_lead_id,
+                    primary_email=lead.primary_email,
+                    lead_stage=lead.lead_stage,
+                    workflow_state=workflow.state if workflow is not None else None,
+                )
+            )
+            if lock and len(assignments) >= limit:
+                break
+        return tuple(assignments)
+
+    async def delete_retired_track(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+    ) -> None:
+        version_result = await self._session.execute(
+            select(PausedSearchTrackVersionModel.track_version_id)
+            .where(PausedSearchTrackVersionModel.workspace_id == workspace_id)
+            .where(PausedSearchTrackVersionModel.track_id == track_id)
+        )
+        version_ids = tuple(version_id for (version_id,) in version_result.all())
+        if version_ids:
+            await self._session.execute(
+                delete(RecurringOccurrenceModel).where(
+                    RecurringOccurrenceModel.workspace_id == workspace_id,
+                    RecurringOccurrenceModel.track_version_id.in_(version_ids),
+                )
+            )
+            await self._session.execute(
+                delete(PausedSearchTrackStepModel).where(
+                    PausedSearchTrackStepModel.workspace_id == workspace_id,
+                    PausedSearchTrackStepModel.track_version_id.in_(version_ids),
+                )
+            )
+            await self._session.execute(
+                delete(PausedSearchReasonMappingModel).where(
+                    PausedSearchReasonMappingModel.workspace_id == workspace_id,
+                    PausedSearchReasonMappingModel.track_version_id.in_(version_ids),
+                )
+            )
+            await self._session.execute(
+                delete(PausedSearchTrackVersionModel).where(
+                    PausedSearchTrackVersionModel.workspace_id == workspace_id,
+                    PausedSearchTrackVersionModel.track_version_id.in_(version_ids),
+                )
+            )
+        await self._session.execute(
+            delete(PausedSearchTrackModel).where(
+                PausedSearchTrackModel.workspace_id == workspace_id,
+                PausedSearchTrackModel.track_id == track_id,
+            )
+        )
 
     async def get_track(
         self,
@@ -320,6 +429,75 @@ class PostgresPausedSearchTrackAdminAuditLogRepository:
         return _audit_from_model(result.scalar_one())
 
 
+class PostgresPausedSearchTrackAssignmentRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_active_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> PausedSearchTrackAssignment | None:
+        return await self._get_active_for_lead(workspace_id, lead_id, for_update=False)
+
+    async def get_active_for_lead_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> PausedSearchTrackAssignment | None:
+        return await self._get_active_for_lead(workspace_id, lead_id, for_update=True)
+
+    async def _get_active_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        for_update: bool,
+    ) -> PausedSearchTrackAssignment | None:
+        result = await self._session.execute(
+            _active_assignment_statement(workspace_id, lead_id, for_update=for_update)
+        )
+        model = result.scalar_one_or_none()
+        return _assignment_from_model(model) if model is not None else None
+
+    async def create(
+        self,
+        assignment: PausedSearchTrackAssignment,
+    ) -> PausedSearchTrackAssignment:
+        result = await self._session.execute(
+            insert(PausedSearchTrackAssignmentModel)
+            .values(**_assignment_to_values(assignment))
+            .returning(PausedSearchTrackAssignmentModel)
+        )
+        return _assignment_from_model(result.scalar_one())
+
+    async def release_active(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        released_at: datetime,
+        released_by: UserId | None = None,
+        release_reason: str | None = None,
+    ) -> PausedSearchTrackAssignment | None:
+        result = await self._session.execute(
+            update(PausedSearchTrackAssignmentModel)
+            .where(
+                PausedSearchTrackAssignmentModel.workspace_id == workspace_id,
+                PausedSearchTrackAssignmentModel.lead_id == lead_id,
+                PausedSearchTrackAssignmentModel.released_at.is_(None),
+            )
+            .values(
+                released_at=released_at,
+                released_by_user_id=released_by,
+                release_reason=release_reason,
+            )
+            .returning(PausedSearchTrackAssignmentModel)
+        )
+        model = result.scalar_one_or_none()
+        return _assignment_from_model(model) if model is not None else None
+
+
 def _track_statement(
     workspace_id: WorkspaceId,
     track_id: PausedSearchTrackId,
@@ -332,6 +510,64 @@ def _track_statement(
         .where(PausedSearchTrackModel.track_id == track_id)
     )
     return statement.with_for_update() if for_update else statement
+
+
+def _active_assignment_statement(
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    *,
+    for_update: bool,
+) -> Select[tuple[PausedSearchTrackAssignmentModel]]:
+    statement = select(PausedSearchTrackAssignmentModel).where(
+        PausedSearchTrackAssignmentModel.workspace_id == workspace_id,
+        PausedSearchTrackAssignmentModel.lead_id == lead_id,
+        PausedSearchTrackAssignmentModel.released_at.is_(None),
+    )
+    return statement.with_for_update() if for_update else statement
+
+
+def _assignment_to_values(assignment: PausedSearchTrackAssignment) -> dict[str, object]:
+    return {
+        "assignment_id": assignment.assignment_id,
+        "workspace_id": assignment.workspace_id,
+        "lead_id": assignment.lead_id,
+        "track_id": assignment.track_id,
+        "track_version_id": assignment.track_version_id,
+        "track_key_snapshot": assignment.track_key_snapshot,
+        "track_name_snapshot": assignment.track_name_snapshot,
+        "track_version_snapshot": assignment.track_version_snapshot,
+        "reason_code": assignment.reason_code.value if assignment.reason_code is not None else None,
+        "source": assignment.source.value,
+        "assigned_by_user_id": assignment.assigned_by_user_id,
+        "assigned_at": assignment.assigned_at,
+        "released_at": assignment.released_at,
+        "released_by_user_id": assignment.released_by,
+        "release_reason": assignment.release_reason,
+    }
+
+
+def _assignment_from_model(
+    model: PausedSearchTrackAssignmentModel,
+) -> PausedSearchTrackAssignment:
+    return PausedSearchTrackAssignment(
+        assignment_id=model.assignment_id,
+        workspace_id=model.workspace_id,
+        lead_id=model.lead_id,
+        track_id=model.track_id,
+        track_version_id=model.track_version_id,
+        track_key_snapshot=model.track_key_snapshot,
+        track_name_snapshot=model.track_name_snapshot,
+        track_version_snapshot=model.track_version_snapshot,
+        reason_code=(
+            PausedSearchReasonCode(model.reason_code) if model.reason_code is not None else None
+        ),
+        source=PausedSearchTrackAssignmentSource(model.source),
+        assigned_by_user_id=model.assigned_by_user_id,
+        assigned_at=model.assigned_at,
+        released_at=model.released_at,
+        released_by=model.released_by_user_id,
+        release_reason=model.release_reason,
+    )
 
 
 def _track_to_values(track: PausedSearchTrack) -> dict[str, object]:
@@ -430,6 +666,11 @@ def _step_to_values(step: PausedSearchTrackStep) -> dict[str, object]:
         "message_goal": step.message_goal,
         "template_key": step.template_key,
         "template_version_id": step.template_version_id,
+        "template_profile": (
+            dormant_step_template_profile_to_mapping(step.template_profile)
+            if step.template_profile is not None
+            else None
+        ),
         "max_attempts": step.max_attempts,
         "review_required": step.review_required,
         "interval_days": step.interval_days,
@@ -459,6 +700,7 @@ def _step_from_model(model: PausedSearchTrackStepModel) -> PausedSearchTrackStep
         created_at=model.created_at,
         interval_days=model.interval_days,
         max_occurrences=model.max_occurrences,
+        template_profile=dormant_step_template_profile_from_mapping(model.template_profile),
     )
 
 

@@ -10,14 +10,18 @@ from app.application.services.llm.structured_json import (
     coerce_llm_confidence,
     normalize_llm_json_text,
 )
-from app.domain.conversations import CrmConversationEvent, HandoffReasonCode
+from app.domain.conversations import (
+    CrmConversationEvent,
+    CrmConversationEventDirection,
+    HandoffReasonCode,
+)
 from app.domain.leads import (
     CanonicalLeadRecord,
     LeadStateClassificationOutcome,
     PausedSearchReasonCode,
 )
 
-LEAD_STATE_CLASSIFICATION_PROMPT_VERSION = "lead_state_classification:v4"
+LEAD_STATE_CLASSIFICATION_PROMPT_VERSION = "lead_state_classification:v5"
 STRICT_RETRY_PROMPT_VERSION = f"{LEAD_STATE_CLASSIFICATION_PROMPT_VERSION}:strict_retry"
 MIN_LEAD_STATE_CLASSIFICATION_CONFIDENCE = 0.70
 
@@ -74,6 +78,11 @@ class _LLMLeadStateClassification(BaseModel):
     reengagement_window_label: str | None = None
     confidence: float = Field(ge=0.0, le=1.0)
     evidence: list[str] = Field(default_factory=list)
+    evidence_event_ids: list[str] = Field(default_factory=list)
+    lead_goal: str | None = None
+    last_known_intent: str | None = None
+    intent_freshness: str | None = None
+    conversation_waiting_on: str | None = None
     summary: str = Field(min_length=1, max_length=600)
 
     @field_validator("confidence", mode="before")
@@ -109,11 +118,12 @@ async def classify_lead_from_conversation(
     model: str | None = None,
     min_confidence: float = MIN_LEAD_STATE_CLASSIFICATION_CONFIDENCE,
 ) -> LeadStateClassificationResult:
+    normalized_events = _normalize_conversation_events(crm_conversation_events)
     input_context = _approved_context_payload(
         lead=lead,
         now=now,
         conversation_summary=conversation_summary,
-        crm_conversation_events=crm_conversation_events,
+        crm_conversation_events=normalized_events,
         dormant_threshold_days=dormant_threshold_days,
     )
     prompt_text = _build_prompt(input_context)
@@ -152,6 +162,11 @@ async def classify_lead_from_conversation(
 
     parsed_llm_response = _parsed_llm_response_payload(classification)
     reasons = _validation_reasons(classification, min_confidence=min_confidence)
+    classification, policy_trace = _apply_route_policy(
+        classification=classification,
+        input_context=input_context,
+    )
+    input_context["classifier_policy"] = policy_trace
     if reasons:
         return LeadStateClassificationResult(
             status=LeadStateClassificationStatus.REJECTED,
@@ -302,6 +317,11 @@ def _build_strict_retry_prompt(payload: dict[str, object]) -> str:
         "reengagement_window_label": "after summer",
         "confidence": 0.88,
         "evidence": ["Lead said rates are too high", "Lead wants to wait until fall"],
+        "evidence_event_ids": ["text_message:123"],
+        "lead_goal": "buyer",
+        "last_known_intent": "wants to buy after rates improve",
+        "intent_freshness": "current",
+        "conversation_waiting_on": "lead",
         "summary": "Lead is waiting for lower mortgage rates before buying.",
     }
     return (
@@ -321,6 +341,11 @@ def _build_strict_retry_prompt(payload: dict[str, object]) -> str:
         "- reengagement_window_label: short string or null\n"
         "- confidence: number between 0 and 1\n"
         "- evidence: list of short strings\n"
+        "- evidence_event_ids: list of event_id values from lead-authored events only\n"
+        "- lead_goal: short profile label or null\n"
+        "- last_known_intent: short semantic description or null\n"
+        "- intent_freshness: current, historical, or unknown\n"
+        "- conversation_waiting_on: lead, agent, or unknown\n"
         "- summary: non-empty string under 600 chars\n"
         "If unsure, still return every required key with your best structured judgment.\n"
         f"Example valid response: {json.dumps(example, sort_keys=True)}\n"
@@ -367,16 +392,7 @@ def _approved_context_payload(
             dormant_threshold_days=dormant_threshold_days,
         ),
         "conversation_summary": conversation_summary,
-        "recent_messages": [
-            {
-                "direction": event.direction.value if event.direction else None,
-                "actor_name": event.actor_name,
-                "content": event.content,
-                "occurred_at": event.occurred_at.isoformat() if event.occurred_at else None,
-            }
-            for event in crm_conversation_events[:20]
-            if event.content
-        ],
+        "recent_messages": [_message_context(event) for event in crm_conversation_events[-20:]],
     }
 
 
@@ -395,6 +411,7 @@ def _freshness_context(
     latest_outbound_at = _latest_event_at(crm_conversation_events, direction="outbound")
     latest_internal_at = _latest_event_at(crm_conversation_events, direction="internal")
     latest_property_event_at = lead.latest_property_event_at
+    latest_lead_signal_at = latest_inbound_at
     has_observed_inbound_reply_after_latest_property_event = _has_observed_inbound_reply_after(
         crm_conversation_events,
         latest_property_event_at,
@@ -409,6 +426,34 @@ def _freshness_context(
         now=now,
         dormant_threshold_days=dormant_threshold_days,
     )
+    latest_lead_signal_older_than_dormant_threshold = _is_stale_by_threshold(
+        value=latest_lead_signal_at,
+        now=now,
+        dormant_threshold_days=dormant_threshold_days,
+    )
+    events_after_latest_lead_signal = (
+        [
+            event
+            for event in crm_conversation_events
+            if latest_lead_signal_at is not None and event.occurred_at > latest_lead_signal_at
+        ]
+        if latest_lead_signal_at is not None
+        else []
+    )
+    outbound_only_since_latest_lead_signal = (
+        all(
+            event.direction != CrmConversationEventDirection.INBOUND
+            for event in events_after_latest_lead_signal
+        )
+        if latest_lead_signal_at is not None
+        else None
+    )
+    has_current_inbound_engagement = (
+        latest_lead_signal_older_than_dormant_threshold is False
+        if latest_lead_signal_older_than_dormant_threshold is not None
+        else (latest_lead_signal_at is not None if dormant_threshold_days is None else False)
+    )
+    conversation_waiting_on = _conversation_waiting_on(crm_conversation_events)
     stale_property_interest_without_observed_reply: bool | None = None
     if (
         property_interest_is_stale_by_threshold is not None
@@ -432,15 +477,33 @@ def _freshness_context(
         "latest_observed_inbound_message_at": _iso_datetime(latest_inbound_at),
         "latest_observed_outbound_message_at": _iso_datetime(latest_outbound_at),
         "latest_observed_internal_message_at": _iso_datetime(latest_internal_at),
+        "latest_lead_signal_at": _iso_datetime(latest_lead_signal_at),
         "days_since_last_meaningful_communication": _days_since(
             now, lead.last_meaningful_communication_at
         ),
         "days_since_latest_observed_message": _days_since(now, latest_message_at),
         "days_since_latest_property_event": _days_since(now, latest_property_event_at),
         "days_since_latest_observed_inbound_message": _days_since(now, latest_inbound_at),
+        "days_since_latest_lead_signal": _days_since(now, latest_lead_signal_at),
         "latest_observed_message_older_than_dormant_threshold": (
             latest_observed_message_older_than_dormant_threshold
         ),
+        "latest_lead_signal_older_than_dormant_threshold": (
+            latest_lead_signal_older_than_dormant_threshold
+        ),
+        "outbound_only_since_latest_lead_signal": outbound_only_since_latest_lead_signal,
+        "has_current_inbound_engagement": has_current_inbound_engagement,
+        "conversation_waiting_on": conversation_waiting_on,
+        "days_waiting_on_lead": (
+            _days_since(now, latest_lead_signal_at)
+            if conversation_waiting_on == "lead"
+            else None
+        ),
+        "lead_signal_event_ids": [
+            event.crm_activity_id
+            for event in crm_conversation_events
+            if event.direction == CrmConversationEventDirection.INBOUND
+        ],
         "has_observed_inbound_reply_after_latest_property_event": (
             has_observed_inbound_reply_after_latest_property_event
         ),
@@ -462,6 +525,146 @@ def _latest_event_at(
         if event.direction is not None and event.direction.value == direction
     ]
     return max(matches, default=None)
+
+
+def _normalize_conversation_events(
+    crm_conversation_events: tuple[CrmConversationEvent, ...],
+) -> tuple[CrmConversationEvent, ...]:
+    """Collapse duplicate CRM records before deriving conversation state."""
+    seen_activity_ids: set[str] = set()
+    seen_fingerprints: set[tuple[str | None, str, str | None]] = set()
+    normalized: list[CrmConversationEvent] = []
+    for event in sorted(
+        crm_conversation_events,
+        key=lambda item: (item.occurred_at, item.created_at, item.crm_activity_id),
+    ):
+        if event.crm_activity_id in seen_activity_ids:
+            continue
+        fingerprint = (
+            event.direction.value if event.direction else None,
+            event.occurred_at.isoformat(),
+            " ".join(event.content.split()) if event.content else None,
+        )
+        if fingerprint in seen_fingerprints:
+            continue
+        seen_activity_ids.add(event.crm_activity_id)
+        seen_fingerprints.add(fingerprint)
+        normalized.append(event)
+    return tuple(normalized)
+
+
+def _message_context(event: CrmConversationEvent) -> dict[str, object]:
+    return {
+        "event_id": event.crm_activity_id,
+        "direction": event.direction.value if event.direction else None,
+        "actor_role": _actor_role(event),
+        "is_lead_authored": event.direction == CrmConversationEventDirection.INBOUND,
+        "activity_type": event.activity_type,
+        "actor_name": event.actor_name,
+        "content": event.content,
+        "occurred_at": event.occurred_at.isoformat(),
+    }
+
+
+def _actor_role(event: CrmConversationEvent) -> str:
+    if event.direction == CrmConversationEventDirection.INBOUND:
+        return "lead"
+    if event.direction == CrmConversationEventDirection.OUTBOUND:
+        return "agent" if event.actor_agent_id or event.actor_name else "automation"
+    if event.direction == CrmConversationEventDirection.INTERNAL:
+        return "system"
+    return "unknown"
+
+
+def _conversation_waiting_on(
+    crm_conversation_events: tuple[CrmConversationEvent, ...],
+) -> str:
+    if not crm_conversation_events:
+        return "unknown"
+    latest = crm_conversation_events[-1]
+    if latest.direction == CrmConversationEventDirection.INBOUND:
+        return "agent"
+    if latest.direction in {
+        CrmConversationEventDirection.OUTBOUND,
+        CrmConversationEventDirection.INTERNAL,
+    }:
+        return "lead"
+    return "unknown"
+
+
+def _apply_route_policy(
+    *,
+    classification: _LLMLeadStateClassification,
+    input_context: dict[str, object],
+) -> tuple[_LLMLeadStateClassification, dict[str, object]]:
+    freshness = input_context.get("freshness_context", {})
+    if not isinstance(freshness, dict):
+        freshness = {}
+    proposed_outcome = classification.outcome.value
+    evidence_ids = list(classification.evidence_event_ids)
+    lead_signal_ids = set(str(value) for value in freshness.get("lead_signal_event_ids", []))
+    invalid_evidence_ids = sorted(set(evidence_ids) - lead_signal_ids)
+    has_current_inbound = freshness.get("has_current_inbound_engagement")
+    policy_reasons: list[str] = []
+    applied = classification
+
+    if proposed_outcome == _LLMLeadStateClassificationOutcome.HUMAN_HANDOFF.value:
+        if invalid_evidence_ids:
+            policy_reasons.append("evidence_event_not_lead_authored")
+        if has_current_inbound is False:
+            policy_reasons.append("no_fresh_lead_signal_for_handoff")
+        if policy_reasons:
+            applied = classification.model_copy(
+                update={
+                    "outcome": _LLMLeadStateClassificationOutcome.DORMANT,
+                    "handoff_reason_code": None,
+                    "pause_reason_code": None,
+                    "evidence": _dormant_policy_evidence(freshness),
+                    "summary": _dormant_policy_summary(freshness),
+                }
+            )
+
+    if proposed_outcome == _LLMLeadStateClassificationOutcome.PAUSED_SEARCH.value:
+        if invalid_evidence_ids:
+            policy_reasons.append("evidence_event_not_lead_authored")
+            applied = classification.model_copy(
+                update={
+                    "outcome": _LLMLeadStateClassificationOutcome.REVIEW_HOLD,
+                    "pause_reason_code": None,
+                }
+            )
+
+    policy_trace: dict[str, object] = {
+        "proposed_outcome": proposed_outcome,
+        "applied_outcome": applied.outcome.value,
+        "decision": "overridden" if applied.outcome != classification.outcome else "accepted",
+        "reason_codes": policy_reasons,
+        "proposed_evidence_event_ids": evidence_ids,
+        "valid_lead_signal_event_ids": sorted(lead_signal_ids),
+        "invalid_evidence_event_ids": invalid_evidence_ids,
+        "freshness_gate": "current_inbound_required_for_handoff",
+        "authoritative": True,
+    }
+    return applied, policy_trace
+
+
+def _dormant_policy_evidence(freshness: dict[str, object]) -> list[str]:
+    evidence = []
+    days = freshness.get("days_since_latest_lead_signal")
+    if isinstance(days, int):
+        evidence.append(f"Latest lead-authored signal was {days} days ago.")
+    evidence.append("No fresh lead-authored reply was observed after the outbound follow-ups.")
+    return evidence
+
+
+def _dormant_policy_summary(freshness: dict[str, object]) -> str:
+    days = freshness.get("days_since_latest_lead_signal")
+    if isinstance(days, int):
+        return (
+            f"Historical lead interest is stale after {days} days without a fresh inbound reply; "
+            "route is dormant."
+        )
+    return "No fresh lead-authored engagement was observed; route is dormant."
 
 
 def _has_observed_inbound_reply_after(
@@ -502,16 +705,19 @@ def _iso_datetime(value: datetime | None) -> str | None:
 
 def _base_prompt_instructions() -> str:
     return (
-        "You classify a real estate lead's overall state from conversation context. "
+        "You analyze a real estate lead's conversation and propose a safe state. "
         "Return exactly one valid JSON object and nothing else. "
         "Do not include markdown fences, prose, comments, or trailing text.\n"
         "You must use only the exact enum values provided below. Never invent or shorten "
         "an outcome or reason code.\n"
         "Use freshness_context as authoritative derived timing facts from the lead record "
-        "and the recent CRM context window. Historical interest alone is not enough for "
-        "human_handoff.\n"
+        "and the recent CRM context window. Only events with actor_role=lead and "
+        "is_lead_authored=true are evidence of lead intent. Outbound agent, automation, "
+        "internal, and unknown events are context only and must never support a handoff. "
+        "Historical interest alone is not enough for human_handoff.\n"
         "Choose exactly one outcome using these rules, in priority order:\n"
-        "1. human_handoff — use this only when the lead shows current active buying/selling "
+        "1. human_handoff — propose this only when a lead-authored event is current and "
+        "unresolved, and the lead shows active buying/selling "
         "interest now, asks for a person now, requests a showing/call now, or asks for "
         "property/pricing/financing/market/legal/tax advice that still needs a human follow-up. "
         "Do not choose human_handoff from a stale property inquiry alone.\n"
@@ -521,24 +727,24 @@ def _base_prompt_instructions() -> str:
         "4. dormant — the lead went quiet and there is no known current reason to pause or "
         "handoff. If freshness_context.stale_property_interest_without_observed_reply is "
         "true, prefer dormant unless the context clearly supports blocked, paused_search, "
-        "or review_hold. If freshness_context.latest_observed_message_older_than_"
-        "dormant_threshold is true, also treat old showing requests, old property "
-        "interest, and old internal-only context as historical unless there is a newer "
-        "current-engagement signal.\n"
+        "or review_hold. If freshness_context.latest_lead_signal_older_than_dormant_threshold "
+        "is true, also treat old showing requests, old property interest, and old "
+        "internal-only context as historical unless there is a newer current lead-authored "
+        "signal.\n"
         "5. review_hold — use this only when the conversation clearly requires human review.\n"
         "6. unknown — use this when no route is a clear safe winner. Unknown maps to review hold.\n"
         "If a property inquiry is older than the configured dormant threshold and there is no "
         "observed later inbound reply, treat that inquiry as historical context rather than "
         "current handoff urgency.\n"
-        "If the newest observed message in the available context window is older than the "
-        "configured dormant threshold, prefer dormant over human_handoff unless the context "
-        "clearly supports blocked, paused_search, or review_hold.\n"
+        "If the newest lead-authored signal is older than the configured dormant threshold, "
+        "prefer dormant over human_handoff unless the context clearly supports blocked, "
+        "paused_search, or review_hold.\n"
         "When stale timing facts strongly support dormant, do not assign low confidence just "
         "because the historical message text sounds urgent or high-intent. In those stale-only "
         "cases, confidence should usually be high unless there is a real newer conflicting "
         "signal in the context.\n"
-        "A recent inbound request for help, a fresh showing request, or a fresh ask for advice "
-        "can still be human_handoff even if older dormant history exists.\n"
+        "A recent lead-authored request for help, a fresh showing request, or a fresh ask "
+        "for advice can still be human_handoff even if older dormant history exists.\n"
         "For paused_search, pause_reason_code must be exactly one of: "
         f"{', '.join(code.value for code in PausedSearchReasonCode)}.\n"
         "For human_handoff, handoff_reason_code must be exactly one of: "
@@ -548,8 +754,15 @@ def _base_prompt_instructions() -> str:
         "Set reengagement_not_before to an ISO date only if the lead mentioned a concrete date.\n"
         "Set reengagement_window_label to a short human phrase such as "
         "'after lease ends' or 'next quarter'.\n"
-        "evidence is a list of short phrases from the conversation that support your outcome.\n"
+        "evidence is a list of short phrases from lead-authored events that support your "
+        "proposal. evidence_event_ids must contain only the exact event_id values of those "
+        "lead-authored events; never cite outbound or internal event IDs.\n"
+        "Also report lead_goal, last_known_intent, intent_freshness, and "
+        "conversation_waiting_on as semantic context. The backend route policy is "
+        "authoritative and may override your proposal when freshness or evidence rules fail.\n"
         "summary is a concise explanation under 600 characters.\n"
         "Return only JSON with keys: outcome, handoff_reason_code, pause_reason_code, "
-        "reengagement_not_before, reengagement_window_label, confidence, evidence, summary."
+        "reengagement_not_before, reengagement_window_label, confidence, evidence, "
+        "evidence_event_ids, lead_goal, last_known_intent, intent_freshness, "
+        "conversation_waiting_on, summary."
     )

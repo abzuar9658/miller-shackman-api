@@ -1,3 +1,4 @@
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -6,6 +7,7 @@ from uuid import UUID
 
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.common.ids import (
+    LeadId,
     PausedSearchTrackId,
     PausedSearchTrackVersionId,
     UserId,
@@ -13,6 +15,13 @@ from app.domain.common.ids import (
 )
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import PausedSearchReasonCode
+from app.domain.outbound_drafting import DormantStepTemplateProfile
+
+
+def generate_paused_search_track_key(display_name: str) -> str:
+    key = display_name.strip().lower().replace("&", " and ")
+    key = re.sub(r"[^a-z0-9]+", "-", key).strip("-")
+    return key or "paused-search-track"
 
 
 class PausedSearchTrackStatus(StrEnum):
@@ -56,6 +65,16 @@ class PausedSearchTrackAdminAuditAction(StrEnum):
     DRAFT_UPDATED = "paused_search_track_draft_updated"
     VERSION_PUBLISHED = "paused_search_track_version_published"
     TRACK_RETIRED = "paused_search_track_retired"
+    TRACK_RESTORED = "paused_search_track_restored"
+    TRACK_DELETED = "paused_search_track_deleted"
+
+
+class PausedSearchTrackAssignmentSource(StrEnum):
+    REASON_MAPPING = "reason_mapping"
+    WORKFLOW_BACKFILL = "workflow_backfill"
+    LEGACY_REASON_BACKFILL = "legacy_reason_backfill"
+    ADMIN_MIGRATION = "admin_migration"
+    ADMIN_REPAIR = "admin_repair"
 
 
 def _empty_details() -> Mapping[str, object]:
@@ -66,7 +85,7 @@ def _empty_details() -> Mapping[str, object]:
 class PausedSearchTrackAdminAuditLog:
     audit_log_id: UUID
     workspace_id: WorkspaceId
-    track_id: PausedSearchTrackId
+    track_id: PausedSearchTrackId | None
     action: PausedSearchTrackAdminAuditAction
     actor_user_id: UserId
     created_at: datetime
@@ -132,6 +151,7 @@ class PausedSearchTrackStep:
     interval_days: int | None = None
     max_occurrences: int = 1
     template_version_id: UUID | None = None
+    template_profile: DormantStepTemplateProfile | None = None
 
 
 @dataclass(frozen=True)
@@ -146,8 +166,39 @@ class PausedSearchReasonMapping:
 
 
 @dataclass(frozen=True)
+class PausedSearchTrackAssignment:
+    assignment_id: UUID
+    workspace_id: WorkspaceId
+    lead_id: LeadId
+    track_id: PausedSearchTrackId | None
+    track_version_id: PausedSearchTrackVersionId | None
+    track_key_snapshot: str
+    track_name_snapshot: str
+    track_version_snapshot: int
+    reason_code: PausedSearchReasonCode | None
+    source: PausedSearchTrackAssignmentSource
+    assigned_by_user_id: UserId | None
+    assigned_at: datetime
+    released_at: datetime | None = None
+    released_by: UserId | None = None
+    release_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class PausedSearchTrackLeadAssignment:
+    lead_id: UUID
+    workflow_id: UUID | None
+    track_version_id: PausedSearchTrackVersionId | None
+    crm_lead_id: str
+    primary_email: str | None
+    lead_stage: str
+    workflow_state: str | None
+
+
+@dataclass(frozen=True)
 class PausedSearchTrackAdminView:
     track: PausedSearchTrack
     version: PausedSearchTrackVersion
     steps: tuple[PausedSearchTrackStep, ...]
     reason_mappings: tuple[PausedSearchReasonMapping, ...] = ()
+    assigned_leads: tuple[PausedSearchTrackLeadAssignment, ...] = ()

@@ -41,6 +41,7 @@ class DomainEventType(StrEnum):
     PAUSED_SEARCH_TRACK_DRAFT_UPDATED = "paused_search_track.draft_updated"
     PAUSED_SEARCH_TRACK_PUBLISHED = "paused_search_track.published"
     PAUSED_SEARCH_TRACK_RETIRED = "paused_search_track.retired"
+    PAUSED_SEARCH_TRACK_RESTORED = "paused_search_track.restored"
     WORKFLOW_TRANSITIONED = "workflow.transitioned"
 
 

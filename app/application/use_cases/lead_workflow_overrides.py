@@ -9,6 +9,7 @@ from app.application.ports.repositories import (
     LeadWorkflowOverrideAuditLogRepository,
     LeadWorkflowRepository,
     PausedSearchOccurrenceRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     WorkspaceRepository,
@@ -17,12 +18,18 @@ from app.application.services.lead_assignment import is_actor_assigned_to_lead
 from app.application.services.lead_nurture_rescheduling import (
     enqueue_lead_nurture_reschedule_signal,
 )
+from app.application.services.paused_search_track_assignment import (
+    synchronize_paused_search_track_assignment,
+)
 from app.application.use_cases.lead_paused_search import update_lead_paused_search
 from app.application.use_cases.schedule_next_paused_search_action import (
     schedule_next_paused_search_action,
 )
 from app.domain.campaigns.execution import CampaignVersionStatus
-from app.domain.campaigns.paused_search_tracks import PausedSearchTrackStep
+from app.domain.campaigns.paused_search_tracks import (
+    PausedSearchTrackAssignmentSource,
+    PausedSearchTrackStep,
+)
 from app.domain.common.ids import LeadId, PausedSearchTrackVersionId, WorkspaceId
 from app.domain.identity import (
     AuthenticatedActor,
@@ -92,6 +99,7 @@ async def override_paused_search_timing(
     lead_workflow_repository: LeadWorkflowRepository,
     lead_workflow_override_audit_repository: LeadWorkflowOverrideAuditLogRepository,
     paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     workspace_repository: WorkspaceRepository,
     now: datetime,
@@ -139,6 +147,7 @@ async def override_paused_search_timing(
         paused_search_history_repository=paused_search_history_repository,
         lead_workflow_repository=lead_workflow_repository,
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         temporal_signal_outbox_repository=temporal_signal_outbox_repository,
         now=now,
     )
@@ -205,6 +214,7 @@ async def migrate_paused_search_track_version(
     lead_workflow_repository: LeadWorkflowRepository,
     lead_workflow_override_audit_repository: LeadWorkflowOverrideAuditLogRepository,
     paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     workspace_repository: WorkspaceRepository,
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
@@ -218,6 +228,11 @@ async def migrate_paused_search_track_version(
         return _result(
             PausedSearchWorkflowOverrideStatus.REJECTED,
             PausedSearchWorkflowOverrideReasonCode.PERMISSION_DENIED,
+        )
+    if paused_search_track_assignment_repository is None:
+        return _result(
+            PausedSearchWorkflowOverrideStatus.INVALID,
+            PausedSearchWorkflowOverrideReasonCode.TRACK_VERSION_NOT_FOUND,
         )
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
     if lead is None:
@@ -270,13 +285,6 @@ async def migrate_paused_search_track_version(
             PausedSearchWorkflowOverrideStatus.INVALID,
             PausedSearchWorkflowOverrideReasonCode.TRACK_VERSION_DISABLED,
         )
-    if paused_search_occurrence_repository is not None:
-        await paused_search_occurrence_repository.cancel_open_for_workflow(
-            workspace_id=workspace_id,
-            workflow_id=workflow.workflow_id,
-            now=now,
-            reason="paused_search_track_version_migrated",
-        )
     workspace = await workspace_repository.get_by_id(workspace_id)
     if workspace is None:
         return _result(
@@ -284,10 +292,41 @@ async def migrate_paused_search_track_version(
             PausedSearchWorkflowOverrideReasonCode.WORKSPACE_NOT_FOUND,
         )
 
+    assignment_result = await synchronize_paused_search_track_assignment(
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        reason_code=lead.pause_reason_code,
+        clear=False,
+        actor_user_id=actor.user_id,
+        source=PausedSearchTrackAssignmentSource.ADMIN_MIGRATION,
+        assignment_repository=paused_search_track_assignment_repository,
+        track_mapping_repository=paused_search_track_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        now=now,
+        target_track_version_id=target_track_version_id,
+    )
+    assignment = assignment_result.assignment
+    if (
+        assignment is None
+        or assignment.track_version_id != target_track_version_id
+        or assignment_result.workflow is None
+    ):
+        return _result(
+            PausedSearchWorkflowOverrideStatus.INVALID,
+            PausedSearchWorkflowOverrideReasonCode.TRACK_VERSION_NOT_FOUND,
+        )
+    workflow = assignment_result.workflow
+    if paused_search_occurrence_repository is not None:
+        await paused_search_occurrence_repository.cancel_open_for_workflow(
+            workspace_id=workspace_id,
+            workflow_id=workflow.workflow_id,
+            now=now,
+            reason="paused_search_track_version_migrated",
+        )
+
     updated_workflow = await lead_workflow_repository.save(
         replace(
             workflow,
-            paused_search_track_version_id=target_track_version_id,
             paused_search_track_step_id=None,
             next_action_at=None,
             updated_at=now,

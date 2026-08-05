@@ -18,16 +18,21 @@ from app.application.use_cases.paused_search_operations import (
 from app.application.use_cases.paused_search_track_admin import (
     PausedSearchTrackAdminReasonCode,
     PausedSearchTrackConfigInput,
+    PausedSearchTrackDeleteStatus,
     PausedSearchTrackDraftStatus,
     PausedSearchTrackPublishStatus,
     PausedSearchTrackReadStatus,
+    PausedSearchTrackRestoreStatus,
     PausedSearchTrackRetireStatus,
     PausedSearchTrackStepInput,
     build_unsaved_paused_search_track_view,
     create_draft_paused_search_track,
+    delete_retired_paused_search_track,
     get_paused_search_track_view,
     list_paused_search_track_views,
+    list_retired_paused_search_track_views,
     publish_paused_search_track_version,
+    restore_retired_paused_search_track,
     retire_paused_search_track,
     update_draft_paused_search_track,
 )
@@ -39,6 +44,10 @@ from app.application.use_cases.resolve_uncertain_paused_search_occurrence import
     UncertainOccurrenceResolution,
     UncertainOccurrenceResolutionStatus,
     resolve_uncertain_paused_search_occurrence,
+)
+from app.application.use_cases.workspace_outbound_drafting import (
+    OutboundDraftingPreviewResult,
+    preview_workspace_outbound_drafting,
 )
 from app.domain.campaigns.capability_profiles import CAPABILITY_PROFILES
 from app.domain.campaigns.outbound_message import OutboundMessage
@@ -66,6 +75,11 @@ from app.domain.compliance.contactability import (
 )
 from app.domain.identity import AuthenticatedActor, PermissionCapability, evaluate_permission
 from app.domain.leads import CanonicalLeadRecord, LeadPausedSearchProfile
+from app.domain.outbound_drafting import (
+    DormantStepTemplateProfile,
+    OutboundJourneyKind,
+    dormant_step_template_profile_to_mapping,
+)
 from app.domain.workflows import LeadWorkflow, WorkflowState
 from app.interfaces.api.dependencies.lead_paused_search import (
     LeadPausedSearchActionBundle,
@@ -80,6 +94,11 @@ from app.interfaces.api.dependencies.paused_search_tracks import (
     get_paused_search_track_read_bundle,
     get_paused_search_track_service_bundle,
 )
+from app.interfaces.api.dependencies.workspace_settings import (
+    WorkspaceOutboundDraftingPreviewBundle,
+    get_workspace_outbound_drafting_preview_bundle,
+)
+from app.interfaces.api.schemas.campaigns import DormantStepTemplateProfileSchema
 from app.interfaces.api.schemas.paused_search_tracks import (
     PausedSearchCapabilityProfileListResponse,
     PausedSearchCapabilityProfileResponse,
@@ -102,11 +121,13 @@ from app.interfaces.api.schemas.paused_search_tracks import (
     PausedSearchTrackDraftRequest,
     PausedSearchTrackDraftValidateRequest,
     PausedSearchTrackDraftValidationResponse,
+    PausedSearchTrackLeadAssignmentResponse,
     PausedSearchTrackListResponse,
     PausedSearchTrackPreviewOccurrenceResponse,
     PausedSearchTrackPreviewResponse,
     PausedSearchTrackPublishRequest,
     PausedSearchTrackResponse,
+    PausedSearchTrackStepPreviewRequest,
     PausedSearchTrackStepResponse,
     PausedSearchTrackSummaryResponse,
     PausedSearchTrackValidationResponse,
@@ -115,6 +136,8 @@ from app.interfaces.api.schemas.paused_search_tracks import (
     UncertainOccurrenceResolutionRequest,
     UncertainOccurrenceResolutionResponse,
 )
+from app.interfaces.api.schemas.workspace import WorkspaceOutboundDraftingPreviewResponse
+from app.interfaces.api.v1.campaigns import _outbound_drafting_preview_response
 
 router = APIRouter(tags=["paused-search-tracks"])
 
@@ -439,6 +462,25 @@ async def list_paused_search_templates(
     )
 
 
+@router.get("/{workspace_id}/paused-search-tracks/retired")
+async def list_retired_paused_search_tracks(
+    workspace_id: UUID,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[PausedSearchTrackReadBundle, Depends(get_paused_search_track_read_bundle)],
+) -> PausedSearchTrackListResponse:
+    result = await list_retired_paused_search_track_views(
+        actor=actor,
+        workspace_id=workspace_id,
+        repository=bundle.track_repository,
+    )
+    if result.status == PausedSearchTrackReadStatus.REJECTED:
+        _raise_rejection(result.reasons)
+    return PausedSearchTrackListResponse(
+        status=result.status.value,
+        tracks=[_summary_response(view) for view in result.views],
+    )
+
+
 @router.get("/{workspace_id}/paused-search-tracks/profiles")
 async def list_paused_search_profiles(
     workspace_id: UUID,
@@ -566,7 +608,7 @@ async def preview_paused_search_track_draft(
         campaign_enrollment_id=uuid5(track_id, "preview-enrollment"),
         campaign_id=uuid5(track_id, "preview-campaign"),
         lead_id=uuid5(track_id, "preview-lead"),
-        state=WorkflowState.PAUSED,
+        state=WorkflowState.QUEUED,
         last_transition_at=payload.as_of,
         state_version=0,
         created_at=payload.as_of,
@@ -594,6 +636,53 @@ async def preview_paused_search_track_draft(
         quiet_hours_end=contact_policy.quiet_hours_end,
     )
     return _preview_response(result, view.version.track_version_id)
+
+
+@router.post(
+    "/{workspace_id}/paused-search-tracks/{track_id}/step-preview",
+    response_model=WorkspaceOutboundDraftingPreviewResponse,
+)
+async def preview_paused_search_step_route(
+    workspace_id: UUID,
+    track_id: UUID,
+    payload: PausedSearchTrackStepPreviewRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[
+        PausedSearchTrackServiceBundle,
+        Depends(get_paused_search_track_service_bundle),
+    ],
+    drafting_bundle: Annotated[
+        WorkspaceOutboundDraftingPreviewBundle,
+        Depends(get_workspace_outbound_drafting_preview_bundle),
+    ],
+) -> WorkspaceOutboundDraftingPreviewResponse:
+    _require_track_admin(actor)
+    track = await bundle.track_repository.get_track(workspace_id, track_id)
+    if track is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=["track_not_found"])
+    result: OutboundDraftingPreviewResult = await preview_workspace_outbound_drafting(
+        actor=actor,
+        workspace_id=workspace_id,
+        query=payload.query,
+        workspace_repository=drafting_bundle.workspace_repository,
+        membership_repository=drafting_bundle.membership_repository,
+        workspace_outbound_drafting_config_repository=(
+            drafting_bundle.workspace_outbound_drafting_config_repository
+        ),
+        workspace_llm_config_repository=drafting_bundle.workspace_llm_config_repository,
+        llm_client=drafting_bundle.llm_client,
+        listing_source_repository=drafting_bundle.listing_source_repository,
+        listing_snapshot_repository=drafting_bundle.listing_snapshot_repository,
+        listing_search_client=drafting_bundle.listing_search_client,
+        listing_cache_ttl=drafting_bundle.listing_cache_ttl,
+        now=datetime.now(UTC),
+        default_openrouter_model=drafting_bundle.default_openrouter_model,
+        journey_kind=OutboundJourneyKind.PAUSED_SEARCH,
+        template_profile=_template_profile_from_schema(payload.template_profile),
+        template_channel=payload.channel,
+        campaign_goal=payload.message_goal,
+    )
+    return _outbound_drafting_preview_response(result)
 
 
 @router.post("/{workspace_id}/paused-search-tracks", status_code=status.HTTP_201_CREATED)
@@ -715,6 +804,68 @@ async def retire_paused_search_track_route(
     return _admin_response(result.status.value, result.view)
 
 
+@router.delete("/{workspace_id}/paused-search-tracks/{track_id}")
+async def delete_retired_paused_search_track_route(
+    workspace_id: UUID,
+    track_id: UUID,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[
+        PausedSearchTrackServiceBundle,
+        Depends(get_paused_search_track_service_bundle),
+    ],
+) -> PausedSearchTrackAdminResponse:
+    result = await delete_retired_paused_search_track(
+        actor=actor,
+        workspace_id=workspace_id,
+        track_id=track_id,
+        repository=bundle.track_repository,
+        audit_log_repository=bundle.audit_log_repository,
+        now=datetime.now(UTC),
+    )
+    if result.status is PausedSearchTrackDeleteStatus.BLOCKED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reasons": [reason.value for reason in result.reasons],
+                "assigned_lead_ids": [
+                    str(lead.lead_id)
+                    for lead in (result.view.assigned_leads if result.view else ())
+                ],
+            },
+        )
+    if result.status is PausedSearchTrackDeleteStatus.REJECTED:
+        _raise_rejection(result.reasons)
+    assert result.view is not None
+    await bundle.session.commit()
+    return _admin_response(result.status.value, result.view)
+
+
+@router.post("/{workspace_id}/paused-search-tracks/{track_id}/restore")
+async def restore_retired_paused_search_track_route(
+    workspace_id: UUID,
+    track_id: UUID,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[
+        PausedSearchTrackServiceBundle,
+        Depends(get_paused_search_track_service_bundle),
+    ],
+) -> PausedSearchTrackAdminResponse:
+    result = await restore_retired_paused_search_track(
+        actor=actor,
+        workspace_id=workspace_id,
+        track_id=track_id,
+        repository=bundle.track_repository,
+        audit_log_repository=bundle.audit_log_repository,
+        now=datetime.now(UTC),
+        event_bus=bundle.event_bus,
+    )
+    if result.status is PausedSearchTrackRestoreStatus.REJECTED:
+        _raise_rejection(result.reasons)
+    assert result.view is not None
+    await bundle.session.commit()
+    return _admin_response(result.status.value, result.view)
+
+
 async def _apply_review_action_route(
     *,
     workspace_id: UUID,
@@ -746,6 +897,9 @@ async def _apply_review_action_route(
         workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
         paused_search_history_repository=bundle.paused_search_history_repository,
         paused_search_track_repository=bundle.paused_search_track_repository,
+        paused_search_track_assignment_repository=(
+            bundle.paused_search_track_assignment_repository
+        ),
         lead_workflow_override_audit_repository=bundle.lead_workflow_override_audit_repository,
         workspace_repository=bundle.workspace_repository,
         paused_search_occurrence_repository=bundle.occurrence_transition_repository,
@@ -908,11 +1062,30 @@ def _config_input(payload: PausedSearchTrackConfigRequest) -> PausedSearchTrackC
                 interval_days=step.interval_days,
                 max_occurrences=step.max_occurrences,
                 template_version_id=step.template_version_id,
+                template_profile=_template_profile_from_schema(step.template_profile),
                 timing_basis=step.timing_basis,
                 fallback_channel=step.fallback_channel,
             )
             for step in payload.steps
         ),
+    )
+
+
+def _template_profile_from_schema(
+    profile: DormantStepTemplateProfileSchema | None,
+) -> DormantStepTemplateProfile | None:
+    if profile is None:
+        return None
+    return DormantStepTemplateProfile(
+        tone=profile.tone,
+        style=profile.style,
+        length=profile.length,
+        call_to_action=profile.call_to_action,
+        greeting=profile.greeting,
+        sign_off=profile.sign_off,
+        listing_context=profile.listing_context,
+        personalization_fields=tuple(profile.personalization_fields),
+        custom_instructions=profile.custom_instructions,
     )
 
 
@@ -939,6 +1112,7 @@ def _admin_response(
         version=_version_response(view.version),
         steps=[_step_response(step) for step in view.steps],
         reason_mappings=[_mapping_response(mapping) for mapping in view.reason_mappings],
+        assigned_leads=[_lead_assignment_response(lead) for lead in view.assigned_leads],
         reasons=[],
     )
 
@@ -949,6 +1123,7 @@ def _summary_response(view: PausedSearchTrackAdminView) -> PausedSearchTrackSumm
         version=_version_response(view.version),
         step_count=len(view.steps),
         reason_mappings=[_mapping_response(mapping) for mapping in view.reason_mappings],
+        assigned_leads=[_lead_assignment_response(lead) for lead in view.assigned_leads],
     )
 
 
@@ -962,6 +1137,7 @@ def _detail_response(
         version=_version_response(view.version),
         steps=[_step_response(step) for step in view.steps],
         reason_mappings=[_mapping_response(mapping) for mapping in view.reason_mappings],
+        assigned_leads=[_lead_assignment_response(lead) for lead in view.assigned_leads],
     )
 
 
@@ -977,11 +1153,21 @@ def _version_response(version: PausedSearchTrackVersion) -> PausedSearchTrackVer
 
 
 def _step_response(step: PausedSearchTrackStep) -> PausedSearchTrackStepResponse:
-    return PausedSearchTrackStepResponse(**step.__dict__)
+    data = dict(step.__dict__)
+    data["template_profile"] = (
+        dormant_step_template_profile_to_mapping(step.template_profile)
+        if step.template_profile is not None
+        else None
+    )
+    return PausedSearchTrackStepResponse(**data)
 
 
 def _mapping_response(mapping: PausedSearchReasonMapping) -> PausedSearchReasonMappingResponse:
     return PausedSearchReasonMappingResponse(**mapping.__dict__)
+
+
+def _lead_assignment_response(lead: object) -> PausedSearchTrackLeadAssignmentResponse:
+    return PausedSearchTrackLeadAssignmentResponse(**lead.__dict__)
 
 
 def _require_track_admin(actor: AuthenticatedActor) -> None:

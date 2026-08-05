@@ -8,15 +8,15 @@ from app.application.ports.event_bus import EventBus
 from app.application.ports.repositories import (
     CampaignEnrollmentRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     WorkflowTransitionRepository,
     WorkspaceOperationalControlRepository,
 )
 from app.application.ports.temporal import TemporalWorkflowStarter
 from app.application.services.campaign_enrollment_starter import start_single_campaign_enrollment
-from app.application.services.paused_search_track_pinning import (
-    pin_published_paused_search_track_on_latest_workflow,
-    resolve_published_paused_search_track_version_id,
+from app.application.services.paused_search_track_assignment import (
+    synchronize_paused_search_track_assignment,
 )
 from app.application.services.workspace_automation_control import (
     recurring_paused_search_block_reason,
@@ -32,6 +32,7 @@ from app.application.use_cases.campaign_enrollment_types import (
     LeadStartStatus,
 )
 from app.domain.campaigns.enrollment import CampaignEnrollmentSource
+from app.domain.campaigns.paused_search_tracks import PausedSearchTrackAssignmentSource
 from app.domain.common.ids import CampaignId, CampaignVersionId, LeadId, WorkspaceId
 from app.domain.leads import CanonicalLeadRecord
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
@@ -67,6 +68,7 @@ async def start_paused_search_campaign_enrollment(
     workflow_transition_repository: WorkflowTransitionRepository,
     temporal_workflow_starter: TemporalWorkflowStarter,
     paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository,
     event_bus: EventBus | None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
     commit: Callable[[], Awaitable[None]] | None,
@@ -90,15 +92,28 @@ async def start_paused_search_campaign_enrollment(
                 ),
             )
 
-    pinned_track_version_id = await resolve_published_paused_search_track_version_id(
+    assignment_result = await synchronize_paused_search_track_assignment(
         workspace_id=workspace_id,
-        pause_reason_code=lead.pause_reason_code,
-        paused_search_track_repository=paused_search_track_repository,
+        lead_id=lead_id,
+        reason_code=lead.pause_reason_code,
+        clear=False,
+        actor_user_id=actor_user_id,
+        source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
+        assignment_repository=paused_search_track_assignment_repository,
+        track_mapping_repository=paused_search_track_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        now=now,
     )
-    if pinned_track_version_id is None:
+    active_assignment = assignment_result.assignment
+    resolved_track_version_id = assignment_result.resolved_track_version_id
+    if (
+        active_assignment is None
+        or resolved_track_version_id is None
+        or active_assignment.track_version_id != resolved_track_version_id
+    ):
         return PausedSearchCampaignEnrollmentResult(
             status=PausedSearchCampaignEnrollmentStatus.REVIEW_HOLD,
-            reason_codes=reason_codes + ("paused_search_track_unavailable",),
+            reason_codes=reason_codes + ("paused_search_track_assignment_unavailable",),
         )
 
     existing = await campaign_enrollment_repository.get_by_lead_and_campaign(
@@ -122,7 +137,7 @@ async def start_paused_search_campaign_enrollment(
             now=now,
             metadata=_paused_search_enrollment_metadata(lead),
             initial_workflow_state=WorkflowState.ACTIVE_NURTURE,
-            paused_search_track_version_id=pinned_track_version_id,
+            paused_search_track_version_id=active_assignment.track_version_id,
             event_bus=event_bus,
             workspace_operational_control_repository=workspace_operational_control_repository,
             commit=commit,
@@ -141,14 +156,19 @@ async def start_paused_search_campaign_enrollment(
             error=lead_result.error or "failed to start enrollment",
         )
 
-    pinned_workflow = await pin_published_paused_search_track_on_latest_workflow(
+    assignment_result = await synchronize_paused_search_track_assignment(
         workspace_id=workspace_id,
         lead_id=lead_id,
-        pause_reason_code=lead.pause_reason_code,
+        reason_code=lead.pause_reason_code,
+        clear=False,
+        actor_user_id=actor_user_id,
+        source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
+        assignment_repository=paused_search_track_assignment_repository,
+        track_mapping_repository=paused_search_track_repository,
         lead_workflow_repository=lead_workflow_repository,
-        paused_search_track_repository=paused_search_track_repository,
         now=now,
     )
+    pinned_workflow = assignment_result.workflow
     if pinned_workflow is None:
         return PausedSearchCampaignEnrollmentResult(
             status=PausedSearchCampaignEnrollmentStatus.FAILED,

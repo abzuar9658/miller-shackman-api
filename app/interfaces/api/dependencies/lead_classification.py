@@ -12,6 +12,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     WorkspaceLLMConfigRepository,
@@ -30,6 +31,7 @@ from app.infrastructure.persistence.postgres.lead_routing_review_repository impo
 )
 from app.infrastructure.persistence.postgres.paused_search_track_repository import (
     PostgresPausedSearchTrackAdminRepository,
+    PostgresPausedSearchTrackAssignmentRepository,
 )
 from app.infrastructure.persistence.postgres.temporal_signal_outbox_repository import (
     PostgresTemporalSignalOutboxRepository,
@@ -62,6 +64,7 @@ class LeadClassificationActionBundle:
     llm_client: LLMClient
     default_openrouter_model: str
     routing_review_repository: LeadRoutingReviewRepository | None = None
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None
 
 
 async def get_lead_classification_action_bundle(
@@ -77,6 +80,9 @@ async def get_lead_classification_action_bundle(
         workspace_llm_config_repository=PostgresWorkspaceLLMConfigRepository(session),
         lead_workflow_repository=PostgresLeadWorkflowRepository(session),
         paused_search_track_repository=PostgresPausedSearchTrackAdminRepository(session),
+        paused_search_track_assignment_repository=PostgresPausedSearchTrackAssignmentRepository(
+            session
+        ),
         temporal_signal_outbox_repository=PostgresTemporalSignalOutboxRepository(session),
         llm_client=build_llm_client(settings),
         default_openrouter_model=settings.openrouter_model,

@@ -19,6 +19,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
@@ -139,6 +140,7 @@ async def run_dormant_selector_batch(
     now: datetime,
     default_openrouter_model: str = "openai/gpt-4o-mini",
     paused_search_track_repository: PausedSearchTrackMappingRepository | None = None,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
@@ -219,6 +221,7 @@ async def run_dormant_selector_batch(
         dormant_threshold_days=config.dormant_threshold_days,
         lead_workflow_repository=lead_workflow_repository,
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         temporal_signal_outbox_repository=temporal_signal_outbox_repository,
         routing_review_repository=routing_review_repository,
         now=now,
@@ -320,6 +323,7 @@ async def run_dormant_selector_batch(
         workflow_transition_repository=workflow_transition_repository,
         temporal_workflow_starter=temporal_workflow_starter,
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         event_bus=event_bus,
         workspace_operational_control_repository=workspace_operational_control_repository,
         commit=commit,
@@ -416,6 +420,7 @@ async def _evaluate_candidates(
     dormant_threshold_days: int,
     lead_workflow_repository: LeadWorkflowRepository,
     paused_search_track_repository: PausedSearchTrackMappingRepository | None,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None,
     routing_review_repository: LeadRoutingReviewRepository | None,
     now: datetime,
@@ -457,6 +462,9 @@ async def _evaluate_candidates(
             dormant_threshold_days=dormant_threshold_days,
             lead_workflow_repository=lead_workflow_repository,
             paused_search_track_repository=paused_search_track_repository,
+            paused_search_track_assignment_repository=(
+                paused_search_track_assignment_repository
+            ),
             temporal_signal_outbox_repository=temporal_signal_outbox_repository,
             routing_review_repository=routing_review_repository,
         )
@@ -509,12 +517,16 @@ async def _start_paused_search_candidates(
     workflow_transition_repository: WorkflowTransitionRepository,
     temporal_workflow_starter: TemporalWorkflowStarter,
     paused_search_track_repository: PausedSearchTrackMappingRepository | None,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
     event_bus: EventBus | None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
     commit: Callable[[], Awaitable[None]] | None,
     now: datetime,
 ) -> tuple[int, tuple[LeadId, ...]]:
-    if paused_search_track_repository is None:
+    if (
+        paused_search_track_repository is None
+        or paused_search_track_assignment_repository is None
+    ):
         return 0, ()
     started_count = 0
     started_lead_ids: list[LeadId] = []
@@ -535,6 +547,9 @@ async def _start_paused_search_candidates(
             workflow_transition_repository=workflow_transition_repository,
             temporal_workflow_starter=temporal_workflow_starter,
             paused_search_track_repository=paused_search_track_repository,
+            paused_search_track_assignment_repository=(
+                paused_search_track_assignment_repository
+            ),
             event_bus=event_bus,
             workspace_operational_control_repository=workspace_operational_control_repository,
             commit=commit,

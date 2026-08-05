@@ -19,6 +19,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     UserRepository,
     WorkflowTransitionRepository,
@@ -32,9 +33,6 @@ from app.application.services.canonical_lead_inputs import (
     contactability_facts_from_canonical_lead,
     enrollment_facts_from_canonical_lead,
     start_candidate_from_canonical_lead,
-)
-from app.application.services.paused_search_track_pinning import (
-    resolve_published_paused_search_track_version_id,
 )
 from app.application.use_cases.ai_nurture_routing_side_effects import (
     create_or_complete_ai_nurture_handoff,
@@ -119,6 +117,7 @@ async def process_crm_tag_campaign_enrollment(
     lead_repository: LeadRepository,
     paused_search_history_repository: LeadPausedSearchHistoryRepository,
     paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
     artifact_repository: LeadClassificationArtifactRepository,
     crm_conversation_event_repository: CrmConversationEventRepository,
     workspace_llm_config_repository: WorkspaceLLMConfigRepository,
@@ -210,16 +209,15 @@ async def process_crm_tag_campaign_enrollment(
         default_openrouter_model=default_openrouter_model,
         dormant_threshold_days=matched_config.dormant_threshold_days,
         routing_review_repository=routing_review_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
     )
     if route_result.route == AiNurtureRoute.PAUSED_SEARCH:
-        current_lead = await lead_repository.get_by_id(workspace_id, lead.lead_id) or lead
-        pinned_track_version_id = await resolve_published_paused_search_track_version_id(
-            workspace_id=workspace_id,
-            pause_reason_code=current_lead.pause_reason_code,
-            paused_search_track_repository=paused_search_track_repository,
-        )
-        if pinned_track_version_id is None:
-            review_reason_codes = route_result.reason_codes + ("paused_search_track_unavailable",)
+        if paused_search_track_assignment_repository is None:
+            review_reason_codes = route_result.reason_codes + (
+                "paused_search_track_assignment_unavailable",
+            )
             await record_pending_ai_nurture_routing_review(
                 workspace_id=workspace_id,
                 lead=lead,
@@ -238,6 +236,7 @@ async def process_crm_tag_campaign_enrollment(
                 reason_codes=review_reason_codes,
                 route=AiNurtureRoute.REVIEW_HOLD,
             )
+        current_lead = await lead_repository.get_by_id(workspace_id, lead.lead_id) or lead
         return await _start_paused_search_campaign(
             workspace_id=workspace_id,
             lead_id=lead.lead_id,
@@ -249,6 +248,9 @@ async def process_crm_tag_campaign_enrollment(
             workflow_transition_repository=workflow_transition_repository,
             temporal_workflow_starter=temporal_workflow_starter,
             paused_search_track_repository=paused_search_track_repository,
+            paused_search_track_assignment_repository=(
+                paused_search_track_assignment_repository
+            ),
             event_bus=event_bus,
             workspace_operational_control_repository=workspace_operational_control_repository,
             commit=commit,
@@ -449,6 +451,7 @@ async def _start_paused_search_campaign(
     workflow_transition_repository: WorkflowTransitionRepository,
     temporal_workflow_starter: TemporalWorkflowStarter,
     paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository,
     event_bus: EventBus | None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
     commit: Callable[[], Awaitable[None]] | None,
@@ -468,6 +471,7 @@ async def _start_paused_search_campaign(
         workflow_transition_repository=workflow_transition_repository,
         temporal_workflow_starter=temporal_workflow_starter,
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         event_bus=event_bus,
         workspace_operational_control_repository=workspace_operational_control_repository,
         commit=commit,

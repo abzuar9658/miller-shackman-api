@@ -20,6 +20,7 @@ from app.application.ports.repositories import (
     LeadWorkflowRepository,
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
@@ -147,6 +148,7 @@ async def continue_ai_conversation_after_inbound(
     routing_review_repository: LeadRoutingReviewRepository | None = None,
     crm_conversation_event_repository: CrmConversationEventRepository | None = None,
     paused_search_track_repository: PausedSearchTrackMappingRepository | None = None,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     crm_client: CRMClient | None = None,
     outbound_message_crm_completion_repository: (
@@ -217,6 +219,9 @@ async def continue_ai_conversation_after_inbound(
         supplemental_crm_conversation_events=supplemental_crm_conversation_events,
         lead_workflow_repository=lead_workflow_repository,
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=(
+            paused_search_track_assignment_repository
+        ),
         temporal_signal_outbox_repository=temporal_signal_outbox_repository,
     )
     if reroute_result is not None and reroute_result.route != AiNurtureRoute.DORMANT:
@@ -330,6 +335,7 @@ async def continue_ai_conversation_after_inbound(
             scheduled_for=now,
             pre_send_policy=_pre_send_policy(workspace_contact_policy, workspace.default_timezone),
             journey_kind=OutboundJourneyKind.DORMANT,
+            drafting_config=config.outbound_drafting_config,
             conversation_summary=(
                 latest_summary.summary_text if latest_summary is not None else None
             ),
@@ -593,6 +599,7 @@ async def _maybe_route_reply_before_continuation(
     supplemental_crm_conversation_events: tuple[CrmConversationEvent, ...],
     lead_workflow_repository: LeadWorkflowRepository,
     paused_search_track_repository: PausedSearchTrackMappingRepository | None,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None,
 ) -> AiNurtureRouteResult | None:
     if (
@@ -622,6 +629,7 @@ async def _maybe_route_reply_before_continuation(
         supplemental_crm_conversation_events=supplemental_crm_conversation_events,
         lead_workflow_repository=lead_workflow_repository,
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         temporal_signal_outbox_repository=temporal_signal_outbox_repository,
         routing_review_repository=routing_review_repository,
     )

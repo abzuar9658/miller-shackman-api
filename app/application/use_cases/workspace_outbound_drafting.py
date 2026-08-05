@@ -14,6 +14,9 @@ from app.application.ports.repositories import (
     WorkspaceOutboundDraftingConfigRepository,
     WorkspaceRepository,
 )
+from app.application.services.dormant_step_drafting import (
+    apply_dormant_step_drafting_profile,
+)
 from app.application.services.listing_context_enrichment import (
     maybe_enrich_outbound_lead_context,
 )
@@ -37,7 +40,12 @@ from app.domain.common.ids import WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.identity import AuthenticatedActor, PermissionCapability, evaluate_permission
 from app.domain.leads import CanonicalLeadRecord, CRMProvider, LeadType
-from app.domain.outbound_drafting import default_workspace_outbound_drafting_config
+from app.domain.outbound_drafting import (
+    DormantStepTemplateProfile,
+    OutboundJourneyKind,
+    WorkspaceOutboundDraftingConfig,
+    default_workspace_outbound_drafting_config,
+)
 
 
 class OutboundDraftingPreviewStatus(StrEnum):
@@ -86,6 +94,11 @@ async def preview_workspace_outbound_drafting(
     listing_cache_ttl: timedelta = timedelta(hours=1),
     now: datetime,
     default_openrouter_model: str = "openai/gpt-4o-mini",
+    drafting_config: WorkspaceOutboundDraftingConfig | None = None,
+    journey_kind: OutboundJourneyKind | None = None,
+    template_profile: DormantStepTemplateProfile | None = None,
+    template_channel: ContactChannel | None = None,
+    campaign_goal: str = "Preview outbound response to a live user property query.",
 ) -> OutboundDraftingPreviewResult:
     effective_actor = await _actor_for_workspace(
         actor=actor,
@@ -116,9 +129,10 @@ async def preview_workspace_outbound_drafting(
     resolved_agent_name = _normalized_preview_value(agent_name)
     resolved_brokerage_name = _normalized_preview_value(brokerage_name) or workspace.name
 
-    drafting_config = (
-        await workspace_outbound_drafting_config_repository.get_by_workspace_id(workspace_id)
-    ) or default_workspace_outbound_drafting_config(workspace_id)
+    if drafting_config is None:
+        drafting_config = (
+            await workspace_outbound_drafting_config_repository.get_by_workspace_id(workspace_id)
+        ) or default_workspace_outbound_drafting_config(workspace_id)
     model = await resolve_workspace_openrouter_model(
         workspace_id=workspace_id,
         workspace_llm_config_repository=workspace_llm_config_repository,
@@ -158,30 +172,68 @@ async def preview_workspace_outbound_drafting(
         snapshot_repository=listing_snapshot_repository,
         listing_search_client=listing_search_client,
     )
-    sms_result, email_result = await asyncio.gather(
-        draft_outbound_message(
+    if template_profile is not None and template_channel is not None:
+        drafting_config, lead_context = apply_dormant_step_drafting_profile(
+            drafting_config=drafting_config,
+            lead_context=lead_context,
+            template_profile=template_profile,
+            channel=template_channel.value,
+        )
+    sms_result: OutboundMessageDraftResult | None = None
+    email_result: OutboundMessageDraftResult | None = None
+    if template_channel is None:
+        sms_result, email_result = await asyncio.gather(
+            draft_outbound_message(
+                lead=lead,
+                channel=ContactChannel.SMS,
+                campaign_goal=campaign_goal,
+                brokerage_name=resolved_brokerage_name,
+                assigned_agent_name=resolved_agent_name,
+                lead_context=lead_context,
+                journey_kind=journey_kind,
+                llm_client=llm_client,
+                drafting_config=drafting_config,
+                model=model,
+            ),
+            draft_outbound_message(
+                lead=lead,
+                channel=ContactChannel.EMAIL,
+                campaign_goal=campaign_goal,
+                brokerage_name=resolved_brokerage_name,
+                assigned_agent_name=resolved_agent_name,
+                lead_context=lead_context,
+                journey_kind=journey_kind,
+                llm_client=llm_client,
+                drafting_config=drafting_config,
+                model=model,
+            ),
+        )
+    elif template_channel == ContactChannel.SMS:
+        sms_result = await draft_outbound_message(
             lead=lead,
             channel=ContactChannel.SMS,
-            campaign_goal="Preview outbound response to a live user property query.",
+            campaign_goal=campaign_goal,
             brokerage_name=resolved_brokerage_name,
             assigned_agent_name=resolved_agent_name,
             lead_context=lead_context,
+            journey_kind=journey_kind,
             llm_client=llm_client,
             drafting_config=drafting_config,
             model=model,
-        ),
-        draft_outbound_message(
+        )
+    else:
+        email_result = await draft_outbound_message(
             lead=lead,
             channel=ContactChannel.EMAIL,
-            campaign_goal="Preview outbound response to a live user property query.",
+            campaign_goal=campaign_goal,
             brokerage_name=resolved_brokerage_name,
             assigned_agent_name=resolved_agent_name,
             lead_context=lead_context,
+            journey_kind=journey_kind,
             llm_client=llm_client,
             drafting_config=drafting_config,
             model=model,
-        ),
-    )
+        )
     listing_relevance_brief = build_listing_relevance_brief_payload(lead_context.listing_context)
     return OutboundDraftingPreviewResult(
         status=OutboundDraftingPreviewStatus.PREVIEWED,
@@ -196,7 +248,11 @@ async def preview_workspace_outbound_drafting(
     )
 
 
-def _preview_from_draft(result: OutboundMessageDraftResult) -> OutboundDraftPreview:
+def _preview_from_draft(
+    result: OutboundMessageDraftResult | None,
+) -> OutboundDraftPreview | None:
+    if result is None:
+        return None
     return OutboundDraftPreview(
         status=result.status.value,
         body=result.body,

@@ -23,6 +23,7 @@ from app.application.ports.rejected_draft_review import RejectedDraftReviewRepos
 from app.application.ports.repositories import (
     CRMAgentRepository,
     LeadRoutingReviewRepository,
+    PausedSearchTrackAssignmentRepository,
     WorkspaceContactPolicyRepository,
 )
 from app.core.database import get_session
@@ -50,6 +51,7 @@ from app.infrastructure.persistence.postgres.outbound_message_repository import 
 )
 from app.infrastructure.persistence.postgres.paused_search_track_repository import (
     PostgresPausedSearchTrackAdminRepository,
+    PostgresPausedSearchTrackAssignmentRepository,
 )
 from app.infrastructure.persistence.postgres.rejected_draft_review_repository import (
     PostgresRejectedDraftReviewRepository,
@@ -73,6 +75,7 @@ class LeadReadBundle:
     workflow_override_audit_repository: LeadReadWorkflowOverrideAuditRepository
     workflow_transition_repository: LeadReadWorkflowTransitionRepository
     paused_search_track_repository: LeadReadPausedSearchTrackRepository
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository
     activity_repository: LeadActivityRepository
     rejected_draft_review_repository: RejectedDraftReviewRepository
     inbound_message_repository: LeadReadInboundMessageRepository
@@ -96,6 +99,9 @@ async def get_lead_read_bundle(
         workflow_override_audit_repository=PostgresLeadWorkflowOverrideAuditLogRepository(session),
         workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
         paused_search_track_repository=PostgresPausedSearchTrackAdminRepository(session),
+        paused_search_track_assignment_repository=PostgresPausedSearchTrackAssignmentRepository(
+            session
+        ),
         activity_repository=PostgresLeadActivityRepository(session),
         rejected_draft_review_repository=PostgresRejectedDraftReviewRepository(session),
         inbound_message_repository=PostgresInboundMessageRepository(session),

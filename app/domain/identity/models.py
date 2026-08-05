@@ -6,6 +6,8 @@ from uuid import UUID
 
 from app.domain.common.ids import (
     AuthAuditLogId,
+    ExtensionDeviceId,
+    ExtensionPairingCodeId,
     PasswordResetTokenId,
     RefreshSessionId,
     UserId,
@@ -51,6 +53,7 @@ class AuthAuditEventType(StrEnum):
     WORKSPACE_OUTBOUND_DRAFTING_CONFIG_UPDATED = "workspace_outbound_drafting_config_updated"
     WORKSPACE_OPERATIONAL_CONTROL_UPDATED = "workspace_operational_control_updated"
     CRM_HISTORY_IMPORT_JOB_REQUESTED = "crm_history_import_job_requested"
+    CRM_HISTORY_EXTENSION_EXPORT_REQUESTED = "crm_history_extension_export_requested"
     CRM_HISTORY_IMPORT_UPLOAD_COMPLETED = "crm_history_import_upload_completed"
     CRM_HISTORY_IMPORT_PROMOTION_COMPLETED = "crm_history_import_promotion_completed"
     CRM_HISTORY_IMPORT_PROMOTION_FAILED = "crm_history_import_promotion_failed"
@@ -68,6 +71,9 @@ class AuthAuditEventType(StrEnum):
     USER_ENABLED = "user_enabled"
     MEMBERSHIP_DISABLED = "membership_disabled"
     MEMBERSHIP_ENABLED = "membership_enabled"
+    EXTENSION_PAIRING_CODE_CREATED = "extension_pairing_code_created"
+    EXTENSION_DEVICE_PAIRED = "extension_device_paired"
+    EXTENSION_DEVICE_REVOKED = "extension_device_revoked"
 
 
 class RefreshSessionRevocationReason(StrEnum):
@@ -168,6 +174,34 @@ class UserInvitation:
 
 
 @dataclass(frozen=True)
+class ExtensionPairingCode:
+    pairing_code_id: ExtensionPairingCodeId
+    workspace_id: WorkspaceId
+    user_id: UserId
+    token_hash: str
+    expires_at: datetime
+    claimed_at: datetime | None
+    revoked_at: datetime | None
+    created_by_user_id: UserId
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class ExtensionDevice:
+    device_id: ExtensionDeviceId
+    workspace_id: WorkspaceId
+    user_id: UserId
+    device_name: str
+    extension_version: str | None
+    credential_hash: str
+    created_at: datetime
+    last_seen_at: datetime | None
+    revoked_at: datetime | None
+    revoked_by_user_id: UserId | None
+    revocation_reason: str | None
+
+
+@dataclass(frozen=True)
 class AuthAuditLog:
     audit_log_id: AuthAuditLogId
     event_type: AuthAuditEventType
@@ -187,3 +221,9 @@ class AuthenticatedActor:
     active_workspace_status: WorkspaceStatus | None = None
     active_membership_id: WorkspaceMembershipId | None = None
     active_membership_status: WorkspaceMembershipStatus | None = None
+
+
+@dataclass(frozen=True)
+class AuthenticatedExtensionDevice:
+    actor: AuthenticatedActor
+    device_id: ExtensionDeviceId

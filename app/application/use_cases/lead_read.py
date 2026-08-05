@@ -26,6 +26,7 @@ from app.application.ports.rejected_draft_review import RejectedDraftReviewRepos
 from app.application.ports.repositories import (
     CRMAgentRepository,
     LeadRoutingReviewRepository,
+    PausedSearchTrackAssignmentRepository,
 )
 from app.application.services.lead_assignment import (
     is_actor_assigned_to_lead,
@@ -232,6 +233,7 @@ async def get_lead_detail_view(
     workflow_override_audit_repository: LeadReadWorkflowOverrideAuditRepository,
     workflow_transition_repository: LeadReadWorkflowTransitionRepository,
     paused_search_track_repository: LeadReadPausedSearchTrackRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository,
     activity_repository: LeadActivityRepository,
     rejected_draft_review_repository: RejectedDraftReviewRepository,
     inbound_message_repository: LeadReadInboundMessageRepository,
@@ -320,7 +322,9 @@ async def get_lead_detail_view(
         )
     paused_search_plan = await _paused_search_plan_view(
         workspace_id,
+        lead_id,
         latest_workflow,
+        paused_search_track_assignment_repository,
         paused_search_track_repository,
     )
     paused_search_track_options = await _paused_search_track_options(
@@ -376,17 +380,26 @@ async def get_lead_detail_view(
 
 async def _paused_search_plan_view(
     workspace_id: WorkspaceId,
+    lead_id: LeadId,
     workflow: LeadWorkflow | None,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository,
     paused_search_track_repository: LeadReadPausedSearchTrackRepository,
 ) -> LeadPausedSearchPlanView | None:
-    if workflow is None or workflow.paused_search_track_version_id is None:
+    assignment = await paused_search_track_assignment_repository.get_active_for_lead(
+        workspace_id,
+        lead_id,
+    )
+    if assignment is None or assignment.track_version_id is None:
         return None
 
     version = await paused_search_track_repository.get_version(
         workspace_id,
-        workflow.paused_search_track_version_id,
+        assignment.track_version_id,
     )
     if version is None:
+        return None
+
+    if assignment.track_id is not None and version.track_id != assignment.track_id:
         return None
 
     track = await paused_search_track_repository.get_track(workspace_id, version.track_id)
@@ -398,7 +411,11 @@ async def _paused_search_plan_view(
         version.track_version_id,
     )
     current_step = next(
-        (step for step in steps if step.step_id == workflow.paused_search_track_step_id),
+        (
+            step
+            for step in steps
+            if workflow is not None and step.step_id == workflow.paused_search_track_step_id
+        ),
         None,
     )
     return LeadPausedSearchPlanView(
@@ -406,7 +423,7 @@ async def _paused_search_plan_view(
         version=version,
         steps=steps,
         current_step=current_step,
-        next_action_at=workflow.next_action_at,
+        next_action_at=workflow.next_action_at if workflow is not None else None,
     )
 
 

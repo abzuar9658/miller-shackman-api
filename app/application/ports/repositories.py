@@ -18,12 +18,15 @@ from app.domain.campaigns.paused_search_tracks import (
     PausedSearchReasonMapping,
     PausedSearchTrack,
     PausedSearchTrackAdminAuditLog,
+    PausedSearchTrackAssignment,
+    PausedSearchTrackLeadAssignment,
     PausedSearchTrackStep,
     PausedSearchTrackVersion,
 )
 from app.domain.campaigns.template_registry import TemplateVersion
 from app.domain.common.ids import (
     CRMAgentRecordId,
+    ExtensionDeviceId,
     LeadId,
     PausedSearchTrackId,
     PausedSearchTrackVersionId,
@@ -49,6 +52,8 @@ from app.domain.crm_sync import (
 )
 from app.domain.identity import (
     AuthAuditLog,
+    ExtensionDevice,
+    ExtensionPairingCode,
     PasswordCredential,
     PasswordResetToken,
     RefreshSession,
@@ -503,6 +508,53 @@ class AuthAuditLogRepository(Protocol):
         raise NotImplementedError
 
 
+class ExtensionPairingCodeRepository(Protocol):
+    async def get_by_token_hash_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        token_hash: str,
+    ) -> ExtensionPairingCode | None:
+        raise NotImplementedError
+
+    async def revoke_pending_for_user(
+        self,
+        workspace_id: WorkspaceId,
+        user_id: UserId,
+        *,
+        revoked_at: datetime,
+    ) -> int:
+        raise NotImplementedError
+
+    async def save(self, pairing_code: ExtensionPairingCode) -> ExtensionPairingCode:
+        raise NotImplementedError
+
+
+class ExtensionDeviceRepository(Protocol):
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        device_id: ExtensionDeviceId,
+    ) -> ExtensionDevice | None:
+        raise NotImplementedError
+
+    async def list_by_workspace_and_user(
+        self,
+        workspace_id: WorkspaceId,
+        user_id: UserId,
+    ) -> tuple[ExtensionDevice, ...]:
+        raise NotImplementedError
+
+    async def count_active_for_user(
+        self,
+        workspace_id: WorkspaceId,
+        user_id: UserId,
+    ) -> int:
+        raise NotImplementedError
+
+    async def save(self, device: ExtensionDevice) -> ExtensionDevice:
+        raise NotImplementedError
+
+
 class ConversationSummaryRepository(Protocol):
     async def get_latest_for_conversation(
         self,
@@ -786,6 +838,13 @@ class PausedSearchTrackAdminAuditLogRepository(Protocol):
 
 
 class PausedSearchTrackMappingRepository(Protocol):
+    async def get_track(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+    ) -> PausedSearchTrack | None:
+        raise NotImplementedError
+
     async def get_version(
         self,
         workspace_id: WorkspaceId,
@@ -805,6 +864,39 @@ class PausedSearchTrackMappingRepository(Protocol):
         workspace_id: WorkspaceId,
         reason_code: PausedSearchReasonCode,
     ) -> PausedSearchReasonMapping | None:
+        raise NotImplementedError
+
+
+class PausedSearchTrackAssignmentRepository(Protocol):
+    async def get_active_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> PausedSearchTrackAssignment | None:
+        raise NotImplementedError
+
+    async def get_active_for_lead_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> PausedSearchTrackAssignment | None:
+        raise NotImplementedError
+
+    async def create(
+        self,
+        assignment: PausedSearchTrackAssignment,
+    ) -> PausedSearchTrackAssignment:
+        raise NotImplementedError
+
+    async def release_active(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        released_at: datetime,
+        released_by: UserId | None = None,
+        release_reason: str | None = None,
+    ) -> PausedSearchTrackAssignment | None:
         raise NotImplementedError
 
 
@@ -923,6 +1015,23 @@ class PausedSearchOccurrenceOperationsRepository(Protocol):
 
 class PausedSearchTrackAdminRepository(Protocol):
     async def list_tracks(self, workspace_id: WorkspaceId) -> tuple[PausedSearchTrack, ...]:
+        raise NotImplementedError
+
+    async def list_assigned_leads(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+        *,
+        limit: int = 100,
+        lock: bool = False,
+    ) -> tuple[PausedSearchTrackLeadAssignment, ...]:
+        raise NotImplementedError
+
+    async def delete_retired_track(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+    ) -> None:
         raise NotImplementedError
 
     async def get_track(

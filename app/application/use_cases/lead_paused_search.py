@@ -1,12 +1,13 @@
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from app.application.ports.repositories import (
     LeadPausedSearchHistoryRepository,
     LeadRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
 )
@@ -14,9 +15,13 @@ from app.application.services.lead_assignment import is_actor_assigned_to_lead
 from app.application.services.lead_nurture_rescheduling import (
     enqueue_lead_nurture_reschedule_signal,
 )
+from app.application.services.paused_search_track_assignment import (
+    synchronize_paused_search_track_assignment,
+)
 from app.application.services.paused_search_track_pinning import (
     pin_published_paused_search_track_on_latest_workflow,
 )
+from app.domain.campaigns import PausedSearchTrackAssignmentSource
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.identity import (
     AuthenticatedActor,
@@ -71,6 +76,7 @@ async def update_lead_paused_search(
     paused_search_history_repository: LeadPausedSearchHistoryRepository,
     lead_workflow_repository: LeadWorkflowRepository,
     paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     now: datetime,
 ) -> LeadPausedSearchActionResult:
@@ -105,6 +111,19 @@ async def update_lead_paused_search(
     )
 
     if previous_profile == current_profile:
+        await _synchronize_track_assignment(
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            reason_code=(
+                current_profile.pause_reason_code if current_profile is not None else None
+            ),
+            clear=current_profile is None,
+            actor_user_id=actor.user_id,
+            lead_workflow_repository=lead_workflow_repository,
+            paused_search_track_repository=paused_search_track_repository,
+            paused_search_track_assignment_repository=paused_search_track_assignment_repository,
+            now=now,
+        )
         return LeadPausedSearchActionResult(
             status=LeadPausedSearchActionStatus.UNCHANGED,
             lead_id=lead_id,
@@ -135,12 +154,15 @@ async def update_lead_paused_search(
     )
     saved_lead = await lead_repository.upsert(updated_lead)
     saved_profile = lead_paused_search_profile(saved_lead)
-    await pin_published_paused_search_track_on_latest_workflow(
+    await _synchronize_track_assignment(
         workspace_id=workspace_id,
         lead_id=lead_id,
-        pause_reason_code=(saved_profile.pause_reason_code if saved_profile is not None else None),
+        reason_code=(saved_profile.pause_reason_code if saved_profile is not None else None),
+        clear=saved_profile is None,
+        actor_user_id=actor.user_id,
         lead_workflow_repository=lead_workflow_repository,
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         now=now,
     )
     if temporal_signal_outbox_repository is not None:
@@ -193,6 +215,42 @@ def _can_edit_paused_search(actor: AuthenticatedActor, lead: CanonicalLeadRecord
         PermissionContext(acts_on_assigned_lead=is_actor_assigned_to_lead(actor, lead)),
     )
     return own_permission.allowed
+
+
+async def _synchronize_track_assignment(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    reason_code: PausedSearchReasonCode | None,
+    clear: bool,
+    actor_user_id: UUID,
+    lead_workflow_repository: LeadWorkflowRepository,
+    paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
+    now: datetime,
+) -> None:
+    if paused_search_track_assignment_repository is not None:
+        await synchronize_paused_search_track_assignment(
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            reason_code=reason_code,
+            clear=clear,
+            actor_user_id=actor_user_id,
+            source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
+            assignment_repository=paused_search_track_assignment_repository,
+            track_mapping_repository=paused_search_track_repository,
+            lead_workflow_repository=lead_workflow_repository,
+            now=now,
+        )
+        return
+    await pin_published_paused_search_track_on_latest_workflow(
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        pause_reason_code=reason_code,
+        lead_workflow_repository=lead_workflow_repository,
+        paused_search_track_repository=paused_search_track_repository,
+        now=now,
+    )
 
 
 def _action_for_change(

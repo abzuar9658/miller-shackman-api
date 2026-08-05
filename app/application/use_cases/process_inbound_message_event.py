@@ -30,6 +30,7 @@ from app.application.ports.repositories import (
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
     PausedSearchOccurrenceRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     UserRepository,
@@ -266,6 +267,7 @@ async def process_inbound_message_event(
     lead_workflow_repository: LeadWorkflowRepository | None = None,
     workflow_transition_repository: WorkflowTransitionRepository | None = None,
     paused_search_track_repository: PausedSearchTrackMappingRepository | None = None,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
     event_bus: EventBus | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
@@ -704,6 +706,9 @@ async def process_inbound_message_event(
             routing_review_repository=routing_review_repository,
             crm_conversation_event_repository=crm_conversation_event_repository,
             paused_search_track_repository=paused_search_track_repository,
+            paused_search_track_assignment_repository=(
+                paused_search_track_assignment_repository
+            ),
             temporal_signal_outbox_repository=temporal_signal_outbox_repository,
             crm_client=crm_client,
             outbound_message_crm_completion_repository=outbound_message_crm_completion_repository,
@@ -956,6 +961,9 @@ async def process_inbound_message_event(
             supplemental_crm_conversation_events=supplemental_crm_conversation_events,
             lead_workflow_repository=lead_workflow_repository,
             paused_search_track_repository=paused_search_track_repository,
+            paused_search_track_assignment_repository=(
+                paused_search_track_assignment_repository
+            ),
             now=now,
         )
     return ProcessInboundMessageEventResult(
@@ -2281,6 +2289,7 @@ async def _maybe_reclassify_lead_state_after_inbound(
     supplemental_crm_conversation_events: tuple[CrmConversationEvent, ...],
     lead_workflow_repository: LeadWorkflowRepository | None,
     paused_search_track_repository: PausedSearchTrackMappingRepository | None,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
     now: datetime,
     routing_review_repository: LeadRoutingReviewRepository | None,
 ) -> None:
@@ -2309,6 +2318,7 @@ async def _maybe_reclassify_lead_state_after_inbound(
         supplemental_crm_conversation_events=supplemental_crm_conversation_events,
         lead_workflow_repository=lead_workflow_repository,
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
     )
     if routing_review_repository is not None:
         if classification_result.status == ApplyLeadStateClassificationStatus.REVIEW:

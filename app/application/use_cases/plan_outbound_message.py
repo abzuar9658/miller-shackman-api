@@ -16,6 +16,9 @@ from app.application.services.canonical_lead_inputs import (
     contactability_facts_from_canonical_lead,
     lead_has_destination_for_channel,
 )
+from app.application.services.dormant_step_drafting import (
+    apply_dormant_step_drafting_profile,
+)
 from app.application.services.llm.outbound_message_drafting import (
     ApprovedOutboundLeadContext,
     OutboundMessageDraftReasonCode,
@@ -51,8 +54,9 @@ from app.domain.compliance.contactability import (
 )
 from app.domain.leads import CanonicalLeadRecord
 from app.domain.outbound_drafting import (
+    DormantStepTemplateProfile,
     OutboundJourneyKind,
-    default_workspace_outbound_drafting_config,
+    WorkspaceOutboundDraftingConfig,
 )
 
 
@@ -69,6 +73,7 @@ class PlanOutboundMessageReasonCode(StrEnum):
     CHANNEL_NOT_CONTACTABLE = "channel_not_contactable"
     PRE_SEND_BLOCKED = "pre_send_blocked"
     DRAFT_REJECTED = "draft_rejected"
+    MISSING_DRAFTING_CONFIG = "missing_drafting_config"
     DUPLICATE_PLAN = "duplicate_plan"
 
 
@@ -115,6 +120,8 @@ class OutboundPlanningContext:
     last_campaign_outreach_at: datetime | None = None
     last_channel_outreach_at: datetime | None = None
     other_channel_sent_at: datetime | None = None
+    drafting_config: WorkspaceOutboundDraftingConfig | None = None
+    template_profile: DormantStepTemplateProfile | None = None
 
 
 @dataclass(frozen=True)
@@ -218,11 +225,22 @@ async def plan_outbound_message_for_lead_record(
         workspace_llm_config_repository=workspace_llm_config_repository,
         default_openrouter_model=default_openrouter_model,
     )
-    drafting_config = default_workspace_outbound_drafting_config(workspace_id)
-    if workspace_outbound_drafting_config_repository is not None:
+    drafting_config = context.drafting_config
+    if (
+        context.drafting_config is None
+        and workspace_outbound_drafting_config_repository is not None
+    ):
         drafting_config = (
             await workspace_outbound_drafting_config_repository.get_by_workspace_id(workspace_id)
-        ) or drafting_config
+        )
+    if drafting_config is None:
+        return PlanOutboundMessageResult(
+            status=PlanOutboundMessageStatus.REJECTED,
+            selected_channel=selected.channel,
+            pre_send_decision=selected.pre_send_decision,
+            reasons=(PlanOutboundMessageReasonCode.MISSING_DRAFTING_CONFIG,),
+            channel_evaluations=selected.evaluations,
+        )
     if context.journey_kind == OutboundJourneyKind.PAUSED_SEARCH:
         drafting_config = apply_paused_search_drafting_template(
             drafting_config=drafting_config,
@@ -234,6 +252,17 @@ async def plan_outbound_message_for_lead_record(
             channel=selected.channel,
             template=context.template_version,
         )
+    lead_context = context.lead_context
+    if (
+        context.journey_kind in (OutboundJourneyKind.DORMANT, OutboundJourneyKind.PAUSED_SEARCH)
+        and context.template_profile is not None
+    ):
+        drafting_config, lead_context = apply_dormant_step_drafting_profile(
+            drafting_config=drafting_config,
+            lead_context=lead_context,
+            template_profile=context.template_profile,
+            channel=selected.channel.value,
+        )
 
     draft_result = await draft_outbound_message(
         lead=lead,
@@ -241,7 +270,7 @@ async def plan_outbound_message_for_lead_record(
         campaign_goal=context.campaign_goal,
         brokerage_name=context.brokerage_name,
         assigned_agent_name=context.assigned_agent_name,
-        lead_context=context.lead_context,
+        lead_context=lead_context,
         journey_kind=context.journey_kind,
         llm_client=llm_client,
         drafting_config=drafting_config,

@@ -40,6 +40,11 @@ from app.application.use_cases.run_dormant_selector_batch import (
     DormantSelectorBatchStatus,
     run_dormant_selector_batch,
 )
+from app.application.use_cases.workspace_outbound_drafting import (
+    OutboundDraftingPreviewResult,
+    OutboundDraftingPreviewStatus,
+    preview_workspace_outbound_drafting,
+)
 from app.domain.campaigns.admin import (
     CampaignAdminCadenceStep,
     CampaignAdminCampaign,
@@ -47,6 +52,14 @@ from app.domain.campaigns.admin import (
 )
 from app.domain.identity import AuthenticatedActor, WorkspaceMembershipRole
 from app.domain.identity.permissions import PermissionCapability, evaluate_permission
+from app.domain.outbound_drafting import (
+    SUPPORTED_QUERY_EXTRACTION_FIELDS,
+    SUPPORTED_TEMPLATE_PLACEHOLDERS,
+    DormantStepTemplateProfile,
+    OutboundJourneyKind,
+    WorkspaceOutboundDraftingConfig,
+    default_workspace_outbound_drafting_config,
+)
 from app.interfaces.api.dependencies.campaign import (
     CampaignReadBundle,
     CampaignServiceBundle,
@@ -54,6 +67,10 @@ from app.interfaces.api.dependencies.campaign import (
     get_campaign_service_bundle,
 )
 from app.interfaces.api.dependencies.membership import get_workspace_actor
+from app.interfaces.api.dependencies.workspace_settings import (
+    WorkspaceOutboundDraftingPreviewBundle,
+    get_workspace_outbound_drafting_preview_bundle,
+)
 from app.interfaces.api.schemas.campaigns import (
     CampaignAdminResponse,
     CampaignCadenceStepResponse,
@@ -64,12 +81,14 @@ from app.interfaces.api.schemas.campaigns import (
     CampaignResponse,
     CampaignSummaryResponse,
     CampaignVersionResponse,
+    DormantStepTemplateProfileSchema,
     NurtureCadenceStepResponse,
     NurtureSettingsAdminResponse,
     NurtureSettingsConfigResponse,
     NurtureSettingsDetailResponse,
     NurtureSettingsDraftRequest,
     NurtureSettingsPolicyResponse,
+    NurtureSettingsPreviewRequest,
     PauseCampaignRequest,
     RecordPreflightVetoRequest,
     RecordPreflightVetoResponse,
@@ -77,6 +96,7 @@ from app.interfaces.api.schemas.campaigns import (
     RunDormantSelectorRequest,
     RunDormantSelectorResponse,
 )
+from app.interfaces.api.schemas.workspace import WorkspaceOutboundDraftingPreviewResponse
 
 router = APIRouter(tags=["campaigns"])
 
@@ -158,6 +178,118 @@ async def get_nurture_settings_route(
     return _nurture_settings_detail_response(CampaignReadStatus.OK.value, view)
 
 
+@router.post(
+    "/{workspace_id}/nurture-settings/preview",
+    response_model=WorkspaceOutboundDraftingPreviewResponse,
+)
+async def preview_nurture_settings_route(
+    workspace_id: UUID,
+    request: NurtureSettingsPreviewRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[
+        WorkspaceOutboundDraftingPreviewBundle,
+        Depends(get_workspace_outbound_drafting_preview_bundle),
+    ],
+) -> WorkspaceOutboundDraftingPreviewResponse:
+    if request.draft is not None:
+        if request.template_key is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A dormant cadence step is required when previewing a draft",
+            )
+        draft_config = _config_from_request(workspace_id, request.draft)
+        preview_step = next(
+            (
+                step
+                for step in draft_config.cadence_steps
+                if step.template_key == request.template_key
+            ),
+            None,
+        )
+        if preview_step is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Dormant cadence step not found in draft",
+            )
+        drafting_config = draft_config.outbound_drafting_config
+    else:
+        campaign = await _require_single_workspace_nurture_campaign(
+            workspace_id=workspace_id,
+            campaign_admin_repository=bundle.campaign_admin_repository,
+        )
+        view = await _current_nurture_settings_view(
+            actor=actor,
+            workspace_id=workspace_id,
+            campaign=campaign,
+            campaign_admin_repository=bundle.campaign_admin_repository,
+        )
+        drafting_config = view.version.outbound_drafting_config or (
+            default_workspace_outbound_drafting_config(workspace_id)
+        )
+        preview_step = None
+        if request.template_key is not None:
+            preview_step = next(
+                (
+                    CampaignCadenceStepInput(
+                        channel=step.channel,
+                        delay_hours=step.delay_hours,
+                        message_goal=step.message_goal,
+                        template_key=step.template_key,
+                        max_attempts=step.max_attempts,
+                        template_profile=step.template_profile,
+                    )
+                    for step in view.cadence_steps
+                    if step.template_key == request.template_key
+                ),
+                None,
+            )
+            if preview_step is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Dormant cadence step not found",
+                )
+    result = await preview_workspace_outbound_drafting(
+        actor=actor,
+        workspace_id=workspace_id,
+        query=request.query,
+        agent_name=request.agent_name,
+        brokerage_name=request.brokerage_name,
+        workspace_repository=bundle.workspace_repository,
+        membership_repository=bundle.membership_repository,
+        workspace_outbound_drafting_config_repository=(
+            bundle.workspace_outbound_drafting_config_repository
+        ),
+        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
+        llm_client=bundle.llm_client,
+        listing_source_repository=bundle.listing_source_repository,
+        listing_snapshot_repository=bundle.listing_snapshot_repository,
+        listing_search_client=bundle.listing_search_client,
+        listing_cache_ttl=bundle.listing_cache_ttl,
+        now=datetime.now(UTC),
+        default_openrouter_model=bundle.default_openrouter_model,
+        drafting_config=drafting_config,
+        journey_kind=OutboundJourneyKind.DORMANT,
+        template_profile=(preview_step.template_profile if preview_step is not None else None),
+        template_channel=(preview_step.channel if preview_step is not None else None),
+        campaign_goal=(
+            preview_step.message_goal
+            if preview_step is not None
+            else "Preview dormant follow-up."
+        ),
+    )
+    if result.status == OutboundDraftingPreviewStatus.REJECTED:
+        status_code = (
+            status.HTTP_403_FORBIDDEN
+            if any(reason.value == "permission_denied" for reason in result.reasons)
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail=[reason.value for reason in result.reasons],
+        )
+    return _outbound_drafting_preview_response(result)
+
+
 @router.put(
     "/{workspace_id}/nurture-settings/draft",
     response_model=NurtureSettingsAdminResponse,
@@ -178,7 +310,7 @@ async def upsert_nurture_settings_draft_route(
             actor=actor,
             workspace_id=workspace_id,
             name=_WORKSPACE_NURTURE_POLICY_NAME,
-            config=_config_from_request(request),
+            config=_config_from_request(workspace_id, request),
             campaign_admin_repository=bundle.campaign_admin_repository,
             audit_log_repository=bundle.campaign_admin_audit_log_repository,
             event_bus=bundle.event_bus,
@@ -198,7 +330,7 @@ async def upsert_nurture_settings_draft_route(
         workspace_id=workspace_id,
         campaign_id=campaign.campaign_id,
         name=_WORKSPACE_NURTURE_POLICY_NAME,
-        config=_config_from_request(request),
+        config=_config_from_request(workspace_id, request),
         campaign_admin_repository=bundle.campaign_admin_repository,
         audit_log_repository=bundle.campaign_admin_audit_log_repository,
         event_bus=bundle.event_bus,
@@ -330,7 +462,7 @@ async def create_draft_campaign_route(
         actor=actor,
         workspace_id=workspace_id,
         name=request.name,
-        config=_config_from_request(request),
+        config=_config_from_request(workspace_id, request),
         campaign_admin_repository=bundle.campaign_admin_repository,
         audit_log_repository=bundle.campaign_admin_audit_log_repository,
         event_bus=bundle.event_bus,
@@ -358,7 +490,7 @@ async def update_draft_campaign_route(
         workspace_id=workspace_id,
         campaign_id=campaign_id,
         name=request.name,
-        config=_config_from_request(request),
+        config=_config_from_request(workspace_id, request),
         campaign_admin_repository=bundle.campaign_admin_repository,
         audit_log_repository=bundle.campaign_admin_audit_log_repository,
         event_bus=bundle.event_bus,
@@ -492,6 +624,9 @@ async def run_dormant_selector_route(
         llm_client=bundle.llm_client,
         default_openrouter_model=bundle.default_openrouter_model,
         paused_search_track_repository=bundle.paused_search_track_repository,
+        paused_search_track_assignment_repository=(
+            bundle.paused_search_track_assignment_repository
+        ),
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         event_bus=bundle.event_bus,
         routing_review_repository=bundle.routing_review_repository,
@@ -751,7 +886,10 @@ async def _current_nurture_settings_view(
     )
 
 
-def _config_from_request(request: CampaignConfigRequest) -> CampaignConfigInput:
+def _config_from_request(
+    workspace_id: UUID,
+    request: CampaignConfigRequest,
+) -> CampaignConfigInput:
     return CampaignConfigInput(
         enabled_channels=tuple(request.enabled_channels),
         daily_start_cap=request.daily_start_cap,
@@ -772,8 +910,19 @@ def _config_from_request(request: CampaignConfigRequest) -> CampaignConfigInput:
                 message_goal=step.message_goal,
                 template_key=step.template_key,
                 max_attempts=step.max_attempts,
+                template_profile=_template_profile_from_schema(step.template_profile),
             )
             for step in request.cadence_steps
+        ),
+        outbound_drafting_config=WorkspaceOutboundDraftingConfig(
+            workspace_id=workspace_id,
+            prompt_text=request.prompt_text,
+            sms_prompt_text=request.sms_prompt_text,
+            sms_template=request.sms_template,
+            email_prompt_text=request.email_prompt_text,
+            email_template=request.email_template,
+            email_subject_template=request.email_subject_template,
+            enabled_extraction_fields=tuple(request.enabled_extraction_fields),
         ),
     )
 
@@ -823,6 +972,9 @@ def _campaign_response(view: CampaignAdminView) -> CampaignResponse:
 
 def _version_response(view: CampaignAdminView) -> CampaignVersionResponse:
     version = view.version
+    drafting_config = version.outbound_drafting_config or (
+        default_workspace_outbound_drafting_config(version.workspace_id)
+    )
     return CampaignVersionResponse(
         campaign_version_id=version.campaign_version_id,
         campaign_id=version.campaign_id,
@@ -841,6 +993,15 @@ def _version_response(view: CampaignAdminView) -> CampaignVersionResponse:
         allow_assigned_agent_manual_enrollment=version.allow_assigned_agent_manual_enrollment,
         prompt_version=version.prompt_version,
         approved_model=version.approved_model,
+        prompt_text=drafting_config.prompt_text,
+        sms_prompt_text=drafting_config.sms_prompt_text,
+        sms_template=drafting_config.sms_template,
+        email_prompt_text=drafting_config.email_prompt_text,
+        email_template=drafting_config.email_template,
+        email_subject_template=drafting_config.email_subject_template,
+        enabled_extraction_fields=list(drafting_config.enabled_extraction_fields),
+        supported_extraction_fields=list(SUPPORTED_QUERY_EXTRACTION_FIELDS),
+        supported_template_placeholders=list(SUPPORTED_TEMPLATE_PLACEHOLDERS),
         created_by_user_id=version.created_by_user_id,
         created_at=version.created_at,
         published_at=version.published_at,
@@ -867,6 +1028,9 @@ def _nurture_settings_config_response(
     view: CampaignAdminView,
 ) -> NurtureSettingsConfigResponse:
     version = view.version
+    drafting_config = version.outbound_drafting_config or (
+        default_workspace_outbound_drafting_config(version.workspace_id)
+    )
     return NurtureSettingsConfigResponse(
         settings_version_id=version.campaign_version_id,
         nurture_settings_id=version.campaign_id,
@@ -885,9 +1049,54 @@ def _nurture_settings_config_response(
         allow_assigned_agent_manual_enrollment=version.allow_assigned_agent_manual_enrollment,
         prompt_version=version.prompt_version,
         approved_model=version.approved_model,
+        prompt_text=drafting_config.prompt_text,
+        sms_prompt_text=drafting_config.sms_prompt_text,
+        sms_template=drafting_config.sms_template,
+        email_prompt_text=drafting_config.email_prompt_text,
+        email_template=drafting_config.email_template,
+        email_subject_template=drafting_config.email_subject_template,
+        enabled_extraction_fields=list(drafting_config.enabled_extraction_fields),
+        supported_extraction_fields=list(SUPPORTED_QUERY_EXTRACTION_FIELDS),
+        supported_template_placeholders=list(SUPPORTED_TEMPLATE_PLACEHOLDERS),
         created_by_user_id=version.created_by_user_id,
         created_at=version.created_at,
         published_at=version.published_at,
+    )
+
+
+def _outbound_drafting_preview_response(
+    result: OutboundDraftingPreviewResult,
+) -> WorkspaceOutboundDraftingPreviewResponse:
+    return WorkspaceOutboundDraftingPreviewResponse(
+        status=result.status.value,
+        parsed_preferences=result.parsed_preferences or {},
+        extraction_method=result.extraction_method.value,
+        extraction_confidence=result.extraction_confidence,
+        extraction_reasons=[reason.value for reason in result.extraction_reasons],
+        listing_context_found=result.listing_relevance_brief is not None,
+        listing_relevance_brief=result.listing_relevance_brief,
+        sms_preview=(
+            {
+                "status": result.sms_preview.status,
+                "body": result.sms_preview.body,
+                "subject": result.sms_preview.subject,
+                "prompt_version": result.sms_preview.prompt_version,
+                "model": result.sms_preview.model,
+            }
+            if result.sms_preview is not None
+            else None
+        ),
+        email_preview=(
+            {
+                "status": result.email_preview.status,
+                "body": result.email_preview.body,
+                "subject": result.email_preview.subject,
+                "prompt_version": result.email_preview.prompt_version,
+                "model": result.email_preview.model,
+            }
+            if result.email_preview is not None
+            else None
+        ),
     )
 
 
@@ -902,6 +1111,7 @@ def _cadence_step_response(step: CampaignAdminCadenceStep) -> CampaignCadenceSte
         template_key=step.template_key,
         max_attempts=step.max_attempts,
         created_at=step.created_at,
+        template_profile=_template_profile_schema(step.template_profile),
     )
 
 
@@ -918,6 +1128,7 @@ def _nurture_cadence_step_response(
         template_key=step.template_key,
         max_attempts=step.max_attempts,
         created_at=step.created_at,
+        template_profile=_template_profile_schema(step.template_profile),
     )
 
 
@@ -936,6 +1147,9 @@ def _admin_response(
         )
     campaign = view.campaign
     version = view.version
+    drafting_config = version.outbound_drafting_config or (
+        default_workspace_outbound_drafting_config(version.workspace_id)
+    )
     return CampaignAdminResponse(
         status=status_value,
         campaign=CampaignResponse(
@@ -966,6 +1180,15 @@ def _admin_response(
             allow_assigned_agent_manual_enrollment=version.allow_assigned_agent_manual_enrollment,
             prompt_version=version.prompt_version,
             approved_model=version.approved_model,
+            prompt_text=drafting_config.prompt_text,
+            sms_prompt_text=drafting_config.sms_prompt_text,
+            sms_template=drafting_config.sms_template,
+            email_prompt_text=drafting_config.email_prompt_text,
+            email_template=drafting_config.email_template,
+            email_subject_template=drafting_config.email_subject_template,
+            enabled_extraction_fields=list(drafting_config.enabled_extraction_fields),
+            supported_extraction_fields=list(SUPPORTED_QUERY_EXTRACTION_FIELDS),
+            supported_template_placeholders=list(SUPPORTED_TEMPLATE_PLACEHOLDERS),
             created_by_user_id=version.created_by_user_id,
             created_at=version.created_at,
             published_at=version.published_at,
@@ -981,10 +1204,47 @@ def _admin_response(
                 template_key=step.template_key,
                 max_attempts=step.max_attempts,
                 created_at=step.created_at,
+                template_profile=_template_profile_schema(step.template_profile),
             )
             for step in view.cadence_steps
         ],
         reasons=[str(reason) for reason in reasons],
+    )
+
+
+def _template_profile_from_schema(
+    profile: DormantStepTemplateProfileSchema | None,
+) -> DormantStepTemplateProfile | None:
+    if profile is None:
+        return None
+    return DormantStepTemplateProfile(
+        tone=profile.tone,
+        style=profile.style,
+        length=profile.length,
+        call_to_action=profile.call_to_action,
+        greeting=profile.greeting,
+        sign_off=profile.sign_off,
+        listing_context=profile.listing_context,
+        personalization_fields=tuple(profile.personalization_fields),
+        custom_instructions=profile.custom_instructions,
+    )
+
+
+def _template_profile_schema(
+    profile: DormantStepTemplateProfile | None,
+) -> DormantStepTemplateProfileSchema | None:
+    if profile is None:
+        return None
+    return DormantStepTemplateProfileSchema(
+        tone=profile.tone,
+        style=profile.style,
+        length=profile.length,
+        call_to_action=profile.call_to_action,
+        greeting=profile.greeting,
+        sign_off=profile.sign_off,
+        listing_context=profile.listing_context,
+        personalization_fields=list(profile.personalization_fields),
+        custom_instructions=profile.custom_instructions,
     )
 
 

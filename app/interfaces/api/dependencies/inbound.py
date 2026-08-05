@@ -27,6 +27,7 @@ from app.application.ports.repositories import (
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
     PausedSearchOccurrenceRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     UserRepository,
@@ -83,6 +84,7 @@ from app.infrastructure.persistence.postgres.paused_search_occurrence_repository
 )
 from app.infrastructure.persistence.postgres.paused_search_track_repository import (
     PostgresPausedSearchTrackAdminRepository,
+    PostgresPausedSearchTrackAssignmentRepository,
 )
 from app.infrastructure.persistence.postgres.temporal_signal_outbox_repository import (
     PostgresTemporalSignalOutboxRepository,
@@ -159,6 +161,7 @@ class InboundServiceBundle:
     user_repository: UserRepository | None = None
     routing_review_repository: LeadRoutingReviewRepository | None = None
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None
 
 
 async def get_inbound_service_bundle(
@@ -186,6 +189,9 @@ async def get_inbound_service_bundle(
             session
         ),
         paused_search_track_repository=PostgresPausedSearchTrackAdminRepository(session),
+        paused_search_track_assignment_repository=PostgresPausedSearchTrackAssignmentRepository(
+            session
+        ),
         paused_search_occurrence_repository=PostgresPausedSearchOccurrenceRepository(session),
         lead_workflow_repository=PostgresLeadWorkflowRepository(session),
         workflow_transition_repository=PostgresWorkflowTransitionRepository(session),

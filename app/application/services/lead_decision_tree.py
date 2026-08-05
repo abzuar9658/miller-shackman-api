@@ -223,7 +223,7 @@ def build_lead_decision_tree(
 
     extra_nodes: tuple[LeadDecisionTreeNodeView, ...] = ()
     extra_edges: tuple[LeadDecisionTreeEdgeView, ...] = ()
-    if current_route == "paused_search" and latest_workflow is not None:
+    if current_route == "paused_search":
         extra_nodes, extra_edges = _build_paused_search_subtree(
             lead=lead,
             paused_search_track=paused_search_track,
@@ -356,7 +356,7 @@ def _build_paused_search_subtree(
     paused_search_steps: tuple[PausedSearchTrackStep, ...],
     paused_search_current_step: PausedSearchTrackStep | None,
     paused_search_track_options: tuple[PausedSearchTrackOptionSpec, ...],
-    latest_workflow: LeadWorkflow,
+    latest_workflow: LeadWorkflow | None,
 ) -> tuple[tuple[LeadDecisionTreeNodeView, ...], tuple[LeadDecisionTreeEdgeView, ...]]:
     track_options = _normalized_paused_search_track_options(
         paused_search_track,
@@ -398,7 +398,7 @@ def _build_paused_search_track_subtree(
     paused_search_steps: tuple[PausedSearchTrackStep, ...],
     paused_search_current_step: PausedSearchTrackStep | None,
     paused_search_track_options: tuple[PausedSearchTrackOptionSpec, ...],
-    latest_workflow: LeadWorkflow,
+    latest_workflow: LeadWorkflow | None,
 ) -> tuple[tuple[LeadDecisionTreeNodeView, ...], tuple[LeadDecisionTreeEdgeView, ...]]:
     track_columns = _paused_search_track_columns(len(paused_search_track_options))
     selected_track_version_id = (
@@ -412,9 +412,13 @@ def _build_paused_search_track_subtree(
             for option in paused_search_track_options
             if option.version.track_version_id == selected_track_version_id
         ),
-        paused_search_track_options[0],
+        None,
     )
-    selected_column = track_columns[paused_search_track_options.index(selected_option)]
+    selected_column = (
+        track_columns[paused_search_track_options.index(selected_option)]
+        if selected_option is not None
+        else 8
+    )
 
     nodes: list[LeadDecisionTreeNodeView] = [
         _node(
@@ -427,7 +431,7 @@ def _build_paused_search_track_subtree(
             False,
             description=(
                 "The backend shows the active admin-configured paused-search tracks "
-                "before expanding the track pinned to this workflow."
+                "before expanding the track assigned from the durable lead assignment."
             ),
         )
     ]
@@ -439,7 +443,7 @@ def _build_paused_search_track_subtree(
             False,
             description=(
                 "Paused-search is active, so the backend first identifies which "
-                "configured track is pinned to the lead workflow."
+                "configured track is assigned to the lead."
             ),
             detail_lines=_paused_search_track_catalog_detail_lines(
                 paused_search_track_options,
@@ -449,7 +453,10 @@ def _build_paused_search_track_subtree(
     ]
 
     for index, option in enumerate(paused_search_track_options):
-        selected = option.version.track_version_id == selected_option.version.track_version_id
+        selected = (
+            selected_option is not None
+            and option.version.track_version_id == selected_option.version.track_version_id
+        )
         track_node_id = _paused_search_track_node_id(option)
         nodes.append(
             _node(
@@ -476,6 +483,42 @@ def _build_paused_search_track_subtree(
             )
         )
 
+    if selected_option is None:
+        unassigned_node_id = "paused_search_track_unassigned"
+        nodes.append(
+            _node(
+                unassigned_node_id,
+                LeadDecisionTreeNodeKind.STATE,
+                "Track assignment needed",
+                6,
+                8,
+                False,
+                True,
+                description=(
+                    "Paused-search is active, but this lead has no durable track "
+                    "version. Assign a published track before scheduling outreach."
+                ),
+                chips=("No durable assignment",),
+            )
+        )
+        edges.append(
+            _edge(
+                "paused_search_track_decision",
+                unassigned_node_id,
+                True,
+                True,
+                "Needs assignment",
+                description=(
+                    "No configured paused-search track is currently assigned to this "
+                    "lead."
+                ),
+                detail_lines=(
+                    "The active paused-search profile is not enough to identify a track.",
+                ),
+            )
+        )
+        return tuple(nodes), tuple(edges)
+
     phase_nodes, phase_edges = _build_paused_search_phase_subtree(
         lead=lead,
         paused_search_track=paused_search_track,
@@ -501,7 +544,7 @@ def _build_paused_search_phase_subtree(
     paused_search_track_version: PausedSearchTrackVersion | None,
     paused_search_steps: tuple[PausedSearchTrackStep, ...],
     paused_search_current_step: PausedSearchTrackStep | None,
-    latest_workflow: LeadWorkflow,
+    latest_workflow: LeadWorkflow | None,
     root_node_id: str,
     decision_row: int,
     branch_row: int,
@@ -517,7 +560,10 @@ def _build_paused_search_phase_subtree(
         state_node = LeadDecisionTreeNodeView(
             node_id="paused_search_state",
             kind=LeadDecisionTreeNodeKind.STATE,
-            label=_workflow_label(latest_workflow.state, paused_search=True),
+            label=_workflow_label(
+                latest_workflow.state if latest_workflow is not None else WorkflowState.PAUSED,
+                paused_search=True,
+            ),
             row=decision_row,
             column=center_column,
             status=LeadDecisionTreeElementStatus.CURRENT,
@@ -575,7 +621,7 @@ def _build_paused_search_phase_subtree(
             True,
             False,
             description=(
-                "The selected track is pinned to this workflow, so the backend now "
+                "The durable assignment selects this track, so the backend now "
                 "resolves which internal phase should run."
             ),
             detail_lines=_paused_search_route_detail_lines(
@@ -623,7 +669,10 @@ def _build_paused_search_phase_subtree(
         LeadDecisionTreeNodeView(
             node_id="paused_search_state",
             kind=LeadDecisionTreeNodeKind.STATE,
-            label=_workflow_label(latest_workflow.state, paused_search=True),
+            label=_workflow_label(
+                latest_workflow.state if latest_workflow is not None else WorkflowState.PAUSED,
+                paused_search=True,
+            ),
             row=state_row,
             column=selected_column,
             status=LeadDecisionTreeElementStatus.CURRENT,
@@ -697,13 +746,17 @@ def _paused_search_track_node_id(option: PausedSearchTrackOptionSpec) -> str:
 
 def _paused_search_track_catalog_detail_lines(
     options: tuple[PausedSearchTrackOptionSpec, ...],
-    selected_option: PausedSearchTrackOptionSpec,
+    selected_option: PausedSearchTrackOptionSpec | None,
 ) -> tuple[str, ...]:
-    return (
-        f"Configured active tracks shown: {len(options)}.",
-        f"Selected track: {selected_option.track.display_name} "
-        f"v{selected_option.version.version_number}.",
-    )
+    lines = [f"Configured active tracks shown: {len(options)}."]
+    if selected_option is None:
+        lines.append("Selected track: none; this lead needs a track assignment.")
+    else:
+        lines.append(
+            f"Selected track: {selected_option.track.display_name} "
+            f"v{selected_option.version.version_number}."
+        )
+    return tuple(lines)
 
 
 def _paused_search_track_node_description(
@@ -711,7 +764,7 @@ def _paused_search_track_node_description(
     selected: bool,
 ) -> str:
     if selected:
-        return "This admin-configured paused-search track is pinned to the lead's latest workflow."
+        return "This admin-configured paused-search track is assigned to this lead."
     return "This is another active paused-search track configured by admins for the workspace."
 
 
@@ -721,11 +774,12 @@ def _paused_search_track_edge_description(
 ) -> str:
     if selected:
         return (
-            f"The workflow selected {option.track.display_name} as this lead's paused-search track."
+            f"The durable assignment selected {option.track.display_name} as this lead's "
+            "paused-search track."
         )
     return (
         f"{option.track.display_name} exists as an active admin-created "
-        "paused-search track, but it is not pinned to this lead."
+        "paused-search track, but it is not assigned to this lead."
     )
 
 
@@ -1235,11 +1289,6 @@ def _paused_search_chosen_reason(
     classification_artifact: LeadClassificationArtifact | None,
     latest_workflow: LeadWorkflow | None,
 ) -> str:
-    if latest_workflow is not None and latest_workflow.paused_search_track_version_id is not None:
-        return (
-            "This lead followed paused-search because the latest workflow is "
-            "pinned to a paused-search track version."
-        )
     if lead.paused_search_active:
         return (
             "This lead followed paused-search because the lead record is marked "
@@ -1268,7 +1317,7 @@ def _paused_search_route_detail_lines(
     lines: list[str] = []
     if paused_search_track is not None and paused_search_track_version is not None:
         lines.append(
-            f"Pinned track: {paused_search_track.display_name} "
+            f"Assigned track: {paused_search_track.display_name} "
             f"v{paused_search_track_version.version_number}."
         )
     phases = _phase_labels(paused_search_steps)
@@ -1281,7 +1330,12 @@ def _paused_search_route_detail_lines(
     return tuple(lines)
 
 
-def _paused_search_state_description(latest_workflow: LeadWorkflow) -> str:
+def _paused_search_state_description(latest_workflow: LeadWorkflow | None) -> str:
+    if latest_workflow is None:
+        return (
+            "The lead has a durable paused-search assignment but no workflow has been "
+            "created yet."
+        )
     if latest_workflow.state == WorkflowState.QUEUED:
         return (
             "The lead is queued on the paused-search track and is waiting for "
@@ -1307,7 +1361,7 @@ def _paused_search_state_detail_lines(
     paused_search_track_version: PausedSearchTrackVersion | None,
     paused_search_steps: tuple[PausedSearchTrackStep, ...],
     paused_search_current_step: PausedSearchTrackStep | None,
-    latest_workflow: LeadWorkflow,
+    latest_workflow: LeadWorkflow | None,
 ) -> tuple[str, ...]:
     lines = list(_workflow_state_detail_lines(latest_workflow))
     lines.extend(
@@ -1321,9 +1375,11 @@ def _paused_search_state_detail_lines(
     return tuple(lines)
 
 
-def _workflow_state_detail_lines(latest_workflow: LeadWorkflow) -> tuple[str, ...]:
+def _workflow_state_detail_lines(latest_workflow: LeadWorkflow | None) -> tuple[str, ...]:
+    if latest_workflow is None:
+        return ("Workflow state: not created; the durable assignment is active.",)
     lines: list[str] = [f"Workflow state: {latest_workflow.state.value.replace('_', ' ')}."]
-    if latest_workflow.next_action_at is not None:
+    if latest_workflow is not None and latest_workflow.next_action_at is not None:
         lines.append(f"Next planned action: {latest_workflow.next_action_at.isoformat()}.")
     return tuple(lines)
 
@@ -1402,7 +1458,7 @@ def _paused_search_chips(
     paused_search_track: PausedSearchTrack | None,
     paused_search_track_version: PausedSearchTrackVersion | None,
     paused_search_current_step: PausedSearchTrackStep | None,
-    latest_workflow: LeadWorkflow,
+    latest_workflow: LeadWorkflow | None,
 ) -> tuple[str, ...]:
     chips: list[str] = []
     if lead.pause_reason_code is not None:
@@ -1415,6 +1471,6 @@ def _paused_search_chips(
         chips.append(f"Track v{paused_search_track_version.version_number}")
     if paused_search_current_step is not None:
         chips.append(paused_search_current_step.phase.value.replace("_", " ").title())
-    if latest_workflow.next_action_at is not None:
+    if latest_workflow is not None and latest_workflow.next_action_at is not None:
         chips.append(f"Next action {latest_workflow.next_action_at.isoformat()}")
     return tuple(chips)

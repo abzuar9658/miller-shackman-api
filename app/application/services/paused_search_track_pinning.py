@@ -51,6 +51,11 @@ async def pin_published_paused_search_track_on_latest_workflow(
         pause_reason_code=pause_reason_code,
         paused_search_track_repository=paused_search_track_repository,
     )
+    if pause_reason_code is not None and track_version_id is None:
+        # A retired or temporarily unmapped track must not orphan a lead that is
+        # already pinned to its historical version. Clearing the pin is reserved
+        # for explicitly clearing the paused-search profile.
+        return workflow
     if workflow.paused_search_track_version_id == track_version_id:
         return workflow
     return await lead_workflow_repository.save(

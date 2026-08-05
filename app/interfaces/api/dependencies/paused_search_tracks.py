@@ -17,6 +17,7 @@ from app.application.ports.repositories import (
     PausedSearchReviewRepository,
     PausedSearchTrackAdminAuditLogRepository,
     PausedSearchTrackAdminRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     TemplateRepository,
     TemporalSignalOutboxRepository,
@@ -46,6 +47,7 @@ from app.infrastructure.persistence.postgres.paused_search_review_repository imp
 from app.infrastructure.persistence.postgres.paused_search_track_repository import (
     PostgresPausedSearchTrackAdminAuditLogRepository,
     PostgresPausedSearchTrackAdminRepository,
+    PostgresPausedSearchTrackAssignmentRepository,
 )
 from app.infrastructure.persistence.postgres.template_repository import PostgresTemplateRepository
 from app.infrastructure.persistence.postgres.temporal_signal_outbox_repository import (
@@ -96,6 +98,7 @@ class PausedSearchOperationsBundle:
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository
     paused_search_history_repository: LeadPausedSearchHistoryRepository
     paused_search_track_repository: PausedSearchTrackMappingRepository
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository
     lead_workflow_override_audit_repository: LeadWorkflowOverrideAuditLogRepository
     workspace_repository: WorkspaceRepository
     occurrence_transition_repository: PausedSearchOccurrenceOperationsRepository
@@ -140,6 +143,9 @@ async def get_paused_search_operations_bundle(
         workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
         paused_search_history_repository=PostgresLeadRepository(session),
         paused_search_track_repository=PostgresPausedSearchTrackAdminRepository(session),
+        paused_search_track_assignment_repository=PostgresPausedSearchTrackAssignmentRepository(
+            session
+        ),
         lead_workflow_override_audit_repository=PostgresLeadWorkflowOverrideAuditLogRepository(session),
         workspace_repository=PostgresWorkspaceRepository(session),
         occurrence_transition_repository=PostgresPausedSearchOccurrenceRepository(session),

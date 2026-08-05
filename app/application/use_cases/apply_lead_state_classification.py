@@ -10,6 +10,7 @@ from app.application.ports.repositories import (
     LeadPausedSearchHistoryRepository,
     LeadRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     TemporalSignalOutboxRepository,
     WorkspaceLLMConfigRepository,
@@ -26,9 +27,13 @@ from app.application.services.llm.lead_state_classification import (
 from app.application.services.llm.workspace_model_resolution import (
     resolve_workspace_openrouter_model,
 )
+from app.application.services.paused_search_track_assignment import (
+    synchronize_paused_search_track_assignment,
+)
 from app.application.services.paused_search_track_pinning import (
     pin_published_paused_search_track_on_latest_workflow,
 )
+from app.domain.campaigns import PausedSearchTrackAssignmentSource
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.conversations import CrmConversationEvent
 from app.domain.identity import (
@@ -45,6 +50,7 @@ from app.domain.leads import (
     LeadPausedSearchProfile,
     LeadStateClassificationOutcome,
     PausedSearchAction,
+    PausedSearchReasonCode,
     PausedSearchSource,
     lead_paused_search_profile,
 )
@@ -89,6 +95,7 @@ async def apply_lead_state_classification(
     supplemental_crm_conversation_events: tuple[CrmConversationEvent, ...] = (),
     lead_workflow_repository: LeadWorkflowRepository | None = None,
     paused_search_track_repository: PausedSearchTrackMappingRepository | None = None,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     precomputed_classification_result: LeadStateClassificationResult | None = None,
     artifact_source: str = "ai_conversation_classification",
@@ -174,6 +181,7 @@ async def apply_lead_state_classification(
             allow_overwrite_human_state=allow_overwrite_human_state,
             lead_workflow_repository=lead_workflow_repository,
             paused_search_track_repository=paused_search_track_repository,
+            paused_search_track_assignment_repository=paused_search_track_assignment_repository,
             temporal_signal_outbox_repository=temporal_signal_outbox_repository,
             paused_search_source=paused_search_source,
         )
@@ -211,6 +219,7 @@ async def _apply_paused_search(
     allow_overwrite_human_state: bool,
     lead_workflow_repository: LeadWorkflowRepository | None,
     paused_search_track_repository: PausedSearchTrackMappingRepository | None,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None,
     paused_search_source: PausedSearchSource,
 ) -> ApplyLeadStateClassificationResult:
@@ -248,6 +257,19 @@ async def _apply_paused_search(
         paused_search_last_confirmed_at=now,
     )
     if previous_profile == current_profile:
+        if lead_workflow_repository is not None and paused_search_track_repository is not None:
+            await _synchronize_track_assignment(
+                workspace_id=lead.workspace_id,
+                lead_id=lead.lead_id,
+                reason_code=current_profile.pause_reason_code,
+                actor_user_id=actor_user_id,
+                lead_workflow_repository=lead_workflow_repository,
+                paused_search_track_repository=paused_search_track_repository,
+                paused_search_track_assignment_repository=(
+                    paused_search_track_assignment_repository
+                ),
+                now=now,
+            )
         saved_artifact = await _save_artifact(
             artifact_repository=artifact_repository,
             workspace_id=workspace_id,
@@ -270,14 +292,16 @@ async def _apply_paused_search(
     saved_lead = await lead_repository.upsert(updated_lead)
     saved_profile = lead_paused_search_profile(saved_lead)
     if lead_workflow_repository is not None and paused_search_track_repository is not None:
-        await pin_published_paused_search_track_on_latest_workflow(
+        await _synchronize_track_assignment(
             workspace_id=lead.workspace_id,
             lead_id=lead.lead_id,
-            pause_reason_code=(
+            reason_code=(
                 saved_profile.pause_reason_code if saved_profile is not None else None
             ),
+            actor_user_id=actor_user_id,
             lead_workflow_repository=lead_workflow_repository,
             paused_search_track_repository=paused_search_track_repository,
+            paused_search_track_assignment_repository=paused_search_track_assignment_repository,
             now=now,
         )
         if temporal_signal_outbox_repository is not None:
@@ -319,6 +343,41 @@ async def _apply_paused_search(
         artifact=saved_artifact,
         profile=saved_profile,
         history_entry=history_entry,
+    )
+
+
+async def _synchronize_track_assignment(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    reason_code: PausedSearchReasonCode | None,
+    actor_user_id: UUID | None,
+    lead_workflow_repository: LeadWorkflowRepository,
+    paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
+    now: datetime,
+) -> None:
+    if paused_search_track_assignment_repository is not None:
+        await synchronize_paused_search_track_assignment(
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            reason_code=reason_code,
+            clear=False,
+            actor_user_id=actor_user_id,
+            source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
+            assignment_repository=paused_search_track_assignment_repository,
+            track_mapping_repository=paused_search_track_repository,
+            lead_workflow_repository=lead_workflow_repository,
+            now=now,
+        )
+        return
+    await pin_published_paused_search_track_on_latest_workflow(
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        pause_reason_code=reason_code,
+        lead_workflow_repository=lead_workflow_repository,
+        paused_search_track_repository=paused_search_track_repository,
+        now=now,
     )
 
 

@@ -86,6 +86,9 @@ async def handle_people_event(
                     bundle.lead_repository,
                 ),
                 paused_search_track_repository=bundle.paused_search_track_repository,
+                paused_search_track_assignment_repository=(
+                    bundle.paused_search_track_assignment_repository
+                ),
                 artifact_repository=bundle.lead_classification_artifact_repository,
                 crm_conversation_event_repository=bundle.crm_conversation_event_repository,
                 workspace_llm_config_repository=bundle.workspace_llm_config_repository,

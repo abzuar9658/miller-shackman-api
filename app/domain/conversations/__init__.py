@@ -1,3 +1,4 @@
+from app.domain.conversations.event_identity import canonical_crm_event_identity
 from app.domain.conversations.models import (
     Conversation,
     ConversationStatus,
@@ -32,6 +33,7 @@ __all__ = [
     "InboundMessage",
     "InboundMessageClassificationStatus",
     "WorkspaceHandoffConfig",
+    "canonical_crm_event_identity",
     "default_workspace_handoff_config",
     "is_open_handoff",
 ]

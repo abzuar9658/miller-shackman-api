@@ -52,6 +52,7 @@ async def _main() -> int:
     from app.application.use_cases.seed_default_paused_search_tracks import (
         seed_default_paused_search_tracks,
     )
+    from app.application.use_cases.template_registry import seed_paused_search_templates
     from app.core.config import get_settings
     from app.core.database import enable_postgres_service_access
     from app.infrastructure.persistence.postgres.outbox_event_repository import (
@@ -62,6 +63,9 @@ async def _main() -> int:
         PostgresPausedSearchTrackAdminAuditLogRepository,
         PostgresPausedSearchTrackAdminRepository,
     )
+    from app.infrastructure.persistence.postgres.template_repository import (
+        PostgresTemplateRepository,
+    )
 
     settings = get_settings()
     engine = create_async_engine(settings.database_url, pool_pre_ping=True, poolclass=NullPool)
@@ -70,6 +74,12 @@ async def _main() -> int:
     try:
         async with session_factory() as session:
             await enable_postgres_service_access(session)
+            template_repository = PostgresTemplateRepository(session)
+            await seed_paused_search_templates(
+                workspace_id=args.workspace_id,
+                repository=template_repository,
+                now=datetime.now(UTC),
+            )
             actor = await _load_actor(
                 workspace_id=args.workspace_id,
                 user_id=args.actor_user_id,
@@ -85,6 +95,7 @@ async def _main() -> int:
                     if args.dry_run
                     else PostgresTransactionalEventBus(PostgresOutboxEventRepository(session))
                 ),
+                template_repository=template_repository,
                 now=datetime.now(UTC),
             )
 

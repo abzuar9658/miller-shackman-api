@@ -11,6 +11,8 @@ from app.application.use_cases.crm_history_imports import (
     CrmHistoryImportReasonCode,
     complete_crm_history_import_upload,
     create_crm_history_import,
+    create_extension_crm_history_import,
+    crm_history_export_batch_fingerprint,
     evaluate_crm_history_import_capability,
     ingest_crm_history_events,
     read_crm_history_import,
@@ -19,7 +21,7 @@ from app.domain.crm_history_imports import (
     CrmHistoryImportEventPayload,
     CrmHistoryImportJob,
 )
-from app.domain.identity import AuthenticatedActor
+from app.domain.identity import AuthenticatedActor, AuthenticatedExtensionDevice
 from app.domain.leads import CRMProvider
 from app.infrastructure.crm.follow_up_boss.history_import_parser import (
     parse_fub_people_response,
@@ -28,6 +30,7 @@ from app.interfaces.api.dependencies.crm_history_imports import (
     CrmHistoryImportBundle,
     get_crm_history_import_bundle,
 )
+from app.interfaces.api.dependencies.extension_devices import get_extension_device_actor
 from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.interfaces.api.schemas.crm_history_imports import (
     CreateCrmHistoryImportRequest,
@@ -50,11 +53,54 @@ _TOKEN_HEADER = Header(alias="X-CRM-History-Import-Token", min_length=1)
     response_model=CreateCrmHistoryImportResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def export_crm_history_from_extension_route(
+async def export_crm_history_route(
     workspace_id: UUID,
     request: ExtensionExportCrmHistoryRequest,
     actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
     bundle: Annotated[CrmHistoryImportBundle, Depends(get_crm_history_import_bundle)],
+) -> CreateCrmHistoryImportResponse:
+    response = await _export_crm_history(
+        workspace_id=workspace_id,
+        request=request,
+        actor=actor,
+        bundle=bundle,
+        extension_device=None,
+    )
+    await bundle.session.commit()
+    return response
+
+
+@router.post(
+    "/{workspace_id}/crm-history-imports/extension-export",
+    response_model=CreateCrmHistoryImportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def extension_device_export_crm_history_route(
+    workspace_id: UUID,
+    request: ExtensionExportCrmHistoryRequest,
+    extension_device: Annotated[
+        AuthenticatedExtensionDevice, Depends(get_extension_device_actor)
+    ],
+    bundle: Annotated[CrmHistoryImportBundle, Depends(get_crm_history_import_bundle)],
+) -> CreateCrmHistoryImportResponse:
+    response = await _export_crm_history(
+        workspace_id=workspace_id,
+        request=request,
+        actor=extension_device.actor,
+        bundle=bundle,
+        extension_device=extension_device,
+    )
+    await bundle.session.commit()
+    return response
+
+
+async def _export_crm_history(
+    *,
+    workspace_id: UUID,
+    request: ExtensionExportCrmHistoryRequest,
+    actor: AuthenticatedActor,
+    bundle: CrmHistoryImportBundle,
+    extension_device: AuthenticatedExtensionDevice | None,
 ) -> CreateCrmHistoryImportResponse:
     lead = await bundle.lead_repository.get_by_crm_id(
         workspace_id,
@@ -63,23 +109,43 @@ async def export_crm_history_from_extension_route(
     )
     if lead is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=["lead_not_found"])
-    created = await create_crm_history_import(
-        actor=actor,
-        workspace_id=workspace_id,
-        lead_id=lead.lead_id,
-        enabled=bundle.settings.fub_history_import_enabled,
-        lead_repository=bundle.lead_repository,
-        job_repository=bundle.job_repository,
-        audit_log_repository=bundle.audit_log_repository,
-        now=datetime.now(UTC),
-    )
-    _raise_if_rejected(created.status, created.reasons)
-    assert created.job is not None and created.upload_token is not None
     payloads = _event_payloads(request.events, source_url=request.source_url)
     if request.source_payload is not None:
         payloads += parse_fub_people_response(
             request.source_payload, request.crm_lead_id, request.source_url
         )
+    if extension_device is None:
+        created = await create_crm_history_import(
+            actor=actor,
+            workspace_id=workspace_id,
+            lead_id=lead.lead_id,
+            enabled=bundle.settings.fub_history_import_enabled,
+            lead_repository=bundle.lead_repository,
+            job_repository=bundle.job_repository,
+            audit_log_repository=bundle.audit_log_repository,
+            now=datetime.now(UTC),
+        )
+    else:
+        created = await create_extension_crm_history_import(
+            extension_device=extension_device,
+            workspace_id=workspace_id,
+            lead_id=lead.lead_id,
+            enabled=bundle.settings.fub_history_import_enabled,
+            lead_repository=bundle.lead_repository,
+            job_repository=bundle.job_repository,
+            audit_log_repository=bundle.audit_log_repository,
+            now=datetime.now(UTC),
+            batch_fingerprint=crm_history_export_batch_fingerprint(payloads),
+        )
+    _raise_if_rejected(created.status, created.reasons)
+    assert created.job is not None
+    if created.status is CrmHistoryImportMutationStatus.DUPLICATE:
+        return CreateCrmHistoryImportResponse(
+            status=created.status.value,
+            job=_job_response(created.job),
+            upload_token=None,
+        )
+    assert created.upload_token is not None
     await ingest_crm_history_events(
         workspace_id=workspace_id,
         import_job_id=created.job.import_job_id,
@@ -97,7 +163,6 @@ async def export_crm_history_from_extension_route(
         audit_log_repository=bundle.audit_log_repository,
         now=datetime.now(UTC),
     )
-    await bundle.session.commit()
     _raise_if_rejected(completed.status, completed.reasons)
     assert completed.job is not None
     return CreateCrmHistoryImportResponse(

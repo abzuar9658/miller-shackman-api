@@ -109,6 +109,7 @@ from app.domain.leads import (
     LeadClassificationReason,
     LeadType,
 )
+from app.domain.outbound_drafting import default_workspace_outbound_drafting_config
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
 from app.infrastructure.auth.passwords import PasslibPasswordHasher
 from app.infrastructure.persistence.postgres.campaign_admin_repository import (
@@ -575,7 +576,7 @@ async def _ensure_campaign(
         actor=actor,
         workspace_id=workspace_id,
         name=CAMPAIGN_NAME,
-        config=_campaign_config(),
+        config=_campaign_config(workspace_id),
         campaign_admin_repository=campaign_repository,
         audit_log_repository=audit_repository,
         now=now,
@@ -1095,7 +1096,7 @@ async def _reset_demo_lead_data(session: AsyncSession, workspace_id: WorkspaceId
         await session.execute(delete(model).where(model.workspace_id == workspace_id))
 
 
-def _campaign_config() -> CampaignConfigInput:
+def _campaign_config(workspace_id: WorkspaceId) -> CampaignConfigInput:
     return CampaignConfigInput(
         enabled_channels=(ContactChannel.EMAIL, ContactChannel.SMS),
         daily_start_cap=50,
@@ -1132,6 +1133,7 @@ def _campaign_config() -> CampaignConfigInput:
                 max_attempts=1,
             ),
         ),
+        outbound_drafting_config=default_workspace_outbound_drafting_config(workspace_id),
     )
 
 

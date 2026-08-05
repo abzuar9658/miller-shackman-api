@@ -21,6 +21,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackMappingRepository,
     UserRepository,
     WorkflowTransitionRepository,
@@ -237,6 +238,7 @@ async def start_lead_manual_enrollment(
     llm_client: LLMClient,
     crm_conversation_event_repository: CrmConversationEventRepository,
     paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
     routing_review_repository: LeadRoutingReviewRepository | None,
     event_bus: EventBus | None,
     now: datetime,
@@ -300,6 +302,7 @@ async def start_lead_manual_enrollment(
         crm_conversation_event_repository=crm_conversation_event_repository,
         lead_workflow_repository=lead_workflow_repository,
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         routing_review_repository=routing_review_repository,
         now=now,
         default_openrouter_model=default_openrouter_model,
@@ -307,6 +310,25 @@ async def start_lead_manual_enrollment(
     )
 
     if route_result.route == AiNurtureRoute.PAUSED_SEARCH:
+        if paused_search_track_assignment_repository is None:
+            review_reasons = route_result.reason_codes + (
+                "paused_search_track_assignment_unavailable",
+            )
+            await record_pending_ai_nurture_routing_review(
+                workspace_id=workspace_id,
+                lead=lead,
+                route_result=route_result,
+                reason_codes=review_reasons,
+                routing_review_repository=routing_review_repository,
+                now=now,
+            )
+            return StartLeadManualEnrollmentResult(
+                status=LeadManualEnrollmentActionStatus.REVIEW_HOLD,
+                campaign_id=campaign_id,
+                campaign_version_id=version.campaign_version_id,
+                route=AiNurtureRoute.REVIEW_HOLD,
+                reasons=review_reasons,
+            )
         current_lead = await lead_repository.get_by_id(workspace_id, lead_id)
         paused_search_result = await start_paused_search_campaign_enrollment(
             workspace_id=workspace_id,
@@ -323,6 +345,9 @@ async def start_lead_manual_enrollment(
             workspace_operational_control_repository=workspace_operational_control_repository,
             temporal_workflow_starter=temporal_workflow_starter,
             paused_search_track_repository=paused_search_track_repository,
+            paused_search_track_assignment_repository=(
+                paused_search_track_assignment_repository
+            ),
             commit=commit,
             now=now,
             event_bus=event_bus,

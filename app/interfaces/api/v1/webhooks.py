@@ -104,6 +104,9 @@ async def _handle_inbound_message_event(
         lead_workflow_repository=bundle.lead_workflow_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
         paused_search_track_repository=bundle.paused_search_track_repository,
+        paused_search_track_assignment_repository=(
+            bundle.paused_search_track_assignment_repository
+        ),
         paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
         llm_client=bundle.llm_client,
         event_bus=bundle.event_bus,

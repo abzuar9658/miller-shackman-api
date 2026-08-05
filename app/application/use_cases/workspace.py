@@ -183,7 +183,7 @@ class WorkspaceSettingsView:
     handoff_config: WorkspaceHandoffConfig
     crm_sync_config: WorkspaceCRMSyncConfig
     llm_config: WorkspaceLLMConfig
-    outbound_drafting_config: WorkspaceOutboundDraftingConfig
+    outbound_drafting_config: WorkspaceOutboundDraftingConfig | None
     operational_control: WorkspaceOperationalControl
 
 
@@ -745,7 +745,8 @@ async def get_workspace_settings(
                 )
             ),
             outbound_drafting_config=(
-                outbound_drafting_config or default_workspace_outbound_drafting_config(workspace_id)
+                outbound_drafting_config
+                or default_workspace_outbound_drafting_config(workspace_id)
             ),
             operational_control=(
                 operational_control or default_workspace_operational_control(workspace_id)
@@ -1348,9 +1349,9 @@ async def update_workspace_outbound_drafting_config(
             reasons=(AuthReasonCode.WORKSPACE_NOT_FOUND,),
         )
 
-    current_config = (
-        await workspace_outbound_drafting_config_repository.get_by_workspace_id(workspace_id)
-    ) or default_workspace_outbound_drafting_config(workspace_id)
+    current_config = await workspace_outbound_drafting_config_repository.get_by_workspace_id(
+        workspace_id
+    )
     normalized_fields = normalize_enabled_extraction_fields(enabled_extraction_fields)
     normalized_prompt_text = normalize_config_prompt_text(prompt_text)
     normalized_sms_prompt_text = normalize_outbound_prompt_text(
@@ -1367,7 +1368,8 @@ async def update_workspace_outbound_drafting_config(
         email_subject_template,
     )
     if (
-        current_config.prompt_text == normalized_prompt_text
+        current_config is not None
+        and current_config.prompt_text == normalized_prompt_text
         and current_config.sms_prompt_text == normalized_sms_prompt_text
         and current_config.sms_template == normalized_sms_template
         and current_config.email_prompt_text == normalized_email_prompt_text
@@ -1383,7 +1385,7 @@ async def update_workspace_outbound_drafting_config(
     saved_config = await workspace_outbound_drafting_config_repository.save(
         WorkspaceOutboundDraftingConfig(
             workspace_id=workspace_id,
-            revision=current_config.revision,
+            revision=current_config.revision if current_config is not None else 1,
             prompt_text=normalized_prompt_text,
             sms_prompt_text=normalized_sms_prompt_text,
             sms_template=normalized_sms_template,

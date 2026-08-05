@@ -10,6 +10,7 @@ from app.application.ports.listing_sources import ListingSnapshotRepository, Lis
 from app.application.ports.llm import LLMClient
 from app.application.ports.repositories import (
     AuthAuditLogRepository,
+    CampaignAdminRepository,
     LeadWorkflowRepository,
     TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
@@ -24,6 +25,9 @@ from app.application.ports.repositories import (
 )
 from app.core.config import Settings, get_settings
 from app.core.database import get_session
+from app.infrastructure.persistence.postgres.campaign_admin_repository import (
+    PostgresCampaignAdminRepository,
+)
 from app.infrastructure.persistence.postgres.identity_repository import (
     PostgresAuthAuditLogRepository,
     PostgresWorkspaceMembershipRepository,
@@ -98,6 +102,7 @@ class WorkspaceOutboundDraftingPreviewBundle:
     listing_search_client: ListingSearchClient
     listing_cache_ttl: timedelta
     default_openrouter_model: str
+    campaign_admin_repository: CampaignAdminRepository
 
 
 async def get_workspace_settings_bundle(
@@ -145,4 +150,5 @@ async def get_workspace_outbound_drafting_preview_bundle(
         listing_search_client=build_listing_search_client(settings),
         listing_cache_ttl=timedelta(minutes=settings.listing_context_enrichment_cache_ttl_minutes),
         default_openrouter_model=settings.openrouter_model,
+        campaign_admin_repository=PostgresCampaignAdminRepository(session),
     )
