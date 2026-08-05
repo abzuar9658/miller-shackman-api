@@ -183,6 +183,18 @@ def test_preflight_routes_return_list_and_detail_for_brokerage_admin() -> None:
     assert detail_response.json()["entries"][0]["vetoed"] is True
 
 
+def test_preflight_routes_allow_platform_super_admin() -> None:
+    client = _client_for_role(WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN)
+
+    list_response = client.client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/preflight-digests")
+    detail_response = client.client.get(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/preflight-digests/{DIGEST_ID}"
+    )
+
+    assert list_response.status_code == 200
+    assert detail_response.status_code == 200
+
+
 def test_preflight_routes_allow_assigned_agent_for_own_mapped_lead() -> None:
     actor_id = UUID("00000000-0000-0000-0000-000000000005")
     crm_agent_record_id = UUID("00000000-0000-0000-0000-000000000006")

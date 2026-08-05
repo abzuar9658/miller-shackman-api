@@ -26,7 +26,6 @@ from app.domain.campaigns import (
     CampaignStatus,
     CampaignVersionStatus,
     PausedSearchFallbackTimingPolicy,
-    PausedSearchTrackFamily,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
@@ -50,7 +49,6 @@ from app.domain.identity import Workspace, WorkspaceStatus
 from app.domain.leads import (
     CanonicalLeadRecord,
     CRMProvider,
-    PausedSearchReasonCode,
     PausedSearchSource,
 )
 from app.domain.outbound_drafting import (
@@ -1535,7 +1533,8 @@ def _paused_search_lead(
     return replace(
         _lead(has_email=has_email, has_phone=has_phone),
         paused_search_active=True,
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=PAUSED_SEARCH_TRACK_VERSION_ID,
         pause_reason_note="Waiting for mortgage rates to improve.",
         reengagement_not_before=NOW + timedelta(days=90),
         reengagement_window_label="fall check-in",
@@ -1637,15 +1636,13 @@ def _paused_search_track_version() -> PausedSearchTrackVersion:
         track_id=PAUSED_SEARCH_TRACK_ID,
         version_number=1,
         status=CampaignVersionStatus.PUBLISHED,
-        track_family=PausedSearchTrackFamily.MAINTENANCE,
+        selection_guidance="Select when a paused lead needs periodic follow-up.",
         enabled=True,
         allowed_channels=(ContactChannel.EMAIL,),
-        default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
         fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_MAINTENANCE_INTERVAL,
         maintenance_interval_days=60,
         reactivation_window_days=30,
         max_total_touches=4,
-        requires_review_before_publish=False,
         created_by_user_id=UUID("00000000-0000-0000-0000-00000000000d"),
         created_at=NOW,
         published_at=NOW,

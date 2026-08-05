@@ -2,7 +2,10 @@ from app.application.services.llm.lead_state_classification import (
     LeadStateClassificationResult,
     LeadStateClassificationStatus,
 )
-from app.domain.leads import LeadStateClassificationOutcome, PausedSearchReasonCode
+from app.domain.leads import (
+    LeadStateClassificationOutcome,
+    PausedSearchTrackSelectionStatus,
+)
 from scripts.evaluate_lead_state_classification import (
     EvaluationScenario,
     ScenarioEvaluation,
@@ -15,7 +18,7 @@ def _scenario(
     key: str,
     *,
     expected_outcome: str,
-    expected_pause_reason: str | None = None,
+    expected_track_key: str | None = None,
     expected_handoff_reason: str | None = None,
 ) -> EvaluationScenario:
     return EvaluationScenario(
@@ -23,7 +26,7 @@ def _scenario(
         title=key,
         description=key,
         expected_outcome=expected_outcome,
-        expected_pause_reason=expected_pause_reason,
+        expected_track_key=expected_track_key,
         events=(),
         lead_last_meaningful_communication_at=None,
         enrollment_signal="test",
@@ -34,13 +37,16 @@ def _scenario(
 def _result(
     outcome: LeadStateClassificationOutcome,
     *,
-    pause_reason: PausedSearchReasonCode | None = None,
+    track_key: str | None = None,
 ) -> LeadStateClassificationResult:
     return LeadStateClassificationResult(
         status=LeadStateClassificationStatus.CLASSIFIED,
         prompt_version="test:v1",
         outcome=outcome,
-        pause_reason_code=pause_reason,
+        selected_track_key=track_key,
+        track_selection_status=(
+            PausedSearchTrackSelectionStatus.SELECTED if track_key else None
+        ),
         confidence=0.9,
     )
 
@@ -69,7 +75,7 @@ def test_aggregate_metrics_reports_route_mismatch_and_safety_signals() -> None:
             scenario=review_scenario,
             result=_result(
                 LeadStateClassificationOutcome.PAUSED_SEARCH,
-                pause_reason=PausedSearchReasonCode.OTHER_KNOWN_PAUSE,
+                track_key="other-known-pause",
             ),
             prompt_texts=(),
             matches=False,

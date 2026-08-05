@@ -6,7 +6,6 @@ from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchTerminalBehavior,
     PausedSearchTrack,
-    PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
@@ -18,7 +17,6 @@ from app.domain.campaigns import (
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.template_registry import TemplateChannel, TemplateStatus, TemplateVersion
 from app.domain.compliance import ContactChannel
-from app.domain.leads import PausedSearchReasonCode
 from app.domain.outbound_drafting import DormantStepTemplateProfile
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
@@ -60,7 +58,15 @@ def test_template_binding_is_required_and_must_match_step() -> None:
         subject="Checking in",
         prompt_text="Write a check-in.",
         allowed_variables=("message_body",),
-        permitted_use_tags=("no_prohibited_advice",),
+        permitted_use_tags=(
+            "no_prohibited_advice",
+            "no_financial_advice",
+            "no_legal_advice",
+            "no_tax_advice",
+            "no_investment_advice",
+            "no_market_predictions",
+            "no_unverified_listing_claims",
+        ),
         status=TemplateStatus.APPROVED,
         approved_at=NOW,
         created_at=NOW,
@@ -130,10 +136,9 @@ def test_validation_reports_all_blocking_configuration_findings() -> None:
     version = replace(
         _version(),
         allowed_channels=(),
-        default_for_reason_codes=(),
+        selection_guidance="too short",
         max_total_touches=6,
         max_duration_days=20,
-        requires_review_before_publish=True,
     )
     step = replace(
         _step(),
@@ -159,7 +164,7 @@ def test_validation_reports_all_blocking_configuration_findings() -> None:
         PausedSearchValidationCode.EMPTY_TRACK_KEY,
         PausedSearchValidationCode.EMPTY_DISPLAY_NAME,
         PausedSearchValidationCode.NO_ALLOWED_CHANNELS,
-        PausedSearchValidationCode.NO_REASON_MAPPING,
+        PausedSearchValidationCode.INVALID_SELECTION_GUIDANCE,
         PausedSearchValidationCode.INVALID_TOUCH_LIMIT,
         PausedSearchValidationCode.INVALID_DURATION,
         PausedSearchValidationCode.INVALID_STEP_ORDER,
@@ -170,42 +175,7 @@ def test_validation_reports_all_blocking_configuration_findings() -> None:
         PausedSearchValidationCode.INVALID_MAX_ATTEMPTS,
         PausedSearchValidationCode.INVALID_MAX_OCCURRENCES,
         PausedSearchValidationCode.INVALID_RECURRING_INTERVAL,
-        PausedSearchValidationCode.LEGACY_PUBLISH_REVIEW_REQUIRED,
     }.issubset({item.code for item in report.errors})
-
-
-def test_capability_profile_limits_are_authoritative() -> None:
-    version = replace(
-        _version(),
-        default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_INVENTORY,),
-        max_duration_days=365,
-    )
-    report = validate_paused_search_track(
-        track=_track(),
-        version=version,
-        steps=(_step(interval_days=90),),
-        for_publish=False,
-    )
-
-    assert {
-        PausedSearchValidationCode.PROFILE_DURATION_EXCEEDED,
-        PausedSearchValidationCode.PROFILE_INTERVAL_OUT_OF_RANGE,
-    }.issubset({item.code for item in report.errors})
-
-
-def test_legacy_review_flag_is_warning_for_draft_and_error_for_publish() -> None:
-    version = replace(_version(), requires_review_before_publish=True)
-    draft = validate_paused_search_track(
-        track=_track(), version=version, steps=(_step(),), for_publish=False
-    )
-    publish = validate_paused_search_track(
-        track=_track(), version=version, steps=(_step(),), for_publish=True
-    )
-
-    assert draft.publishable
-    assert draft.warnings[0].code is PausedSearchValidationCode.LEGACY_PUBLISH_REVIEW_REQUIRED
-    assert not publish.publishable
-    assert publish.errors[0].code is PausedSearchValidationCode.LEGACY_PUBLISH_REVIEW_REQUIRED
 
 
 def _track() -> PausedSearchTrack:
@@ -229,15 +199,13 @@ def _version(*, max_total_touches: int = 3) -> PausedSearchTrackVersion:
         track_id=TRACK_ID,
         version_number=1,
         status=CampaignVersionStatus.DRAFT,
-        track_family=PausedSearchTrackFamily.MAINTENANCE,
+        selection_guidance="Select when a temporary renter plans to search again later.",
         enabled=True,
         allowed_channels=(ContactChannel.EMAIL,),
-        default_for_reason_codes=(PausedSearchReasonCode.RENTED_TEMPORARILY,),
         fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_MAINTENANCE_INTERVAL,
         maintenance_interval_days=90,
         reactivation_window_days=45,
         max_total_touches=max_total_touches,
-        requires_review_before_publish=False,
         created_by_user_id=USER_ID,
         created_at=NOW,
         terminal_behavior=PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED,

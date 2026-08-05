@@ -29,7 +29,6 @@ from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrack,
     PausedSearchTrackAssignment,
     PausedSearchTrackAssignmentSource,
-    PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
@@ -85,7 +84,6 @@ from app.domain.leads import (
     LeadRoutingReviewStatus,
     LeadStateClassificationOutcome,
     PausedSearchAction,
-    PausedSearchReasonCode,
     PausedSearchSource,
 )
 from app.domain.workflows import (
@@ -353,14 +351,17 @@ def test_lead_routes_return_list_and_detail() -> None:
     assert detail_response.json()["ownership"]["mapped_app_user"]["user_id"] == str(USER_ID)
     assert detail_response.json()["ownership"]["mapped_app_user"]["email"] == "agent@example.com"
     assert (
-        detail_response.json()["lead"]["paused_search"]["pause_reason_code"] == "waiting_for_rates"
+        detail_response.json()["lead"]["paused_search"]["paused_search_track_key"]
+        == "waiting-for-rates"
     )
     assert detail_response.json()["qualification_plan"]["classification_artifact"]["outcome"] == (
         "paused_search"
     )
     assert (
-        detail_response.json()["qualification_plan"]["classification_artifact"]["pause_reason_code"]
-        == "waiting_for_rates"
+        detail_response.json()["qualification_plan"]["classification_artifact"][
+            "selected_track_key"
+        ]
+        == "waiting-for-rates"
     )
     trace = detail_response.json()["qualification_plan"]["classification_artifact"]["llm_trace"]
     assert trace["prompt_text"] == "Prompt text for paused-search classification."
@@ -543,7 +544,7 @@ def test_update_paused_search_route_updates_profile_and_history() -> None:
         f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search",
         json={
             "active": True,
-            "reason_code": "waiting_for_inventory",
+            "selected_track_key": "rates-watch",
             "reason_note": "Holding for new listings this fall.",
             "reengagement_not_before": "2030-03-01T12:00:00Z",
             "reengagement_window_label": "fall inventory",
@@ -553,7 +554,7 @@ def test_update_paused_search_route_updates_profile_and_history() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "updated"
-    assert payload["paused_search"]["pause_reason_code"] == "waiting_for_inventory"
+    assert payload["paused_search"]["paused_search_track_key"] == "rates-watch"
     assert payload["history_entry"]["action"] == "updated"
 
 
@@ -565,7 +566,7 @@ def test_assigned_agent_cannot_update_unowned_paused_search_profile() -> None:
 
     response = client.client.patch(
         f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search",
-        json={"active": True, "reason_code": "timing_not_right"},
+        json={"active": True, "selected_track_key": "rates-watch"},
     )
 
     assert response.status_code == 403
@@ -577,7 +578,7 @@ def test_clear_paused_search_request_rejects_extra_fields() -> None:
 
     response = client.client.patch(
         f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search",
-        json={"active": False, "reason_code": "timing_not_right"},
+        json={"active": False, "selected_track_key": "rates-watch"},
     )
 
     assert response.status_code == 422
@@ -673,7 +674,8 @@ def _client_for_role(
         email_permission_status=email_permission_status,
         do_not_contact=False,
         paused_search_active=True,
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=UUID("00000000-0000-0000-0000-000000000052"),
         pause_reason_note="Asked to revisit once rates settle.",
         reengagement_not_before=NOW,
         reengagement_window_label="check back in 90 days",
@@ -722,7 +724,8 @@ def _client_for_role(
                 previous_profile=None,
                 current_profile=LeadPausedSearchProfile(
                     paused_search_active=True,
-                    pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+                    paused_search_track_key="rates-watch",
+                    paused_search_track_version_id=UUID("00000000-0000-0000-0000-000000000052"),
                     pause_reason_note="Asked to revisit once rates settle.",
                     reengagement_not_before=NOW,
                     reengagement_window_label="check back in 90 days",
@@ -785,8 +788,7 @@ def _client_for_role(
                     track_key_snapshot="rates-watch",
                     track_name_snapshot="Rates Watch",
                     track_version_snapshot=2,
-                    reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
-                    source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
+                    source=PausedSearchTrackAssignmentSource.CLASSIFICATION,
                     assigned_by_user_id=USER_ID,
                     assigned_at=NOW,
                 ),
@@ -882,7 +884,12 @@ def _client_for_role(
         lead_repository=lead_repository,
         paused_search_history_repository=paused_search_history_repository,
         lead_workflow_repository=FakeLeadWorkflowRepository((workflow,)),
-        paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
+        paused_search_track_repository=FakePausedSearchTrackAdminRepository(
+            tracks=(_paused_search_track(),),
+            versions=(_paused_search_track_version(),),
+            steps=(_paused_search_track_step(),),
+        ),
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         temporal_signal_outbox_repository=outbox,
     )
     workflow_override_action_bundle = LeadWorkflowOverrideActionBundle(
@@ -892,6 +899,7 @@ def _client_for_role(
         lead_workflow_repository=FakeLeadWorkflowRepository((workflow,)),
         lead_workflow_override_audit_repository=FakeLeadWorkflowOverrideAuditLogRepository(()),
         paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         temporal_signal_outbox_repository=outbox,
         workspace_repository=FakeWorkspaceRepository(_workspace()),
     )
@@ -954,7 +962,7 @@ def _classification_artifact() -> LeadClassificationArtifact:
         lead_id=LEAD_ID,
         source="ai_conversation_classification",
         outcome=LeadStateClassificationOutcome.PAUSED_SEARCH,
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        selected_track_key="waiting-for-rates",
         reengagement_not_before=NOW,
         reengagement_window_label="check back in 90 days",
         confidence=0.94,
@@ -979,11 +987,11 @@ def _classification_artifact() -> LeadClassificationArtifact:
             ],
         },
         raw_llm_response_text=(
-            '{"outcome":"paused_search","pause_reason_code":"waiting_for_rates"}'
+            '{"outcome":"paused_search","selected_track_key":"waiting-for-rates"}'
         ),
         parsed_llm_response={
             "outcome": "paused_search",
-            "pause_reason_code": "waiting_for_rates",
+            "selected_track_key": "waiting-for-rates",
             "confidence": 0.94,
             "summary": "Pause until rates settle, then re-engage.",
         },
@@ -997,7 +1005,6 @@ def _review_queue_artifact() -> LeadClassificationArtifact:
         lead_id=LEAD_ID,
         source="ai_conversation_classification",
         outcome=LeadStateClassificationOutcome.REVIEW_HOLD,
-        pause_reason_code=None,
         reengagement_not_before=None,
         reengagement_window_label=None,
         confidence=0.55,
@@ -1103,15 +1110,13 @@ def _paused_search_track_version() -> PausedSearchTrackVersion:
         track_id=UUID("00000000-0000-0000-0000-000000000054"),
         version_number=2,
         status=CampaignVersionStatus.PUBLISHED,
-        track_family=PausedSearchTrackFamily.REACTIVATION,
+        selection_guidance="Select when a paused lead needs periodic follow-up.",
         enabled=True,
         allowed_channels=(ContactChannel.SMS, ContactChannel.EMAIL),
-        default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
         fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_REENGAGEMENT_NOT_BEFORE,
         maintenance_interval_days=30,
         reactivation_window_days=14,
         max_total_touches=5,
-        requires_review_before_publish=False,
         created_by_user_id=USER_ID,
         created_at=NOW,
         published_at=NOW,

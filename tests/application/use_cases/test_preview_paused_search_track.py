@@ -11,7 +11,6 @@ from app.application.use_cases.preview_paused_search_track import (
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchTrack,
-    PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
@@ -28,7 +27,7 @@ from app.domain.identity import (
     WorkspaceMembershipStatus,
     WorkspaceStatus,
 )
-from app.domain.leads import LeadPausedSearchProfile, PausedSearchReasonCode
+from app.domain.leads import LeadPausedSearchProfile
 from app.domain.workflows import LeadWorkflow, WorkflowState
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
@@ -150,15 +149,13 @@ def _version() -> PausedSearchTrackVersion:
         track_id=TRACK_ID,
         version_number=1,
         status=CampaignVersionStatus.DRAFT,
-        track_family=PausedSearchTrackFamily.MAINTENANCE,
+        selection_guidance="Select when a paused lead needs periodic follow-up.",
         enabled=True,
         allowed_channels=(ContactChannel.EMAIL,),
-        default_for_reason_codes=(PausedSearchReasonCode.RENTED_TEMPORARILY,),
         fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_MAINTENANCE_INTERVAL,
         maintenance_interval_days=30,
         reactivation_window_days=30,
         max_total_touches=2,
-        requires_review_before_publish=False,
         created_by_user_id=USER_ID,
         created_at=NOW,
     )
@@ -186,7 +183,8 @@ def _step() -> PausedSearchTrackStep:
 def _profile() -> LeadPausedSearchProfile:
     return LeadPausedSearchProfile(
         paused_search_active=True,
-        pause_reason_code=PausedSearchReasonCode.RENTED_TEMPORARILY,
+        paused_search_track_key="rented-year",
+        paused_search_track_version_id=VERSION_ID,
     )
 
 

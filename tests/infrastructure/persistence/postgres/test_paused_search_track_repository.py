@@ -8,13 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
-    PausedSearchReasonMapping,
     PausedSearchTrack,
     PausedSearchTrackAdminAuditAction,
     PausedSearchTrackAdminAuditLog,
     PausedSearchTrackAssignment,
     PausedSearchTrackAssignmentSource,
-    PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
@@ -23,7 +21,6 @@ from app.domain.campaigns import (
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.template_registry import TemplateChannel, TemplateStatus, TemplateVersion
 from app.domain.compliance.contactability import ContactChannel
-from app.domain.leads import PausedSearchReasonCode
 from app.infrastructure.persistence.postgres.models import (
     LeadModel,
     PausedSearchTrackAdminAuditLogModel,
@@ -63,20 +60,11 @@ async def test_paused_search_track_repository_saves_versions_steps_mappings_and_
     track = await repository.save_track(_track())
     version = await repository.save_version(_version())
     steps = await repository.replace_steps(WORKSPACE_ID, VERSION_ID, (_step(),))
-    mappings = await repository.replace_reason_mappings(
-        workspace_id=WORKSPACE_ID,
-        track_id=TRACK_ID,
-        track_version_id=VERSION_ID,
-        reason_codes=(PausedSearchReasonCode.RENTED_TEMPORARILY,),
-        actor_user_id=USER_ID,
-        now=NOW,
-    )
     audit_log = await audit_repository.append(_audit_log())
 
     assert track == _track()
     assert version == _version()
     assert steps == (_step(),)
-    assert mappings == (_mapping(mappings[0].mapping_id),)
     assert audit_log.action == PausedSearchTrackAdminAuditAction.DRAFT_CREATED
     assert await repository.list_tracks(WORKSPACE_ID) == (track,)
     assert await repository.get_track_for_update(WORKSPACE_ID, TRACK_ID) == track
@@ -85,13 +73,6 @@ async def test_paused_search_track_repository_saves_versions_steps_mappings_and_
     assert await repository.get_latest_version(WORKSPACE_ID, TRACK_ID) == version
     assert await repository.get_latest_version_number(WORKSPACE_ID, TRACK_ID) == 1
     assert await repository.get_steps(WORKSPACE_ID, VERSION_ID) == (_step(),)
-    assert (
-        await repository.get_reason_mapping(
-            WORKSPACE_ID,
-            PausedSearchReasonCode.RENTED_TEMPORARILY,
-        )
-        == mappings[0]
-    )
 
     await repository.retire_published_versions(WORKSPACE_ID, TRACK_ID, except_version_id=None)
     assert await repository.get_version(WORKSPACE_ID, VERSION_ID) == version
@@ -102,10 +83,6 @@ async def test_paused_search_track_repository_saves_versions_steps_mappings_and_
     assert await repository.get_track(WORKSPACE_ID, TRACK_ID) is None
     assert await repository.get_version(WORKSPACE_ID, VERSION_ID) is None
     assert await repository.get_steps(WORKSPACE_ID, VERSION_ID) == ()
-    assert await repository.get_reason_mapping(
-        WORKSPACE_ID,
-        PausedSearchReasonCode.RENTED_TEMPORARILY,
-    ) is None
     audit_result = await postgres_session.execute(
         select(PausedSearchTrackAdminAuditLogModel).where(
             PausedSearchTrackAdminAuditLogModel.audit_log_id == AUDIT_ID
@@ -160,7 +137,7 @@ async def test_paused_search_track_assignment_repository_creates_locks_and_relea
     replacement = replace(
         assignment,
         assignment_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
-        source=PausedSearchTrackAssignmentSource.ADMIN_REPAIR,
+        source=PausedSearchTrackAssignmentSource.OPERATOR,
     )
     assert await repository.create(replacement) == replacement
 
@@ -250,15 +227,13 @@ def _version() -> PausedSearchTrackVersion:
         track_id=TRACK_ID,
         version_number=1,
         status=CampaignVersionStatus.DRAFT,
-        track_family=PausedSearchTrackFamily.MAINTENANCE,
+        selection_guidance="Select when a temporary renter plans to search again later.",
         enabled=True,
         allowed_channels=(ContactChannel.EMAIL,),
-        default_for_reason_codes=(PausedSearchReasonCode.RENTED_TEMPORARILY,),
         fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_REENGAGEMENT_NOT_BEFORE,
         maintenance_interval_days=90,
         reactivation_window_days=45,
         max_total_touches=2,
-        requires_review_before_publish=False,
         created_by_user_id=USER_ID,
         created_at=NOW,
     )
@@ -277,18 +252,6 @@ def _step() -> PausedSearchTrackStep:
         template_key="paused-search-maintenance-email-1",
         max_attempts=1,
         review_required=False,
-        created_at=NOW,
-    )
-
-
-def _mapping(mapping_id: UUID) -> PausedSearchReasonMapping:
-    return PausedSearchReasonMapping(
-        mapping_id=mapping_id,
-        workspace_id=WORKSPACE_ID,
-        reason_code=PausedSearchReasonCode.RENTED_TEMPORARILY,
-        track_id=TRACK_ID,
-        track_version_id=VERSION_ID,
-        created_by_user_id=USER_ID,
         created_at=NOW,
     )
 
@@ -316,8 +279,7 @@ def _assignment() -> PausedSearchTrackAssignment:
         track_key_snapshot="rented-year",
         track_name_snapshot="Rented for a year",
         track_version_snapshot=1,
-        reason_code=PausedSearchReasonCode.RENTED_TEMPORARILY,
-        source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
+        source=PausedSearchTrackAssignmentSource.CLASSIFICATION,
         assigned_by_user_id=USER_ID,
         assigned_at=NOW,
     )
@@ -355,7 +317,8 @@ async def _create_lead(postgres_session: AsyncSession) -> None:
             activity_reliability="reliable",
             latest_property_context_present=False,
             paused_search_active=True,
-            pause_reason_code=PausedSearchReasonCode.RENTED_TEMPORARILY.value,
+            paused_search_track_key="rented-year",
+            paused_search_track_version_id=VERSION_ID,
             created_at=NOW,
             updated_at=NOW,
         )

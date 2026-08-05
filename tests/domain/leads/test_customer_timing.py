@@ -7,7 +7,6 @@ from app.domain.leads import (
     CustomerTimingCandidate,
     CustomerTimingEvidenceType,
     CustomerTimingStatus,
-    PausedSearchReasonCode,
     PausedSearchSource,
     confirm_customer_timing,
 )
@@ -19,7 +18,6 @@ def test_confirming_ai_candidate_requires_a_date_and_records_operator() -> None:
         timing_id=uuid4(),
         workspace_id=uuid4(),
         lead_id=uuid4(),
-        reason_code=PausedSearchReasonCode.TIMING_NOT_RIGHT,
         customer_date=now,
         source=PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
         evidence_type=CustomerTimingEvidenceType.AI_EXTRACTION,
@@ -41,7 +39,6 @@ def test_confirming_without_a_date_is_rejected() -> None:
         timing_id=uuid4(),
         workspace_id=uuid4(),
         lead_id=uuid4(),
-        reason_code=None,
         customer_date=None,
         source=PausedSearchSource.OPERATOR,
         evidence_type=CustomerTimingEvidenceType.OPERATOR_INPUT,

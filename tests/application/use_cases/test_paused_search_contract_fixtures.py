@@ -22,4 +22,4 @@ def test_paused_search_contract_fixture_ids_are_distinct_and_stable() -> None:
     )
 
     assert len(set(identifiers)) == len(identifiers)
-    assert fixture.profile_key == "timing_not_right"
+    assert fixture.track_key == "timing-not-right"

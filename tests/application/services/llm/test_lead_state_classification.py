@@ -3,12 +3,15 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import pytest
+
 from app.application.ports.llm import LLMClient, LLMCompletionRequest, LLMResult
 from app.application.services.llm.lead_state_classification import (
     LeadStateClassificationReasonCode,
     LeadStateClassificationStatus,
     classify_lead_from_conversation,
 )
+from app.domain.campaigns import PausedSearchTrackCatalogEntry
 from app.domain.conversations import (
     CrmConversationEvent,
     CrmConversationEventDirection,
@@ -18,7 +21,7 @@ from app.domain.leads import (
     CanonicalLeadRecord,
     CRMProvider,
     LeadStateClassificationOutcome,
-    PausedSearchReasonCode,
+    PausedSearchTrackSelectionStatus,
     PropertyEventType,
 )
 
@@ -76,14 +79,65 @@ def _event(
 
 
 def _classification_json(**kwargs: object) -> str:
+    explicit_selection_status = kwargs.pop("track_selection_status", None)
+    explicit_track_key = kwargs.pop("selected_track_key", None)
+    if kwargs.get("outcome") == "paused_search":
+        kwargs["selected_track_key"] = explicit_track_key
+        kwargs["track_selection_status"] = explicit_selection_status or (
+            "selected" if explicit_track_key is not None else None
+        )
+    else:
+        kwargs["selected_track_key"] = None
+        kwargs["track_selection_status"] = None
     return json.dumps(kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selection_status", ["no_match", "ambiguous"])
+async def test_preserves_uncertain_catalog_selection_for_review(
+    selection_status: str,
+) -> None:
+    client = _StubLLMClient(
+        _classification_json(
+            outcome="paused_search",
+            selected_track_key=None,
+            track_selection_status=selection_status,
+            confidence=0.9,
+            evidence=["The pause does not clearly fit one category"],
+            summary="Track selection needs human review.",
+        )
+    )
+
+    result = await classify_lead_from_conversation(
+        lead=_lead(),
+        now=NOW,
+        crm_conversation_events=(_event("Please pause for now"),),
+        llm_client=client,
+        paused_search_catalog=_catalog(),
+    )
+
+    assert result.status is LeadStateClassificationStatus.CLASSIFIED
+    assert result.track_selection_status is PausedSearchTrackSelectionStatus(selection_status)
+    assert result.track_version_id is None
+
+
+def _catalog() -> tuple[PausedSearchTrackCatalogEntry, ...]:
+    return (
+        PausedSearchTrackCatalogEntry(
+            track_key="waiting-for-rates",
+            display_name="Waiting for rates",
+            selection_guidance="Use when a lead explicitly waits for borrowing rates to improve.",
+            track_id=UUID("00000000-0000-0000-0000-000000000003"),
+            track_version_id=UUID("00000000-0000-0000-0000-000000000004"),
+        ),
+    )
 
 
 async def test_classifies_paused_search_with_reason_and_timing() -> None:
     client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
-            pause_reason_code="waiting_for_rates",
+            selected_track_key="waiting-for-rates",
             reengagement_not_before="2026-09-01",
             reengagement_window_label="after summer",
             confidence=0.88,
@@ -96,10 +150,13 @@ async def test_classifies_paused_search_with_reason_and_timing() -> None:
         now=NOW,
         crm_conversation_events=(_event("I'm waiting for rates to drop"),),
         llm_client=client,
+        paused_search_catalog=_catalog(),
     )
     assert result.status == LeadStateClassificationStatus.CLASSIFIED
     assert result.outcome == LeadStateClassificationOutcome.PAUSED_SEARCH
-    assert result.pause_reason_code == PausedSearchReasonCode.WAITING_FOR_RATES
+    assert result.selected_track_key == "waiting-for-rates"
+    assert result.track_selection_status is PausedSearchTrackSelectionStatus.SELECTED
+    assert result.track_version_id == _catalog()[0].track_version_id
     assert result.reengagement_not_before == datetime(2026, 9, 1, tzinfo=UTC)
     assert result.reengagement_window_label == "after summer"
     assert result.confidence == 0.88
@@ -119,7 +176,6 @@ async def test_classifies_human_handoff_with_reason_code() -> None:
         _classification_json(
             outcome="human_handoff",
             handoff_reason_code="specific_property_or_advice",
-            pause_reason_code=None,
             reengagement_not_before=None,
             reengagement_window_label=None,
             confidence=0.93,
@@ -132,6 +188,7 @@ async def test_classifies_human_handoff_with_reason_code() -> None:
         now=NOW,
         crm_conversation_events=(_event("Can you advise me on pricing for this listing?"),),
         llm_client=client,
+        paused_search_catalog=_catalog(),
     )
     assert result.status == LeadStateClassificationStatus.CLASSIFIED
     assert result.outcome == LeadStateClassificationOutcome.HUMAN_HANDOFF
@@ -142,7 +199,6 @@ async def test_rejects_human_handoff_without_reason_code() -> None:
     client = _StubLLMClient(
         _classification_json(
             outcome="human_handoff",
-            pause_reason_code=None,
             reengagement_not_before=None,
             reengagement_window_label=None,
             confidence=0.90,
@@ -165,7 +221,6 @@ async def test_maps_unknown_outcome_to_review_hold() -> None:
         _classification_json(
             outcome="unknown",
             handoff_reason_code=None,
-            pause_reason_code=None,
             confidence=0.91,
             evidence=["Conversation mixed timing and interest signals."],
             summary="No route is a clear safe winner.",
@@ -176,6 +231,7 @@ async def test_maps_unknown_outcome_to_review_hold() -> None:
         now=NOW,
         crm_conversation_events=(_event("Maybe next year, not sure yet."),),
         llm_client=client,
+        paused_search_catalog=_catalog(),
     )
     assert result.status == LeadStateClassificationStatus.CLASSIFIED
     assert result.outcome == LeadStateClassificationOutcome.REVIEW_HOLD
@@ -186,7 +242,7 @@ async def test_rejects_low_confidence() -> None:
     client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
-            pause_reason_code="waiting_for_rates",
+            selected_track_key="waiting-for-rates",
             confidence=0.45,
             evidence=["Maybe waiting"],
             summary="Low confidence.",
@@ -197,6 +253,7 @@ async def test_rejects_low_confidence() -> None:
         now=NOW,
         crm_conversation_events=(),
         llm_client=client,
+        paused_search_catalog=_catalog(),
     )
     assert result.status == LeadStateClassificationStatus.REJECTED
     assert LeadStateClassificationReasonCode.LOW_CONFIDENCE in result.reasons
@@ -238,11 +295,11 @@ async def test_rejects_unknown_outcome() -> None:
     assert LeadStateClassificationReasonCode.INVALID_LLM_RESPONSE in result.reasons
 
 
-async def test_rejects_unknown_pause_reason_code() -> None:
+async def test_rejects_unknown_selected_track_key() -> None:
     client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
-            pause_reason_code="aliens_are_landin",
+            selected_track_key="aliens_are_landin",
             confidence=0.95,
             evidence=["Lead said something"],
             summary="Unknown reason code.",
@@ -255,7 +312,7 @@ async def test_rejects_unknown_pause_reason_code() -> None:
         llm_client=client,
     )
     assert result.status == LeadStateClassificationStatus.REJECTED
-    assert LeadStateClassificationReasonCode.INVALID_LLM_RESPONSE in result.reasons
+    assert LeadStateClassificationReasonCode.INVALID_TRACK_SELECTION in result.reasons
 
 
 async def test_includes_freshness_context_for_stale_property_interest_without_reply() -> None:
@@ -263,7 +320,7 @@ async def test_includes_freshness_context_for_stale_property_interest_without_re
         _classification_json(
             outcome="dormant",
             handoff_reason_code=None,
-            pause_reason_code=None,
+            selected_track_key=None,
             confidence=0.91,
             evidence=["Inquiry is stale"],
             summary="Historical property inquiry with no later reply.",
@@ -318,7 +375,6 @@ async def test_uses_latest_observed_message_freshness_when_property_fields_are_m
         _classification_json(
             outcome="dormant",
             handoff_reason_code=None,
-            pause_reason_code=None,
             confidence=0.9,
             evidence=["No fresh engagement after old tour request"],
             summary="Old conversation window should be treated as dormant.",
@@ -365,7 +421,6 @@ async def test_marks_recent_property_interest_with_reply_as_not_stale() -> None:
         _classification_json(
             outcome="human_handoff",
             handoff_reason_code="specific_property_or_advice",
-            pause_reason_code=None,
             confidence=0.95,
             evidence=["Lead asked for help on a specific property"],
             summary="Fresh property help request needs an agent.",
@@ -422,7 +477,6 @@ async def test_overrides_stale_handoff_after_outbound_followups() -> None:
         _classification_json(
             outcome="human_handoff",
             handoff_reason_code="specific_property_or_advice",
-            pause_reason_code=None,
             confidence=0.94,
             evidence=["Cash purchase inquiry"],
             evidence_event_ids=[outbound_follow_up.crm_activity_id],
@@ -469,7 +523,6 @@ async def test_accepts_handoff_for_fresh_lead_authored_signal() -> None:
         _classification_json(
             outcome="human_handoff",
             handoff_reason_code="human_requested",
-            pause_reason_code=None,
             confidence=0.93,
             evidence=["Lead requested help scheduling a showing."],
             evidence_event_ids=[inbound.crm_activity_id],

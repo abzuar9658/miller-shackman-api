@@ -94,15 +94,15 @@ async def test_seed_is_idempotent() -> None:
         for template in first.templates
         if "waiting-for-inventory" in template.template_key
     )
-    assert waiting_for_rates.permitted_use_tags == (
+    universal_tags = {
+        "no_prohibited_advice",
         "no_financial_advice",
-        "no_prohibited_advice",
-    )
-    assert financial_prep.permitted_use_tags == (
-        "no_financial_advice",
-        "no_prohibited_advice",
-    )
-    assert waiting_for_inventory.permitted_use_tags == (
-        "listing_context_allowed",
-        "no_prohibited_advice",
-    )
+        "no_legal_advice",
+        "no_tax_advice",
+        "no_investment_advice",
+        "no_market_predictions",
+        "no_unverified_listing_claims",
+    }
+    assert set(waiting_for_rates.permitted_use_tags) == universal_tags
+    assert set(financial_prep.permitted_use_tags) == universal_tags
+    assert set(waiting_for_inventory.permitted_use_tags) == universal_tags

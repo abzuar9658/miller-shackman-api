@@ -11,17 +11,14 @@ from app.application.services.paused_search_track_assignment import (
 )
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
-    PausedSearchReasonMapping,
     PausedSearchTrack,
     PausedSearchTrackAssignment,
     PausedSearchTrackAssignmentSource,
-    PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackVersion,
 )
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.compliance.contactability import ContactChannel
-from app.domain.leads import PausedSearchReasonCode
 from app.domain.workflows import LeadWorkflow, WorkflowState
 from tests.application.use_cases._campaign_cadence_fakes import FakeLeadWorkflowRepository
 from tests.application.use_cases._paused_search_track_fakes import (
@@ -65,7 +62,6 @@ async def test_clear_releases_assignment_and_clears_workflow_pin() -> None:
     result = await _synchronize(
         assignments=assignments,
         workflows=workflows,
-        reason_code=None,
         clear=True,
     )
 
@@ -97,65 +93,34 @@ async def test_unmapped_or_retired_track_preserves_assignment_and_pin() -> None:
     assert len(assignments.assignments) == 1
 
 
-@pytest.mark.asyncio
-async def test_reason_change_releases_old_assignment_and_creates_new() -> None:
-    assignments = FakePausedSearchTrackAssignmentRepository((_assignment(),))
-    workflows = FakeLeadWorkflowRepository()
-
-    result = await _synchronize(
-        assignments=assignments,
-        workflows=workflows,
-        reason_code=PausedSearchReasonCode.TIMING_NOT_RIGHT,
-        repository=_track_repository(reason_code=PausedSearchReasonCode.TIMING_NOT_RIGHT),
-    )
-
-    assert result.assignment is not None
-    assert result.assignment.reason_code is PausedSearchReasonCode.TIMING_NOT_RIGHT
-    assert assignments.assignments[0].released_at == NOW
-    assert len(assignments.assignments) == 2
-
-
 async def _synchronize(
     *,
     assignments: FakePausedSearchTrackAssignmentRepository,
     workflows: FakeLeadWorkflowRepository,
-    reason_code: PausedSearchReasonCode | None = PausedSearchReasonCode.WAITING_FOR_RATES,
     clear: bool = False,
     repository: FakePausedSearchTrackAdminRepository | None = None,
 ) -> PausedSearchTrackAssignmentSyncResult:
     return await synchronize_paused_search_track_assignment(
         workspace_id=WORKSPACE_ID,
         lead_id=LEAD_ID,
-        reason_code=reason_code,
         clear=clear,
         actor_user_id=USER_ID,
-        source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
+        source=PausedSearchTrackAssignmentSource.CLASSIFICATION,
         assignment_repository=assignments,
-        track_mapping_repository=repository or _track_repository(),
+        track_repository=repository or _track_repository(),
         lead_workflow_repository=workflows,
         now=NOW,
+        target_track_version_id=None if clear else VERSION_ID,
     )
 
 
 def _track_repository(
     *,
     track: PausedSearchTrack | None = None,
-    reason_code: PausedSearchReasonCode = PausedSearchReasonCode.WAITING_FOR_RATES,
 ) -> FakePausedSearchTrackAdminRepository:
     return FakePausedSearchTrackAdminRepository(
         tracks=(track or _track(),),
         versions=(_version(),),
-        mappings=(
-            PausedSearchReasonMapping(
-                mapping_id=UUID("00000000-0000-0000-0000-000000000009"),
-                workspace_id=WORKSPACE_ID,
-                reason_code=reason_code,
-                track_id=TRACK_ID,
-                track_version_id=VERSION_ID,
-                created_by_user_id=USER_ID,
-                created_at=NOW,
-            ),
-        ),
     )
 
 
@@ -180,15 +145,13 @@ def _version() -> PausedSearchTrackVersion:
         track_id=TRACK_ID,
         version_number=1,
         status=CampaignVersionStatus.PUBLISHED,
-        track_family=PausedSearchTrackFamily.MAINTENANCE,
+        selection_guidance="Select when a paused lead needs periodic follow-up.",
         enabled=True,
         allowed_channels=(ContactChannel.EMAIL,),
-        default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
         fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_REENGAGEMENT_NOT_BEFORE,
         maintenance_interval_days=90,
         reactivation_window_days=30,
         max_total_touches=2,
-        requires_review_before_publish=False,
         created_by_user_id=USER_ID,
         created_at=NOW,
         published_at=NOW,
@@ -205,8 +168,7 @@ def _assignment() -> PausedSearchTrackAssignment:
         track_key_snapshot="waiting-rates",
         track_name_snapshot="Waiting for rates",
         track_version_snapshot=1,
-        reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
-        source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
+        source=PausedSearchTrackAssignmentSource.CLASSIFICATION,
         assigned_by_user_id=USER_ID,
         assigned_at=NOW,
     )

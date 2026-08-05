@@ -22,9 +22,7 @@ from app.application.use_cases.run_dormant_selector_batch import (
 from app.domain.campaigns.execution import CampaignExecutionConfig, CampaignVersionStatus
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchFallbackTimingPolicy,
-    PausedSearchReasonMapping,
     PausedSearchTrack,
-    PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackVersion,
 )
@@ -42,7 +40,6 @@ from app.domain.leads.canonical import (
     CanonicalLeadRecord,
     CRMProvider,
     LeadType,
-    PausedSearchReasonCode,
     PausedSearchSource,
     lead_paused_search_profile,
 )
@@ -246,6 +243,9 @@ def _workspace_llm_config() -> WorkspaceLLMConfig:
 
 
 def _classification_json(**kwargs: object) -> str:
+    selected_track_key = kwargs.pop("selected_track_key", None)
+    kwargs["selected_track_key"] = selected_track_key
+    kwargs["track_selection_status"] = "selected" if selected_track_key is not None else None
     if kwargs.get("outcome") == "human_handoff" and "handoff_reason_code" not in kwargs:
         kwargs["handoff_reason_code"] = "human_requested"
     return json.dumps(kwargs)
@@ -253,17 +253,6 @@ def _classification_json(**kwargs: object) -> str:
 
 def _paused_search_track_repository() -> FakePausedSearchTrackAdminRepository:
     return FakePausedSearchTrackAdminRepository(
-        mappings=(
-            PausedSearchReasonMapping(
-                mapping_id=uuid4(),
-                workspace_id=WORKSPACE_ID,
-                reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
-                track_id=TRACK_ID,
-                track_version_id=TRACK_VERSION_ID,
-                created_by_user_id=USER_ID,
-                created_at=NOW,
-            ),
-        ),
         tracks=(
             PausedSearchTrack(
                 track_id=TRACK_ID,
@@ -284,15 +273,13 @@ def _paused_search_track_repository() -> FakePausedSearchTrackAdminRepository:
                 track_id=TRACK_ID,
                 version_number=1,
                 status=CampaignVersionStatus.PUBLISHED,
-                track_family=PausedSearchTrackFamily.MAINTENANCE,
+                selection_guidance="Select when a paused lead needs periodic follow-up.",
                 enabled=True,
                 allowed_channels=(ContactChannel.EMAIL,),
-                default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
                 fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_MAINTENANCE_INTERVAL,
                 maintenance_interval_days=365,
                 reactivation_window_days=45,
                 max_total_touches=3,
-                requires_review_before_publish=False,
                 created_by_user_id=USER_ID,
                 created_at=NOW,
                 published_at=NOW,
@@ -444,14 +431,14 @@ async def test_issues_preflight_digest_and_holds_back_assigned_lead() -> None:
 
 
 @pytest.mark.asyncio
-async def test_paused_search_candidate_is_classified_and_not_started_as_dormant() -> None:
+async def test_paused_search_candidate_without_catalog_is_held_for_review() -> None:
     lead = _lead(has_assigned_agent=False)
     lead_repository = FakeLeadRepository()
     artifact_repository = FakeLeadClassificationArtifactRepository()
     llm_client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
-            pause_reason_code="waiting_for_rates",
+            selected_track_key="waiting-for-rates",
             reengagement_not_before="2027-07-01",
             reengagement_window_label="next summer",
             confidence=0.91,
@@ -475,13 +462,12 @@ async def test_paused_search_candidate_is_classified_and_not_started_as_dormant(
     assert artifact_repository.saved[0].outcome.value == "paused_search"
     saved_lead = await lead_repository.get_by_id(WORKSPACE_ID, lead.lead_id)
     assert saved_lead is not None
-    profile = lead_paused_search_profile(saved_lead)
-    assert profile is not None
-    assert profile.pause_reason_code == PausedSearchReasonCode.WAITING_FOR_RATES
+    assert lead_paused_search_profile(saved_lead) is None
+    assert artifact_repository.saved[0].track_selection_status is not None
 
 
 @pytest.mark.asyncio
-async def test_paused_search_candidate_starts_reason_specific_track_when_mapping_exists() -> None:
+async def test_paused_search_candidate_starts_selected_catalog_track() -> None:
     lead = _lead(has_assigned_agent=False)
     lead_repository = FakeLeadRepository()
     lead_workflow_repository = FakeLeadWorkflowRepository()
@@ -489,7 +475,7 @@ async def test_paused_search_candidate_starts_reason_specific_track_when_mapping
     llm_client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
-            pause_reason_code="waiting_for_rates",
+            selected_track_key="waiting-for-rates",
             confidence=0.91,
             evidence=["Lead said rates need to improve"],
             summary="Lead is waiting for rates before restarting the search.",
@@ -517,12 +503,13 @@ async def test_paused_search_candidate_starts_reason_specific_track_when_mapping
 
 
 @pytest.mark.asyncio
-async def test_paused_search_profile_with_dormant_classification_is_paused_search() -> None:
+async def test_existing_profile_does_not_override_fresh_dormant_classification() -> None:
     lead = _lead(has_assigned_agent=False)
     lead = replace(
         lead,
         paused_search_active=True,
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=TRACK_VERSION_ID,
         paused_search_source=PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
     )
     lead_repository = FakeLeadRepository()
@@ -549,12 +536,12 @@ async def test_paused_search_profile_with_dormant_classification_is_paused_searc
 
     assert result.status == DormantSelectorBatchStatus.COMPLETED
     assert result.selected_count == 1
-    assert result.started_count == 0
-    assert result.paused_search_started_count == 1
+    assert result.started_count == 1
+    assert result.paused_search_started_count == 0
     assert result.started_lead_ids == (lead.lead_id,)
     assert temporal_workflow_starter.calls
     saved_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, lead.lead_id)]
-    assert saved_workflow.paused_search_track_version_id == TRACK_VERSION_ID
+    assert saved_workflow.paused_search_track_version_id is None
 
 
 @pytest.mark.asyncio
@@ -563,7 +550,8 @@ async def test_existing_paused_search_profile_with_handoff_classification_is_not
     lead = replace(
         lead,
         paused_search_active=True,
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=TRACK_VERSION_ID,
         paused_search_source=PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
     )
     lead_repository = FakeLeadRepository()
@@ -716,7 +704,7 @@ async def test_assigned_paused_search_candidate_issues_digest_before_start() -> 
     llm_client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
-            pause_reason_code="waiting_for_rates",
+            selected_track_key="waiting-for-rates",
             confidence=0.91,
             evidence=["Lead said rates need to improve"],
             summary="Lead is waiting for rates before restarting the search.",
@@ -759,7 +747,7 @@ async def test_vetoed_assigned_paused_search_candidate_does_not_start_after_wind
     llm_client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
-            pause_reason_code="waiting_for_rates",
+            selected_track_key="waiting-for-rates",
             confidence=0.91,
             evidence=["Lead said rates need to improve"],
             summary="Lead is waiting for rates before restarting the search.",
@@ -818,7 +806,7 @@ async def test_assigned_paused_search_candidate_starts_after_digest_window() -> 
     llm_client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
-            pause_reason_code="waiting_for_rates",
+            selected_track_key="waiting-for-rates",
             confidence=0.91,
             evidence=["Lead said rates need to improve"],
             summary="Lead is waiting for rates before restarting the search.",
@@ -861,7 +849,8 @@ async def test_paused_search_and_dormant_candidates_share_daily_cap_ordering() -
     paused_search_lead = replace(
         _lead(has_assigned_agent=False),
         paused_search_active=True,
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=TRACK_VERSION_ID,
         paused_search_source=PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
     )
     dormant_lead = _lead(has_assigned_agent=False)
@@ -888,7 +877,7 @@ async def test_paused_search_and_dormant_candidates_share_daily_cap_ordering() -
     assert result.status == DormantSelectorBatchStatus.COMPLETED
     assert result.selected_count == 1
     assert result.held_back_count == 1
-    assert result.started_count == 0
-    assert result.paused_search_started_count == 1
+    assert result.started_count == 1
+    assert result.paused_search_started_count == 0
     assert result.started_lead_ids == (paused_search_lead.lead_id,)
     assert temporal_workflow_starter.calls

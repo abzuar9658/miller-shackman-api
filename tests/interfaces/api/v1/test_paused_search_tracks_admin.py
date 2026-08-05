@@ -93,6 +93,26 @@ def test_create_generates_track_key_when_omitted(
     assert response.json()["track"]["track_key"] == "rate-watch"
 
 
+def test_invalid_configuration_returns_validation_findings(
+    paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
+) -> None:
+    payload = _payload()
+    payload["steps"][0]["channel"] = "sms"
+
+    response = paused_search_track_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks",
+        json=payload,
+    )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["reasons"] == ["invalid_configuration"]
+    assert any(
+        finding["code"] == "step_channel_not_allowed"
+        for finding in detail["validation"]["errors"]
+    )
+
+
 def test_publish_and_retire_paused_search_track(
     paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
 ) -> None:
@@ -178,7 +198,7 @@ def test_preview_requires_admin_role() -> None:
     assert response.json()["detail"] == ["permission_denied"]
 
 
-def test_templates_and_profiles_are_readable_before_track_id_route(
+def test_templates_are_readable_before_track_id_route(
     paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
 ) -> None:
     paused_search_track_admin_client.client.post(
@@ -188,14 +208,8 @@ def test_templates_and_profiles_are_readable_before_track_id_route(
     templates_response = paused_search_track_admin_client.client.get(
         f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks/templates"
     )
-    profiles_response = paused_search_track_admin_client.client.get(
-        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks/profiles"
-    )
-
     assert templates_response.status_code == 200
     assert templates_response.json()["templates"]
-    assert profiles_response.status_code == 200
-    assert len(profiles_response.json()["profiles"]) >= 1
 
 
 def test_assigned_agent_cannot_view_or_create_paused_search_tracks() -> None:
@@ -284,15 +298,13 @@ def _payload() -> dict[str, Any]:
     return {
         "track_key": "rate-watch",
         "display_name": "Rate Watch",
-        "track_family": "maintenance",
+        "selection_guidance": "Select when a lead waits for mortgage rates to improve.",
         "enabled": True,
         "allowed_channels": ["email"],
-        "default_for_reason_codes": ["waiting_for_rates"],
         "fallback_timing_policy": "use_maintenance_interval",
         "maintenance_interval_days": 60,
         "reactivation_window_days": 30,
         "max_total_touches": 4,
-        "requires_review_before_publish": False,
         "steps": [
             {
                 "phase": "maintenance",

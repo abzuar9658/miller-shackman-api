@@ -8,9 +8,7 @@ from fastapi.testclient import TestClient
 from app.application.ports.crm import CRMClient
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
-    PausedSearchReasonMapping,
     PausedSearchTrack,
-    PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackVersion,
 )
@@ -25,7 +23,7 @@ from app.domain.identity import (
     WorkspaceMembershipStatus,
     WorkspaceStatus,
 )
-from app.domain.leads import CanonicalLeadRecord, CRMProvider, PausedSearchReasonCode
+from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.workspace_automation import WorkspaceOperationalControl
 from app.interfaces.api.dependencies.lead_manual_enrollment import (
     LeadManualEnrollmentBundle,
@@ -117,7 +115,6 @@ def test_manual_start_routes_to_paused_search_before_starting_workflow() -> None
     client = _client_for_role(
         WorkspaceMembershipRole.BROKERAGE_ADMIN,
         classification_outcome="paused_search",
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
     )
 
     response = client.client.post(
@@ -225,7 +222,6 @@ def _client_for_role(
     already_enrolled: bool = False,
     classification_outcome: str = "dormant",
     classification_confidence: float = 0.91,
-    pause_reason_code: PausedSearchReasonCode | None = None,
 ) -> LeadManualEnrollmentTestClient:
     app = create_app()
     lead = CanonicalLeadRecord(
@@ -325,7 +321,14 @@ def _client_for_role(
         llm_client=FakeClassificationLLMClient(
             outcome=classification_outcome,
             confidence=classification_confidence,
-            pause_reason_code=(pause_reason_code.value if pause_reason_code is not None else None),
+            selected_track_key=(
+                "waiting-rates"
+                if classification_outcome == "paused_search"
+                else None
+            ),
+            track_selection_status=(
+                "selected" if classification_outcome == "paused_search" else None
+            ),
         ),
         crm_conversation_event_repository=FakeCrmConversationEventRepository(),
         paused_search_track_repository=_track_repository(),
@@ -385,17 +388,6 @@ def _track_repository() -> FakePausedSearchTrackAdminRepository:
                 updated_at=NOW,
             ),
         ),
-        mappings=(
-            PausedSearchReasonMapping(
-                mapping_id=UUID("00000000-0000-0000-0000-000000000011"),
-                workspace_id=WORKSPACE_ID,
-                reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
-                track_id=UUID("00000000-0000-0000-0000-000000000012"),
-                track_version_id=UUID("00000000-0000-0000-0000-000000000013"),
-                created_by_user_id=USER_ID,
-                created_at=NOW,
-            ),
-        ),
         versions=(
             PausedSearchTrackVersion(
                 track_version_id=UUID("00000000-0000-0000-0000-000000000013"),
@@ -403,17 +395,15 @@ def _track_repository() -> FakePausedSearchTrackAdminRepository:
                 track_id=UUID("00000000-0000-0000-0000-000000000012"),
                 version_number=1,
                 status=CampaignVersionStatus.PUBLISHED,
-                track_family=PausedSearchTrackFamily.MAINTENANCE,
+                selection_guidance="Select when a lead waits for mortgage rates to improve.",
                 enabled=True,
                 allowed_channels=(ContactChannel.EMAIL,),
-                default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
                 fallback_timing_policy=(
                     PausedSearchFallbackTimingPolicy.USE_REENGAGEMENT_NOT_BEFORE
                 ),
                 maintenance_interval_days=30,
                 reactivation_window_days=30,
                 max_total_touches=6,
-                requires_review_before_publish=False,
                 created_by_user_id=USER_ID,
                 created_at=NOW,
                 published_at=NOW,

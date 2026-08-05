@@ -86,7 +86,7 @@ def test_acknowledging_attention_item_upserts_latest_version() -> None:
     assert second.acknowledgement.acknowledged_at == LATER
 
 
-def test_platform_super_admin_cannot_manage_workspace_attention_acknowledgements() -> None:
+def test_platform_super_admin_can_manage_workspace_attention_acknowledgements() -> None:
     repository = FakeAttentionAcknowledgementRepository()
 
     result = _run(
@@ -98,8 +98,8 @@ def test_platform_super_admin_cannot_manage_workspace_attention_acknowledgements
         )
     )
 
-    assert result.status == AttentionAcknowledgementStatus.REJECTED
-    assert [reason.value for reason in result.reasons] == ["permission_denied"]
+    assert result.status == AttentionAcknowledgementStatus.CLEARED
+    assert result.reasons == ()
 
 
 def _actor(role: WorkspaceMembershipRole) -> AuthenticatedActor:

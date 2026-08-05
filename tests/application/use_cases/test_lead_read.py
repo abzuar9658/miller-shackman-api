@@ -22,7 +22,6 @@ from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrack,
     PausedSearchTrackAssignment,
     PausedSearchTrackAssignmentSource,
-    PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
@@ -61,7 +60,6 @@ from app.domain.leads import (
     LeadRoutingReviewStatus,
     LeadStateClassificationOutcome,
     PausedSearchAction,
-    PausedSearchReasonCode,
     PausedSearchSource,
 )
 from app.domain.workflows import (
@@ -104,6 +102,7 @@ MESSAGE_ID = UUID("00000000-0000-0000-0000-000000000005")
 INBOUND_ID = UUID("00000000-0000-0000-0000-000000000006")
 HANDOFF_ID = UUID("00000000-0000-0000-0000-000000000007")
 CAMPAIGN_ID = UUID("00000000-0000-0000-0000-000000000008")
+TRACK_VERSION_ID = UUID("00000000-0000-0000-0000-000000000015")
 
 
 def test_list_lead_views_returns_owner_and_workflow() -> None:
@@ -296,7 +295,6 @@ def test_decision_tree_highlights_blocked_classifier_route() -> None:
     artifact = replace(
         _classification_artifact(),
         outcome=LeadStateClassificationOutcome.BLOCKED,
-        pause_reason_code=None,
         summary="Lead opted out of further communication.",
         parsed_llm_response={"outcome": "blocked", "confidence": 0.9},
         raw_llm_response_text='{"outcome":"blocked","confidence":0.9}',
@@ -495,7 +493,8 @@ def _lead() -> CanonicalLeadRecord:
         primary_phone="+15555550123",
         mapped_custom_fields={"display_name": "Jordan Seller"},
         paused_search_active=True,
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        paused_search_track_key="waiting-rates",
+        paused_search_track_version_id=TRACK_VERSION_ID,
         pause_reason_note="Asked to revisit once rates settle.",
         reengagement_not_before=NOW,
         reengagement_window_label="check back in 90 days",
@@ -566,7 +565,7 @@ def _classification_artifact() -> LeadClassificationArtifact:
         lead_id=LEAD_ID,
         source="ai_conversation_classification",
         outcome=LeadStateClassificationOutcome.PAUSED_SEARCH,
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        selected_track_key="waiting-for-rates",
         reengagement_not_before=NOW,
         reengagement_window_label="check back in 90 days",
         confidence=0.93,
@@ -591,11 +590,13 @@ def _classification_artifact() -> LeadClassificationArtifact:
             ],
         },
         raw_llm_response_text=(
-            '{"outcome":"paused_search","pause_reason_code":"waiting_for_rates"}'
+            '{"outcome":"paused_search","selected_track_key":"waiting-for-rates",'
+            '"track_version_id":"00000000-0000-0000-0000-000000000010"}'
         ),
         parsed_llm_response={
             "outcome": "paused_search",
-            "pause_reason_code": "waiting_for_rates",
+            "selected_track_key": "waiting-for-rates",
+            "track_version_id": "00000000-0000-0000-0000-000000000010",
             "confidence": 0.93,
             "summary": "Lead wants to pause until financing conditions improve.",
         },
@@ -618,20 +619,18 @@ def _paused_search_track() -> PausedSearchTrack:
 
 def _paused_search_track_version() -> PausedSearchTrackVersion:
     return PausedSearchTrackVersion(
-        track_version_id=UUID("00000000-0000-0000-0000-000000000015"),
+        track_version_id=TRACK_VERSION_ID,
         workspace_id=WORKSPACE_ID,
         track_id=UUID("00000000-0000-0000-0000-000000000018"),
         version_number=3,
         status=CampaignVersionStatus.PUBLISHED,
-        track_family=PausedSearchTrackFamily.REACTIVATION,
+        selection_guidance="Select when a paused lead needs periodic follow-up.",
         enabled=True,
         allowed_channels=(ContactChannel.SMS, ContactChannel.EMAIL),
-        default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
         fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_REENGAGEMENT_NOT_BEFORE,
         maintenance_interval_days=30,
         reactivation_window_days=14,
         max_total_touches=5,
-        requires_review_before_publish=False,
         created_by_user_id=USER_ID,
         created_at=NOW,
         published_at=NOW,
@@ -648,8 +647,7 @@ def _paused_search_track_assignment() -> PausedSearchTrackAssignment:
         track_key_snapshot="rates-watch",
         track_name_snapshot="Rates Watch",
         track_version_snapshot=3,
-        reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
-        source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
+        source=PausedSearchTrackAssignmentSource.CLASSIFICATION,
         assigned_by_user_id=USER_ID,
         assigned_at=NOW,
     )
@@ -670,8 +668,7 @@ def _inventory_paused_search_track_version() -> PausedSearchTrackVersion:
         _paused_search_track_version(),
         track_version_id=UUID("00000000-0000-0000-0000-000000000021"),
         track_id=UUID("00000000-0000-0000-0000-000000000020"),
-        track_family=PausedSearchTrackFamily.MAINTENANCE,
-        default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_INVENTORY,),
+        selection_guidance="Use when a lead is waiting for suitable inventory to become available.",
     )
 
 
@@ -700,8 +697,7 @@ def _personal_timing_paused_search_track_version() -> PausedSearchTrackVersion:
         _paused_search_track_version(),
         track_version_id=UUID("00000000-0000-0000-0000-000000000024"),
         track_id=UUID("00000000-0000-0000-0000-000000000023"),
-        track_family=PausedSearchTrackFamily.MAINTENANCE,
-        default_for_reason_codes=(PausedSearchReasonCode.PERSONAL_LIFE_TIMING,),
+        selection_guidance="Use when personal life timing has paused the lead's property search.",
     )
 
 
@@ -786,7 +782,8 @@ def _paused_search_history_entry() -> LeadPausedSearchHistoryEntry:
         previous_profile=None,
         current_profile=LeadPausedSearchProfile(
             paused_search_active=True,
-            pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+            paused_search_track_key="waiting-for-rates",
+            paused_search_track_version_id=UUID("00000000-0000-0000-0000-000000000010"),
             pause_reason_note="Asked to revisit once rates settle.",
             reengagement_not_before=NOW,
             reengagement_window_label="check back in 90 days",

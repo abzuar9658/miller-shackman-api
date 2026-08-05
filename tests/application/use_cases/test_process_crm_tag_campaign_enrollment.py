@@ -13,9 +13,7 @@ from app.domain.campaigns import (
     CampaignStatus,
     CampaignVersionStatus,
     PausedSearchFallbackTimingPolicy,
-    PausedSearchReasonMapping,
     PausedSearchTrack,
-    PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackVersion,
 )
@@ -38,7 +36,6 @@ from app.domain.leads import (
     CanonicalLeadRecord,
     CRMProvider,
     LeadStateClassificationOutcome,
-    PausedSearchReasonCode,
     PausedSearchSource,
 )
 from app.domain.workflows import WorkflowState
@@ -210,7 +207,7 @@ async def test_chooses_only_the_matching_campaign_when_multiple_are_active() -> 
 
 
 @pytest.mark.asyncio
-async def test_routes_to_paused_search_when_existing_profile_beats_dormant() -> None:
+async def test_fresh_dormant_classification_does_not_reuse_stale_paused_profile() -> None:
     lead_repo = FakeLeadRepository()
     artifact_repo = FakeLeadClassificationArtifactRepository()
     workflow_repo = FakeLeadWorkflowRepository()
@@ -246,17 +243,16 @@ async def test_routes_to_paused_search_when_existing_profile_beats_dormant() -> 
     )
 
     assert result.status == CRMTagCampaignEnrollmentStatus.STARTED
-    assert result.route == "paused_search"
+    assert result.route == "dormant"
     assert len(artifact_repo.saved) == 1
     assert artifact_repo.saved[0].outcome.value == "dormant"
     assert len(enrollments.enrollments) == 1
     assert len(temporal.calls) == 1
     workflow = workflow_repo.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
-    assert workflow.state == WorkflowState.ACTIVE_NURTURE
-    assert workflow.paused_search_track_version_id == TRACK_VERSION_ID
+    assert workflow.state == WorkflowState.QUEUED
+    assert workflow.paused_search_track_version_id is None
     transition = next(iter(transitions.transitions.values()))
-    assert transition.to_state == WorkflowState.ACTIVE_NURTURE
-    assert transition.metadata["route"] == "paused_search"
+    assert transition.to_state == WorkflowState.QUEUED
 
 
 @pytest.mark.asyncio
@@ -288,7 +284,11 @@ async def test_paused_search_enrollment_holds_when_recurring_flag_is_disabled() 
         artifact_repository=FakeLeadClassificationArtifactRepository(),
         crm_conversation_event_repository=FakeCrmConversationEventRepository(),
         workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
-        llm_client=FakeClassificationLLMClient(outcome="dormant"),
+        llm_client=FakeClassificationLLMClient(
+            outcome="paused_search",
+            selected_track_key="waiting-for-rates",
+            track_selection_status="selected",
+        ),
         workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(
             WorkspaceOperationalControl(workspace_id=WORKSPACE_ID)
         ),
@@ -458,7 +458,7 @@ async def test_duplicate_paused_search_tag_event_returns_already_enrolled() -> N
 
 
 @pytest.mark.asyncio
-async def test_review_holds_paused_search_when_no_published_track_mapping_exists() -> None:
+async def test_review_holds_when_selected_track_is_not_published() -> None:
     lead_repo = FakeLeadRepository()
     routing_review_repository = FakeLeadRoutingReviewRepository()
 
@@ -485,17 +485,18 @@ async def test_review_holds_paused_search_when_no_published_track_mapping_exists
         artifact_repository=FakeLeadClassificationArtifactRepository(),
         crm_conversation_event_repository=FakeCrmConversationEventRepository(),
         workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
-        llm_client=FakeClassificationLLMClient(outcome="dormant"),
+        llm_client=FakeClassificationLLMClient(
+            outcome="paused_search",
+            selected_track_key="waiting-for-rates",
+            track_selection_status="selected",
+        ),
         routing_review_repository=routing_review_repository,
     )
 
     assert result.status == CRMTagCampaignEnrollmentStatus.REVIEW_HOLD
     assert result.route == "review_hold"
-    assert "paused_search_track_assignment_unavailable" in result.reason_codes
-    assert routing_review_repository.saved[0].reason_codes == (
-        "existing_paused_search_profile",
-        "paused_search_track_assignment_unavailable",
-    )
+    assert result.reason_codes == ("classification_rejected",)
+    assert routing_review_repository.saved[0].reason_codes == ("classification_rejected",)
 
 
 @pytest.mark.asyncio
@@ -1044,9 +1045,8 @@ async def _lead(
         email_permission_status=ContactPermissionStatus.CONFIRMED,
         do_not_contact=do_not_contact,
         paused_search_active=paused_search_active,
-        pause_reason_code=(
-            PausedSearchReasonCode.WAITING_FOR_RATES if paused_search_active else None
-        ),
+        paused_search_track_key="waiting-rates" if paused_search_active else None,
+        paused_search_track_version_id=TRACK_VERSION_ID if paused_search_active else None,
         paused_search_source=(
             PausedSearchSource.AI_CONVERSATION_CLASSIFICATION if paused_search_active else None
         ),
@@ -1064,17 +1064,6 @@ def _paused_search_track_repository(
     track_version_id: PausedSearchTrackVersionId = TRACK_VERSION_ID,
 ) -> FakePausedSearchTrackAdminRepository:
     return FakePausedSearchTrackAdminRepository(
-        mappings=(
-            PausedSearchReasonMapping(
-                mapping_id=UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
-                workspace_id=WORKSPACE_ID,
-                reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
-                track_id=UUID("99999999-9999-9999-9999-999999999999"),
-                track_version_id=track_version_id,
-                created_by_user_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
-                created_at=NOW,
-            ),
-        ),
         tracks=(
             PausedSearchTrack(
                 track_id=UUID("99999999-9999-9999-9999-999999999999"),
@@ -1095,15 +1084,15 @@ def _paused_search_track_repository(
                 track_id=UUID("99999999-9999-9999-9999-999999999999"),
                 version_number=1,
                 status=CampaignVersionStatus.PUBLISHED,
-                track_family=PausedSearchTrackFamily.MAINTENANCE,
+                selection_guidance=(
+                    "Use when the lead has paused their search and needs periodic follow-up."
+                ),
                 enabled=True,
                 allowed_channels=(ContactChannel.EMAIL,),
-                default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
                 fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_MAINTENANCE_INTERVAL,
                 maintenance_interval_days=60,
                 reactivation_window_days=30,
                 max_total_touches=4,
-                requires_review_before_publish=False,
                 created_by_user_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
                 created_at=NOW,
                 published_at=NOW,
@@ -1145,15 +1134,17 @@ class _InvalidJsonLLMClient(LLMClient):
 
 def _timing_not_right_track_repository() -> FakePausedSearchTrackAdminRepository:
     return FakePausedSearchTrackAdminRepository(
-        mappings=(
-            PausedSearchReasonMapping(
-                mapping_id=UUID("cccccccc-cccc-cccc-cccc-cccccccccccc"),
-                workspace_id=WORKSPACE_ID,
-                reason_code=PausedSearchReasonCode.TIMING_NOT_RIGHT,
+        tracks=(
+            PausedSearchTrack(
                 track_id=TIMING_TRACK_ID,
-                track_version_id=TIMING_TRACK_VERSION_ID,
+                workspace_id=WORKSPACE_ID,
+                track_key="timing-not-right",
+                display_name="Timing not right",
+                status=PausedSearchTrackStatus.ACTIVE,
+                active_version_id=TIMING_TRACK_VERSION_ID,
                 created_by_user_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
                 created_at=NOW,
+                updated_at=NOW,
             ),
         ),
         versions=(
@@ -1163,15 +1154,15 @@ def _timing_not_right_track_repository() -> FakePausedSearchTrackAdminRepository
                 track_id=TIMING_TRACK_ID,
                 version_number=1,
                 status=CampaignVersionStatus.PUBLISHED,
-                track_family=PausedSearchTrackFamily.MAINTENANCE,
+                selection_guidance=(
+                    "Use when the lead says the timing is not right for a property search."
+                ),
                 enabled=True,
                 allowed_channels=(ContactChannel.EMAIL,),
-                default_for_reason_codes=(PausedSearchReasonCode.TIMING_NOT_RIGHT,),
                 fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_MAINTENANCE_INTERVAL,
                 maintenance_interval_days=60,
                 reactivation_window_days=30,
                 max_total_touches=4,
-                requires_review_before_publish=False,
                 created_by_user_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
                 created_at=NOW,
                 published_at=NOW,

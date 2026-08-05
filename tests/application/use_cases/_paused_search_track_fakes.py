@@ -1,14 +1,18 @@
 from dataclasses import replace
 from datetime import datetime
+from uuid import UUID
 
 from app.domain.campaigns import (
-    PausedSearchReasonMapping,
+    PausedSearchFallbackTimingPolicy,
     PausedSearchTrack,
     PausedSearchTrackAssignment,
+    PausedSearchTrackCatalogEntry,
     PausedSearchTrackLeadAssignment,
     PausedSearchTrackStep,
     PausedSearchTrackVersion,
 )
+from app.domain.campaigns.execution import CampaignVersionStatus
+from app.domain.campaigns.paused_search_tracks import PausedSearchTrackStatus
 from app.domain.common.ids import (
     LeadId,
     PausedSearchTrackId,
@@ -16,21 +20,20 @@ from app.domain.common.ids import (
     UserId,
     WorkspaceId,
 )
-from app.domain.leads import PausedSearchReasonCode
+from app.domain.compliance.contactability import ContactChannel
+
+DEFAULT_TRACK_ID = UUID("99999999-9999-9999-9999-999999999999")
+DEFAULT_TRACK_VERSION_ID = UUID("88888888-8888-8888-8888-888888888888")
 
 
 class FakePausedSearchTrackAdminRepository:
     def __init__(
         self,
         *,
-        mappings: tuple[PausedSearchReasonMapping, ...] = (),
         tracks: tuple[PausedSearchTrack, ...] = (),
         versions: tuple[PausedSearchTrackVersion, ...] = (),
         steps: tuple[PausedSearchTrackStep, ...] = (),
     ) -> None:
-        self._mappings = {
-            (mapping.workspace_id, mapping.reason_code): mapping for mapping in mappings
-        }
         self._tracks = {(track.workspace_id, track.track_id): track for track in tracks}
         self._versions = {
             (version.workspace_id, version.track_version_id): version for version in versions
@@ -64,12 +67,27 @@ class FakePausedSearchTrackAdminRepository:
     ) -> PausedSearchTrack | None:
         return self._tracks.get((workspace_id, track_id))
 
-    async def get_reason_mapping(
+    async def list_active_catalog(
         self,
         workspace_id: WorkspaceId,
-        reason_code: PausedSearchReasonCode,
-    ) -> PausedSearchReasonMapping | None:
-        return self._mappings.get((workspace_id, reason_code))
+    ) -> tuple[PausedSearchTrackCatalogEntry, ...]:
+        entries: list[PausedSearchTrackCatalogEntry] = []
+        for track in self._tracks.values():
+            if track.workspace_id != workspace_id or track.active_version_id is None:
+                continue
+            version = self._versions.get((workspace_id, track.active_version_id))
+            if version is None or not version.enabled:
+                continue
+            entries.append(
+                PausedSearchTrackCatalogEntry(
+                    track_key=track.track_key,
+                    display_name=track.display_name,
+                    selection_guidance=version.selection_guidance,
+                    track_id=track.track_id,
+                    track_version_id=version.track_version_id,
+                )
+            )
+        return tuple(entries)
 
     async def get_version(
         self,
@@ -88,6 +106,52 @@ class FakePausedSearchTrackAdminRepository:
             for step in self._steps
             if step.workspace_id == workspace_id and step.track_version_id == track_version_id
         )
+
+
+def published_paused_search_track_repository(
+    *,
+    workspace_id: WorkspaceId,
+    now: datetime,
+    track_key: str = "waiting-for-rates",
+    track_id: PausedSearchTrackId = DEFAULT_TRACK_ID,
+    track_version_id: PausedSearchTrackVersionId = DEFAULT_TRACK_VERSION_ID,
+) -> FakePausedSearchTrackAdminRepository:
+    return FakePausedSearchTrackAdminRepository(
+        tracks=(
+            PausedSearchTrack(
+                track_id=track_id,
+                workspace_id=workspace_id,
+                track_key=track_key,
+                display_name="Waiting for rates",
+                status=PausedSearchTrackStatus.ACTIVE,
+                active_version_id=track_version_id,
+                created_by_user_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                created_at=now,
+                updated_at=now,
+            ),
+        ),
+        versions=(
+            PausedSearchTrackVersion(
+                track_version_id=track_version_id,
+                workspace_id=workspace_id,
+                track_id=track_id,
+                version_number=1,
+                status=CampaignVersionStatus.PUBLISHED,
+                selection_guidance="Select when a lead waits for mortgage rates to improve.",
+                enabled=True,
+                allowed_channels=(ContactChannel.EMAIL,),
+                fallback_timing_policy=(
+                    PausedSearchFallbackTimingPolicy.USE_MAINTENANCE_INTERVAL
+                ),
+                maintenance_interval_days=60,
+                reactivation_window_days=30,
+                max_total_touches=4,
+                created_by_user_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                created_at=now,
+                published_at=now,
+            ),
+        ),
+    )
 
 
 class FakePausedSearchTrackAssignmentRepository:

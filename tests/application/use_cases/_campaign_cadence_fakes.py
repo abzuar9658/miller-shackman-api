@@ -951,7 +951,8 @@ class FakeClassificationLLMClient:
         handoff_reason_code: str | None = None,
         reengagement_not_before: str | None = None,
         reengagement_window_label: str | None = None,
-        pause_reason_code: str | None = None,
+        selected_track_key: str | None = None,
+        track_selection_status: str | None = None,
     ) -> None:
         self.requests: list[LLMCompletionRequest] = []
         resolved_handoff_reason_code = handoff_reason_code
@@ -966,7 +967,8 @@ class FakeClassificationLLMClient:
                 "handoff_reason_code": resolved_handoff_reason_code,
                 "reengagement_not_before": reengagement_not_before,
                 "reengagement_window_label": reengagement_window_label,
-                "pause_reason_code": pause_reason_code,
+                "selected_track_key": selected_track_key,
+                "track_selection_status": track_selection_status,
             }
         )
 

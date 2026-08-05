@@ -14,7 +14,6 @@ from app.domain.conversations import CrmConversationEvent, CrmConversationEventD
 from app.domain.leads import (
     CanonicalLeadRecord,
     CRMProvider,
-    PausedSearchReasonCode,
     PausedSearchSource,
     PropertyEventType,
 )
@@ -32,17 +31,19 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
 )
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
+    FakePausedSearchTrackAssignmentRepository,
+    published_paused_search_track_repository,
 )
 
 NOW = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("11111111-1111-1111-1111-111111111111")
 LEAD_ID = UUID("22222222-2222-2222-2222-222222222222")
+TRACK_VERSION_ID = UUID("33333333-3333-3333-3333-333333333333")
 
 
 def _lead(
     *, paused_search_active: bool = False, do_not_contact: bool = False
 ) -> CanonicalLeadRecord:
-    pause_reason_code = PausedSearchReasonCode.WAITING_FOR_RATES if paused_search_active else None
     paused_search_source = (
         PausedSearchSource.AI_CONVERSATION_CLASSIFICATION if paused_search_active else None
     )
@@ -63,7 +64,8 @@ def _lead(
         email_permission_status=ContactPermissionStatus.CONFIRMED,
         do_not_contact=do_not_contact,
         paused_search_active=paused_search_active,
-        pause_reason_code=pause_reason_code,
+        paused_search_track_key="waiting-for-rates" if paused_search_active else None,
+        paused_search_track_version_id=TRACK_VERSION_ID if paused_search_active else None,
         paused_search_source=paused_search_source,
     )
 
@@ -106,7 +108,7 @@ def _crm_event_with_metadata(
 
 
 def _paused_search_track_repository() -> FakePausedSearchTrackAdminRepository:
-    return FakePausedSearchTrackAdminRepository()
+    return published_paused_search_track_repository(workspace_id=WORKSPACE_ID, now=NOW)
 
 
 async def _route(
@@ -136,6 +138,7 @@ async def _route(
         dormant_threshold_days=dormant_threshold_days,
         lead_workflow_repository=workflow_repo,
         paused_search_track_repository=track_repo,
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         temporal_signal_outbox_repository=outbox,
         routing_review_repository=routing_review_repository,
     )
@@ -178,24 +181,27 @@ async def test_fresh_paused_search_keeps_existing_paused_search() -> None:
     lead = _lead(paused_search_active=True)
     result = await _route(
         lead,
-        FakeClassificationLLMClient(outcome="paused_search", pause_reason_code="waiting_for_rates"),
+        FakeClassificationLLMClient(
+            outcome="paused_search",
+            selected_track_key="waiting-for-rates",
+            track_selection_status="selected",
+        ),
     )
     assert result.route == AiNurtureRoute.PAUSED_SEARCH
 
 
 @pytest.mark.asyncio
-async def test_existing_paused_search_fallback_beats_dormant_classification() -> None:
+async def test_fresh_dormant_classification_does_not_reuse_stale_paused_profile() -> None:
     lead = _lead(paused_search_active=True)
     result = await _route(lead, FakeClassificationLLMClient(outcome="dormant"))
-    assert result.route == AiNurtureRoute.PAUSED_SEARCH
-    assert result.reason_codes == ("existing_paused_search_profile",)
+    assert result.route == AiNurtureRoute.DORMANT
 
 
 @pytest.mark.asyncio
-async def test_existing_paused_search_fallback_beats_rejected_classification() -> None:
+async def test_rejected_classification_holds_even_with_stale_paused_profile() -> None:
     lead = _lead(paused_search_active=True)
     result = await _route(lead, FakeClassificationLLMClient(outcome="dormant", confidence=0.5))
-    assert result.route == AiNurtureRoute.PAUSED_SEARCH
+    assert result.route == AiNurtureRoute.REVIEW_HOLD
 
 
 @pytest.mark.asyncio
@@ -231,7 +237,7 @@ async def test_review_hold_route_creates_pending_routing_review() -> None:
 
 
 @pytest.mark.asyncio
-async def test_paused_search_fallback_supersedes_pending_routing_review() -> None:
+async def test_stale_paused_profile_does_not_supersede_pending_routing_review() -> None:
     review_repository = FakeLeadRoutingReviewRepository()
 
     initial_result = await _route(
@@ -241,16 +247,16 @@ async def test_paused_search_fallback_supersedes_pending_routing_review() -> Non
     )
     assert initial_result.route == AiNurtureRoute.REVIEW_HOLD
 
-    fallback_result = await _route(
+    second_result = await _route(
         _lead(paused_search_active=True),
         FakeClassificationLLMClient(outcome="dormant", confidence=0.5),
         routing_review_repository=review_repository,
     )
 
-    assert fallback_result.route == AiNurtureRoute.PAUSED_SEARCH
-    assert len(review_repository.saved) == 1
-    latest_review = review_repository.saved[0]
-    assert latest_review.status.value == "superseded"
+    assert second_result.route == AiNurtureRoute.REVIEW_HOLD
+    assert len(review_repository.saved) == 2
+    assert review_repository.saved[0].status.value == "superseded"
+    assert review_repository.saved[1].status.value == "pending"
 
 
 @pytest.mark.asyncio
@@ -370,7 +376,8 @@ async def test_future_timing_text_can_still_route_to_paused_search_when_llm_conf
     lead = _lead(paused_search_active=False)
     llm_client = FakeClassificationLLMClient(
         outcome="paused_search",
-        pause_reason_code="timing_not_right",
+        selected_track_key="waiting-for-rates",
+        track_selection_status="selected",
         reengagement_not_before="2027-01-01T00:00:00Z",
         reengagement_window_label="January 2027",
     )

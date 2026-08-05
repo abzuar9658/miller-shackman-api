@@ -114,7 +114,11 @@ async def test_search_skips_json_ld_objects_without_url(
     client = StreetEasyListingSearchClient()
 
     async def fake_get(url: str) -> httpx.Response:
-        return httpx.Response(200, text=HTML_WITH_URLLESS_OBJECT, request=httpx.Request("GET", url))
+        return httpx.Response(
+            200,
+            text=HTML_WITH_URLLESS_OBJECT,
+            request=httpx.Request("GET", url),
+        )
 
     monkeypatch.setattr(client._client, "get", fake_get)
     results = await client.search(
@@ -149,7 +153,11 @@ HTML_WITH_ADDITIONAL_PROPERTY_PRICE = """
     {"@type": "PropertyValue", "name": "Building Type", "value": "CO_OP"}
   ],
   "image": [
-    {"@type": "ImageObject", "url": "https://img.example/1.webp", "contentUrl": "https://img.example/1-copy.webp"}
+    {
+      "@type": "ImageObject",
+      "url": "https://img.example/1.webp",
+      "contentUrl": "https://img.example/1-copy.webp"
+    }
   ],
   "numberOfBedrooms": "2",
   "numberOfBathroomsTotal": "1"

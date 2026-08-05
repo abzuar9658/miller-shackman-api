@@ -23,8 +23,8 @@ from app.application.use_cases.process_inbound_message_event import (
 )
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
-    PausedSearchReasonMapping,
-    PausedSearchTrackFamily,
+    PausedSearchTrack,
+    PausedSearchTrackStatus,
     PausedSearchTrackVersion,
 )
 from app.domain.campaigns.execution import (
@@ -64,7 +64,6 @@ from app.domain.leads import (
     CanonicalLeadRecord,
     CRMProvider,
     LeadPausedSearchHistoryEntry,
-    PausedSearchReasonCode,
     PausedSearchSource,
 )
 from app.domain.llm import WorkspaceLLMConfig
@@ -92,6 +91,7 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
 from tests.application.use_cases._lead_read_fakes import FakeUserRepository
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
+    FakePausedSearchTrackAssignmentRepository,
 )
 from tests.application.use_cases.test_complete_handoff import (
     FakeHandoffCompletionRepository,
@@ -719,7 +719,7 @@ def _lead_state_classification_json(
     evidence: tuple[str, ...] = ("Lead sent a new reply.",),
     summary: str = "Lead state updated from latest reply.",
     handoff_reason_code: str | None = None,
-    pause_reason_code: str | None = None,
+    selected_track_key: str | None = None,
 ) -> str:
     payload: dict[str, object] = {
         "outcome": outcome,
@@ -727,7 +727,8 @@ def _lead_state_classification_json(
         "evidence": list(evidence),
         "summary": summary,
         "handoff_reason_code": handoff_reason_code,
-        "pause_reason_code": pause_reason_code,
+        "selected_track_key": selected_track_key,
+        "track_selection_status": "selected" if selected_track_key is not None else None,
         "pause_reason_note": None,
         "reengagement_not_before": None,
         "reengagement_window_label": None,
@@ -780,6 +781,7 @@ class _ContinueAIDependencies(TypedDict):
     lead_workflow_repository: FakeLeadWorkflowRepository
     workflow_transition_repository: FakeWorkflowTransitionRepository
     paused_search_track_repository: FakePausedSearchTrackAdminRepository
+    paused_search_track_assignment_repository: FakePausedSearchTrackAssignmentRepository
     temporal_signal_outbox_repository: FakeTemporalSignalOutboxRepository
     workspace_repository: FakeWorkspaceRepository
     workspace_contact_policy_repository: FakeWorkspaceContactPolicyRepository
@@ -921,6 +923,9 @@ def _continue_ai_dependencies(
         "lead_workflow_repository": _workflow_repository(workflow),
         "workflow_transition_repository": FakeWorkflowTransitionRepository(),
         "paused_search_track_repository": _paused_search_track_repository(),
+        "paused_search_track_assignment_repository": (
+            FakePausedSearchTrackAssignmentRepository()
+        ),
         "temporal_signal_outbox_repository": FakeTemporalSignalOutboxRepository(),
         "workspace_repository": FakeWorkspaceRepository(_workspace()),
         "workspace_contact_policy_repository": FakeWorkspaceContactPolicyRepository(
@@ -951,15 +956,17 @@ def _workflow_repository(workflow: LeadWorkflow) -> FakeLeadWorkflowRepository:
 
 def _paused_search_track_repository() -> FakePausedSearchTrackAdminRepository:
     return FakePausedSearchTrackAdminRepository(
-        mappings=(
-            PausedSearchReasonMapping(
-                mapping_id=UUID("00000000-0000-0000-0000-000000000041"),
-                workspace_id=WORKSPACE_ID,
-                reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        tracks=(
+            PausedSearchTrack(
                 track_id=TRACK_ID,
-                track_version_id=TRACK_VERSION_ID,
-                created_by_user_id=UUID("00000000-0000-0000-0000-000000000042"),
+                workspace_id=WORKSPACE_ID,
+                track_key="waiting-for-rates",
+                display_name="Waiting for rates",
+                status=PausedSearchTrackStatus.ACTIVE,
+                active_version_id=TRACK_VERSION_ID,
+                created_by_user_id=UUID("00000000-0000-0000-0000-000000000043"),
                 created_at=NOW,
+                updated_at=NOW,
             ),
         ),
         versions=(
@@ -969,17 +976,15 @@ def _paused_search_track_repository() -> FakePausedSearchTrackAdminRepository:
                 track_id=TRACK_ID,
                 version_number=1,
                 status=CampaignVersionStatus.PUBLISHED,
-                track_family=PausedSearchTrackFamily.MAINTENANCE,
+                selection_guidance="Select when a paused lead needs periodic follow-up.",
                 enabled=True,
                 allowed_channels=(ContactChannel.EMAIL,),
-                default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
                 fallback_timing_policy=(
                     PausedSearchFallbackTimingPolicy.USE_REENGAGEMENT_NOT_BEFORE
                 ),
                 maintenance_interval_days=30,
                 reactivation_window_days=30,
                 max_total_touches=6,
-                requires_review_before_publish=False,
                 created_by_user_id=UUID("00000000-0000-0000-0000-000000000043"),
                 created_at=NOW,
                 published_at=NOW,
@@ -1811,7 +1816,7 @@ async def test_continue_ai_pauses_when_reply_reroutes_to_paused_search() -> None
             draft_text=_draft_json(),
             lead_state_text=_lead_state_classification_json(
                 outcome="paused_search",
-                pause_reason_code="waiting_for_rates",
+                    selected_track_key="waiting-for-rates",
                 summary="Lead is waiting for rates to improve.",
             ),
         ),
@@ -1857,7 +1862,7 @@ async def test_continue_ai_reroute_to_review_hold_creates_pending_routing_review
             lead_state_text=_lead_state_classification_json(
                 outcome="paused_search",
                 confidence=0.4,
-                pause_reason_code="waiting_for_rates",
+                    selected_track_key="waiting-for-rates",
                 summary="Timing is uncertain.",
             ),
         ),
@@ -1888,7 +1893,8 @@ async def test_continue_ai_reroutes_existing_paused_search_to_human_handoff() ->
     lead_repository.lead = replace(
         lead_repository.lead,
         paused_search_active=True,
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=TRACK_VERSION_ID,
         paused_search_source=PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
     )
 

@@ -15,7 +15,6 @@ from app.domain.leads import (
     LeadPausedSearchProfile,
     LeadType,
     PausedSearchAction,
-    PausedSearchReasonCode,
     PausedSearchSource,
 )
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
@@ -39,10 +38,11 @@ def test_upsert_includes_paused_search_fields() -> None:
 
     saved = _run(PostgresLeadRepository(cast(AsyncSession, session)).upsert(_lead()))
 
-    assert saved.pause_reason_code == PausedSearchReasonCode.WAITING_FOR_RATES
+    assert saved.paused_search_track_key == "waiting-for-rates"
+    assert saved.paused_search_track_version_id == UUID("11111111-1111-1111-1111-111111111108")
     statement = str(session.statements[0])
     assert "paused_search_active" in statement
-    assert "pause_reason_code" in statement
+    assert "paused_search_track_key" in statement
 
 
 def test_append_history_returns_saved_entry() -> None:
@@ -117,7 +117,8 @@ def _lead() -> CanonicalLeadRecord:
         classification_reason=LeadClassificationReason.CRM_TYPE_MISSING,
         mapped_custom_fields={"display_name": "Jordan Buyer"},
         paused_search_active=True,
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=UUID("11111111-1111-1111-1111-111111111108"),
         pause_reason_note="Waiting until rates improve.",
         reengagement_not_before=NOW,
         reengagement_window_label="spring check-in",
@@ -149,7 +150,8 @@ def _history_entry() -> LeadPausedSearchHistoryEntry:
         previous_profile=None,
         current_profile=LeadPausedSearchProfile(
             paused_search_active=True,
-            pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+            paused_search_track_key="waiting-for-rates",
+            paused_search_track_version_id=UUID("11111111-1111-1111-1111-111111111108"),
             pause_reason_note="Waiting until rates improve.",
             reengagement_not_before=NOW,
             reengagement_window_label="spring check-in",
@@ -207,7 +209,8 @@ def _lead_model() -> LeadModel:
         has_accountable_owner=False,
         latest_property_context_present=False,
         paused_search_active=True,
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES.value,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=UUID("11111111-1111-1111-1111-111111111108"),
         pause_reason_note="Waiting until rates improve.",
         reengagement_not_before=NOW,
         reengagement_window_label="spring check-in",
@@ -228,7 +231,8 @@ def _history_model() -> LeadPausedSearchHistoryModel:
         action=PausedSearchAction.SET.value,
         previous_active=False,
         current_active=True,
-        current_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES.value,
+        current_paused_search_track_key="waiting-for-rates",
+        current_paused_search_track_version_id=UUID("11111111-1111-1111-1111-111111111108"),
         current_reason_note="Waiting until rates improve.",
         current_reengagement_not_before=NOW,
         current_reengagement_window_label="spring check-in",

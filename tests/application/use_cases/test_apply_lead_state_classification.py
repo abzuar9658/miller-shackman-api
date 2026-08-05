@@ -3,6 +3,8 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+import pytest
+
 from app.application.ports.llm import LLMClient, LLMCompletionRequest, LLMResult
 from app.application.use_cases.apply_lead_state_classification import (
     ApplyLeadStateClassificationStatus,
@@ -14,7 +16,6 @@ from app.domain.leads import (
     CRMProvider,
     LeadClassificationAppliedStatus,
     LeadStateClassificationOutcome,
-    PausedSearchReasonCode,
     PausedSearchSource,
     lead_paused_search_profile,
 )
@@ -32,6 +33,7 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
 )
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
+    FakePausedSearchTrackAssignmentRepository,
 )
 
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -62,6 +64,16 @@ class _StubLLMClient(LLMClient):
 
 
 def _classification_json(**kwargs: object) -> str:
+    selected_track_key = kwargs.pop("selected_track_key", None)
+    track_selection_status = kwargs.pop("track_selection_status", None)
+    kwargs["selected_track_key"] = (
+        selected_track_key
+        if selected_track_key is not None
+        else None
+    )
+    kwargs["track_selection_status"] = track_selection_status or (
+        "selected" if selected_track_key is not None else None
+    )
     return json.dumps(kwargs)
 
 
@@ -78,7 +90,8 @@ def _lead(*, paused_search_source: PausedSearchSource | None = None) -> Canonica
         return replace(
             lead,
             paused_search_active=True,
-            pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+            paused_search_track_key="waiting-rates",
+            paused_search_track_version_id=TRACK_VERSION_ID,
             paused_search_source=paused_search_source,
             paused_search_recorded_at=NOW,
             paused_search_recorded_by_user_id=USER_ID,
@@ -129,23 +142,25 @@ def _workflow() -> LeadWorkflow:
 def _track_repository() -> FakePausedSearchTrackAdminRepository:
     from app.domain.campaigns import (
         PausedSearchFallbackTimingPolicy,
-        PausedSearchReasonMapping,
-        PausedSearchTrackFamily,
+        PausedSearchTrack,
+        PausedSearchTrackStatus,
         PausedSearchTrackVersion,
     )
     from app.domain.campaigns.execution import CampaignVersionStatus
     from app.domain.compliance.contactability import ContactChannel
 
     return FakePausedSearchTrackAdminRepository(
-        mappings=(
-            PausedSearchReasonMapping(
-                mapping_id=UUID("00000000-0000-0000-0000-000000000009"),
-                workspace_id=WORKSPACE_ID,
-                reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        tracks=(
+            PausedSearchTrack(
                 track_id=TRACK_ID,
-                track_version_id=TRACK_VERSION_ID,
+                workspace_id=WORKSPACE_ID,
+                track_key="waiting-for-rates",
+                display_name="Waiting for rates",
+                status=PausedSearchTrackStatus.ACTIVE,
+                active_version_id=TRACK_VERSION_ID,
                 created_by_user_id=USER_ID,
                 created_at=NOW,
+                updated_at=NOW,
             ),
         ),
         versions=(
@@ -155,17 +170,17 @@ def _track_repository() -> FakePausedSearchTrackAdminRepository:
                 track_id=TRACK_ID,
                 version_number=1,
                 status=CampaignVersionStatus.PUBLISHED,
-                track_family=PausedSearchTrackFamily.MAINTENANCE,
+                selection_guidance=(
+                    "Use when a lead explicitly waits for mortgage rates to improve."
+                ),
                 enabled=True,
                 allowed_channels=(ContactChannel.EMAIL,),
-                default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
                 fallback_timing_policy=(
                     PausedSearchFallbackTimingPolicy.USE_REENGAGEMENT_NOT_BEFORE
                 ),
                 maintenance_interval_days=90,
                 reactivation_window_days=45,
                 max_total_touches=2,
-                requires_review_before_publish=False,
                 created_by_user_id=USER_ID,
                 created_at=NOW,
                 published_at=NOW,
@@ -186,7 +201,7 @@ async def test_applies_valid_paused_search_classification() -> None:
     client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
-            pause_reason_code="waiting_for_rates",
+            selected_track_key="waiting-for-rates",
             reengagement_not_before="2026-09-01",
             reengagement_window_label="after summer",
             confidence=0.88,
@@ -206,6 +221,7 @@ async def test_applies_valid_paused_search_classification() -> None:
         workspace_llm_config_repository=llm_repo,
         lead_workflow_repository=workflow_repo,
         paused_search_track_repository=_track_repository(),
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         temporal_signal_outbox_repository=signal_outbox_repository,
         llm_client=client,
         now=NOW,
@@ -225,7 +241,8 @@ async def test_applies_valid_paused_search_classification() -> None:
     profile = lead_paused_search_profile(lead_repo.lead)
     assert profile is not None
     assert profile.paused_search_source == PausedSearchSource.AI_CONVERSATION_CLASSIFICATION
-    assert profile.pause_reason_code == PausedSearchReasonCode.WAITING_FOR_RATES
+    assert profile.paused_search_track_key == "waiting-for-rates"
+    assert profile.paused_search_track_version_id == TRACK_VERSION_ID
     saved_workflow = workflow_repo.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     assert saved_workflow.paused_search_track_version_id == TRACK_VERSION_ID
     signal_entry = next(iter(signal_outbox_repository.entries.values()))
@@ -241,7 +258,7 @@ async def test_rejects_low_confidence_and_leaves_profile_unchanged() -> None:
     client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
-            pause_reason_code="waiting_for_rates",
+            selected_track_key="waiting-for-rates",
             confidence=0.45,
             evidence=["Maybe"],
             summary="Low confidence.",
@@ -270,6 +287,46 @@ async def test_rejects_low_confidence_and_leaves_profile_unchanged() -> None:
     assert lead_paused_search_profile(lead_repo.lead) is None
 
 
+@pytest.mark.parametrize("selection_status", ["no_match", "ambiguous"])
+async def test_uncertain_catalog_selection_creates_review_hold(
+    selection_status: str,
+) -> None:
+    lead_repo = FakeLeadRepository(_lead())
+    artifact_repo = FakeLeadClassificationArtifactRepository()
+    client = _StubLLMClient(
+        _classification_json(
+            outcome="paused_search",
+            track_selection_status=selection_status,
+            confidence=0.92,
+            evidence=["The pause does not identify one catalog track."],
+            summary="Track selection needs review.",
+        )
+    )
+
+    result = await apply_lead_state_classification(
+        actor=None,
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        lead_repository=lead_repo,
+        paused_search_history_repository=lead_repo,
+        artifact_repository=artifact_repo,
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(
+            _workspace_llm_config()
+        ),
+        llm_client=client,
+        paused_search_track_repository=_track_repository(),
+        now=NOW,
+    )
+
+    assert result.status is ApplyLeadStateClassificationStatus.REVIEW
+    assert result.reasons == (f"paused_search_track_{selection_status}",)
+    assert result.artifact is not None
+    assert result.artifact.applied_status is LeadClassificationAppliedStatus.REVIEW
+    assert lead_repo.lead is not None
+    assert lead_paused_search_profile(lead_repo.lead) is None
+
+
 async def test_unknown_outcome_becomes_review_hold_artifact() -> None:
     lead = _lead()
     lead_repo = FakeLeadRepository(lead)
@@ -279,7 +336,7 @@ async def test_unknown_outcome_becomes_review_hold_artifact() -> None:
     client = _StubLLMClient(
         _classification_json(
             outcome="unknown",
-            pause_reason_code=None,
+            selected_track_key=None,
             handoff_reason_code=None,
             confidence=0.93,
             evidence=["Signals conflict between future timing and active interest."],
@@ -318,7 +375,7 @@ async def test_human_operator_profile_blocks_ai_overwrite() -> None:
     client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
-            pause_reason_code="waiting_for_inventory",
+            selected_track_key="waiting-for-rates",
             confidence=0.92,
             evidence=["Lead said inventory is low"],
             summary="Now waiting for inventory.",
@@ -334,6 +391,7 @@ async def test_human_operator_profile_blocks_ai_overwrite() -> None:
         artifact_repository=artifact_repo,
         crm_conversation_event_repository=crm_repo,
         workspace_llm_config_repository=llm_repo,
+        paused_search_track_repository=_track_repository(),
         llm_client=client,
         now=NOW,
     )
@@ -345,7 +403,8 @@ async def test_human_operator_profile_blocks_ai_overwrite() -> None:
     assert lead_repo.lead is not None
     profile = lead_paused_search_profile(lead_repo.lead)
     assert profile is not None
-    assert profile.pause_reason_code == PausedSearchReasonCode.WAITING_FOR_RATES
+    assert profile.paused_search_track_key == "waiting-rates"
+    assert profile.paused_search_track_version_id == TRACK_VERSION_ID
 
 
 async def test_allow_overwrite_human_state() -> None:
@@ -354,10 +413,12 @@ async def test_allow_overwrite_human_state() -> None:
     artifact_repo = FakeLeadClassificationArtifactRepository()
     crm_repo = FakeCrmConversationEventRepository()
     llm_repo = FakeWorkspaceLLMConfigRepository(_workspace_llm_config())
+    workflow_repo = FakeLeadWorkflowRepository()
+    workflow_repo.latest_by_lead[(WORKSPACE_ID, LEAD_ID)] = _workflow()
     client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
-            pause_reason_code="waiting_for_inventory",
+            selected_track_key="waiting-for-rates",
             confidence=0.92,
             evidence=["Lead said inventory is low"],
             summary="Now waiting for inventory.",
@@ -373,6 +434,9 @@ async def test_allow_overwrite_human_state() -> None:
         artifact_repository=artifact_repo,
         crm_conversation_event_repository=crm_repo,
         workspace_llm_config_repository=llm_repo,
+        paused_search_track_repository=_track_repository(),
+        lead_workflow_repository=workflow_repo,
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         llm_client=client,
         now=NOW,
         allow_overwrite_human_state=True,
@@ -382,7 +446,8 @@ async def test_allow_overwrite_human_state() -> None:
     assert lead_repo.lead is not None
     profile = lead_paused_search_profile(lead_repo.lead)
     assert profile is not None
-    assert profile.pause_reason_code == PausedSearchReasonCode.WAITING_FOR_INVENTORY
+    assert profile.paused_search_track_key == "waiting-for-rates"
+    assert profile.paused_search_track_version_id == TRACK_VERSION_ID
 
 
 async def test_dormant_outcome_does_not_write_paused_profile() -> None:
@@ -459,7 +524,8 @@ async def test_matching_paused_search_profile_is_not_marked_applied() -> None:
     lead = replace(
         _lead(),
         paused_search_active=True,
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=TRACK_VERSION_ID,
         paused_search_source=PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
         paused_search_recorded_at=NOW,
         paused_search_recorded_by_user_id=None,
@@ -475,7 +541,7 @@ async def test_matching_paused_search_profile_is_not_marked_applied() -> None:
     client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
-            pause_reason_code="waiting_for_rates",
+            selected_track_key="waiting-for-rates",
             confidence=0.88,
             evidence=["Lead still wants to wait for rates."],
             summary="Paused-search status is unchanged.",
@@ -494,6 +560,7 @@ async def test_matching_paused_search_profile_is_not_marked_applied() -> None:
         llm_client=client,
         lead_workflow_repository=workflow_repo,
         paused_search_track_repository=track_repo,
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         now=NOW,
     )
 

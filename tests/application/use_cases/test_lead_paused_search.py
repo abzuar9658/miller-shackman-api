@@ -17,7 +17,6 @@ from app.domain.identity import (
 from app.domain.leads import (
     CanonicalLeadRecord,
     CRMProvider,
-    PausedSearchReasonCode,
     PausedSearchSource,
 )
 from app.domain.workflows import LeadWorkflow, TemporalSignalName, WorkflowState
@@ -57,7 +56,7 @@ def test_update_lead_paused_search_sets_profile_and_history() -> None:
             workspace_id=WORKSPACE_ID,
             lead_id=LEAD_ID,
             active=True,
-            reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+            selected_track_key="waiting-rates",
             reason_note="Waiting until rates improve.",
             reengagement_not_before=NOW,
             reengagement_window_label="spring check-in",
@@ -65,6 +64,7 @@ def test_update_lead_paused_search_sets_profile_and_history() -> None:
             paused_search_history_repository=history_repository,
             lead_workflow_repository=workflow_repository,
             paused_search_track_repository=_track_repository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
             temporal_signal_outbox_repository=signal_outbox_repository,
             now=NOW,
         )
@@ -72,7 +72,8 @@ def test_update_lead_paused_search_sets_profile_and_history() -> None:
 
     assert result.status == LeadPausedSearchActionStatus.UPDATED
     assert result.profile is not None
-    assert result.profile.pause_reason_code == PausedSearchReasonCode.WAITING_FOR_RATES
+    assert result.profile.paused_search_track_key == "waiting-rates"
+    assert result.profile.paused_search_track_version_id == TRACK_VERSION_ID
     assert result.history_entry is not None
     assert result.history_entry.previous_profile is None
     pinned_workflow = asyncio.run(workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID))
@@ -94,7 +95,7 @@ def test_update_lead_paused_search_returns_unchanged_for_duplicate_profile() -> 
             workspace_id=WORKSPACE_ID,
             lead_id=LEAD_ID,
             active=True,
-            reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+            selected_track_key="waiting-rates",
             reason_note="Waiting until rates improve.",
             reengagement_not_before=NOW,
             reengagement_window_label="spring check-in",
@@ -114,7 +115,6 @@ def test_update_lead_paused_search_returns_unchanged_for_duplicate_profile() -> 
     assert pinned_workflow.paused_search_track_version_id == TRACK_VERSION_ID
     assignment = asyncio.run(assignment_repository.get_active_for_lead(WORKSPACE_ID, LEAD_ID))
     assert assignment is not None
-    assert assignment.track_version_id == TRACK_VERSION_ID
 
 
 def test_update_lead_paused_search_clears_existing_profile() -> None:
@@ -123,6 +123,7 @@ def test_update_lead_paused_search_clears_existing_profile() -> None:
     workflow_repository = FakeLeadWorkflowRepository(
         (_workflow(paused_search_track_version_id=TRACK_VERSION_ID),)
     )
+    assignment_repository = FakePausedSearchTrackAssignmentRepository()
     signal_outbox_repository = FakeTemporalSignalOutboxRepository()
 
     result = asyncio.run(
@@ -131,7 +132,7 @@ def test_update_lead_paused_search_clears_existing_profile() -> None:
             workspace_id=WORKSPACE_ID,
             lead_id=LEAD_ID,
             active=False,
-            reason_code=None,
+            selected_track_key=None,
             reason_note=None,
             reengagement_not_before=None,
             reengagement_window_label=None,
@@ -139,6 +140,7 @@ def test_update_lead_paused_search_clears_existing_profile() -> None:
             paused_search_history_repository=history_repository,
             lead_workflow_repository=workflow_repository,
             paused_search_track_repository=_track_repository(),
+            paused_search_track_assignment_repository=assignment_repository,
             temporal_signal_outbox_repository=signal_outbox_repository,
             now=NOW,
         )
@@ -151,6 +153,7 @@ def test_update_lead_paused_search_clears_existing_profile() -> None:
     pinned_workflow = asyncio.run(workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID))
     assert pinned_workflow is not None
     assert pinned_workflow.paused_search_track_version_id is None
+    assert asyncio.run(assignment_repository.get_active_for_lead(WORKSPACE_ID, LEAD_ID)) is None
     signal_entry = next(iter(signal_outbox_repository.entries.values()))
     assert signal_entry.signal_name == TemporalSignalName.RESCHEDULE_REQUESTED
 
@@ -162,7 +165,7 @@ def test_assigned_agent_cannot_edit_unowned_paused_search_profile() -> None:
             workspace_id=WORKSPACE_ID,
             lead_id=LEAD_ID,
             active=True,
-            reason_code=PausedSearchReasonCode.TIMING_NOT_RIGHT,
+            selected_track_key="waiting-rates",
             reason_note=None,
             reengagement_not_before=None,
             reengagement_window_label=None,
@@ -172,6 +175,7 @@ def test_assigned_agent_cannot_edit_unowned_paused_search_profile() -> None:
             paused_search_history_repository=FakeLeadPausedSearchHistoryRepository(()),
             lead_workflow_repository=FakeLeadWorkflowRepository((_workflow(),)),
             paused_search_track_repository=_track_repository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
             now=NOW,
         )
     )
@@ -206,7 +210,8 @@ def _paused_search_lead() -> CanonicalLeadRecord:
         effective_owner_user_id=USER_ID,
         mapped_custom_fields={"display_name": "Jordan Seller"},
         paused_search_active=True,
-        pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        paused_search_track_key="waiting-rates",
+        paused_search_track_version_id=TRACK_VERSION_ID,
         pause_reason_note="Waiting until rates improve.",
         reengagement_not_before=NOW,
         reengagement_window_label="spring check-in",
@@ -237,9 +242,7 @@ def _workflow(*, paused_search_track_version_id: UUID | None = None) -> LeadWork
 def _track_repository() -> FakePausedSearchTrackAdminRepository:
     from app.domain.campaigns import (
         PausedSearchFallbackTimingPolicy,
-        PausedSearchReasonMapping,
         PausedSearchTrack,
-        PausedSearchTrackFamily,
         PausedSearchTrackStatus,
         PausedSearchTrackVersion,
     )
@@ -260,17 +263,6 @@ def _track_repository() -> FakePausedSearchTrackAdminRepository:
                 updated_at=NOW,
             ),
         ),
-        mappings=(
-            PausedSearchReasonMapping(
-                mapping_id=UUID("00000000-0000-0000-0000-000000000009"),
-                workspace_id=WORKSPACE_ID,
-                reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
-                track_id=TRACK_ID,
-                track_version_id=TRACK_VERSION_ID,
-                created_by_user_id=USER_ID,
-                created_at=NOW,
-            ),
-        ),
         versions=(
             PausedSearchTrackVersion(
                 track_version_id=TRACK_VERSION_ID,
@@ -278,17 +270,15 @@ def _track_repository() -> FakePausedSearchTrackAdminRepository:
                 track_id=TRACK_ID,
                 version_number=1,
                 status=CampaignVersionStatus.PUBLISHED,
-                track_family=PausedSearchTrackFamily.MAINTENANCE,
+                selection_guidance="Select when a paused lead needs periodic follow-up.",
                 enabled=True,
                 allowed_channels=(ContactChannel.EMAIL,),
-                default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
                 fallback_timing_policy=(
                     PausedSearchFallbackTimingPolicy.USE_REENGAGEMENT_NOT_BEFORE
                 ),
                 maintenance_interval_days=90,
                 reactivation_window_days=45,
                 max_total_touches=2,
-                requires_review_before_publish=False,
                 created_by_user_id=USER_ID,
                 created_at=NOW,
                 published_at=NOW,

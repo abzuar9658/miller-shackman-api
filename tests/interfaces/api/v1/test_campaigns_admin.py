@@ -102,6 +102,19 @@ def test_assigned_agent_cannot_view_campaign_list() -> None:
     assert response.json()["detail"] == ["permission_denied"]
 
 
+def test_platform_super_admin_can_create_and_view_campaigns() -> None:
+    client = _client_for_role(WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN)
+
+    create_response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/campaigns",
+        json=_payload(),
+    )
+    list_response = client.client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/campaigns")
+
+    assert create_response.status_code == 201
+    assert list_response.status_code == 200
+
+
 def test_assigned_agent_cannot_create_campaign() -> None:
     client = _client_for_role(WorkspaceMembershipRole.ASSIGNED_AGENT)
 

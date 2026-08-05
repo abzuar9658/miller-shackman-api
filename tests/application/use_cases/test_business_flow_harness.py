@@ -37,9 +37,7 @@ from app.domain.campaigns import (
     CampaignStatus,
     CampaignVersionStatus,
     PausedSearchFallbackTimingPolicy,
-    PausedSearchReasonMapping,
     PausedSearchTrack,
-    PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
@@ -73,7 +71,6 @@ from app.domain.identity import Workspace, WorkspaceStatus
 from app.domain.leads import (
     CanonicalLeadRecord,
     CRMProvider,
-    PausedSearchReasonCode,
 )
 from app.domain.outbound_drafting import default_workspace_outbound_drafting_config
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
@@ -780,13 +777,14 @@ async def test_business_flow_harness_runs_crm_tag_to_paused_search_send_to_hando
         lead_repository=lead_repository,
         paused_search_history_repository=lead_repository,
         paused_search_track_repository=_paused_search_track_repository(),
-            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         artifact_repository=FakeLeadClassificationArtifactRepository(),
         crm_conversation_event_repository=FakeCrmConversationEventRepository(),
         workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
         llm_client=FakeClassificationLLMClient(
             outcome="paused_search",
-            pause_reason_code="waiting_for_rates",
+            selected_track_key="waiting-for-rates",
+            track_selection_status="selected",
             summary="Lead wants to wait for better mortgage rates.",
         ),
         event_bus=FakeEventBus(),
@@ -1199,38 +1197,6 @@ def _lead(*, tags: tuple[str, ...] = ()) -> CanonicalLeadRecord:
 
 def _paused_search_track_repository() -> FakePausedSearchTrackAdminRepository:
     return FakePausedSearchTrackAdminRepository(
-        mappings=(
-            PausedSearchReasonMapping(
-                mapping_id=UUID("00000000-0000-0000-0000-000000000016"),
-                workspace_id=WORKSPACE_ID,
-                reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
-                track_id=UUID("00000000-0000-0000-0000-000000000015"),
-                track_version_id=PAUSED_SEARCH_TRACK_VERSION_ID,
-                created_by_user_id=ACTOR_ID,
-                created_at=NOW,
-            ),
-        ),
-        versions=(
-            PausedSearchTrackVersion(
-                track_version_id=PAUSED_SEARCH_TRACK_VERSION_ID,
-                workspace_id=WORKSPACE_ID,
-                track_id=UUID("00000000-0000-0000-0000-000000000015"),
-                version_number=1,
-                status=CampaignVersionStatus.PUBLISHED,
-                track_family=PausedSearchTrackFamily.MAINTENANCE,
-                enabled=True,
-                allowed_channels=(ContactChannel.EMAIL,),
-                default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
-                fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_MAINTENANCE_INTERVAL,
-                maintenance_interval_days=60,
-                reactivation_window_days=30,
-                max_total_touches=4,
-                requires_review_before_publish=False,
-                created_by_user_id=ACTOR_ID,
-                created_at=NOW,
-                published_at=NOW,
-            ),
-        ),
         tracks=(
             PausedSearchTrack(
                 track_id=UUID("00000000-0000-0000-0000-000000000015"),
@@ -1242,6 +1208,27 @@ def _paused_search_track_repository() -> FakePausedSearchTrackAdminRepository:
                 created_by_user_id=ACTOR_ID,
                 created_at=NOW,
                 updated_at=NOW,
+            ),
+        ),
+        versions=(
+            PausedSearchTrackVersion(
+                track_version_id=PAUSED_SEARCH_TRACK_VERSION_ID,
+                workspace_id=WORKSPACE_ID,
+                track_id=UUID("00000000-0000-0000-0000-000000000015"),
+                version_number=1,
+                status=CampaignVersionStatus.PUBLISHED,
+                selection_guidance=(
+                    "Use when a lead explicitly waits for mortgage rates to improve."
+                ),
+                enabled=True,
+                allowed_channels=(ContactChannel.EMAIL,),
+                fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_MAINTENANCE_INTERVAL,
+                maintenance_interval_days=60,
+                reactivation_window_days=30,
+                max_total_touches=4,
+                created_by_user_id=ACTOR_ID,
+                created_at=NOW,
+                published_at=NOW,
             ),
         ),
         steps=(

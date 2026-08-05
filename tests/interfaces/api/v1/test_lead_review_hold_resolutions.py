@@ -8,9 +8,7 @@ from fastapi.testclient import TestClient
 from app.application.ports.crm import CRMClient
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
-    PausedSearchReasonMapping,
     PausedSearchTrack,
-    PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackVersion,
 )
@@ -31,7 +29,6 @@ from app.domain.leads import (
     LeadClassificationAppliedStatus,
     LeadClassificationArtifact,
     LeadStateClassificationOutcome,
-    PausedSearchReasonCode,
 )
 from app.domain.workspace_automation import WorkspaceOperationalControl
 from app.interfaces.api.dependencies.lead_classification import (
@@ -111,7 +108,7 @@ def test_admin_can_resolve_review_hold_to_paused_search() -> None:
         json={
             "resolution": "paused_search",
             "campaign_id": str(CAMPAIGN_ID),
-            "pause_reason_code": "waiting_for_rates",
+            "selected_track_key": "waiting-for-rates",
             "pause_reason_note": "Need better financing conditions.",
             "reengagement_not_before": NOW.isoformat(),
             "reengagement_window_label": "spring check-in",
@@ -249,7 +246,6 @@ def _artifact(outcome: LeadStateClassificationOutcome) -> LeadClassificationArti
         lead_id=LEAD_ID,
         source="ai_conversation_classification",
         outcome=outcome,
-        pause_reason_code=None,
         reengagement_not_before=None,
         reengagement_window_label=None,
         confidence=0.55,
@@ -304,17 +300,6 @@ def _campaign_repository() -> FakeCampaignAdminRepository:
 
 def _track_repository() -> FakePausedSearchTrackAdminRepository:
     return FakePausedSearchTrackAdminRepository(
-        mappings=(
-            PausedSearchReasonMapping(
-                mapping_id=UUID("00000000-0000-0000-0000-000000000011"),
-                workspace_id=WORKSPACE_ID,
-                reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
-                track_id=TRACK_ID,
-                track_version_id=TRACK_VERSION_ID,
-                created_by_user_id=USER_ID,
-                created_at=NOW,
-            ),
-        ),
         versions=(
             PausedSearchTrackVersion(
                 track_version_id=TRACK_VERSION_ID,
@@ -322,17 +307,15 @@ def _track_repository() -> FakePausedSearchTrackAdminRepository:
                 track_id=TRACK_ID,
                 version_number=1,
                 status=CampaignVersionStatus.PUBLISHED,
-                track_family=PausedSearchTrackFamily.MAINTENANCE,
+                selection_guidance="Select when a lead waits for mortgage rates to improve.",
                 enabled=True,
                 allowed_channels=(ContactChannel.EMAIL,),
-                default_for_reason_codes=(PausedSearchReasonCode.WAITING_FOR_RATES,),
                 fallback_timing_policy=(
                     PausedSearchFallbackTimingPolicy.USE_REENGAGEMENT_NOT_BEFORE
                 ),
                 maintenance_interval_days=30,
                 reactivation_window_days=30,
                 max_total_touches=6,
-                requires_review_before_publish=False,
                 created_by_user_id=USER_ID,
                 created_at=NOW,
                 published_at=NOW,

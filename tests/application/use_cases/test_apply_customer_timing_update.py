@@ -11,7 +11,6 @@ from app.domain.leads import (
     CustomerTimingCandidate,
     CustomerTimingEvidenceType,
     CustomerTimingStatus,
-    PausedSearchReasonCode,
     PausedSearchSource,
 )
 
@@ -44,7 +43,6 @@ async def test_ai_timing_is_candidate_until_operator_confirmation() -> None:
     result = await apply_customer_timing_update(
         workspace_id=uuid4(),
         lead_id=uuid4(),
-        reason_code=PausedSearchReasonCode.TIMING_NOT_RIGHT,
         customer_date=now,
         source=PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
         evidence_type=CustomerTimingEvidenceType.AI_EXTRACTION,
@@ -66,7 +64,6 @@ async def test_operator_timing_is_confirmed_immediately() -> None:
     result = await apply_customer_timing_update(
         workspace_id=uuid4(),
         lead_id=uuid4(),
-        reason_code=PausedSearchReasonCode.TIMING_NOT_RIGHT,
         customer_date=now,
         source=PausedSearchSource.OPERATOR,
         evidence_type=CustomerTimingEvidenceType.OPERATOR_INPUT,

@@ -21,10 +21,9 @@ from app.application.use_cases.paused_search_track_admin import (
 )
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
-    PausedSearchReasonMapping,
     PausedSearchTrack,
     PausedSearchTrackAdminAuditLog,
-    PausedSearchTrackFamily,
+    PausedSearchTrackCatalogEntry,
     PausedSearchTrackLeadAssignment,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
@@ -43,7 +42,6 @@ from app.domain.identity import (
     WorkspaceMembershipStatus,
     WorkspaceStatus,
 )
-from app.domain.leads import PausedSearchReasonCode
 from app.domain.outbound_drafting import DormantStepTemplateProfile
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
@@ -112,7 +110,7 @@ def test_create_draft_paused_search_track_persists_audit_and_event() -> None:
     assert event_bus.events[-1].event_type == DomainEventType.PAUSED_SEARCH_TRACK_DRAFT_CREATED
 
 
-def test_create_draft_rejects_assigned_agent_and_duplicate_reason_mapping() -> None:
+def test_create_draft_rejects_assigned_agent_and_short_guidance() -> None:
     permission_result = _run(
         create_draft_paused_search_track(
             actor=_actor(role=WorkspaceMembershipRole.ASSIGNED_AGENT),
@@ -125,18 +123,13 @@ def test_create_draft_rejects_assigned_agent_and_duplicate_reason_mapping() -> N
             now=NOW,
         )
     )
-    mapping_result = _run(
+    guidance_result = _run(
         create_draft_paused_search_track(
             actor=_actor(),
             workspace_id=WORKSPACE_ID,
             track_key="rented-year",
             display_name="Rented for a year",
-            config=_config(
-                default_for_reason_codes=(
-                    PausedSearchReasonCode.RENTED_TEMPORARILY,
-                    PausedSearchReasonCode.RENTED_TEMPORARILY,
-                )
-            ),
+            config=_config(selection_guidance="too short"),
             repository=FakePausedSearchTrackAdminRepository(),
             audit_log_repository=FakePausedSearchTrackAuditLogRepository(),
             now=NOW,
@@ -145,11 +138,11 @@ def test_create_draft_rejects_assigned_agent_and_duplicate_reason_mapping() -> N
 
     assert permission_result.status == PausedSearchTrackDraftStatus.REJECTED
     assert permission_result.reasons[0].value == "permission_denied"
-    assert mapping_result.status == PausedSearchTrackDraftStatus.REJECTED
-    assert mapping_result.reasons[0].value == "invalid_configuration"
+    assert guidance_result.status == PausedSearchTrackDraftStatus.REJECTED
+    assert guidance_result.reasons[0].value == "invalid_configuration"
 
 
-def test_publish_track_version_creates_reason_mappings_and_retires_previous_version() -> None:
+def test_publish_track_version_retires_previous_version() -> None:
     repo = FakePausedSearchTrackAdminRepository()
     repo.tracks[TRACK_ID] = _track(status=PausedSearchTrackStatus.ACTIVE)
     repo.versions[PREVIOUS_VERSION_ID] = _version(
@@ -180,7 +173,6 @@ def test_publish_track_version_creates_reason_mappings_and_retires_previous_vers
     assert result.view.track.active_version_id == VERSION_ID
     assert repo.versions[PREVIOUS_VERSION_ID].status == CampaignVersionStatus.RETIRED
     assert repo.versions[PREVIOUS_VERSION_ID].track_version_id == PREVIOUS_VERSION_ID
-    assert repo.mappings[PausedSearchReasonCode.RENTED_TEMPORARILY].track_version_id == VERSION_ID
     assert repo.locked_track_ids == [TRACK_ID]
     assert repo.publish_operations == [
         "lock_track",
@@ -188,7 +180,6 @@ def test_publish_track_version_creates_reason_mappings_and_retires_previous_vers
         "retire_versions",
         "save_version",
         "save_track",
-        "replace_reason_mappings",
     ]
     evidence = audit_repo.logs[-1].details["publish_evidence"]
     assert isinstance(evidence, dict)
@@ -262,12 +253,11 @@ def test_update_published_track_creates_new_draft_without_mutating_active_versio
     assert readback.views[0].steps == result.view.steps
 
 
-def test_retire_track_clears_mappings_but_keeps_pinned_version_readable() -> None:
+def test_retire_track_keeps_pinned_version_readable() -> None:
     repo = FakePausedSearchTrackAdminRepository()
     repo.tracks[TRACK_ID] = _track(status=PausedSearchTrackStatus.ACTIVE)
     repo.versions[VERSION_ID] = _version(status=CampaignVersionStatus.PUBLISHED)
     repo.steps[VERSION_ID] = _step_tuple(VERSION_ID)
-    repo.mappings[PausedSearchReasonCode.RENTED_TEMPORARILY] = _mapping(VERSION_ID)
 
     result = _run(
         retire_paused_search_track(
@@ -282,7 +272,6 @@ def test_retire_track_clears_mappings_but_keeps_pinned_version_readable() -> Non
 
     assert result.status.value == "retired"
     assert repo.tracks[TRACK_ID].status == PausedSearchTrackStatus.RETIRED
-    assert repo.mappings == {}
     assert repo.versions[VERSION_ID].status == CampaignVersionStatus.RETIRED
     assert repo.versions[VERSION_ID].track_version_id == VERSION_ID
 
@@ -311,7 +300,9 @@ def test_restore_retired_track_returns_it_as_an_unpublished_draft() -> None:
     assert result.view is not None
     assert repo.tracks[TRACK_ID].status is PausedSearchTrackStatus.DRAFT
     assert repo.tracks[TRACK_ID].active_version_id is None
-    assert repo.versions[VERSION_ID].status is CampaignVersionStatus.DRAFT
+    assert repo.versions[VERSION_ID].status is CampaignVersionStatus.RETIRED
+    assert result.view.version.track_version_id != VERSION_ID
+    assert result.view.version.status is CampaignVersionStatus.DRAFT
     assert audit_repo.logs[-1].action.value == "paused_search_track_restored"
     assert event_bus.events[-1].event_type is DomainEventType.PAUSED_SEARCH_TRACK_RESTORED
 
@@ -383,7 +374,6 @@ class FakePausedSearchTrackAdminRepository:
         self.tracks: dict[PausedSearchTrackId, PausedSearchTrack] = {}
         self.versions: dict[PausedSearchTrackVersionId, PausedSearchTrackVersion] = {}
         self.steps: dict[PausedSearchTrackVersionId, tuple[PausedSearchTrackStep, ...]] = {}
-        self.mappings: dict[PausedSearchReasonCode, PausedSearchReasonMapping] = {}
         self.locked_track_ids: list[PausedSearchTrackId] = []
         self.publish_operations: list[str] = []
         self.assigned_leads: dict[
@@ -392,6 +382,26 @@ class FakePausedSearchTrackAdminRepository:
 
     async def list_tracks(self, workspace_id: WorkspaceId) -> tuple[PausedSearchTrack, ...]:
         return tuple(track for track in self.tracks.values() if track.workspace_id == workspace_id)
+
+    async def list_active_catalog(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> tuple[PausedSearchTrackCatalogEntry, ...]:
+        entries: list[PausedSearchTrackCatalogEntry] = []
+        for track in self.tracks.values():
+            version_id = track.active_version_id
+            if track.workspace_id != workspace_id or version_id is None:
+                continue
+            entries.append(
+                PausedSearchTrackCatalogEntry(
+                    track_key=track.track_key,
+                    display_name=track.display_name,
+                    selection_guidance=self.versions[version_id].selection_guidance,
+                    track_id=track.track_id,
+                    track_version_id=version_id,
+                )
+            )
+        return tuple(entries)
 
     async def list_assigned_leads(
         self,
@@ -550,65 +560,6 @@ class FakePausedSearchTrackAdminRepository:
             ):
                 self.versions[version_id] = replace(version, status=CampaignVersionStatus.RETIRED)
 
-    async def replace_reason_mappings(
-        self,
-        *,
-        workspace_id: WorkspaceId,
-        track_id: PausedSearchTrackId,
-        track_version_id: PausedSearchTrackVersionId,
-        reason_codes: tuple[PausedSearchReasonCode, ...],
-        actor_user_id: UUID,
-        now: datetime,
-    ) -> tuple[PausedSearchReasonMapping, ...]:
-        self.publish_operations.append("replace_reason_mappings")
-        self.mappings = {
-            reason_code: mapping
-            for reason_code, mapping in self.mappings.items()
-            if mapping.track_id != track_id and reason_code not in reason_codes
-        }
-        for reason_code in reason_codes:
-            self.mappings[reason_code] = PausedSearchReasonMapping(
-                mapping_id=UUID(int=len(self.mappings) + 1),
-                workspace_id=workspace_id,
-                reason_code=reason_code,
-                track_id=track_id,
-                track_version_id=track_version_id,
-                created_by_user_id=actor_user_id,
-                created_at=now,
-            )
-        return tuple(self.mappings[reason_code] for reason_code in reason_codes)
-
-    async def clear_reason_mappings_for_track(
-        self,
-        workspace_id: WorkspaceId,
-        track_id: PausedSearchTrackId,
-    ) -> None:
-        self.mappings = {
-            reason_code: mapping
-            for reason_code, mapping in self.mappings.items()
-            if mapping.workspace_id != workspace_id or mapping.track_id != track_id
-        }
-
-    async def list_reason_mappings_for_version(
-        self,
-        workspace_id: WorkspaceId,
-        track_version_id: PausedSearchTrackVersionId,
-    ) -> tuple[PausedSearchReasonMapping, ...]:
-        return tuple(
-            mapping
-            for mapping in self.mappings.values()
-            if mapping.workspace_id == workspace_id and mapping.track_version_id == track_version_id
-        )
-
-    async def get_reason_mapping(
-        self,
-        workspace_id: WorkspaceId,
-        reason_code: PausedSearchReasonCode,
-    ) -> PausedSearchReasonMapping | None:
-        mapping = self.mappings.get(reason_code)
-        return mapping if mapping is not None and mapping.workspace_id == workspace_id else None
-
-
 class FakePausedSearchTrackAuditLogRepository:
     def __init__(self) -> None:
         self.logs: list[PausedSearchTrackAdminAuditLog] = []
@@ -689,6 +640,11 @@ class FakeTemplateRepository:
             permitted_use_tags=(
                 "no_prohibited_advice",
                 "no_financial_advice",
+                "no_legal_advice",
+                "no_tax_advice",
+                "no_investment_advice",
+                "no_market_predictions",
+                "no_unverified_listing_claims",
                 "listing_context_allowed",
             ),
             status=TemplateStatus.APPROVED,
@@ -713,20 +669,16 @@ class FakeTemplateRepository:
 def _config(
     *,
     max_total_touches: int = 2,
-    default_for_reason_codes: tuple[PausedSearchReasonCode, ...] = (
-        PausedSearchReasonCode.RENTED_TEMPORARILY,
-    ),
+    selection_guidance: str = "Select when a temporary renter plans to search again later.",
 ) -> PausedSearchTrackConfigInput:
     return PausedSearchTrackConfigInput(
-        track_family=PausedSearchTrackFamily.MAINTENANCE,
+        selection_guidance=selection_guidance,
         enabled=True,
         allowed_channels=(ContactChannel.EMAIL,),
-        default_for_reason_codes=default_for_reason_codes,
         fallback_timing_policy=PausedSearchFallbackTimingPolicy.USE_REENGAGEMENT_NOT_BEFORE,
         maintenance_interval_days=90,
         reactivation_window_days=45,
         max_total_touches=max_total_touches,
-        requires_review_before_publish=False,
         steps=(
             PausedSearchTrackStepInput(
                 phase=PausedSearchTrackStepPhase.MAINTENANCE,
@@ -767,15 +719,13 @@ def _version(
         track_id=TRACK_ID,
         version_number=version_number,
         status=status,
-        track_family=config.track_family,
+        selection_guidance=config.selection_guidance,
         enabled=config.enabled,
         allowed_channels=config.allowed_channels,
-        default_for_reason_codes=config.default_for_reason_codes,
         fallback_timing_policy=config.fallback_timing_policy,
         maintenance_interval_days=config.maintenance_interval_days,
         reactivation_window_days=config.reactivation_window_days,
         max_total_touches=config.max_total_touches,
-        requires_review_before_publish=config.requires_review_before_publish,
         created_by_user_id=ACTOR_ID,
         created_at=NOW,
         published_at=NOW if status == CampaignVersionStatus.PUBLISHED else None,
@@ -799,18 +749,6 @@ def _step_tuple(track_version_id: UUID) -> tuple[PausedSearchTrackStep, ...]:
             review_required=config.steps[0].review_required,
             created_at=NOW,
         ),
-    )
-
-
-def _mapping(track_version_id: UUID) -> PausedSearchReasonMapping:
-    return PausedSearchReasonMapping(
-        mapping_id=UUID("00000000-0000-0000-0000-000000000008"),
-        workspace_id=WORKSPACE_ID,
-        reason_code=PausedSearchReasonCode.RENTED_TEMPORARILY,
-        track_id=TRACK_ID,
-        track_version_id=track_version_id,
-        created_by_user_id=ACTOR_ID,
-        created_at=NOW,
     )
 
 

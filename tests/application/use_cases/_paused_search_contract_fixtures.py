@@ -16,7 +16,7 @@ class PausedSearchContractFixtureIds:
     template_id: UUID
     template_version_id: UUID
     notification_id: UUID
-    profile_key: str = "timing_not_right"
+    track_key: str = "timing-not-right"
 
 
 def paused_search_contract_fixture_ids() -> PausedSearchContractFixtureIds:

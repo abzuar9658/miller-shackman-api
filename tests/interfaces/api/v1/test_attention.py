@@ -88,15 +88,15 @@ def test_put_and_delete_attention_acknowledgement_commit_changes() -> None:
     assert attention_client.session.commit_count == 2
 
 
-def test_platform_super_admin_is_forbidden() -> None:
+def test_platform_super_admin_can_list_attention_acknowledgements() -> None:
     attention_client = _client_for_role(WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN)
 
     response = attention_client.client.get(
         f"/api/v1/workspaces/{WORKSPACE_ID}/attention-acknowledgements"
     )
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == ["permission_denied"]
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
 
 
 def _client_for_role(role: WorkspaceMembershipRole) -> AttentionTestClient:

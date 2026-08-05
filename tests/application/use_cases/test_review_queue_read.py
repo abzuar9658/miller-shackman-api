@@ -107,7 +107,6 @@ def _artifact() -> LeadClassificationArtifact:
         lead_id=LEAD_ID,
         source="ai_conversation_classification",
         outcome=LeadStateClassificationOutcome.REVIEW_HOLD,
-        pause_reason_code=None,
         reengagement_not_before=None,
         reengagement_window_label=None,
         confidence=0.51,

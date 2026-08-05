@@ -145,23 +145,23 @@ def test_manager_can_enroll_any_eligible_lead() -> None:
     assert decision.reasons == ()
 
 
-def test_only_manager_and_brokerage_admin_can_import_crm_history() -> None:
-    for role in (WorkspaceMembershipRole.MANAGER, WorkspaceMembershipRole.BROKERAGE_ADMIN):
-        decision = evaluate_permission(
-            _actor(role=role),
-            PermissionCapability.IMPORT_CRM_HISTORY,
-        )
-        assert decision.allowed is True
-
+def test_manager_brokerage_admin_and_super_admin_can_import_crm_history() -> None:
     for role in (
-        WorkspaceMembershipRole.ASSIGNED_AGENT,
+        WorkspaceMembershipRole.MANAGER,
+        WorkspaceMembershipRole.BROKERAGE_ADMIN,
         WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN,
     ):
         decision = evaluate_permission(
             _actor(role=role),
             PermissionCapability.IMPORT_CRM_HISTORY,
         )
-        assert decision.allowed is False
+        assert decision.allowed is True
+
+    assigned_agent = evaluate_permission(
+        _actor(role=WorkspaceMembershipRole.ASSIGNED_AGENT),
+        PermissionCapability.IMPORT_CRM_HISTORY,
+    )
+    assert assigned_agent.allowed is False
 
 
 def test_all_active_brokerage_roles_can_export_history_from_extension() -> None:
@@ -169,18 +169,13 @@ def test_all_active_brokerage_roles_can_export_history_from_extension() -> None:
         WorkspaceMembershipRole.ASSIGNED_AGENT,
         WorkspaceMembershipRole.MANAGER,
         WorkspaceMembershipRole.BROKERAGE_ADMIN,
+        WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN,
     ):
         decision = evaluate_permission(
             _actor(role=role),
             PermissionCapability.EXPORT_CRM_HISTORY_FROM_EXTENSION,
         )
         assert decision.allowed is True
-
-    super_admin = evaluate_permission(
-        _actor(role=WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN),
-        PermissionCapability.EXPORT_CRM_HISTORY_FROM_EXTENSION,
-    )
-    assert super_admin.allowed is False
 
 
 def test_brokerage_admin_can_invite_workspace_user() -> None:
@@ -213,11 +208,10 @@ def test_assigned_agent_cannot_pause_campaign() -> None:
     assert decision.reasons == (PermissionReasonCode.ROLE_NOT_ALLOWED,)
 
 
-def test_platform_super_admin_is_restricted_from_business_actions() -> None:
-    decision = evaluate_permission(
-        _actor(role=WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN),
-        PermissionCapability.PAUSE_CAMPAIGN,
-    )
+def test_platform_super_admin_can_access_every_workspace_capability() -> None:
+    actor = _actor(role=WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN)
 
-    assert decision.allowed is False
-    assert decision.reasons == (PermissionReasonCode.PLATFORM_SUPER_ADMIN_RESTRICTED,)
+    for capability in PermissionCapability:
+        decision = evaluate_permission(actor, capability)
+        assert decision.allowed is True
+        assert decision.reasons == ()
