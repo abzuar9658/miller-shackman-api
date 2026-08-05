@@ -306,10 +306,7 @@ async def test_includes_freshness_context_for_stale_property_interest_without_re
     assert (
         "If a property inquiry is older than the configured dormant threshold" in result.prompt_text
     )
-    assert (
-        "If the newest observed message in the available context window is older"
-        in result.prompt_text
-    )
+    assert "If the newest lead-authored signal is older" in result.prompt_text
     assert (
         "do not assign low confidence just because the historical message text sounds urgent"
         in result.prompt_text
@@ -409,3 +406,91 @@ async def test_marks_recent_property_interest_with_reply_as_not_stale() -> None:
     assert freshness_context["property_interest_is_stale_by_threshold"] is False
     assert freshness_context["has_observed_inbound_reply_after_latest_property_event"] is True
     assert freshness_context["stale_property_interest_without_observed_reply"] is False
+
+
+async def test_overrides_stale_handoff_after_outbound_followups() -> None:
+    stale_inbound = _event(
+        "I'm interested in 309 East Houston Street #4E. This will be a cash purchase for us.",
+        occurred_at=NOW - timedelta(days=14),
+    )
+    outbound_follow_up = _event(
+        "When are you available for a showing?",
+        direction=CrmConversationEventDirection.OUTBOUND,
+        occurred_at=NOW - timedelta(days=3),
+    )
+    client = _StubLLMClient(
+        _classification_json(
+            outcome="human_handoff",
+            handoff_reason_code="specific_property_or_advice",
+            pause_reason_code=None,
+            confidence=0.94,
+            evidence=["Cash purchase inquiry"],
+            evidence_event_ids=[outbound_follow_up.crm_activity_id],
+            lead_goal="buyer",
+            last_known_intent="cash purchase of a specific property",
+            intent_freshness="historical",
+            conversation_waiting_on="lead",
+            summary="Lead is interested in a specific property.",
+        )
+    )
+
+    result = await classify_lead_from_conversation(
+        lead=_lead(),
+        now=NOW,
+        crm_conversation_events=(outbound_follow_up, stale_inbound),
+        llm_client=client,
+        dormant_threshold_days=10,
+    )
+
+    assert result.status == LeadStateClassificationStatus.CLASSIFIED
+    assert result.outcome == LeadStateClassificationOutcome.DORMANT
+    assert result.summary is not None
+    assert "stale" in result.summary
+    assert result.parsed_llm_response["outcome"] == "human_handoff"
+    freshness_context = result.input_context["freshness_context"]
+    assert isinstance(freshness_context, dict)
+    assert freshness_context["latest_lead_signal_at"] == stale_inbound.occurred_at.isoformat()
+    assert freshness_context["days_since_latest_lead_signal"] == 14
+    assert freshness_context["has_current_inbound_engagement"] is False
+    assert freshness_context["outbound_only_since_latest_lead_signal"] is True
+    policy = result.input_context["classifier_policy"]
+    assert isinstance(policy, dict)
+    assert policy["decision"] == "overridden"
+    assert "no_fresh_lead_signal_for_handoff" in policy["reason_codes"]
+    assert "evidence_event_not_lead_authored" in policy["reason_codes"]
+
+
+async def test_accepts_handoff_for_fresh_lead_authored_signal() -> None:
+    inbound = _event(
+        "Can someone help me schedule a showing today?",
+        occurred_at=NOW - timedelta(days=1),
+    )
+    client = _StubLLMClient(
+        _classification_json(
+            outcome="human_handoff",
+            handoff_reason_code="human_requested",
+            pause_reason_code=None,
+            confidence=0.93,
+            evidence=["Lead requested help scheduling a showing."],
+            evidence_event_ids=[inbound.crm_activity_id],
+            lead_goal="buyer",
+            last_known_intent="wants to schedule a showing",
+            intent_freshness="current",
+            conversation_waiting_on="agent",
+            summary="Lead needs an agent to schedule a showing.",
+        )
+    )
+
+    result = await classify_lead_from_conversation(
+        lead=_lead(),
+        now=NOW,
+        crm_conversation_events=(inbound,),
+        llm_client=client,
+        dormant_threshold_days=10,
+    )
+
+    assert result.outcome == LeadStateClassificationOutcome.HUMAN_HANDOFF
+    policy = result.input_context["classifier_policy"]
+    assert isinstance(policy, dict)
+    assert policy["decision"] == "accepted"
+    assert policy["applied_outcome"] == "human_handoff"

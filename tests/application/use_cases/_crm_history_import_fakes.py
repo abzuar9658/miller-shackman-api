@@ -2,7 +2,7 @@ from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
 
-from app.domain.conversations import CrmConversationEvent
+from app.domain.conversations import CrmConversationEvent, canonical_crm_event_identity
 from app.domain.crm_history_imports import (
     CrmHistoryImportEventStatus,
     CrmHistoryImportJob,
@@ -43,6 +43,22 @@ class FakeCrmHistoryImportJobRepository:
                 if job.workspace_id == workspace_id
                 and job.lead_id == lead_id
                 and job.status in active
+            ),
+            None,
+        )
+
+    async def get_by_batch_fingerprint(
+        self, workspace_id: UUID, lead_id: UUID, batch_fingerprint: str
+    ) -> CrmHistoryImportJob | None:
+        return next(
+            (
+                job
+                for job in self.jobs.values()
+                if job.workspace_id == workspace_id
+                and job.lead_id == lead_id
+                and job.batch_fingerprint == batch_fingerprint
+                and job.status
+                not in {CrmHistoryImportJobStatus.FAILED, CrmHistoryImportJobStatus.CANCELLED}
             ),
             None,
         )
@@ -138,11 +154,22 @@ class FakeLeadRepository:
 
 class FakeCrmConversationEventRepository:
     def __init__(self) -> None:
-        self.events: dict[tuple[UUID, str, str], CrmConversationEvent] = {}
+        self.events: dict[tuple[UUID, str, UUID, str], CrmConversationEvent] = {}
 
     async def save(self, event: CrmConversationEvent) -> CrmConversationEvent:
-        self.events[(event.workspace_id, event.crm_provider, event.crm_activity_id)] = event
-        return event
+        identity = canonical_crm_event_identity(
+            activity_type=event.activity_type,
+            occurred_at=event.occurred_at,
+            content=event.content,
+            direction=event.direction,
+        )
+        key = (event.workspace_id, event.crm_provider, event.lead_id, identity)
+        existing = self.events.get(key)
+        if existing is not None and event.source_payload_version.startswith("extension/"):
+            return existing
+        stored = replace(event, canonical_identity=identity)
+        self.events[key] = stored
+        return stored
 
 
 class FakeAuthAuditLogRepository:

@@ -78,6 +78,21 @@ def test_create_list_and_detail_paused_search_tracks(
     assert cast(_FakeSession, paused_search_track_admin_client.session).commits == 1
 
 
+def test_create_generates_track_key_when_omitted(
+    paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
+) -> None:
+    payload = _payload()
+    payload.pop("track_key")
+
+    response = paused_search_track_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks",
+        json=payload,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["track"]["track_key"] == "rate-watch"
+
+
 def test_publish_and_retire_paused_search_track(
     paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
 ) -> None:
@@ -145,6 +160,10 @@ def test_validate_and_preview_unsaved_draft_do_not_persist(
     assert preview_body["status"] == "ready"
     assert preview_body["preview_reference"]
     assert preview_body["occurrences"]
+    assert all(
+        occurrence["reason_code"] == "scheduled"
+        for occurrence in preview_body["occurrences"]
+    )
     assert session.commits == commits_before_preview
 
 
@@ -187,11 +206,16 @@ def test_assigned_agent_cannot_view_or_create_paused_search_tracks() -> None:
         f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks",
         json=_payload(),
     )
+    delete_response = client.client.delete(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks/{UUID(int=123)}"
+    )
 
     assert list_response.status_code == 403
     assert list_response.json()["detail"] == ["permission_denied"]
     assert create_response.status_code == 403
     assert create_response.json()["detail"] == ["permission_denied"]
+    assert delete_response.status_code == 403
+    assert delete_response.json()["detail"] == ["permission_denied"]
 
 
 def test_detail_returns_404_for_missing_track(
@@ -217,6 +241,7 @@ def test_uncertain_occurrence_resolution_route_is_registered() -> None:
         "/api/v1/workspaces/{workspace_id}/paused-search-tracks/reviews/{review_id}/approve",
         "/api/v1/workspaces/{workspace_id}/paused-search-tracks/reviews/{review_id}/reject",
         "/api/v1/workspaces/{workspace_id}/paused-search-tracks/reviews/{review_id}/resolve",
+        "/api/v1/workspaces/{workspace_id}/paused-search-tracks/{track_id}",
     )
     assert all(path in paths for path in expected_paths)
     assert (

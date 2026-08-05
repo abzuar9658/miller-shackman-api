@@ -4,10 +4,14 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from app.application.ports.lead_activity import LeadActivityItem, LeadActivityKind
-from app.application.services.lead_decision_tree import build_lead_decision_tree
+from app.application.services.lead_decision_tree import (
+    PausedSearchTrackOptionSpec,
+    build_lead_decision_tree,
+)
 from app.application.use_cases.lead_read import (
     LeadReadReasonCode,
     LeadReadStatus,
+    _paused_search_plan_view,
     get_lead_detail_view,
     list_lead_views,
 )
@@ -16,6 +20,8 @@ from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessa
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchTrack,
+    PausedSearchTrackAssignment,
+    PausedSearchTrackAssignmentSource,
     PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
@@ -86,6 +92,7 @@ from tests.application.use_cases._lead_read_fakes import (
 )
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
+    FakePausedSearchTrackAssignmentRepository,
 )
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
@@ -163,6 +170,9 @@ def test_get_lead_detail_view_returns_messages_and_transitions() -> None:
                     _inventory_paused_search_step(),
                     _personal_timing_paused_search_step(),
                 ),
+            ),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(
+                (_paused_search_track_assignment(),)
             ),
             activity_repository=FakeLeadActivityRepository(_activity_items()),
             rejected_draft_review_repository=FakeRejectedDraftReviewRepository(
@@ -262,7 +272,7 @@ def test_get_lead_detail_view_returns_messages_and_transitions() -> None:
         if edge.edge_id == "paused_search->paused_search_track_decision"
     )
     assert (
-        "identifies which configured track is pinned"
+        "identifies which configured track is assigned"
         in (paused_search_path_edge.description or "").lower()
     )
     assert any(
@@ -315,6 +325,62 @@ def test_decision_tree_highlights_blocked_classifier_route() -> None:
     assert blocked_edge.status.value == "current"
 
 
+def test_decision_tree_does_not_assign_first_track_when_workflow_is_unpinned() -> None:
+    decision_tree = build_lead_decision_tree(
+        lead=_lead(),
+        classification_artifact=_classification_artifact(),
+        paused_search_track=None,
+        paused_search_track_version=None,
+        paused_search_steps=(),
+        paused_search_current_step=None,
+        paused_search_track_options=(
+            PausedSearchTrackOptionSpec(
+                track=_paused_search_track(),
+                version=_paused_search_track_version(),
+                steps=(_paused_search_track_step(),),
+            ),
+        ),
+        latest_workflow=replace(_workflow(), paused_search_track_version_id=None),
+        latest_handoff=None,
+    )
+
+    unassigned_node = next(
+        node for node in decision_tree.nodes if node.node_id == "paused_search_track_unassigned"
+    )
+    track_node = next(node for node in decision_tree.nodes if node.label == "Rates Watch")
+    assert unassigned_node.status.value == "current"
+    assert track_node.status.value == "available"
+
+
+def test_decision_tree_renders_assigned_track_without_workflow() -> None:
+    decision_tree = build_lead_decision_tree(
+        lead=_lead(),
+        classification_artifact=_classification_artifact(),
+        paused_search_track=_paused_search_track(),
+        paused_search_track_version=_paused_search_track_version(),
+        paused_search_steps=(_paused_search_track_step(),),
+        paused_search_current_step=None,
+        paused_search_track_options=(
+            PausedSearchTrackOptionSpec(
+                track=_paused_search_track(),
+                version=_paused_search_track_version(),
+                steps=(_paused_search_track_step(),),
+            ),
+        ),
+        latest_workflow=None,
+        latest_handoff=None,
+    )
+
+    track_node = next(node for node in decision_tree.nodes if node.label == "Rates Watch")
+    state_node = next(node for node in decision_tree.nodes if node.node_id == "paused_search_state")
+    assert track_node.status.value == "taken"
+    assert state_node.label == "Paused"
+    assert any(
+        "durable paused-search assignment" in (edge.description or "")
+        for edge in decision_tree.edges
+    )
+
+
 def test_assigned_agent_list_lead_views_returns_only_owned_leads() -> None:
     result = asyncio.run(
         list_lead_views(
@@ -364,6 +430,27 @@ def test_assigned_agent_list_lead_views_uses_effective_owner_visibility() -> Non
     assert result.views[0].assigned_agent_name == "Jordan Agent"
 
 
+def test_paused_search_plan_uses_assignment_without_workflow() -> None:
+    plan = asyncio.run(
+        _paused_search_plan_view(
+            WORKSPACE_ID,
+            LEAD_ID,
+            None,
+            FakePausedSearchTrackAssignmentRepository((_paused_search_track_assignment(),)),
+            FakePausedSearchTrackAdminRepository(
+                tracks=(_paused_search_track(),),
+                versions=(_paused_search_track_version(),),
+                steps=(_paused_search_track_step(),),
+            ),
+        )
+    )
+
+    assert plan is not None
+    assert plan.track.track_key == "rates-watch"
+    assert plan.version.version_number == 3
+    assert plan.steps[0].template_key == "paused_search_rates_watch_reactivation"
+
+
 def test_assigned_agent_get_lead_detail_view_rejects_unowned_lead() -> None:
     result = asyncio.run(
         get_lead_detail_view(
@@ -377,6 +464,7 @@ def test_assigned_agent_get_lead_detail_view_rejects_unowned_lead() -> None:
             workflow_override_audit_repository=FakeLeadWorkflowOverrideAuditLogRepository(()),
             workflow_transition_repository=FakeWorkflowTransitionRepository(()),
             paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
             activity_repository=FakeLeadActivityRepository(()),
             rejected_draft_review_repository=FakeRejectedDraftReviewRepository(()),
             routing_review_repository=_routing_review_repository(),
@@ -547,6 +635,23 @@ def _paused_search_track_version() -> PausedSearchTrackVersion:
         created_by_user_id=USER_ID,
         created_at=NOW,
         published_at=NOW,
+    )
+
+
+def _paused_search_track_assignment() -> PausedSearchTrackAssignment:
+    return PausedSearchTrackAssignment(
+        assignment_id=UUID("00000000-0000-0000-0000-000000000017"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        track_id=UUID("00000000-0000-0000-0000-000000000018"),
+        track_version_id=UUID("00000000-0000-0000-0000-000000000015"),
+        track_key_snapshot="rates-watch",
+        track_name_snapshot="Rates Watch",
+        track_version_snapshot=3,
+        reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+        source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
+        assigned_by_user_id=USER_ID,
+        assigned_at=NOW,
     )
 
 

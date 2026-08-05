@@ -19,6 +19,7 @@ from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.template_registry import TemplateChannel, TemplateStatus, TemplateVersion
 from app.domain.compliance import ContactChannel
 from app.domain.leads import PausedSearchReasonCode
+from app.domain.outbound_drafting import DormantStepTemplateProfile
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("10000000-0000-0000-0000-000000000001")
@@ -90,6 +91,39 @@ def test_publish_validation_blocks_unresolved_template_binding() -> None:
 
     assert not report.publishable
     assert report.errors[0].code is PausedSearchValidationCode.TEMPLATE_VERSION_MISSING
+
+
+def test_draft_validation_blocks_unresolved_template_binding() -> None:
+    report = validate_paused_search_track(
+        track=_track(),
+        version=_version(),
+        steps=(_step(),),
+        for_publish=False,
+        templates={},
+    )
+
+    assert not report.publishable
+    assert report.errors[0].code is PausedSearchValidationCode.TEMPLATE_VERSION_MISSING
+
+
+def test_profile_based_step_does_not_require_legacy_template_binding() -> None:
+    template_id = UUID("10000000-0000-0000-0000-000000000009")
+    report = validate_paused_search_track(
+        track=_track(),
+        version=_version(),
+        steps=(
+            replace(
+                _step(),
+                template_version_id=template_id,
+                template_profile=DormantStepTemplateProfile(),
+            ),
+        ),
+        for_publish=True,
+        templates={},
+    )
+
+    assert report.publishable
+    assert report.errors == ()
 
 
 def test_validation_reports_all_blocking_configuration_findings() -> None:

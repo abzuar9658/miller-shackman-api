@@ -78,3 +78,31 @@ async def test_seed_is_idempotent() -> None:
     assert second.status is TemplateBackfillStatus.ALREADY_PRESENT
     assert len(first.templates) == 14
     assert len(repository.templates) == 14
+
+    waiting_for_rates = next(
+        template
+        for template in first.templates
+        if "waiting-for-rates" in template.template_key
+    )
+    financial_prep = next(
+        template
+        for template in first.templates
+        if "financial-prep" in template.template_key
+    )
+    waiting_for_inventory = next(
+        template
+        for template in first.templates
+        if "waiting-for-inventory" in template.template_key
+    )
+    assert waiting_for_rates.permitted_use_tags == (
+        "no_financial_advice",
+        "no_prohibited_advice",
+    )
+    assert financial_prep.permitted_use_tags == (
+        "no_financial_advice",
+        "no_prohibited_advice",
+    )
+    assert waiting_for_inventory.permitted_use_tags == (
+        "listing_context_allowed",
+        "no_prohibited_advice",
+    )

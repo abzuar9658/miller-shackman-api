@@ -31,6 +31,7 @@ from tests.application.use_cases._lead_read_fakes import (
 )
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
+    FakePausedSearchTrackAssignmentRepository,
 )
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
@@ -85,6 +86,7 @@ def test_update_lead_paused_search_returns_unchanged_for_duplicate_profile() -> 
     lead_repository = FakeLeadRepository((_paused_search_lead(),))
     history_repository = FakeLeadPausedSearchHistoryRepository(())
     workflow_repository = FakeLeadWorkflowRepository((_workflow(),))
+    assignment_repository = FakePausedSearchTrackAssignmentRepository()
 
     result = asyncio.run(
         update_lead_paused_search(
@@ -100,12 +102,19 @@ def test_update_lead_paused_search_returns_unchanged_for_duplicate_profile() -> 
             paused_search_history_repository=history_repository,
             lead_workflow_repository=workflow_repository,
             paused_search_track_repository=_track_repository(),
+            paused_search_track_assignment_repository=assignment_repository,
             now=NOW,
         )
     )
 
     assert result.status == LeadPausedSearchActionStatus.UNCHANGED
     assert result.history_entry is None
+    pinned_workflow = asyncio.run(workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID))
+    assert pinned_workflow is not None
+    assert pinned_workflow.paused_search_track_version_id == TRACK_VERSION_ID
+    assignment = asyncio.run(assignment_repository.get_active_for_lead(WORKSPACE_ID, LEAD_ID))
+    assert assignment is not None
+    assert assignment.track_version_id == TRACK_VERSION_ID
 
 
 def test_update_lead_paused_search_clears_existing_profile() -> None:
@@ -229,13 +238,28 @@ def _track_repository() -> FakePausedSearchTrackAdminRepository:
     from app.domain.campaigns import (
         PausedSearchFallbackTimingPolicy,
         PausedSearchReasonMapping,
+        PausedSearchTrack,
         PausedSearchTrackFamily,
+        PausedSearchTrackStatus,
         PausedSearchTrackVersion,
     )
     from app.domain.campaigns.execution import CampaignVersionStatus
     from app.domain.compliance.contactability import ContactChannel
 
     return FakePausedSearchTrackAdminRepository(
+        tracks=(
+            PausedSearchTrack(
+                track_id=TRACK_ID,
+                workspace_id=WORKSPACE_ID,
+                track_key="waiting-rates",
+                display_name="Waiting for rates",
+                status=PausedSearchTrackStatus.ACTIVE,
+                active_version_id=TRACK_VERSION_ID,
+                created_by_user_id=USER_ID,
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        ),
         mappings=(
             PausedSearchReasonMapping(
                 mapping_id=UUID("00000000-0000-0000-0000-000000000009"),

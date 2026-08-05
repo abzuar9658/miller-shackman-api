@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.use_cases.crm_history_imports import promote_crm_history_import
+from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
 from app.domain.crm_history_imports import (
     CrmHistoryImportEventStatus,
     CrmHistoryImportJob,
@@ -73,6 +74,44 @@ async def test_staging_duplicate_claim_and_promotion_to_canonical_row(
     assert await staged.list_received(WORKSPACE_ID, job.import_job_id) == ()
 
 
+async def test_extension_and_pulled_history_converge_in_both_arrival_orders(
+    postgres_session: AsyncSession,
+) -> None:
+    await _seed(postgres_session)
+    canonical = PostgresCrmConversationEventRepository(postgres_session)
+
+    await canonical.save(_pulled_event("text_message:1", "First message", NOW))
+    await canonical.save(_extension_event("extension-fingerprint:first", "First message", NOW))
+    await canonical.save(
+        _extension_event(
+            "extension-fingerprint:second",
+            "Second message",
+            NOW + timedelta(minutes=1),
+        )
+    )
+    await canonical.save(
+        _pulled_event(
+            "text_message:2",
+            "Second message",
+            NOW + timedelta(minutes=1),
+        )
+    )
+    await canonical.save(
+        _extension_event("extension-fingerprint:first-edit", "First message edited", NOW)
+    )
+    await canonical.save(_pulled_event("text_message:1", "First message edited", NOW))
+
+    events = await canonical.list_for_lead(WORKSPACE_ID, LEAD_ID, limit=10)
+
+    assert len(events) == 2
+    assert {event.crm_activity_id for event in events} == {
+        "text_message:1",
+        "text_message:2",
+    }
+    assert all(event.source_payload_version == "follow_up_boss/v1" for event in events)
+    assert {event.content for event in events} == {"First message edited", "Second message"}
+
+
 async def _seed(session: AsyncSession) -> None:
     session.add_all(
         [
@@ -136,4 +175,40 @@ def _event(job: CrmHistoryImportJob) -> StagedCrmHistoryImportEvent:
         status=CrmHistoryImportEventStatus.RECEIVED,
         content="Historical message",
         created_at=NOW,
+    )
+
+
+def _pulled_event(activity_id: str, content: str, occurred_at: datetime) -> CrmConversationEvent:
+    return CrmConversationEvent(
+        crm_conversation_event_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        crm_provider=CRMProvider.FOLLOW_UP_BOSS.value,
+        crm_activity_id=activity_id,
+        activity_type="Text message",
+        direction=CrmConversationEventDirection.INBOUND,
+        occurred_at=occurred_at,
+        content=content,
+        source_payload_version="follow_up_boss/v1",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _extension_event(
+    activity_id: str, content: str, occurred_at: datetime
+) -> CrmConversationEvent:
+    return CrmConversationEvent(
+        crm_conversation_event_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        crm_provider=CRMProvider.FOLLOW_UP_BOSS.value,
+        crm_activity_id=activity_id,
+        activity_type="text",
+        direction=CrmConversationEventDirection.INBOUND,
+        occurred_at=occurred_at,
+        content=content,
+        source_payload_version="extension/v1",
+        created_at=NOW,
+        updated_at=NOW,
     )

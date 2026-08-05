@@ -9,7 +9,9 @@ from app.application.ports.crm import CRMClient
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchReasonMapping,
+    PausedSearchTrack,
     PausedSearchTrackFamily,
+    PausedSearchTrackStatus,
     PausedSearchTrackVersion,
 )
 from app.domain.campaigns.admin import CampaignAdminCampaign, CampaignAdminVersion
@@ -69,6 +71,7 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
 from tests.application.use_cases._lead_read_fakes import FakeUserRepository
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
+    FakePausedSearchTrackAssignmentRepository,
 )
 from tests.application.use_cases.test_complete_handoff import (
     FakeCRMClient,
@@ -156,6 +159,7 @@ def _client_for_role(
     signal_outbox_repository = FakeTemporalSignalOutboxRepository()
     session = _FakeSession()
     track_repository = _track_repository()
+    assignment_repository = FakePausedSearchTrackAssignmentRepository()
 
     manual_bundle = LeadManualEnrollmentBundle(
         session=session,
@@ -177,6 +181,7 @@ def _client_for_role(
         llm_client=FakeClassificationLLMClient(outcome="review_hold"),
         crm_conversation_event_repository=FakeCrmConversationEventRepository(),
         paused_search_track_repository=track_repository,
+        paused_search_track_assignment_repository=assignment_repository,
         routing_review_repository=FakeLeadRoutingReviewRepository(),
         default_openrouter_model="openai/gpt-4o-mini",
         handoff_repository=FakeHandoffRepository(),
@@ -193,6 +198,7 @@ def _client_for_role(
         paused_search_history_repository=lead_repository,
         lead_workflow_repository=workflow_repository,
         paused_search_track_repository=track_repository,
+        paused_search_track_assignment_repository=assignment_repository,
         temporal_signal_outbox_repository=signal_outbox_repository,
     )
     classification_bundle = LeadClassificationActionBundle(
@@ -330,6 +336,19 @@ def _track_repository() -> FakePausedSearchTrackAdminRepository:
                 created_by_user_id=USER_ID,
                 created_at=NOW,
                 published_at=NOW,
+            ),
+        ),
+        tracks=(
+            PausedSearchTrack(
+                track_id=TRACK_ID,
+                workspace_id=WORKSPACE_ID,
+                track_key="waiting-for-rates",
+                display_name="Waiting for rates",
+                status=PausedSearchTrackStatus.ACTIVE,
+                active_version_id=TRACK_VERSION_ID,
+                created_by_user_id=USER_ID,
+                created_at=NOW,
+                updated_at=NOW,
             ),
         ),
     )

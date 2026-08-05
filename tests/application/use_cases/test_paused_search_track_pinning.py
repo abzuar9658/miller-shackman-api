@@ -93,7 +93,7 @@ def test_pin_updates_latest_workflow_with_resolved_track_version() -> None:
     assert saved.paused_search_track_version_id == TRACK_VERSION_ID
 
 
-def test_pin_clears_workflow_when_reason_mapping_is_missing() -> None:
+def test_pin_preserves_existing_workflow_pin_when_reason_mapping_is_missing() -> None:
     workflow_repository = FakeLeadWorkflowRepository()
     workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)] = _workflow(
         paused_search_track_version_id=TRACK_VERSION_ID,
@@ -104,6 +104,27 @@ def test_pin_clears_workflow_when_reason_mapping_is_missing() -> None:
             workspace_id=WORKSPACE_ID,
             lead_id=LEAD_ID,
             pause_reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+            lead_workflow_repository=workflow_repository,
+            paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
+            now=NOW,
+        )
+    )
+
+    assert saved is not None
+    assert saved.paused_search_track_version_id == TRACK_VERSION_ID
+
+
+def test_pin_clears_workflow_when_paused_search_is_cleared() -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)] = _workflow(
+        paused_search_track_version_id=TRACK_VERSION_ID,
+    )
+
+    saved = asyncio.run(
+        pin_published_paused_search_track_on_latest_workflow(
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            pause_reason_code=None,
             lead_workflow_repository=workflow_repository,
             paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
             now=NOW,

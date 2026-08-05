@@ -1,4 +1,5 @@
 import hashlib
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID
@@ -14,6 +15,8 @@ from app.application.use_cases.crm_history_imports import (
     CrmHistoryImportReasonCode,
     complete_crm_history_import_upload,
     create_crm_history_import,
+    create_extension_crm_history_import,
+    crm_history_export_batch_fingerprint,
     ingest_crm_history_events,
     promote_crm_history_import,
 )
@@ -22,9 +25,12 @@ from app.domain.crm_history_imports import (
     CrmHistoryImportEventPayload,
     CrmHistoryImportJob,
     CrmHistoryImportJobStatus,
+    CrmHistoryImportSource,
 )
 from app.domain.identity import (
+    AuthAuditEventType,
     AuthenticatedActor,
+    AuthenticatedExtensionDevice,
     UserStatus,
     WorkspaceMembershipRole,
     WorkspaceMembershipStatus,
@@ -84,6 +90,84 @@ async def test_create_requires_flag_permission_and_stores_only_token_hash() -> N
     assert created.job is not None
     assert created.job.upload_token_hash == hashlib.sha256(b"scoped-token").hexdigest()
     assert "scoped-token" not in created.job.upload_token_hash
+
+
+async def test_extension_create_allows_unassigned_agent_and_is_batch_idempotent() -> None:
+    jobs = FakeCrmHistoryImportJobRepository()
+    audit = FakeAuthAuditLogRepository()
+    payloads = (
+        CrmHistoryImportEventPayload(
+            fingerprint="client-fingerprint",
+            activity_type="text",
+            direction=CrmHistoryImportDirection.INBOUND,
+            occurred_at=NOW,
+            content="Interested",
+        ),
+    )
+    batch_fingerprint = crm_history_export_batch_fingerprint(payloads)
+    leads = cast(LeadRepository, FakeLeadRepository((_lead(),)))
+
+    first = await create_extension_crm_history_import(
+        extension_device=AuthenticatedExtensionDevice(
+            actor=_actor(WorkspaceMembershipRole.ASSIGNED_AGENT),
+            device_id=OTHER_WORKSPACE_ID,
+        ),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        batch_fingerprint=batch_fingerprint,
+        enabled=True,
+        lead_repository=leads,
+        job_repository=cast(CrmHistoryImportJobRepository, jobs),
+        audit_log_repository=cast(AuthAuditLogRepository, audit),
+        now=NOW,
+        token_factory=lambda: "extension-token",
+    )
+    repeated = await create_extension_crm_history_import(
+        extension_device=AuthenticatedExtensionDevice(
+            actor=_actor(WorkspaceMembershipRole.ASSIGNED_AGENT),
+            device_id=OTHER_WORKSPACE_ID,
+        ),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        batch_fingerprint=batch_fingerprint,
+        enabled=True,
+        lead_repository=leads,
+        job_repository=cast(CrmHistoryImportJobRepository, jobs),
+        audit_log_repository=cast(AuthAuditLogRepository, audit),
+        now=NOW,
+        token_factory=lambda: "extension-token",
+    )
+
+    assert first.status is CrmHistoryImportMutationStatus.CREATED
+    assert repeated.status is CrmHistoryImportMutationStatus.DUPLICATE
+    assert repeated.job == first.job
+    assert first.job is not None
+    assert first.job.source is CrmHistoryImportSource.EXTENSION
+    assert first.job.source_device_id == OTHER_WORKSPACE_ID
+    assert audit.logs[0].event_type is AuthAuditEventType.CRM_HISTORY_EXTENSION_EXPORT_REQUESTED
+    assert len(audit.logs) == 2
+    assert audit.logs[1].event_details["request_status"] == "duplicate"
+
+    assert first.job is not None
+    await jobs.save(replace(first.job, status=CrmHistoryImportJobStatus.CANCELLED))
+    retried = await create_extension_crm_history_import(
+        extension_device=AuthenticatedExtensionDevice(
+            actor=_actor(WorkspaceMembershipRole.ASSIGNED_AGENT),
+            device_id=OTHER_WORKSPACE_ID,
+        ),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        batch_fingerprint=batch_fingerprint,
+        enabled=True,
+        lead_repository=leads,
+        job_repository=cast(CrmHistoryImportJobRepository, jobs),
+        audit_log_repository=cast(AuthAuditLogRepository, audit),
+        now=NOW,
+        token_factory=lambda: "replacement-token",
+    )
+    assert retried.status is CrmHistoryImportMutationStatus.CREATED
+    assert retried.job is not None
+    assert retried.job.import_job_id != first.job.import_job_id
 
 
 async def test_ingest_is_scoped_deduplicated_and_has_no_promotion_side_effects() -> None:

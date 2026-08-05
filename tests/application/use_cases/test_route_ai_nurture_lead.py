@@ -79,7 +79,7 @@ def _crm_event(content: str) -> CrmConversationEvent:
         occurred_at=NOW,
         created_at=NOW,
         updated_at=NOW,
-        direction=CrmConversationEventDirection.INTERNAL,
+        direction=CrmConversationEventDirection.INBOUND,
         content=content,
     )
 
@@ -291,7 +291,12 @@ async def test_route_passes_configured_dormant_threshold_to_classifier() -> None
     result = await _route(
         lead,
         llm_client,
-        crm_events=(_crm_event("I am interested in this listing."),),
+        crm_events=(
+            _crm_event_with_metadata(
+                "I am interested in this listing.",
+                direction=CrmConversationEventDirection.INTERNAL,
+            ),
+        ),
         dormant_threshold_days=45,
     )
 

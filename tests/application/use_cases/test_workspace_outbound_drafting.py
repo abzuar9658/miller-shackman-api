@@ -13,7 +13,7 @@ from app.application.use_cases.workspace_outbound_drafting import (
 )
 from app.domain.identity import WorkspaceMembershipRole
 from app.domain.listing_sources import CanonicalListingSnapshot, ListingSource, ListingSourceType
-from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
+from app.domain.outbound_drafting import OutboundJourneyKind, WorkspaceOutboundDraftingConfig
 from tests.application.use_cases.test_authentication import (
     MEMBERSHIP_ID,
     WORKSPACE_ID,
@@ -219,6 +219,61 @@ def test_preview_workspace_outbound_drafting_uses_saved_config_and_live_search()
         "You are the brokerage's preview drafting assistant." in request.prompt
         for request in llm_client.requests
         if request.prompt_version != OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION
+    )
+
+
+def test_preview_workspace_outbound_drafting_prefers_explicit_dormant_config() -> None:
+    deps = _Dependencies()
+    llm_client = _FakePreviewLLMClient()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    deps.workspace_outbound_drafting_configs[WORKSPACE_ID] = WorkspaceOutboundDraftingConfig(
+        workspace_id=WORKSPACE_ID,
+        prompt_text="Workspace prompt must not be used.",
+    )
+    dormant_config = WorkspaceOutboundDraftingConfig(
+        workspace_id=WORKSPACE_ID,
+        revision=4,
+        prompt_text="Use the saved dormant campaign prompt.",
+        enabled_extraction_fields=("location",),
+    )
+
+    result = _run(
+        preview_workspace_outbound_drafting(
+            actor=_actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            query="Looking in Queens",
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            workspace_outbound_drafting_config_repository=(
+                deps.workspace_outbound_drafting_config_repository
+            ),
+            workspace_llm_config_repository=deps.workspace_llm_config_repository,
+            llm_client=llm_client,
+            listing_source_repository=None,
+            listing_snapshot_repository=None,
+            listing_search_client=None,
+            now=NOW,
+            drafting_config=dormant_config,
+            journey_kind=OutboundJourneyKind.DORMANT,
+        )
+    )
+
+    assert result.status == OutboundDraftingPreviewStatus.PREVIEWED
+    draft_requests = [
+        request
+        for request in llm_client.requests
+        if request.prompt_version != OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION
+    ]
+    assert len(draft_requests) == 2
+    assert all(
+        "Use the saved dormant campaign prompt." in request.prompt
+        for request in draft_requests
+    )
+    assert all('"journey_kind": "dormant"' in request.prompt for request in draft_requests)
+    assert all(
+        "Workspace prompt must not be used." not in request.prompt
+        for request in draft_requests
     )
 
 

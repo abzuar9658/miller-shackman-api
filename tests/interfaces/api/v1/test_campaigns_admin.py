@@ -60,7 +60,13 @@ def test_create_draft_campaign_route_returns_201(
     assert body["campaign"]["name"] == "Dormant Buyers"
     assert body["version"]["status"] == "draft"
     assert body["version"]["allow_assigned_agent_manual_enrollment"] is True
+    assert body["version"]["prompt_text"] == "Draft dormant outreach with a calm tone."
+    assert body["version"]["sms_template"] == "Hi {{lead_first_name}}, {{message_body}}"
+    assert body["version"]["email_subject_template"] == "{{message_subject}}"
+    assert body["version"]["enabled_extraction_fields"] == ["location", "max_price"]
+    assert "message_body" in body["version"]["supported_template_placeholders"]
     assert len(body["cadence_steps"]) == 1
+    assert body["cadence_steps"][0]["template_profile"]["tone"] == "warm"
     assert campaign_admin_client.audit_repository.logs[-1].action.value == "campaign_draft_created"
     assert campaign_admin_client.event_bus.events[-1].event_type.value == "campaign.draft_created"
 
@@ -351,6 +357,13 @@ def _payload() -> dict[str, Any]:
         "allow_assigned_agent_manual_enrollment": True,
         "prompt_version": "v1",
         "approved_model": "openai/gpt-4o-mini",
+        "prompt_text": "  Draft dormant outreach with a calm tone.  ",
+        "sms_prompt_text": "Use a concise dormant SMS tone.",
+        "sms_template": "Hi {{lead_first_name}}, {{message_body}}",
+        "email_prompt_text": "Use a concise dormant email tone.",
+        "email_template": "Hello {{lead_first_name}},\n\n{{message_body}}",
+        "email_subject_template": "{{message_subject}}",
+        "enabled_extraction_fields": ["location", "max_price", "location"],
         "cadence_steps": [
             {
                 "channel": "email",
@@ -358,6 +371,17 @@ def _payload() -> dict[str, Any]:
                 "message_goal": "Check whether the lead is still considering a move.",
                 "template_key": "dormant-email-1",
                 "max_attempts": 1,
+                "template_profile": {
+                    "tone": "warm",
+                    "style": "friendly_follow_up",
+                    "length": "short",
+                    "call_to_action": "invite_reply",
+                    "greeting": "lead_first_name",
+                    "sign_off": "best_brokerage",
+                    "listing_context": "when_available",
+                    "personalization_fields": ["lead_first_name", "location"],
+                    "custom_instructions": None,
+                },
             }
         ],
     }

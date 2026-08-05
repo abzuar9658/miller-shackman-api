@@ -32,10 +32,15 @@ from app.domain.compliance import (
     WorkspaceContactPolicy,
 )
 from app.domain.compliance.contactability import ContactChannel
-from app.domain.conversations import WorkspaceHandoffConfig
+from app.domain.conversations import (
+    CrmConversationEvent,
+    CrmConversationEventDirection,
+    WorkspaceHandoffConfig,
+)
 from app.domain.events import DomainEvent
 from app.domain.identity import Workspace, WorkspaceStatus
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.outbound_drafting import default_workspace_outbound_drafting_config
 from app.domain.workflows import LeadWorkflow, TemporalSignalName, WorkflowState
 from app.infrastructure.crm.follow_up_boss.webhook_event_handler import (
     FollowUpBossWebhookEventHandlerImpl,
@@ -323,6 +328,7 @@ def _campaign_execution_config(
         ),
         created_at=NOW,
         published_at=NOW,
+        outbound_drafting_config=default_workspace_outbound_drafting_config(WORKSPACE_ID),
     )
 
 
@@ -1714,7 +1720,7 @@ def test_follow_up_boss_crm_webhook_completes_tag_time_human_handoff(
     crm_client = _FakeCRMClientForWebhook(fetch_result=fetch_result)
     bundle = replace(
         webhook_bundle,
-        lead_repository=FakeLeadRepository(None),
+        lead_repository=FakeLeadRepository(replace(_lead(), crm_lead_id="crm-tag-2")),
         lead_workflow_repository=FakeLeadWorkflowRepository(),
         handoff_repository=FakeHandoffRepository(),
         handoff_completion_repository=FakeHandoffCompletionRepository(),
@@ -1728,6 +1734,25 @@ def test_follow_up_boss_crm_webhook_completes_tag_time_human_handoff(
         ),
         campaign_enrollment_repository=FakeCampaignEnrollmentRepository(),
         temporal_workflow_starter=FakeTemporalWorkflowStarter(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(
+            (
+                CrmConversationEvent(
+                    crm_conversation_event_id=UUID(
+                        "50000000-0000-0000-0000-000000000006"
+                    ),
+                    workspace_id=WORKSPACE_ID,
+                    lead_id=LEAD_ID,
+                    crm_provider="follow_up_boss",
+                    crm_activity_id="crm-tag-inbound-1",
+                    activity_type="TextMessage",
+                    occurred_at=NOW,
+                    created_at=NOW,
+                    updated_at=NOW,
+                    direction=CrmConversationEventDirection.INBOUND,
+                    content="I want to speak with an agent about buying.",
+                ),
+            )
+        ),
         llm_client=FakeClassificationLLMClient(
             outcome="human_handoff",
             handoff_reason_code="human_requested",

@@ -9,7 +9,9 @@ from app.application.ports.crm import CRMClient
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchReasonMapping,
+    PausedSearchTrack,
     PausedSearchTrackFamily,
+    PausedSearchTrackStatus,
     PausedSearchTrackVersion,
 )
 from app.domain.campaigns.admin import CampaignAdminCampaign, CampaignAdminVersion
@@ -53,6 +55,7 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
 from tests.application.use_cases._lead_read_fakes import FakeUserRepository
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
+    FakePausedSearchTrackAssignmentRepository,
 )
 from tests.application.use_cases.test_complete_handoff import (
     FakeCRMClient,
@@ -326,6 +329,7 @@ def _client_for_role(
         ),
         crm_conversation_event_repository=FakeCrmConversationEventRepository(),
         paused_search_track_repository=_track_repository(),
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         routing_review_repository=FakeLeadRoutingReviewRepository(),
         default_openrouter_model="openai/gpt-4o-mini",
         handoff_repository=FakeHandoffRepository(),
@@ -368,6 +372,19 @@ class _FakeSession:
 
 def _track_repository() -> FakePausedSearchTrackAdminRepository:
     return FakePausedSearchTrackAdminRepository(
+        tracks=(
+            PausedSearchTrack(
+                track_id=UUID("00000000-0000-0000-0000-000000000012"),
+                workspace_id=WORKSPACE_ID,
+                track_key="waiting-rates",
+                display_name="Waiting for rates",
+                status=PausedSearchTrackStatus.ACTIVE,
+                active_version_id=UUID("00000000-0000-0000-0000-000000000013"),
+                created_by_user_id=USER_ID,
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        ),
         mappings=(
             PausedSearchReasonMapping(
                 mapping_id=UUID("00000000-0000-0000-0000-000000000011"),

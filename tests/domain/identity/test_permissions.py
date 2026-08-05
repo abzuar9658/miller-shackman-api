@@ -164,6 +164,25 @@ def test_only_manager_and_brokerage_admin_can_import_crm_history() -> None:
         assert decision.allowed is False
 
 
+def test_all_active_brokerage_roles_can_export_history_from_extension() -> None:
+    for role in (
+        WorkspaceMembershipRole.ASSIGNED_AGENT,
+        WorkspaceMembershipRole.MANAGER,
+        WorkspaceMembershipRole.BROKERAGE_ADMIN,
+    ):
+        decision = evaluate_permission(
+            _actor(role=role),
+            PermissionCapability.EXPORT_CRM_HISTORY_FROM_EXTENSION,
+        )
+        assert decision.allowed is True
+
+    super_admin = evaluate_permission(
+        _actor(role=WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN),
+        PermissionCapability.EXPORT_CRM_HISTORY_FROM_EXTENSION,
+    )
+    assert super_admin.allowed is False
+
+
 def test_brokerage_admin_can_invite_workspace_user() -> None:
     decision = evaluate_permission(
         _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN),

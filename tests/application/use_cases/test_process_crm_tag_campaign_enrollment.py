@@ -14,7 +14,9 @@ from app.domain.campaigns import (
     CampaignVersionStatus,
     PausedSearchFallbackTimingPolicy,
     PausedSearchReasonMapping,
+    PausedSearchTrack,
     PausedSearchTrackFamily,
+    PausedSearchTrackStatus,
     PausedSearchTrackVersion,
 )
 from app.domain.campaigns.execution import CampaignCadenceStep, CampaignExecutionConfig
@@ -61,6 +63,7 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
 )
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
+    FakePausedSearchTrackAssignmentRepository,
 )
 from tests.application.use_cases.test_complete_handoff import (
     FakeCRMClient as FakeHandoffCRMClient,
@@ -235,6 +238,7 @@ async def test_routes_to_paused_search_when_existing_profile_beats_dormant() -> 
         lead_repository=lead_repo,
         paused_search_history_repository=lead_repo,
         paused_search_track_repository=_paused_search_track_repository(),
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         artifact_repository=artifact_repo,
         crm_conversation_event_repository=FakeCrmConversationEventRepository(),
         workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
@@ -280,6 +284,7 @@ async def test_paused_search_enrollment_holds_when_recurring_flag_is_disabled() 
         lead_repository=lead_repo,
         paused_search_history_repository=lead_repo,
         paused_search_track_repository=_paused_search_track_repository(),
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         artifact_repository=FakeLeadClassificationArtifactRepository(),
         crm_conversation_event_repository=FakeCrmConversationEventRepository(),
         workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
@@ -325,7 +330,9 @@ async def test_fresh_human_handoff_wins_over_existing_paused_search_profile() ->
         paused_search_history_repository=lead_repo,
         paused_search_track_repository=_paused_search_track_repository(),
         artifact_repository=artifact_repo,
-        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(
+            events=(_crm_event("Lead asked for an agent to help today."),)
+        ),
         workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
         llm_client=FakeClassificationLLMClient(outcome="human_handoff"),
     )
@@ -417,6 +424,7 @@ async def test_duplicate_paused_search_tag_event_returns_already_enrolled() -> N
         lead_repository=lead_repo,
         paused_search_history_repository=lead_repo,
         paused_search_track_repository=track_repository,
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         artifact_repository=artifact_repository,
         crm_conversation_event_repository=conversation_repository,
         workspace_llm_config_repository=llm_config_repository,
@@ -436,6 +444,7 @@ async def test_duplicate_paused_search_tag_event_returns_already_enrolled() -> N
         lead_repository=lead_repo,
         paused_search_history_repository=lead_repo,
         paused_search_track_repository=track_repository,
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         artifact_repository=artifact_repository,
         crm_conversation_event_repository=conversation_repository,
         workspace_llm_config_repository=llm_config_repository,
@@ -482,10 +491,10 @@ async def test_review_holds_paused_search_when_no_published_track_mapping_exists
 
     assert result.status == CRMTagCampaignEnrollmentStatus.REVIEW_HOLD
     assert result.route == "review_hold"
-    assert "paused_search_track_unavailable" in result.reason_codes
+    assert "paused_search_track_assignment_unavailable" in result.reason_codes
     assert routing_review_repository.saved[0].reason_codes == (
         "existing_paused_search_profile",
-        "paused_search_track_unavailable",
+        "paused_search_track_assignment_unavailable",
     )
 
 
@@ -894,6 +903,7 @@ async def test_future_month_year_note_still_uses_llm_first_routing() -> None:
         lead_repository=lead_repo,
         paused_search_history_repository=lead_repo,
         paused_search_track_repository=_timing_not_right_track_repository(),
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         artifact_repository=artifact_repo,
         crm_conversation_event_repository=conversation_repo,
         workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
@@ -1065,6 +1075,19 @@ def _paused_search_track_repository(
                 created_at=NOW,
             ),
         ),
+        tracks=(
+            PausedSearchTrack(
+                track_id=UUID("99999999-9999-9999-9999-999999999999"),
+                workspace_id=WORKSPACE_ID,
+                track_key="waiting-for-rates",
+                display_name="Waiting for rates",
+                status=PausedSearchTrackStatus.ACTIVE,
+                active_version_id=track_version_id,
+                created_by_user_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        ),
         versions=(
             PausedSearchTrackVersion(
                 track_version_id=track_version_id,
@@ -1092,7 +1115,7 @@ def _paused_search_track_repository(
 def _crm_event(
     content: str,
     *,
-    direction: CrmConversationEventDirection = CrmConversationEventDirection.INTERNAL,
+    direction: CrmConversationEventDirection = CrmConversationEventDirection.INBOUND,
 ) -> CrmConversationEvent:
     return CrmConversationEvent(
         crm_conversation_event_id=uuid4(),

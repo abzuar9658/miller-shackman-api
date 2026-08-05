@@ -38,7 +38,9 @@ from app.domain.campaigns import (
     CampaignVersionStatus,
     PausedSearchFallbackTimingPolicy,
     PausedSearchReasonMapping,
+    PausedSearchTrack,
     PausedSearchTrackFamily,
+    PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
@@ -73,6 +75,7 @@ from app.domain.leads import (
     CRMProvider,
     PausedSearchReasonCode,
 )
+from app.domain.outbound_drafting import default_workspace_outbound_drafting_config
 from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
 from app.domain.workspace_automation import WorkspaceOperationalControl
 from tests.application.use_cases._campaign_admin_fakes import FakeEventBus
@@ -91,6 +94,7 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeWorkspaceContactPolicyRepository,
     FakeWorkspaceLLMConfigRepository,
     FakeWorkspaceOperationalControlRepository,
+    FakeWorkspaceOutboundDraftingConfigRepository,
     FakeWorkspaceRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
@@ -99,6 +103,7 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
 )
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
+    FakePausedSearchTrackAssignmentRepository,
 )
 from tests.application.use_cases.test_process_inbound_message_event import (
     FakeInboundMessageCRMCompletionRepository,
@@ -775,6 +780,7 @@ async def test_business_flow_harness_runs_crm_tag_to_paused_search_send_to_hando
         lead_repository=lead_repository,
         paused_search_history_repository=lead_repository,
         paused_search_track_repository=_paused_search_track_repository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         artifact_repository=FakeLeadClassificationArtifactRepository(),
         crm_conversation_event_repository=FakeCrmConversationEventRepository(),
         workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
@@ -821,6 +827,11 @@ async def test_business_flow_harness_runs_crm_tag_to_paused_search_send_to_hando
         paused_search_track_repository=_paused_search_track_repository(),
         workspace_repository=FakeWorkspaceRepository(_workspace()),
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(None),
+        workspace_outbound_drafting_config_repository=(
+            FakeWorkspaceOutboundDraftingConfigRepository(
+                default_workspace_outbound_drafting_config(WORKSPACE_ID)
+            )
+        ),
         lead_repository=lead_repository,
         lead_workflow_repository=workflow_repository,
         workflow_transition_repository=workflow_transitions,
@@ -1220,6 +1231,19 @@ def _paused_search_track_repository() -> FakePausedSearchTrackAdminRepository:
                 published_at=NOW,
             ),
         ),
+        tracks=(
+            PausedSearchTrack(
+                track_id=UUID("00000000-0000-0000-0000-000000000015"),
+                workspace_id=WORKSPACE_ID,
+                track_key="waiting-for-rates",
+                display_name="Waiting for rates",
+                status=PausedSearchTrackStatus.ACTIVE,
+                active_version_id=PAUSED_SEARCH_TRACK_VERSION_ID,
+                created_by_user_id=ACTOR_ID,
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        ),
         steps=(
             PausedSearchTrackStep(
                 step_id=PAUSED_SEARCH_STEP_ID,
@@ -1272,6 +1296,7 @@ def _config(*, crm_enrollment_tag: str | None = None) -> CampaignExecutionConfig
         cadence_steps=(_step(),),
         created_at=NOW,
         published_at=NOW,
+        outbound_drafting_config=default_workspace_outbound_drafting_config(WORKSPACE_ID),
     )
 
 

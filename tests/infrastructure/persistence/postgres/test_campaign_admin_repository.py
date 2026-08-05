@@ -14,6 +14,11 @@ from app.domain.campaigns.admin import (
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.compliance.contactability import ContactChannel
+from app.domain.outbound_drafting import (
+    DormantMessageTone,
+    DormantStepTemplateProfile,
+    WorkspaceOutboundDraftingConfig,
+)
 from app.infrastructure.persistence.postgres.campaign_admin_repository import (
     PostgresCampaignAdminAuditLogRepository,
     PostgresCampaignAdminRepository,
@@ -88,6 +93,12 @@ def _version() -> CampaignAdminVersion:
         approved_model="openai/gpt-4o-mini",
         created_by_user_id=USER_ID,
         created_at=NOW,
+        outbound_drafting_config=WorkspaceOutboundDraftingConfig(
+            workspace_id=WORKSPACE_ID,
+            revision=1,
+            prompt_text="Campaign-specific dormant prompt.",
+            enabled_extraction_fields=("location", "max_price"),
+        ),
     )
 
 
@@ -103,6 +114,7 @@ def _step() -> CampaignAdminCadenceStep:
         template_key="dormant-email-1",
         max_attempts=1,
         created_at=NOW,
+        template_profile=DormantStepTemplateProfile(tone=DormantMessageTone.PROFESSIONAL),
     )
 
 

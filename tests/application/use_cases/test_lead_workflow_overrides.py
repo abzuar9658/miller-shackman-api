@@ -12,7 +12,10 @@ from app.application.use_cases.lead_workflow_overrides import (
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchReasonMapping,
+    PausedSearchTrack,
+    PausedSearchTrackAssignmentSource,
     PausedSearchTrackFamily,
+    PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
@@ -56,6 +59,7 @@ from tests.application.use_cases._lead_read_fakes import (
 )
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
+    FakePausedSearchTrackAssignmentRepository,
 )
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
@@ -90,6 +94,7 @@ async def test_override_paused_search_timing_updates_profile_and_appends_audit()
         lead_workflow_repository=workflow_repository,
         lead_workflow_override_audit_repository=audit_repository,
         paused_search_track_repository=_track_repository(),
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         temporal_signal_outbox_repository=outbox,
         workspace_repository=FakeWorkspaceRepository(_workspace()),
         now=NOW,
@@ -119,6 +124,7 @@ async def test_migrate_paused_search_track_version_rejects_assigned_agent() -> N
         lead_workflow_repository=workflow_repository,
         lead_workflow_override_audit_repository=FakeLeadWorkflowOverrideAuditLogRepository(()),
         paused_search_track_repository=_track_repository(),
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         temporal_signal_outbox_repository=FakeTemporalSignalOutboxRepository(),
         workspace_repository=FakeWorkspaceRepository(_workspace()),
         now=NOW,
@@ -146,9 +152,11 @@ async def test_migrate_paused_search_track_version_rejects_unpublished_target() 
         lead_workflow_repository=workflow_repository,
         lead_workflow_override_audit_repository=FakeLeadWorkflowOverrideAuditLogRepository(()),
         paused_search_track_repository=FakePausedSearchTrackAdminRepository(
+            tracks=(_track(),),
             versions=(_track_version(), unpublished_track),
             steps=_steps(),
         ),
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
         temporal_signal_outbox_repository=FakeTemporalSignalOutboxRepository(),
         workspace_repository=FakeWorkspaceRepository(_workspace()),
         now=NOW,
@@ -164,6 +172,7 @@ async def test_migrate_paused_search_track_version_updates_pinned_version_and_re
     audit_repository = FakeLeadWorkflowOverrideAuditLogRepository(())
     outbox = FakeTemporalSignalOutboxRepository()
     occurrence_repository = FakePausedSearchOccurrenceRepository()
+    assignment_repository = FakePausedSearchTrackAssignmentRepository()
 
     result = await migrate_paused_search_track_version(
         actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
@@ -175,6 +184,7 @@ async def test_migrate_paused_search_track_version_updates_pinned_version_and_re
         lead_workflow_repository=workflow_repository,
         lead_workflow_override_audit_repository=audit_repository,
         paused_search_track_repository=_track_repository(),
+        paused_search_track_assignment_repository=assignment_repository,
         temporal_signal_outbox_repository=outbox,
         workspace_repository=FakeWorkspaceRepository(_workspace()),
         paused_search_occurrence_repository=occurrence_repository,
@@ -184,6 +194,10 @@ async def test_migrate_paused_search_track_version_updates_pinned_version_and_re
     assert result.status == PausedSearchWorkflowOverrideStatus.UPDATED
     assert result.workflow is not None
     assert result.workflow.paused_search_track_version_id == TARGET_TRACK_VERSION_ID
+    active_assignment = await assignment_repository.get_active_for_lead(WORKSPACE_ID, LEAD_ID)
+    assert active_assignment is not None
+    assert active_assignment.track_version_id == TARGET_TRACK_VERSION_ID
+    assert active_assignment.source is PausedSearchTrackAssignmentSource.ADMIN_MIGRATION
     assert result.audit_log is not None
     assert result.audit_log.action == LeadWorkflowOverrideAction.TRACK_VERSION_MIGRATED
     entry = next(iter(outbox.entries.values()))
@@ -400,6 +414,7 @@ def _steps() -> tuple[PausedSearchTrackStep, ...]:
 
 def _track_repository() -> FakePausedSearchTrackAdminRepository:
     return FakePausedSearchTrackAdminRepository(
+        tracks=(_track(),),
         mappings=(
             PausedSearchReasonMapping(
                 mapping_id=UUID("00000000-0000-0000-0000-000000000013"),
@@ -413,6 +428,20 @@ def _track_repository() -> FakePausedSearchTrackAdminRepository:
         ),
         versions=(_track_version(), _target_track_version()),
         steps=_steps(),
+    )
+
+
+def _track() -> PausedSearchTrack:
+    return PausedSearchTrack(
+        track_id=TRACK_ID,
+        workspace_id=WORKSPACE_ID,
+        track_key="waiting-rates",
+        display_name="Waiting for rates",
+        status=PausedSearchTrackStatus.ACTIVE,
+        active_version_id=TARGET_TRACK_VERSION_ID,
+        created_by_user_id=USER_ID,
+        created_at=NOW,
+        updated_at=NOW,
     )
 
 

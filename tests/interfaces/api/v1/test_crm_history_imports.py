@@ -8,11 +8,12 @@ from app.application.ports.repositories import (
     LeadRepository,
 )
 from app.core.config import Settings
-from app.domain.identity import WorkspaceMembershipRole
+from app.domain.identity import AuthenticatedExtensionDevice, WorkspaceMembershipRole
 from app.interfaces.api.dependencies.crm_history_imports import (
     CrmHistoryImportBundle,
     get_crm_history_import_bundle,
 )
+from app.interfaces.api.dependencies.extension_devices import get_extension_device_actor
 from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.main import app
 from tests.application.use_cases._crm_history_import_fakes import (
@@ -212,6 +213,36 @@ def test_extension_export_stages_dom_event_shape_and_source_url() -> None:
             == "https://app.followupboss.com/people/view/1"
             for event in staged
         )
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_device_extension_export_allows_unassigned_lead_and_deduplicates_batch() -> None:
+    bundle = _bundle(enabled=True)
+    actor = _actor(WorkspaceMembershipRole.ASSIGNED_AGENT)
+    principal = AuthenticatedExtensionDevice(
+        actor=actor,
+        device_id=OTHER_WORKSPACE_ID,
+    )
+    app.dependency_overrides[get_extension_device_actor] = lambda: principal
+    app.dependency_overrides[get_crm_history_import_bundle] = lambda: bundle
+    try:
+        with TestClient(app) as client:
+            first = client.post(
+                f"/api/v1/workspaces/{WORKSPACE_ID}/crm-history-imports/extension-export",
+                json={"crm_lead_id": "fub-lead-1", "events": [_event_body()]},
+            )
+            repeated = client.post(
+                f"/api/v1/workspaces/{WORKSPACE_ID}/crm-history-imports/extension-export",
+                json={"crm_lead_id": "fub-lead-1", "events": [_event_body()]},
+            )
+        assert first.status_code == 201
+        assert repeated.status_code == 201
+        assert repeated.json()["status"] == "duplicate"
+        assert repeated.json()["upload_token"] is None
+        assert repeated.json()["job"]["job_id"] == first.json()["job"]["job_id"]
+        audit = cast(FakeAuthAuditLogRepository, bundle.audit_log_repository)
+        assert audit.logs[0].event_details["source_device_id"] == str(principal.device_id)
     finally:
         app.dependency_overrides.clear()
 

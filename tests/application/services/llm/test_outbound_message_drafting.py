@@ -474,6 +474,42 @@ async def test_strips_duplicate_email_wrapper_from_generated_body() -> None:
                 subject="Quick follow-up",
             )
         ),
+        drafting_config=WorkspaceOutboundDraftingConfig(
+            workspace_id=_lead().workspace_id,
+            email_template=(
+                "Hello {{lead_first_name}},\n\n{{message_body}}\n\nBest,\n"
+                "{{brokerage_name}}"
+            ),
+            email_subject_template="{{message_subject}} | {{brokerage_name}}",
+        ),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.DRAFTED
+    assert result.body == (
+        "Hello there,\n\n"
+        "I wanted to check whether Queens is still the right area for you.\n\n"
+        "Best,\n"
+        "Miller Schackman"
+    )
+
+
+async def test_strips_greeting_variant_from_generated_email_body() -> None:
+    result = await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.EMAIL,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name="Alex Agent",
+        lead_context=ApprovedOutboundLeadContext(),
+        llm_client=FakeLLMClient(
+            _draft_json(
+                body=(
+                    "Hello,\n\n"
+                    "I wanted to check whether Queens is still the right area for you."
+                ),
+                subject="Quick follow-up",
+            )
+        ),
     )
 
     assert result.status == OutboundMessageDraftStatus.DRAFTED
@@ -509,3 +545,35 @@ async def test_strips_duplicate_prefix_when_template_appends_message_body() -> N
 
     assert result.status == OutboundMessageDraftStatus.DRAFTED
     assert result.body == "Hi Taylor Agent\n\nAre you still looking in Queens?"
+
+
+async def test_strips_inline_duplicate_sms_greeting() -> None:
+    result = await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name="Alex Agent",
+        lead_context=ApprovedOutboundLeadContext(),
+        llm_client=FakeLLMClient(
+            _draft_json(
+                body=(
+                    "Hi there! I wanted to check in and see if you're still interested "
+                    "in finding a 2-bedroom apartment in Queens under $2k/month.\n"
+                    "Would you like me to have your assigned agent send over a few current options?"
+                )
+            )
+        ),
+        drafting_config=WorkspaceOutboundDraftingConfig(
+            workspace_id=_lead().workspace_id,
+            sms_template="Hi there,\n\n{{message_body}}",
+        ),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.DRAFTED
+    assert result.body == (
+        "Hi there,\n\n"
+        "I wanted to check in and see if you're still interested in finding a "
+        "2-bedroom apartment in Queens under $2k/month.\n"
+        "Would you like me to have your assigned agent send over a few current options?"
+    )

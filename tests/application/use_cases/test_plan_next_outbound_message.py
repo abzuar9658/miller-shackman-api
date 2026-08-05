@@ -36,7 +36,10 @@ from app.domain.listing_sources import (
     ListingSourceType,
 )
 from app.domain.llm import WorkspaceLLMConfig
-from app.domain.outbound_drafting import OutboundJourneyKind
+from app.domain.outbound_drafting import (
+    OutboundJourneyKind,
+    default_workspace_outbound_drafting_config,
+)
 from tests.application.use_cases._campaign_cadence_fakes import FakeCrmConversationEventRepository
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
@@ -401,6 +404,7 @@ def _planning_context(
         extracted_preferences=extracted_preferences or {},
         allowed_mapped_custom_field_keys=("preferred_location",),
         activity_items=activity_items,
+        drafting_config=default_workspace_outbound_drafting_config(WORKSPACE_ID),
     )
 
 

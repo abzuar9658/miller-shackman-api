@@ -493,8 +493,9 @@ class FakeCRMActivitySource:
 
 
 class FakeCrmConversationEventRepository:
-    def __init__(self) -> None:
+    def __init__(self, events: tuple[CrmConversationEvent, ...] = ()) -> None:
         self.saved: list[CrmConversationEvent] = []
+        self.events = events
 
     async def list_for_lead(
         self,
@@ -504,7 +505,7 @@ class FakeCrmConversationEventRepository:
         limit: int = 100,
     ) -> tuple[CrmConversationEvent, ...]:
         _ = (workspace_id, lead_id, limit)
-        return ()
+        return self.events
 
     async def save(self, event: CrmConversationEvent) -> CrmConversationEvent:
         self.saved.append(event)
@@ -1449,7 +1450,23 @@ async def test_sync_completes_tag_time_human_handoff_without_starting_campaign()
         temporal_workflow_starter=temporal,
         paused_search_track_repository=FakePausedSearchTrackAdminRepository(),
         lead_classification_artifact_repository=artifact_repository,
-        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(
+            events=(
+                CrmConversationEvent(
+                    crm_conversation_event_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                    workspace_id=WORKSPACE_ID,
+                    lead_id=UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+                    crm_provider="follow_up_boss",
+                    crm_activity_id="inbound-human-request",
+                    activity_type="text_message",
+                    direction=CrmConversationEventDirection.INBOUND,
+                    occurred_at=NOW,
+                    created_at=NOW,
+                    updated_at=NOW,
+                    content="Please have an agent reach out.",
+                ),
+            )
+        ),
         workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(),
         llm_client=FakeClassificationLLMClient(
             outcome="human_handoff",

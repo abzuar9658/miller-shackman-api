@@ -27,6 +27,8 @@ from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessa
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchTrack,
+    PausedSearchTrackAssignment,
+    PausedSearchTrackAssignmentSource,
     PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
@@ -150,6 +152,7 @@ from tests.application.use_cases._lead_read_fakes import (
 )
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
+    FakePausedSearchTrackAssignmentRepository,
 )
 from tests.application.use_cases.test_process_inbound_message_event import (
     FakeCRMClient,
@@ -370,6 +373,13 @@ def test_lead_routes_return_list_and_detail() -> None:
     assert (
         detail_response.json()["qualification_plan"]["paused_search_plan"]["current_phase"]
         == "reactivation"
+    )
+    paused_search_plan = detail_response.json()["qualification_plan"]["paused_search_plan"]
+    assert paused_search_plan["track_key"] == "rates-watch"
+    assert paused_search_plan["version_number"] == 2
+    assert paused_search_plan["fallback_timing_policy"] == "use_reengagement_not_before"
+    assert paused_search_plan["steps"][0]["template_key"] == (
+        "paused_search_rates_watch_reactivation"
     )
     paused_search_edge = next(
         edge
@@ -763,6 +773,24 @@ def _client_for_role(
             tracks=(_paused_search_track(),),
             versions=(_paused_search_track_version(),),
             steps=(_paused_search_track_step(),),
+        ),
+        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(
+            (
+                PausedSearchTrackAssignment(
+                    assignment_id=UUID("00000000-0000-0000-0000-000000000055"),
+                    workspace_id=WORKSPACE_ID,
+                    lead_id=LEAD_ID,
+                    track_id=UUID("00000000-0000-0000-0000-000000000054"),
+                    track_version_id=UUID("00000000-0000-0000-0000-000000000052"),
+                    track_key_snapshot="rates-watch",
+                    track_name_snapshot="Rates Watch",
+                    track_version_snapshot=2,
+                    reason_code=PausedSearchReasonCode.WAITING_FOR_RATES,
+                    source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
+                    assigned_by_user_id=USER_ID,
+                    assigned_at=NOW,
+                ),
+            )
         ),
         activity_repository=FakeLeadActivityRepository(_activity_items()),
         rejected_draft_review_repository=FakeRejectedDraftReviewRepository(

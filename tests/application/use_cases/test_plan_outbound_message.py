@@ -20,6 +20,7 @@ from app.domain.compliance.contactability import (
     WorkspaceContactPolicy,
 )
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.outbound_drafting import default_workspace_outbound_drafting_config
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("11111111-1111-1111-1111-111111111111")
@@ -247,6 +248,7 @@ def _planning_context(
         brokerage_name="Miller Schackman",
         cadence_step_id="step-1",
         assigned_agent_name="Alex Agent",
+        drafting_config=default_workspace_outbound_drafting_config(WORKSPACE_ID),
     )
 
 

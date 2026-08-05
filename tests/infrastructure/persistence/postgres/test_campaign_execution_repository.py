@@ -8,6 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.campaigns import CampaignStatus, CampaignVersionStatus
 from app.domain.campaigns.execution import CampaignCadenceStep, CampaignExecutionConfig
 from app.domain.compliance.contactability import ContactChannel
+from app.domain.outbound_drafting import (
+    DormantMessageTone,
+    DormantStepTemplateProfile,
+    WorkspaceOutboundDraftingConfig,
+    dormant_step_template_profile_to_mapping,
+)
 from app.infrastructure.persistence.postgres.campaign_execution_repository import (
     PostgresCampaignExecutionRepository,
 )
@@ -112,6 +118,13 @@ def _version_model() -> CampaignVersionModel:
         crm_enrollment_tag="ai_nurture",
         prompt_version="v1",
         approved_model="openai/gpt-4o-mini",
+        prompt_text="Campaign-specific dormant prompt.",
+        sms_prompt_text="Campaign SMS prompt.",
+        sms_template="Hi {{lead_first_name}}, {{message_body}}",
+        email_prompt_text="Campaign email prompt.",
+        email_template="Hello {{lead_first_name}},\n\n{{message_body}}",
+        email_subject_template="{{message_subject}}",
+        enabled_extraction_fields=["location", "max_price"],
         created_by_user_id=CREATOR_ID,
         published_at=NOW,
         created_at=NOW,
@@ -130,6 +143,9 @@ def _step_model() -> CampaignCadenceStepModel:
         template_key="dormant-email-1",
         max_attempts=1,
         created_at=NOW,
+        template_profile=dormant_step_template_profile_to_mapping(
+            DormantStepTemplateProfile(tone=DormantMessageTone.PROFESSIONAL)
+        ),
     )
 
 
@@ -145,6 +161,7 @@ def _step() -> CampaignCadenceStep:
         template_key="dormant-email-1",
         max_attempts=1,
         created_at=NOW,
+        template_profile=DormantStepTemplateProfile(tone=DormantMessageTone.PROFESSIONAL),
     )
 
 
@@ -170,6 +187,17 @@ def _config() -> CampaignExecutionConfig:
         cadence_steps=(_step(),),
         created_at=NOW,
         published_at=NOW,
+        outbound_drafting_config=WorkspaceOutboundDraftingConfig(
+            workspace_id=WORKSPACE_ID,
+            revision=1,
+            prompt_text="Campaign-specific dormant prompt.",
+            sms_prompt_text="Campaign SMS prompt.",
+            sms_template="Hi {{lead_first_name}}, {{message_body}}",
+            email_prompt_text="Campaign email prompt.",
+            email_template="Hello {{lead_first_name}},\n\n{{message_body}}",
+            email_subject_template="{{message_subject}}",
+            enabled_extraction_fields=("location", "max_price"),
+        ),
     )
 
 

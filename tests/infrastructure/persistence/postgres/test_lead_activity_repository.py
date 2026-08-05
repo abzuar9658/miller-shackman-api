@@ -4,7 +4,11 @@ from uuid import UUID
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.conversations import ConversationStatus, InboundMessageClassificationStatus
+from app.domain.conversations import (
+    ConversationStatus,
+    InboundMessageClassificationStatus,
+    canonical_crm_event_identity,
+)
 from app.domain.leads import (
     ActivityReliability,
     CanonicalLeadRecord,
@@ -140,6 +144,12 @@ async def test_list_for_lead_returns_rich_crm_conversation_event_content(
             conversation_id=None,
             crm_provider="follow_up_boss",
             crm_activity_id="call:123",
+            canonical_identity=canonical_crm_event_identity(
+                activity_type="Call",
+                occurred_at=NOW,
+                content="Agent Ada: Hello there.\nJordan Buyer: I will call back next week.",
+                direction="inbound",
+            ),
             activity_type="Call",
             direction="inbound",
             occurred_at=NOW,

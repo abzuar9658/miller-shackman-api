@@ -13,7 +13,9 @@ from app.application.use_cases.lead_review_hold_resolution import (
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchReasonMapping,
+    PausedSearchTrack,
     PausedSearchTrackFamily,
+    PausedSearchTrackStatus,
     PausedSearchTrackVersion,
 )
 from app.domain.campaigns.admin import CampaignAdminCampaign, CampaignAdminVersion
@@ -67,6 +69,7 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
 )
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
+    FakePausedSearchTrackAssignmentRepository,
 )
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
@@ -102,6 +105,7 @@ async def test_resolve_review_hold_to_dormant_starts_manual_enrollment() -> None
         lead_workflow_repository=deps.lead_workflow_repository,
         workflow_transition_repository=deps.workflow_transition_repository,
         paused_search_track_repository=deps.paused_search_track_repository,
+        paused_search_track_assignment_repository=deps.paused_search_track_assignment_repository,
         temporal_signal_outbox_repository=deps.temporal_signal_outbox_repository,
         temporal_workflow_starter=deps.temporal_workflow_starter,
         event_bus=deps.event_bus,
@@ -143,6 +147,7 @@ async def test_resolve_review_hold_to_paused_search_starts_pinned_workflow() -> 
         lead_workflow_repository=deps.lead_workflow_repository,
         workflow_transition_repository=deps.workflow_transition_repository,
         paused_search_track_repository=deps.paused_search_track_repository,
+        paused_search_track_assignment_repository=deps.paused_search_track_assignment_repository,
         temporal_signal_outbox_repository=deps.temporal_signal_outbox_repository,
         temporal_workflow_starter=deps.temporal_workflow_starter,
         event_bus=deps.event_bus,
@@ -305,6 +310,7 @@ class _Deps:
         self.temporal_workflow_starter = FakeTemporalWorkflowStarter()
         self.temporal_signal_outbox_repository = FakeTemporalSignalOutboxRepository()
         self.paused_search_track_repository = _track_repository()
+        self.paused_search_track_assignment_repository = FakePausedSearchTrackAssignmentRepository()
         self.routing_review_repository = FakeLeadRoutingReviewRepository()
         self.workspace_operational_control_repository = FakeWorkspaceOperationalControlRepository(
             WorkspaceOperationalControl(
@@ -461,6 +467,19 @@ def _track_repository() -> FakePausedSearchTrackAdminRepository:
                 created_by_user_id=USER_ID,
                 created_at=NOW,
                 published_at=NOW,
+            ),
+        ),
+        tracks=(
+            PausedSearchTrack(
+                track_id=TRACK_ID,
+                workspace_id=WORKSPACE_ID,
+                track_key="waiting-for-rates",
+                display_name="Waiting for rates",
+                status=PausedSearchTrackStatus.ACTIVE,
+                active_version_id=TRACK_VERSION_ID,
+                created_by_user_id=USER_ID,
+                created_at=NOW,
+                updated_at=NOW,
             ),
         ),
     )

@@ -23,7 +23,9 @@ from app.domain.campaigns.execution import CampaignExecutionConfig, CampaignVers
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchReasonMapping,
+    PausedSearchTrack,
     PausedSearchTrackFamily,
+    PausedSearchTrackStatus,
     PausedSearchTrackVersion,
 )
 from app.domain.campaigns.start_queue import CampaignStatus
@@ -34,6 +36,7 @@ from app.domain.compliance.contactability import (
     SmsComplianceState,
     WorkspaceContactPolicy,
 )
+from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
 from app.domain.leads.canonical import (
     ActivityReliability,
     CanonicalLeadRecord,
@@ -61,6 +64,7 @@ from tests.application.use_cases._campaign_enrollment_fakes import (
 )
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
+    FakePausedSearchTrackAssignmentRepository,
 )
 from tests.application.use_cases.test_preflight_digest import (
     FakeNotificationProvider,
@@ -260,6 +264,19 @@ def _paused_search_track_repository() -> FakePausedSearchTrackAdminRepository:
                 created_at=NOW,
             ),
         ),
+        tracks=(
+            PausedSearchTrack(
+                track_id=TRACK_ID,
+                workspace_id=WORKSPACE_ID,
+                track_key="waiting-for-rates",
+                display_name="Waiting for rates",
+                status=PausedSearchTrackStatus.ACTIVE,
+                active_version_id=TRACK_VERSION_ID,
+                created_by_user_id=USER_ID,
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        ),
         versions=(
             PausedSearchTrackVersion(
                 track_version_id=TRACK_VERSION_ID,
@@ -308,8 +325,12 @@ async def _run(
     preflight_digest_repository: FakePreflightDigestRepository | None = None,
     temporal_workflow_starter: FakeTemporalWorkflowStarter | None = None,
     paused_search_track_repository: FakePausedSearchTrackAdminRepository | None = None,
+    paused_search_track_assignment_repository: (
+        FakePausedSearchTrackAssignmentRepository | None
+    ) = None,
     llm_client: _StubLLMClient | None = None,
     routing_review_repository: FakeLeadRoutingReviewRepository | None = None,
+    crm_events: tuple[CrmConversationEvent, ...] = (),
 ) -> DormantSelectorBatchResult:
 
     resolved_config: CampaignExecutionConfig | None = (
@@ -331,6 +352,10 @@ async def _run(
     notification_provider = notification_provider or FakeNotificationProvider()
     preflight_digest_repository = preflight_digest_repository or FakePreflightDigestRepository()
     temporal_workflow_starter = temporal_workflow_starter or FakeTemporalWorkflowStarter()
+    paused_search_track_assignment_repository = (
+        paused_search_track_assignment_repository
+        or FakePausedSearchTrackAssignmentRepository()
+    )
     llm_client = llm_client or _StubLLMClient(
         _classification_json(
             outcome="dormant",
@@ -360,11 +385,12 @@ async def _run(
         lead_repository=lead_repository,
         paused_search_history_repository=lead_repository,
         artifact_repository=artifact_repository,
-        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(crm_events),
         workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(_workspace_llm_config()),
         llm_client=llm_client,
         default_openrouter_model="openai/gpt-4o-mini",
         paused_search_track_repository=paused_search_track_repository,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         temporal_signal_outbox_repository=None,
         routing_review_repository=routing_review_repository,
         now=now,
@@ -560,6 +586,21 @@ async def test_existing_paused_search_profile_with_handoff_classification_is_not
         temporal_workflow_starter=temporal_workflow_starter,
         paused_search_track_repository=_paused_search_track_repository(),
         llm_client=llm_client,
+        crm_events=(
+            CrmConversationEvent(
+                crm_conversation_event_id=uuid4(),
+                workspace_id=WORKSPACE_ID,
+                lead_id=lead.lead_id,
+                crm_provider="follow_up_boss",
+                crm_activity_id="fresh-human-request",
+                activity_type="text_message",
+                direction=CrmConversationEventDirection.INBOUND,
+                occurred_at=NOW,
+                created_at=NOW,
+                updated_at=NOW,
+                content="Please have an agent reach out.",
+            ),
+        ),
     )
 
     assert result.status == DormantSelectorBatchStatus.COMPLETED

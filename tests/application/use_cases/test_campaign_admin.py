@@ -1,4 +1,5 @@
 from collections.abc import Coroutine
+from dataclasses import replace
 from datetime import UTC, datetime, time
 from typing import Any
 from uuid import UUID
@@ -36,6 +37,7 @@ from app.domain.identity import (
     WorkspaceMembershipStatus,
     WorkspaceStatus,
 )
+from app.domain.outbound_drafting import default_workspace_outbound_drafting_config
 from tests.application.use_cases._campaign_admin_fakes import (
     FakeCampaignAdminAuditLogRepository,
     FakeCampaignAdminRepository,
@@ -93,6 +95,29 @@ def test_create_draft_campaign_rejects_assigned_agent() -> None:
 
     assert result.status == CreateDraftCampaignStatus.REJECTED
     assert result.reasons[0].value == "permission_denied"
+
+
+def test_create_draft_campaign_rejects_duplicate_template_keys() -> None:
+    config = _config()
+    duplicate_step = replace(config.cadence_steps[0], delay_hours=48)
+
+    result = _run(
+        create_draft_campaign(
+            actor=_actor(),
+            workspace_id=WORKSPACE_ID,
+            name="Dormant Buyers",
+            config=replace(
+                config,
+                cadence_steps=(config.cadence_steps[0], duplicate_step),
+            ),
+            campaign_admin_repository=FakeCampaignAdminRepository(),
+            audit_log_repository=FakeCampaignAdminAuditLogRepository(),
+            now=NOW,
+        )
+    )
+
+    assert result.status == CreateDraftCampaignStatus.REJECTED
+    assert result.reasons[0].value == "invalid_configuration"
 
 
 def test_campaign_read_views_require_reporting_permission_and_include_latest_version() -> None:
@@ -276,6 +301,7 @@ def _config(*, daily_start_cap: int = 50) -> CampaignConfigInput:
                 max_attempts=1,
             ),
         ),
+        outbound_drafting_config=default_workspace_outbound_drafting_config(WORKSPACE_ID),
     )
 
 

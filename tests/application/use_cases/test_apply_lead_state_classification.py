@@ -469,6 +469,9 @@ async def test_matching_paused_search_profile_is_not_marked_applied() -> None:
     artifact_repo = FakeLeadClassificationArtifactRepository()
     crm_repo = FakeCrmConversationEventRepository()
     llm_repo = FakeWorkspaceLLMConfigRepository(_workspace_llm_config())
+    workflow_repo = FakeLeadWorkflowRepository()
+    workflow_repo.latest_by_lead[(WORKSPACE_ID, LEAD_ID)] = _workflow()
+    track_repo = _track_repository()
     client = _StubLLMClient(
         _classification_json(
             outcome="paused_search",
@@ -489,12 +492,17 @@ async def test_matching_paused_search_profile_is_not_marked_applied() -> None:
         crm_conversation_event_repository=crm_repo,
         workspace_llm_config_repository=llm_repo,
         llm_client=client,
+        lead_workflow_repository=workflow_repo,
+        paused_search_track_repository=track_repo,
         now=NOW,
     )
 
     assert result.status == ApplyLeadStateClassificationStatus.UNCHANGED
     assert result.artifact is not None
     assert result.artifact.applied_status == LeadClassificationAppliedStatus.REVIEW
+    assert workflow_repo.latest_by_lead[(WORKSPACE_ID, LEAD_ID)].paused_search_track_version_id == (
+        TRACK_VERSION_ID
+    )
 
 
 async def test_lead_not_found() -> None:

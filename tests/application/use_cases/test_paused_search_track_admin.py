@@ -6,11 +6,16 @@ from uuid import UUID, uuid5
 
 from app.application.use_cases.paused_search_track_admin import (
     PausedSearchTrackConfigInput,
+    PausedSearchTrackDeleteStatus,
     PausedSearchTrackDraftStatus,
     PausedSearchTrackPublishStatus,
+    PausedSearchTrackRestoreStatus,
     PausedSearchTrackStepInput,
     create_draft_paused_search_track,
+    delete_retired_paused_search_track,
+    list_paused_search_track_views,
     publish_paused_search_track_version,
+    restore_retired_paused_search_track,
     retire_paused_search_track,
     update_draft_paused_search_track,
 )
@@ -20,6 +25,7 @@ from app.domain.campaigns import (
     PausedSearchTrack,
     PausedSearchTrackAdminAuditLog,
     PausedSearchTrackFamily,
+    PausedSearchTrackLeadAssignment,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
@@ -38,6 +44,7 @@ from app.domain.identity import (
     WorkspaceStatus,
 )
 from app.domain.leads import PausedSearchReasonCode
+from app.domain.outbound_drafting import DormantStepTemplateProfile
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -46,6 +53,34 @@ VERSION_ID = UUID("00000000-0000-0000-0000-000000000003")
 PREVIOUS_VERSION_ID = UUID("00000000-0000-0000-0000-000000000004")
 ACTOR_ID = UUID("00000000-0000-0000-0000-000000000005")
 MEMBERSHIP_ID = UUID("00000000-0000-0000-0000-000000000006")
+
+
+def test_list_paused_search_tracks_hides_retired_tracks() -> None:
+    repository = FakePausedSearchTrackAdminRepository()
+    repository.tracks[TRACK_ID] = _track(status=PausedSearchTrackStatus.ACTIVE)
+    repository.tracks[PREVIOUS_VERSION_ID] = replace(
+        _track(status=PausedSearchTrackStatus.RETIRED),
+        track_id=PREVIOUS_VERSION_ID,
+        active_version_id=PREVIOUS_VERSION_ID,
+    )
+    repository.versions[VERSION_ID] = _version(status=CampaignVersionStatus.PUBLISHED)
+    repository.versions[PREVIOUS_VERSION_ID] = replace(
+        _version(track_version_id=PREVIOUS_VERSION_ID, status=CampaignVersionStatus.RETIRED),
+        track_id=PREVIOUS_VERSION_ID,
+    )
+    repository.steps[VERSION_ID] = _step_tuple(VERSION_ID)
+    repository.steps[PREVIOUS_VERSION_ID] = _step_tuple(PREVIOUS_VERSION_ID)
+
+    result = _run(
+        list_paused_search_track_views(
+            actor=_actor(),
+            workspace_id=WORKSPACE_ID,
+            repository=repository,
+        )
+    )
+
+    assert result.status.value == "ok"
+    assert [view.track.track_id for view in result.views] == [TRACK_ID]
 
 
 def test_create_draft_paused_search_track_persists_audit_and_event() -> None:
@@ -175,6 +210,23 @@ def test_update_published_track_creates_new_draft_without_mutating_active_versio
         status=CampaignVersionStatus.PUBLISHED,
     )
     repo.steps[PREVIOUS_VERSION_ID] = _step_tuple(PREVIOUS_VERSION_ID)
+    config = _config(max_total_touches=3)
+    config = replace(
+        config,
+        steps=(
+            *config.steps,
+            PausedSearchTrackStepInput(
+                phase=PausedSearchTrackStepPhase.REACTIVATION,
+                channel=ContactChannel.EMAIL,
+                delay_hours=24,
+                message_goal="Reconnect when the lead may be ready to act.",
+                template_key="paused-search-reactivation-email-2",
+                template_version_id=PREVIOUS_VERSION_ID,
+                max_attempts=1,
+                template_profile=DormantStepTemplateProfile(),
+            ),
+        ),
+    )
 
     result = _run(
         update_draft_paused_search_track(
@@ -183,7 +235,7 @@ def test_update_published_track_creates_new_draft_without_mutating_active_versio
             track_id=TRACK_ID,
             track_key="rented-year",
             display_name="Rented for a year updated",
-            config=_config(max_total_touches=3),
+            config=config,
             repository=repo,
             audit_log_repository=FakePausedSearchTrackAuditLogRepository(),
             now=NOW,
@@ -194,8 +246,20 @@ def test_update_published_track_creates_new_draft_without_mutating_active_versio
     assert result.view is not None
     assert result.view.version.version_number == 2
     assert result.view.version.status == CampaignVersionStatus.DRAFT
+    assert len(result.view.steps) == 2
     assert repo.versions[PREVIOUS_VERSION_ID].status == CampaignVersionStatus.PUBLISHED
     assert repo.tracks[TRACK_ID].active_version_id == PREVIOUS_VERSION_ID
+
+    readback = _run(
+        list_paused_search_track_views(
+            actor=_actor(),
+            workspace_id=WORKSPACE_ID,
+            repository=repo,
+        )
+    )
+
+    assert readback.views[0].version.track_version_id == result.view.version.track_version_id
+    assert readback.views[0].steps == result.view.steps
 
 
 def test_retire_track_clears_mappings_but_keeps_pinned_version_readable() -> None:
@@ -223,6 +287,97 @@ def test_retire_track_clears_mappings_but_keeps_pinned_version_readable() -> Non
     assert repo.versions[VERSION_ID].track_version_id == VERSION_ID
 
 
+def test_restore_retired_track_returns_it_as_an_unpublished_draft() -> None:
+    repo = FakePausedSearchTrackAdminRepository()
+    repo.tracks[TRACK_ID] = _track(status=PausedSearchTrackStatus.RETIRED)
+    repo.versions[VERSION_ID] = _version(status=CampaignVersionStatus.RETIRED)
+    repo.steps[VERSION_ID] = _step_tuple(VERSION_ID)
+    audit_repo = FakePausedSearchTrackAuditLogRepository()
+    event_bus = FakeEventBus()
+
+    result = _run(
+        restore_retired_paused_search_track(
+            actor=_actor(),
+            workspace_id=WORKSPACE_ID,
+            track_id=TRACK_ID,
+            repository=repo,
+            audit_log_repository=audit_repo,
+            event_bus=event_bus,
+            now=NOW,
+        )
+    )
+
+    assert result.status is PausedSearchTrackRestoreStatus.RESTORED
+    assert result.view is not None
+    assert repo.tracks[TRACK_ID].status is PausedSearchTrackStatus.DRAFT
+    assert repo.tracks[TRACK_ID].active_version_id is None
+    assert repo.versions[VERSION_ID].status is CampaignVersionStatus.DRAFT
+    assert audit_repo.logs[-1].action.value == "paused_search_track_restored"
+    assert event_bus.events[-1].event_type is DomainEventType.PAUSED_SEARCH_TRACK_RESTORED
+
+
+def test_delete_retired_track_is_blocked_while_leads_are_assigned() -> None:
+    repo = FakePausedSearchTrackAdminRepository()
+    repo.tracks[TRACK_ID] = _track(status=PausedSearchTrackStatus.RETIRED)
+    repo.versions[VERSION_ID] = _version(status=CampaignVersionStatus.RETIRED)
+    repo.steps[VERSION_ID] = _step_tuple(VERSION_ID)
+    repo.assigned_leads[TRACK_ID] = (
+        PausedSearchTrackLeadAssignment(
+            lead_id=UUID("00000000-0000-0000-0000-000000000009"),
+            workflow_id=UUID("00000000-0000-0000-0000-00000000000a"),
+            track_version_id=VERSION_ID,
+            crm_lead_id="fub-123",
+            primary_email="lead@example.com",
+            lead_stage="paused",
+            workflow_state="paused",
+        ),
+    )
+    audit_repo = FakePausedSearchTrackAuditLogRepository()
+
+    result = _run(
+        delete_retired_paused_search_track(
+            actor=_actor(),
+            workspace_id=WORKSPACE_ID,
+            track_id=TRACK_ID,
+            repository=repo,
+            audit_log_repository=audit_repo,
+            now=NOW,
+        )
+    )
+
+    assert result.status is PausedSearchTrackDeleteStatus.BLOCKED
+    assert result.view is not None
+    assert len(result.view.assigned_leads) == 1
+    assert repo.tracks[TRACK_ID].status is PausedSearchTrackStatus.RETIRED
+    assert repo.locked_track_ids == [TRACK_ID]
+    assert audit_repo.logs == []
+
+
+def test_delete_retired_track_audits_then_removes_track_after_leads_move() -> None:
+    repo = FakePausedSearchTrackAdminRepository()
+    repo.tracks[TRACK_ID] = _track(status=PausedSearchTrackStatus.RETIRED)
+    repo.versions[VERSION_ID] = _version(status=CampaignVersionStatus.RETIRED)
+    repo.steps[VERSION_ID] = _step_tuple(VERSION_ID)
+    audit_repo = FakePausedSearchTrackAuditLogRepository()
+
+    result = _run(
+        delete_retired_paused_search_track(
+            actor=_actor(),
+            workspace_id=WORKSPACE_ID,
+            track_id=TRACK_ID,
+            repository=repo,
+            audit_log_repository=audit_repo,
+            now=NOW,
+        )
+    )
+
+    assert result.status is PausedSearchTrackDeleteStatus.DELETED
+    assert TRACK_ID not in repo.tracks
+    assert VERSION_ID not in repo.versions
+    assert audit_repo.logs[-1].action.value == "paused_search_track_deleted"
+    assert audit_repo.logs[-1].track_id == TRACK_ID
+
+
 class FakePausedSearchTrackAdminRepository:
     def __init__(self) -> None:
         self.tracks: dict[PausedSearchTrackId, PausedSearchTrack] = {}
@@ -231,9 +386,33 @@ class FakePausedSearchTrackAdminRepository:
         self.mappings: dict[PausedSearchReasonCode, PausedSearchReasonMapping] = {}
         self.locked_track_ids: list[PausedSearchTrackId] = []
         self.publish_operations: list[str] = []
+        self.assigned_leads: dict[
+            PausedSearchTrackId, tuple[PausedSearchTrackLeadAssignment, ...]
+        ] = {}
 
     async def list_tracks(self, workspace_id: WorkspaceId) -> tuple[PausedSearchTrack, ...]:
         return tuple(track for track in self.tracks.values() if track.workspace_id == workspace_id)
+
+    async def list_assigned_leads(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+        *,
+        limit: int = 100,
+        lock: bool = False,
+    ) -> tuple[PausedSearchTrackLeadAssignment, ...]:
+        return self.assigned_leads.get(track_id, ())[:limit]
+
+    async def delete_retired_track(
+        self,
+        workspace_id: WorkspaceId,
+        track_id: PausedSearchTrackId,
+    ) -> None:
+        self.tracks.pop(track_id, None)
+        for version_id, version in tuple(self.versions.items()):
+            if version.track_id == track_id:
+                self.versions.pop(version_id)
+                self.steps.pop(version_id, None)
 
     async def get_track(
         self,

@@ -53,6 +53,10 @@ from app.domain.leads import (
     PausedSearchReasonCode,
     PausedSearchSource,
 )
+from app.domain.outbound_drafting import (
+    WorkspaceOutboundDraftingConfig,
+    default_workspace_outbound_drafting_config,
+)
 from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransitionReasonCode
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCampaignExecutionRepository,
@@ -68,6 +72,7 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeSMSProvider,
     FakeWorkflowTransitionRepository,
     FakeWorkspaceContactPolicyRepository,
+    FakeWorkspaceOutboundDraftingConfigRepository,
     FakeWorkspaceRepository,
 )
 from tests.application.use_cases._paused_search_track_fakes import (
@@ -135,7 +140,9 @@ async def test_schedule_next_campaign_cadence_step_sets_due_time_and_current_ste
         workspace_id=WORKSPACE_ID,
         lead_id=LEAD_ID,
         campaign_version_id=CAMPAIGN_VERSION_ID,
-        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _config(outbound_drafting_config=_dormant_drafting_config())
+        ),
         lead_workflow_repository=workflow_repository,
         now=NOW,
     )
@@ -171,7 +178,9 @@ async def test_execute_campaign_cadence_step_sends_first_step_and_advances_curso
         campaign_version_id=CAMPAIGN_VERSION_ID,
         cadence_step_id=STEP_ONE_ID,
         scheduled_for=schedule_result.scheduled_for or NOW,
-        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _config(outbound_drafting_config=_dormant_drafting_config())
+        ),
         workspace_repository=FakeWorkspaceRepository(_workspace()),
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             _workspace_contact_policy()
@@ -238,6 +247,7 @@ async def test_execute_campaign_cadence_step_sends_first_step_and_advances_curso
     assert len(draft_requests) == 1
     assert "Recent CRM conversation history:" in draft_requests[0].prompt
     assert "We are hoping to move before school starts." in draft_requests[0].prompt
+    assert "Use the campaign version's dormant drafting voice." in draft_requests[0].prompt
 
 
 async def test_schedule_next_campaign_cadence_step_schedules_second_step_after_first_send() -> None:
@@ -253,7 +263,9 @@ async def test_schedule_next_campaign_cadence_step_schedules_second_step_after_f
         workspace_id=WORKSPACE_ID,
         lead_id=LEAD_ID,
         campaign_version_id=CAMPAIGN_VERSION_ID,
-        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            _config(outbound_drafting_config=_dormant_drafting_config())
+        ),
         lead_workflow_repository=workflow_repository,
         now=NOW + timedelta(days=1),
     )
@@ -432,6 +444,11 @@ async def test_execute_campaign_cadence_step_sends_paused_search_step_and_advanc
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             _workspace_contact_policy()
         ),
+        workspace_outbound_drafting_config_repository=(
+            FakeWorkspaceOutboundDraftingConfigRepository(
+                default_workspace_outbound_drafting_config(WORKSPACE_ID)
+            )
+        ),
         lead_repository=FakeLeadRepository(_paused_search_lead()),
         lead_workflow_repository=workflow_repository,
         workflow_transition_repository=transition_repository,
@@ -463,6 +480,7 @@ async def test_execute_campaign_cadence_step_sends_paused_search_step_and_advanc
     assert len(draft_requests) == 1
     assert '"journey_kind": "paused_search"' in draft_requests[0].prompt
     assert "For paused-search outreach" in draft_requests[0].prompt
+    assert "Use the campaign version's dormant drafting voice." not in draft_requests[0].prompt
 
     duplicate_result = await execute_campaign_cadence_step(
         workspace_id=WORKSPACE_ID,
@@ -475,6 +493,9 @@ async def test_execute_campaign_cadence_step_sends_paused_search_step_and_advanc
         workspace_repository=FakeWorkspaceRepository(_workspace()),
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             _workspace_contact_policy()
+        ),
+        workspace_outbound_drafting_config_repository=(
+            FakeWorkspaceOutboundDraftingConfigRepository(_dormant_drafting_config())
         ),
         lead_repository=FakeLeadRepository(_paused_search_lead()),
         lead_workflow_repository=workflow_repository,
@@ -522,6 +543,11 @@ async def test_execute_campaign_cadence_step_holds_review_required_message() -> 
         workspace_repository=FakeWorkspaceRepository(_workspace()),
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             _workspace_contact_policy()
+        ),
+        workspace_outbound_drafting_config_repository=(
+            FakeWorkspaceOutboundDraftingConfigRepository(
+                default_workspace_outbound_drafting_config(WORKSPACE_ID)
+            )
         ),
         lead_repository=FakeLeadRepository(_paused_search_lead()),
         lead_workflow_repository=workflow_repository,
@@ -1137,7 +1163,7 @@ async def test_execute_campaign_cadence_step_persists_rich_draft_rejection_detai
     ]
     assert last_transition.metadata["draft_confidence"] == 0.91
     assert last_transition.metadata["draft_model"] == "openai/gpt-4o-mini"
-    assert last_transition.metadata["draft_prompt_version"] == "outbound_message_draft:v10:r1"
+    assert last_transition.metadata["draft_prompt_version"] == "outbound_message_draft:v10:r3"
     assert last_transition.metadata["selected_channel"] == "email"
     explanation = cast(str, last_transition.metadata["explanation"])
     assert "Draft validation failed: safety flags present." in explanation
@@ -1522,6 +1548,7 @@ def _paused_search_lead(
 def _config(
     *,
     channels: tuple[ContactChannel, ...] = (ContactChannel.EMAIL,),
+    outbound_drafting_config: WorkspaceOutboundDraftingConfig | None = None,
 ) -> CampaignExecutionConfig:
     return CampaignExecutionConfig(
         campaign_id=CAMPAIGN_ID,
@@ -1544,6 +1571,16 @@ def _config(
         cadence_steps=_steps(channels=channels),
         created_at=NOW,
         published_at=NOW,
+        outbound_drafting_config=outbound_drafting_config or _dormant_drafting_config(),
+    )
+
+
+def _dormant_drafting_config() -> WorkspaceOutboundDraftingConfig:
+    return WorkspaceOutboundDraftingConfig(
+        workspace_id=WORKSPACE_ID,
+        revision=3,
+        prompt_text="Use the campaign version's dormant drafting voice.",
+        enabled_extraction_fields=("location", "max_price"),
     )
 
 

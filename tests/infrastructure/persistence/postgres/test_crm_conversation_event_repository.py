@@ -45,6 +45,9 @@ class _FakeResult:
         assert self._scalar_value is not None
         return self._scalar_value
 
+    def scalar_one_or_none(self) -> object | None:
+        return self._scalar_value
+
     def scalars(self) -> _FakeScalarSequence:
         return _FakeScalarSequence(self._scalar_values)
 
@@ -121,7 +124,7 @@ def _run[T](coroutine: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coroutine)
 
 
-async def test_save_uses_idempotent_upsert_on_workspace_provider_activity() -> None:
+async def test_save_inserts_with_all_unique_conflicts_guarded() -> None:
     session = _FakeSession(_FakeResult(scalar_value=_model()))
 
     saved = await PostgresCrmConversationEventRepository(cast(AsyncSession, session)).save(_event())
@@ -129,7 +132,7 @@ async def test_save_uses_idempotent_upsert_on_workspace_provider_activity() -> N
     assert saved == _event()
     statement = str(session.statements[0])
     assert "INSERT INTO crm_conversation_events" in statement
-    assert "ON CONFLICT (workspace_id, crm_provider, crm_activity_id) DO UPDATE" in statement
+    assert "ON CONFLICT DO NOTHING" in statement
 
 
 async def test_list_for_lead_queries_by_workspace_lead_and_orders_by_occurred_at() -> None:
