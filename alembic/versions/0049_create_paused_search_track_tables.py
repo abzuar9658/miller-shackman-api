@@ -19,7 +19,6 @@ _TABLES = (
     "paused_search_tracks",
     "paused_search_track_versions",
     "paused_search_track_steps",
-    "paused_search_reason_mappings",
     "paused_search_track_admin_audit_logs",
 )
 
@@ -69,27 +68,15 @@ def upgrade() -> None:
         ),
         sa.Column("version_number", sa.Integer(), nullable=False),
         sa.Column("status", sa.String(50), nullable=False),
-        sa.Column("track_family", sa.String(100), nullable=False),
+        sa.Column("selection_guidance", sa.Text(), nullable=False),
         sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column(
             "allowed_channels", pg.JSONB, nullable=False, server_default=sa.text("'[]'::jsonb")
-        ),
-        sa.Column(
-            "default_for_reason_codes",
-            pg.JSONB,
-            nullable=False,
-            server_default=sa.text("'[]'::jsonb"),
         ),
         sa.Column("fallback_timing_policy", sa.String(100), nullable=False),
         sa.Column("maintenance_interval_days", sa.Integer(), nullable=False),
         sa.Column("reactivation_window_days", sa.Integer(), nullable=False),
         sa.Column("max_total_touches", sa.Integer(), nullable=False),
-        sa.Column(
-            "requires_review_before_publish",
-            sa.Boolean(),
-            nullable=False,
-            server_default=sa.text("false"),
-        ),
         sa.Column(
             "created_by_user_id",
             pg.UUID(as_uuid=True),
@@ -144,45 +131,6 @@ def upgrade() -> None:
     )
 
     op.create_table(
-        "paused_search_reason_mappings",
-        sa.Column("mapping_id", pg.UUID(as_uuid=True), primary_key=True),
-        sa.Column(
-            "workspace_id",
-            pg.UUID(as_uuid=True),
-            sa.ForeignKey("workspaces.workspace_id"),
-            nullable=False,
-        ),
-        sa.Column("reason_code", sa.String(100), nullable=False),
-        sa.Column(
-            "track_id",
-            pg.UUID(as_uuid=True),
-            sa.ForeignKey("paused_search_tracks.track_id"),
-            nullable=False,
-        ),
-        sa.Column(
-            "track_version_id",
-            pg.UUID(as_uuid=True),
-            sa.ForeignKey("paused_search_track_versions.track_version_id"),
-            nullable=False,
-        ),
-        sa.Column(
-            "created_by_user_id",
-            pg.UUID(as_uuid=True),
-            sa.ForeignKey("users.user_id"),
-            nullable=False,
-        ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.UniqueConstraint(
-            "workspace_id", "reason_code", name="uq_paused_reason_workspace_reason"
-        ),
-    )
-    op.create_index(
-        "ix_paused_reason_mappings_track_version",
-        "paused_search_reason_mappings",
-        ["workspace_id", "track_version_id"],
-    )
-
-    op.create_table(
         "paused_search_track_admin_audit_logs",
         sa.Column("audit_log_id", pg.UUID(as_uuid=True), primary_key=True),
         sa.Column(
@@ -223,13 +171,24 @@ def upgrade() -> None:
 
     for table_name in _TABLES:
         _enable_workspace_rls(table_name)
+    op.create_foreign_key(
+        "fk_lead_classification_artifact_track_version",
+        "lead_classification_artifacts",
+        "paused_search_track_versions",
+        ["track_version_id"],
+        ["track_version_id"],
+    )
 
 
 def downgrade() -> None:
+    op.drop_constraint(
+        "fk_lead_classification_artifact_track_version",
+        "lead_classification_artifacts",
+        type_="foreignkey",
+    )
     for table_name in reversed(_TABLES):
         _disable_workspace_rls(table_name)
     op.drop_table("paused_search_track_admin_audit_logs")
-    op.drop_table("paused_search_reason_mappings")
     op.drop_table("paused_search_track_steps")
     op.drop_table("paused_search_track_versions")
     op.drop_table("paused_search_tracks")

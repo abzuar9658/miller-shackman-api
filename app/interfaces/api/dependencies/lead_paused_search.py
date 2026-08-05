@@ -10,7 +10,7 @@ from app.application.ports.repositories import (
     LeadWorkflowRepository,
     PausedSearchOccurrenceRepository,
     PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
     TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
 )
@@ -43,11 +43,11 @@ class LeadPausedSearchActionBundle:
     lead_repository: LeadRepository
     paused_search_history_repository: LeadPausedSearchHistoryRepository
     lead_workflow_repository: LeadWorkflowRepository
-    paused_search_track_repository: PausedSearchTrackMappingRepository
+    paused_search_track_repository: PausedSearchTrackRepository
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository
     occurrence_repository: PausedSearchOccurrenceRepository | None = None
     workflow_transition_repository: WorkflowTransitionRepository | None = None
-    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None
 
 
 async def get_lead_paused_search_action_bundle(

@@ -1,5 +1,10 @@
 # Paused Search & AI Nurture — Use-Case Completion Status
 
+> **Superseded for paused-search track routing.** Use
+> `paused-search-dynamic-track-classification-correction-plan.md` as the current contract.
+> The historical category, fixed-reason, and live-data migration instructions below are not
+> implementation guidance for the development schema.
+
 **Scope:** maps the seven business use cases from `docs/business-rules/06-ai-nurture-classification-routing-and-reply-handling.md` to the current implementation.
 
 **How to read this doc:**

@@ -15,8 +15,7 @@ from app.application.ports.repositories import (
     OutboundMessageRepository,
     PausedSearchOccurrenceOperationsRepository,
     PausedSearchReviewRepository,
-    PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
     TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
@@ -34,7 +33,6 @@ from app.application.use_cases.lead_resume import (
 )
 from app.application.use_cases.lead_workflow_overrides import (
     PausedSearchWorkflowOverrideStatus,
-    migrate_paused_search_track_version,
     skip_paused_search_next_touch,
 )
 from app.application.use_cases.plan_outbound_message import outbound_message_idempotency_key
@@ -277,7 +275,6 @@ async def apply_paused_search_review_action(
     idempotency_key: str,
     now: datetime,
     resolution_action: str | None = None,
-    target_track_version_id: UUID | None = None,
     terminal_behavior: PausedSearchTerminalBehavior | None = None,
     workflow_repository: LeadReadWorkflowRepository | None = None,
     action_workflow_repository: LeadWorkflowRepository | None = None,
@@ -286,8 +283,7 @@ async def apply_paused_search_review_action(
     external_event_repository: ExternalEventRepository | None = None,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None = None,
     paused_search_history_repository: LeadPausedSearchHistoryRepository | None = None,
-    paused_search_track_repository: PausedSearchTrackMappingRepository | None = None,
-    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
+    paused_search_track_repository: PausedSearchTrackRepository | None = None,
     lead_workflow_override_audit_repository: LeadWorkflowOverrideAuditLogRepository | None = None,
     workspace_repository: WorkspaceRepository | None = None,
     paused_search_occurrence_repository: PausedSearchOccurrenceOperationsRepository | None = None,
@@ -334,17 +330,11 @@ async def apply_paused_search_review_action(
         if action is not PausedSearchReviewAction.RESOLVE or resolution_action not in {
             "skip",
             "resume_after_revalidation",
-            "migrate",
             "terminalize",
         }:
             return PausedSearchReviewActionResult(
                 status=PausedSearchOperationsStatus.INVALID,
                 reasons=(PausedSearchOperationsReason.POLICY_ACTION_NOT_ALLOWED,),
-            )
-        if resolution_action == "migrate" and target_track_version_id is None:
-            return PausedSearchReviewActionResult(
-                status=PausedSearchOperationsStatus.INVALID,
-                reasons=(PausedSearchOperationsReason.INVALID_ACTION,),
             )
         if resolution_action == "terminalize" and terminal_behavior is None:
             return PausedSearchReviewActionResult(
@@ -368,11 +358,9 @@ async def apply_paused_search_review_action(
             workspace_contact_policy_repository=workspace_contact_policy_repository,
             paused_search_history_repository=paused_search_history_repository,
             paused_search_track_repository=paused_search_track_repository,
-            paused_search_track_assignment_repository=paused_search_track_assignment_repository,
             lead_workflow_override_audit_repository=lead_workflow_override_audit_repository,
             workspace_repository=workspace_repository,
             paused_search_occurrence_repository=paused_search_occurrence_repository,
-            target_track_version_id=target_track_version_id,
             terminal_behavior=terminal_behavior,
             commit=commit,
         ):
@@ -722,12 +710,10 @@ async def _execute_policy_resolution(
     external_event_repository: ExternalEventRepository | None,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None,
     paused_search_history_repository: LeadPausedSearchHistoryRepository | None,
-    paused_search_track_repository: PausedSearchTrackMappingRepository | None,
-    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
+    paused_search_track_repository: PausedSearchTrackRepository | None,
     lead_workflow_override_audit_repository: LeadWorkflowOverrideAuditLogRepository | None,
     workspace_repository: WorkspaceRepository | None,
     paused_search_occurrence_repository: PausedSearchOccurrenceOperationsRepository | None,
-    target_track_version_id: UUID | None,
     terminal_behavior: PausedSearchTerminalBehavior | None,
     commit: Callable[[], Awaitable[None]] | None,
 ) -> bool:
@@ -756,26 +742,6 @@ async def _execute_policy_resolution(
             now=now,
         )
         return skip_result.status in {
-            PausedSearchWorkflowOverrideStatus.UPDATED,
-            PausedSearchWorkflowOverrideStatus.UNCHANGED,
-        }
-    if resolution_action == "migrate" and target_track_version_id is not None:
-        migrate_result = await migrate_paused_search_track_version(
-            actor=actor,
-            workspace_id=workspace_id,
-            lead_id=lead_id,
-            target_track_version_id=target_track_version_id,
-            reason=reason,
-            lead_repository=action_lead_repository or lead_repository,  # type: ignore[arg-type]
-            lead_workflow_repository=action_workflow_repository,
-            lead_workflow_override_audit_repository=lead_workflow_override_audit_repository,
-            paused_search_track_repository=paused_search_track_repository,
-            paused_search_track_assignment_repository=paused_search_track_assignment_repository,
-            temporal_signal_outbox_repository=temporal_signal_outbox_repository,
-            workspace_repository=workspace_repository,
-            now=now,
-        )
-        return migrate_result.status in {
             PausedSearchWorkflowOverrideStatus.UPDATED,
             PausedSearchWorkflowOverrideStatus.UNCHANGED,
         }

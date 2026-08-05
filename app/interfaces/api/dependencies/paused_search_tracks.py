@@ -18,7 +18,7 @@ from app.application.ports.repositories import (
     PausedSearchTrackAdminAuditLogRepository,
     PausedSearchTrackAdminRepository,
     PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
     TemplateRepository,
     TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
@@ -97,7 +97,7 @@ class PausedSearchOperationsBundle:
     external_event_repository: ExternalEventRepository
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository
     paused_search_history_repository: LeadPausedSearchHistoryRepository
-    paused_search_track_repository: PausedSearchTrackMappingRepository
+    paused_search_track_repository: PausedSearchTrackRepository
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository
     lead_workflow_override_audit_repository: LeadWorkflowOverrideAuditLogRepository
     workspace_repository: WorkspaceRepository

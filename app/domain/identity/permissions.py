@@ -44,7 +44,6 @@ class PermissionReasonCode(StrEnum):
     WORKSPACE_NOT_ACTIVE = "workspace_not_active"
     MEMBERSHIP_NOT_ACTIVE = "membership_not_active"
     ROLE_NOT_ALLOWED = "role_not_allowed"
-    PLATFORM_SUPER_ADMIN_RESTRICTED = "platform_super_admin_restricted"
     OWNERSHIP_REQUIRED = "ownership_required"
     CAMPAIGN_DISALLOWS_ASSIGNED_AGENT_ENROLLMENT = "campaign_disallows_assigned_agent_enrollment"
     RESUME_REASON_REQUIRED = "resume_reason_required"
@@ -83,13 +82,6 @@ def evaluate_permission(
     _append_active_workspace_context_reasons(actor, reasons)
     if reasons:
         return PermissionDecision(False, capability, tuple(reasons))
-
-    if actor.active_role == WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN:
-        return PermissionDecision(
-            allowed=False,
-            capability=capability,
-            reasons=(PermissionReasonCode.PLATFORM_SUPER_ADMIN_RESTRICTED,),
-        )
 
     if actor.active_role is None or not _role_allows(capability, actor.active_role):
         return PermissionDecision(
@@ -143,6 +135,9 @@ def _role_allows(
     capability: PermissionCapability,
     role: WorkspaceMembershipRole,
 ) -> bool:
+    if role == WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN:
+        return True
+
     if role == WorkspaceMembershipRole.ASSIGNED_AGENT:
         return capability in {
             PermissionCapability.EXPORT_CRM_HISTORY_FROM_EXTENSION,

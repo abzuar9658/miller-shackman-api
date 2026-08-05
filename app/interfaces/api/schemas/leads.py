@@ -3,7 +3,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.domain.leads import PausedSearchReasonCode
 from app.interfaces.api.schemas.handoffs import HandoffResponse
 
 
@@ -33,7 +32,8 @@ class LeadSendabilityResponse(BaseModel):
 
 class LeadPausedSearchProfileResponse(BaseModel):
     paused_search_active: bool
-    pause_reason_code: str | None = None
+    paused_search_track_key: str | None = None
+    paused_search_track_version_id: UUID | None = None
     pause_reason_note: str | None = None
     reengagement_not_before: datetime | None = None
     reengagement_window_label: str | None = None
@@ -64,7 +64,9 @@ class LeadClassificationArtifactResponse(BaseModel):
     artifact_id: UUID
     source: str
     outcome: str
-    pause_reason_code: str | None = None
+    selected_track_key: str | None = None
+    track_selection_status: str | None = None
+    track_version_id: UUID | None = None
     reengagement_not_before: datetime | None = None
     reengagement_window_label: str | None = None
     confidence: float | None = None
@@ -118,15 +120,13 @@ class LeadPausedSearchTrackPlanResponse(BaseModel):
     track_version_id: UUID
     version_number: int
     version_status: str
-    track_family: str
+    selection_guidance: str
     enabled: bool
     allowed_channels: list[str] = Field(default_factory=list)
-    default_for_reason_codes: list[str] = Field(default_factory=list)
     fallback_timing_policy: str
     maintenance_interval_days: int
     reactivation_window_days: int
     max_total_touches: int
-    requires_review_before_publish: bool
     default_pause_duration_days: int
     max_duration_days: int
     terminal_behavior: str
@@ -403,19 +403,19 @@ class LeadDetailResponse(BaseModel):
 
 class UpdateLeadPausedSearchRequest(BaseModel):
     active: bool
-    reason_code: PausedSearchReasonCode | None = None
+    selected_track_key: str | None = Field(default=None, min_length=1, max_length=255)
     reason_note: str | None = Field(default=None, max_length=1000)
     reengagement_not_before: datetime | None = None
     reengagement_window_label: str | None = Field(default=None, max_length=100)
 
     @model_validator(mode="after")
     def validate_shape(self) -> "UpdateLeadPausedSearchRequest":
-        if self.active and self.reason_code is None:
-            raise ValueError("reason_code is required when active is true")
+        if self.active and self.selected_track_key is None:
+            raise ValueError("selected_track_key is required when active is true")
         if not self.active and any(
             value is not None
             for value in (
-                self.reason_code,
+                self.selected_track_key,
                 self.reason_note,
                 self.reengagement_not_before,
                 self.reengagement_window_label,
@@ -480,19 +480,19 @@ class StartLeadManualEnrollmentResponse(BaseModel):
 class ResolveLeadReviewHoldRequest(BaseModel):
     resolution: str
     campaign_id: UUID
-    pause_reason_code: PausedSearchReasonCode | None = None
+    selected_track_key: str | None = Field(default=None, min_length=1, max_length=255)
     pause_reason_note: str | None = Field(default=None, max_length=1000)
     reengagement_not_before: datetime | None = None
     reengagement_window_label: str | None = Field(default=None, max_length=100)
 
     @model_validator(mode="after")
     def validate_shape(self) -> "ResolveLeadReviewHoldRequest":
-        if self.resolution == "paused_search" and self.pause_reason_code is None:
-            raise ValueError("pause_reason_code is required for paused_search resolution")
+        if self.resolution == "paused_search" and self.selected_track_key is None:
+            raise ValueError("selected_track_key is required for paused_search resolution")
         if self.resolution != "paused_search" and any(
             value is not None
             for value in (
-                self.pause_reason_code,
+                self.selected_track_key,
                 self.pause_reason_note,
                 self.reengagement_not_before,
                 self.reengagement_window_label,
@@ -552,20 +552,6 @@ class OverridePausedSearchTimingResponse(BaseModel):
     lead_id: UUID | None = None
     workflow_id: UUID | None = None
     paused_search: LeadPausedSearchProfileResponse | None = None
-    next_action_at: datetime | None = None
-    reasons: list[str] = Field(default_factory=list)
-
-
-class MigratePausedSearchTrackRequest(BaseModel):
-    target_track_version_id: UUID
-    reason: str = Field(min_length=1, max_length=500)
-
-
-class MigratePausedSearchTrackResponse(BaseModel):
-    status: str
-    lead_id: UUID | None = None
-    workflow_id: UUID | None = None
-    target_track_version_id: UUID | None = None
     next_action_at: datetime | None = None
     reasons: list[str] = Field(default_factory=list)
 

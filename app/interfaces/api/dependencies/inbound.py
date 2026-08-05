@@ -28,7 +28,7 @@ from app.application.ports.repositories import (
     OutboundMessageRepository,
     PausedSearchOccurrenceRepository,
     PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
     TemporalSignalOutboxRepository,
     UserRepository,
     WorkflowTransitionRepository,
@@ -137,7 +137,7 @@ class InboundServiceBundle:
     handoff_completion_repository: HandoffCompletionRepository
     inbound_message_crm_completion_repository: InboundMessageCRMCompletionRepository
     outbound_message_crm_completion_repository: OutboundMessageCRMCompletionRepository
-    paused_search_track_repository: PausedSearchTrackMappingRepository
+    paused_search_track_repository: PausedSearchTrackRepository
     lead_workflow_repository: LeadWorkflowRepository
     workflow_transition_repository: WorkflowTransitionRepository
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository

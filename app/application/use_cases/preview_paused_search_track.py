@@ -135,6 +135,7 @@ def paused_search_preview_evidence(
         "track_id": str(track.track_id),
         "track_version_id": str(version.track_version_id),
         "version_number": version.version_number,
+        "selection_guidance": version.selection_guidance,
         "maximum_logical_touches": min(
             version.max_total_touches,
             sum(step.max_occurrences for step in steps),

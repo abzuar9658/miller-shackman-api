@@ -1,3 +1,8 @@
+> **Superseded for paused-search track routing.** Use
+> `paused-search-dynamic-track-classification-correction-plan.md` as the current contract.
+> This historical recurring-maintenance plan must not be used to restore compatibility or
+> existing-data migration behavior.
+
 # Paused-Search Track Control and Recurring Maintenance — End-to-End Implementation Plan
 
 ## 1. Purpose and status

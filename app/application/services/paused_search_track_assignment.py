@@ -6,7 +6,7 @@ from uuid import uuid4
 from app.application.ports.repositories import (
     LeadWorkflowRepository,
     PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
 )
 from app.domain.campaigns import (
     PausedSearchTrack,
@@ -22,7 +22,6 @@ from app.domain.common.ids import (
     UserId,
     WorkspaceId,
 )
-from app.domain.leads import PausedSearchReasonCode
 from app.domain.workflows import LeadWorkflow
 
 
@@ -44,12 +43,11 @@ async def synchronize_paused_search_track_assignment(
     *,
     workspace_id: WorkspaceId,
     lead_id: LeadId,
-    reason_code: PausedSearchReasonCode | None,
     clear: bool,
     actor_user_id: UserId | None,
     source: PausedSearchTrackAssignmentSource,
     assignment_repository: PausedSearchTrackAssignmentRepository,
-    track_mapping_repository: PausedSearchTrackMappingRepository,
+    track_repository: PausedSearchTrackRepository,
     lead_workflow_repository: LeadWorkflowRepository,
     now: datetime,
     target_track_version_id: PausedSearchTrackVersionId | None = None,
@@ -85,9 +83,8 @@ async def synchronize_paused_search_track_assignment(
 
     resolved = await _resolve_assignment_snapshot(
         workspace_id=workspace_id,
-        reason_code=reason_code,
         target_track_version_id=target_track_version_id,
-        track_mapping_repository=track_mapping_repository,
+        track_repository=track_repository,
     )
     if resolved is None:
         return PausedSearchTrackAssignmentSyncResult(
@@ -97,7 +94,7 @@ async def synchronize_paused_search_track_assignment(
         )
     track, version = resolved
 
-    if not _assignment_matches(assignment, version.track_version_id, reason_code):
+    if not _assignment_matches(assignment, version.track_version_id):
         if assignment is not None:
             await assignment_repository.release_active(
                 workspace_id=workspace_id,
@@ -116,7 +113,6 @@ async def synchronize_paused_search_track_assignment(
                 track_key_snapshot=track.track_key,
                 track_name_snapshot=track.display_name,
                 track_version_snapshot=version.version_number,
-                reason_code=reason_code,
                 source=source,
                 assigned_by_user_id=actor_user_id,
                 assigned_at=now,
@@ -141,29 +137,20 @@ async def synchronize_paused_search_track_assignment(
 async def _resolve_assignment_snapshot(
     *,
     workspace_id: WorkspaceId,
-    reason_code: PausedSearchReasonCode | None,
     target_track_version_id: PausedSearchTrackVersionId | None,
-    track_mapping_repository: PausedSearchTrackMappingRepository,
+    track_repository: PausedSearchTrackRepository,
 ) -> tuple[PausedSearchTrack, PausedSearchTrackVersion] | None:
     track_version_id = target_track_version_id
-    expected_track_id = None
     if track_version_id is None:
-        if reason_code is None:
-            return None
-        mapping = await track_mapping_repository.get_reason_mapping(workspace_id, reason_code)
-        if mapping is None:
-            return None
-        track_version_id = mapping.track_version_id
-        expected_track_id = mapping.track_id
-    version = await track_mapping_repository.get_version(workspace_id, track_version_id)
+        return None
+    version = await track_repository.get_version(workspace_id, track_version_id)
     if (
         version is None
         or version.status is not CampaignVersionStatus.PUBLISHED
         or not version.enabled
-        or (expected_track_id is not None and version.track_id != expected_track_id)
     ):
         return None
-    track = await track_mapping_repository.get_track(workspace_id, version.track_id)
+    track = await track_repository.get_track(workspace_id, version.track_id)
     if track is None or track.status is PausedSearchTrackStatus.RETIRED:
         return None
     return track, version
@@ -172,12 +159,10 @@ async def _resolve_assignment_snapshot(
 def _assignment_matches(
     assignment: PausedSearchTrackAssignment | None,
     track_version_id: PausedSearchTrackVersionId,
-    reason_code: PausedSearchReasonCode | None,
 ) -> bool:
     return (
         assignment is not None
         and assignment.track_version_id == track_version_id
-        and assignment.reason_code == reason_code
     )
 
 

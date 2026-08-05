@@ -787,11 +787,8 @@ def _paused_search_track_option_chips(
     lead: CanonicalLeadRecord,
     option: PausedSearchTrackOptionSpec,
 ) -> tuple[str, ...]:
-    chips = [f"Track v{option.version.version_number}"]
-    if lead.pause_reason_code in option.version.default_for_reason_codes:
-        chips.append("Mapped reason")
-    chips.append(option.version.track_family.value.replace("_", " ").title())
-    return tuple(chips)
+    del lead
+    return (f"Track v{option.version.version_number}",)
 
 
 def _paused_search_track_option_detail_lines(
@@ -803,8 +800,7 @@ def _paused_search_track_option_detail_lines(
         f"Version: v{option.version.version_number}.",
         f"Planned touches: {len(option.steps)}.",
     ]
-    if lead.pause_reason_code in option.version.default_for_reason_codes:
-        lines.append(f"Mapped to this lead's pause reason: {lead.pause_reason_code.value}.")
+    del lead
     return tuple(lines)
 
 
@@ -1461,8 +1457,8 @@ def _paused_search_chips(
     latest_workflow: LeadWorkflow | None,
 ) -> tuple[str, ...]:
     chips: list[str] = []
-    if lead.pause_reason_code is not None:
-        chips.append(lead.pause_reason_code.value.replace("_", " ").title())
+    if lead.paused_search_track_key is not None:
+        chips.append(lead.paused_search_track_key.replace("-", " ").title())
     if lead.reengagement_window_label:
         chips.append(lead.reengagement_window_label)
     if paused_search_track is not None:

@@ -20,7 +20,6 @@ from app.domain.leads import (
     LeadPausedSearchProfile,
     LeadType,
     PausedSearchAction,
-    PausedSearchReasonCode,
     PausedSearchSource,
     PropertyEventType,
 )
@@ -263,7 +262,6 @@ def _timing_candidate_to_values(candidate: CustomerTimingCandidate) -> dict[str,
         "timing_id": candidate.timing_id,
         "workspace_id": candidate.workspace_id,
         "lead_id": candidate.lead_id,
-        "reason_code": candidate.reason_code.value if candidate.reason_code else None,
         "customer_date": candidate.customer_date,
         "source": candidate.source.value,
         "evidence_type": candidate.evidence_type.value,
@@ -282,7 +280,6 @@ def _timing_model_to_candidate(model: CustomerTimingModel) -> CustomerTimingCand
         timing_id=model.timing_id,
         workspace_id=model.workspace_id,
         lead_id=model.lead_id,
-        reason_code=PausedSearchReasonCode(model.reason_code) if model.reason_code else None,
         customer_date=model.customer_date,
         source=PausedSearchSource(model.source),
         evidence_type=CustomerTimingEvidenceType(model.evidence_type),
@@ -357,7 +354,8 @@ def _record_to_values(
         "latest_property_price_band": record.latest_property_price_band,
         "latest_property_context_present": record.latest_property_context_present,
         "paused_search_active": record.paused_search_active,
-        "pause_reason_code": record.pause_reason_code.value if record.pause_reason_code else None,
+        "paused_search_track_key": record.paused_search_track_key,
+        "paused_search_track_version_id": record.paused_search_track_version_id,
         "pause_reason_note": record.pause_reason_note,
         "reengagement_not_before": record.reengagement_not_before,
         "reengagement_window_label": record.reengagement_window_label,
@@ -430,9 +428,8 @@ def _model_to_record(model: LeadModel) -> CanonicalLeadRecord:
         latest_property_price_band=model.latest_property_price_band,
         latest_property_context_present=model.latest_property_context_present,
         paused_search_active=model.paused_search_active,
-        pause_reason_code=PausedSearchReasonCode(model.pause_reason_code)
-        if model.pause_reason_code
-        else None,
+        paused_search_track_key=model.paused_search_track_key,
+        paused_search_track_version_id=model.paused_search_track_version_id,
         pause_reason_note=model.pause_reason_note,
         reengagement_not_before=model.reengagement_not_before,
         reengagement_window_label=model.reengagement_window_label,
@@ -463,7 +460,8 @@ def _profile_values(prefix: str, profile: LeadPausedSearchProfile | None) -> dic
     if profile is None:
         return {
             f"{prefix}_active": False,
-            f"{prefix}_reason_code": None,
+            f"{prefix}_paused_search_track_key": None,
+            f"{prefix}_paused_search_track_version_id": None,
             f"{prefix}_reason_note": None,
             f"{prefix}_reengagement_not_before": None,
             f"{prefix}_reengagement_window_label": None,
@@ -474,9 +472,8 @@ def _profile_values(prefix: str, profile: LeadPausedSearchProfile | None) -> dic
         }
     return {
         f"{prefix}_active": profile.paused_search_active,
-        f"{prefix}_reason_code": (
-            profile.pause_reason_code.value if profile.pause_reason_code else None
-        ),
+        f"{prefix}_paused_search_track_key": profile.paused_search_track_key,
+        f"{prefix}_paused_search_track_version_id": profile.paused_search_track_version_id,
         f"{prefix}_reason_note": profile.pause_reason_note,
         f"{prefix}_reengagement_not_before": profile.reengagement_not_before,
         f"{prefix}_reengagement_window_label": profile.reengagement_window_label,
@@ -507,7 +504,8 @@ def _profile_from_model(
     prefix: str,
 ) -> LeadPausedSearchProfile | None:
     is_active = getattr(model, f"{prefix}_active")
-    reason_code = getattr(model, f"{prefix}_reason_code")
+    track_key = getattr(model, f"{prefix}_paused_search_track_key")
+    track_version_id = getattr(model, f"{prefix}_paused_search_track_version_id")
     reason_note = getattr(model, f"{prefix}_reason_note")
     reengagement_not_before = getattr(model, f"{prefix}_reengagement_not_before")
     reengagement_window_label = getattr(model, f"{prefix}_reengagement_window_label")
@@ -518,7 +516,8 @@ def _profile_from_model(
     if not is_active and all(
         value is None
         for value in (
-            reason_code,
+            track_key,
+            track_version_id,
             reason_note,
             reengagement_not_before,
             reengagement_window_label,
@@ -531,7 +530,8 @@ def _profile_from_model(
         return None
     return LeadPausedSearchProfile(
         paused_search_active=is_active,
-        pause_reason_code=PausedSearchReasonCode(reason_code) if reason_code else None,
+        paused_search_track_key=track_key,
+        paused_search_track_version_id=track_version_id,
         pause_reason_note=reason_note,
         reengagement_not_before=reengagement_not_before,
         reengagement_window_label=reengagement_window_label,

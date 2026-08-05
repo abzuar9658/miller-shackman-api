@@ -9,7 +9,7 @@ from app.application.ports.repositories import (
     CampaignEnrollmentRepository,
     LeadWorkflowRepository,
     PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
     WorkflowTransitionRepository,
     WorkspaceOperationalControlRepository,
 )
@@ -67,7 +67,7 @@ async def start_paused_search_campaign_enrollment(
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
     temporal_workflow_starter: TemporalWorkflowStarter,
-    paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_repository: PausedSearchTrackRepository,
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository,
     event_bus: EventBus | None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
@@ -92,25 +92,12 @@ async def start_paused_search_campaign_enrollment(
                 ),
             )
 
-    assignment_result = await synchronize_paused_search_track_assignment(
-        workspace_id=workspace_id,
-        lead_id=lead_id,
-        reason_code=lead.pause_reason_code,
-        clear=False,
-        actor_user_id=actor_user_id,
-        source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
-        assignment_repository=paused_search_track_assignment_repository,
-        track_mapping_repository=paused_search_track_repository,
-        lead_workflow_repository=lead_workflow_repository,
-        now=now,
+    active_assignment = (
+        await paused_search_track_assignment_repository.get_active_for_lead_for_update(
+            workspace_id, lead_id
+        )
     )
-    active_assignment = assignment_result.assignment
-    resolved_track_version_id = assignment_result.resolved_track_version_id
-    if (
-        active_assignment is None
-        or resolved_track_version_id is None
-        or active_assignment.track_version_id != resolved_track_version_id
-    ):
+    if active_assignment is None:
         return PausedSearchCampaignEnrollmentResult(
             status=PausedSearchCampaignEnrollmentStatus.REVIEW_HOLD,
             reason_codes=reason_codes + ("paused_search_track_assignment_unavailable",),
@@ -159,14 +146,14 @@ async def start_paused_search_campaign_enrollment(
     assignment_result = await synchronize_paused_search_track_assignment(
         workspace_id=workspace_id,
         lead_id=lead_id,
-        reason_code=lead.pause_reason_code,
         clear=False,
         actor_user_id=actor_user_id,
-        source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
+        source=PausedSearchTrackAssignmentSource.CLASSIFICATION,
         assignment_repository=paused_search_track_assignment_repository,
-        track_mapping_repository=paused_search_track_repository,
+        track_repository=paused_search_track_repository,
         lead_workflow_repository=lead_workflow_repository,
         now=now,
+        target_track_version_id=active_assignment.track_version_id,
     )
     pinned_workflow = assignment_result.workflow
     if pinned_workflow is None:
@@ -227,8 +214,10 @@ def _paused_search_enrollment_metadata(lead: CanonicalLeadRecord) -> dict[str, o
         "paused_search_active": lead.paused_search_active,
         "explanation": "Lead routed onto the paused-search nurture path.",
     }
-    if lead.pause_reason_code is not None:
-        metadata["pause_reason_code"] = lead.pause_reason_code.value
+    if lead.paused_search_track_key is not None:
+        metadata["paused_search_track_key"] = lead.paused_search_track_key
+    if lead.paused_search_track_version_id is not None:
+        metadata["paused_search_track_version_id"] = str(lead.paused_search_track_version_id)
     if lead.reengagement_window_label:
         metadata["reengagement_window_label"] = lead.reengagement_window_label
     if lead.reengagement_not_before is not None:

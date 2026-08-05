@@ -134,6 +134,7 @@ def _has_attention_access(*, actor: AuthenticatedActor, workspace_id: UUID) -> b
         actor.user_status == UserStatus.ACTIVE
         and actor.active_role
         in {
+            WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN,
             WorkspaceMembershipRole.BROKERAGE_ADMIN,
             WorkspaceMembershipRole.MANAGER,
             WorkspaceMembershipRole.ASSIGNED_AGENT,

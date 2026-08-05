@@ -276,7 +276,6 @@ class PostgresReportingRepository(ReportingRepository):
                     RecurringOccurrenceStatus.SENT,
                     RecurringOccurrenceStatus.SKIPPED,
                     RecurringOccurrenceStatus.CANCELLED,
-                    RecurringOccurrenceStatus.MIGRATED_LEGACY,
                 )
             ),
             fallback=await self._count_rows(

@@ -23,7 +23,14 @@ def upgrade() -> None:
         "leads",
         sa.Column("paused_search_active", sa.Boolean(), nullable=False, server_default=sa.false()),
     )
-    op.add_column("leads", sa.Column("pause_reason_code", sa.String(length=100), nullable=True))
+    op.add_column(
+        "leads",
+        sa.Column("paused_search_track_key", sa.String(length=100), nullable=True),
+    )
+    op.add_column(
+        "leads",
+        sa.Column("paused_search_track_version_id", postgresql.UUID(as_uuid=True), nullable=True),
+    )
     op.add_column("leads", sa.Column("pause_reason_note", sa.Text(), nullable=True))
     op.add_column(
         "leads",
@@ -74,7 +81,12 @@ def upgrade() -> None:
         ),
         sa.Column("action", sa.String(length=50), nullable=False),
         sa.Column("previous_active", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column("previous_reason_code", sa.String(length=100), nullable=True),
+        sa.Column("previous_paused_search_track_key", sa.String(length=100), nullable=True),
+        sa.Column(
+            "previous_paused_search_track_version_id",
+            postgresql.UUID(as_uuid=True),
+            nullable=True,
+        ),
         sa.Column("previous_reason_note", sa.Text(), nullable=True),
         sa.Column("previous_reengagement_not_before", sa.DateTime(timezone=True), nullable=True),
         sa.Column("previous_reengagement_window_label", sa.String(length=100), nullable=True),
@@ -88,7 +100,12 @@ def upgrade() -> None:
         ),
         sa.Column("previous_last_confirmed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("current_active", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column("current_reason_code", sa.String(length=100), nullable=True),
+        sa.Column("current_paused_search_track_key", sa.String(length=100), nullable=True),
+        sa.Column(
+            "current_paused_search_track_version_id",
+            postgresql.UUID(as_uuid=True),
+            nullable=True,
+        ),
         sa.Column("current_reason_note", sa.Text(), nullable=True),
         sa.Column("current_reengagement_not_before", sa.DateTime(timezone=True), nullable=True),
         sa.Column("current_reengagement_window_label", sa.String(length=100), nullable=True),
@@ -132,7 +149,8 @@ def downgrade() -> None:
     op.drop_column("leads", "reengagement_window_label")
     op.drop_column("leads", "reengagement_not_before")
     op.drop_column("leads", "pause_reason_note")
-    op.drop_column("leads", "pause_reason_code")
+    op.drop_column("leads", "paused_search_track_version_id")
+    op.drop_column("leads", "paused_search_track_key")
     op.drop_column("leads", "paused_search_active")
 
 

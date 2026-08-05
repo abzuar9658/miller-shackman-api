@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from app.domain.common.ids import LeadId, WorkspaceId
+from app.domain.common.ids import LeadId, PausedSearchTrackVersionId, WorkspaceId
 from app.domain.compliance.contactability import ContactPermissionStatus, SuppressionType
 from app.domain.lead_assignment import AssignmentResolutionStatus, EffectiveOwnerSource
 
@@ -39,16 +39,6 @@ class PropertyEventType(StrEnum):
     VIEWED_PROPERTY = "viewed_property"
 
 
-class PausedSearchReasonCode(StrEnum):
-    RENTED_TEMPORARILY = "rented_temporarily"
-    TIMING_NOT_RIGHT = "timing_not_right"
-    WAITING_FOR_RATES = "waiting_for_rates"
-    WAITING_FOR_INVENTORY = "waiting_for_inventory"
-    FINANCIAL_PREP = "financial_prep"
-    PERSONAL_LIFE_TIMING = "personal_life_timing"
-    OTHER_KNOWN_PAUSE = "other_known_pause"
-
-
 class PausedSearchSource(StrEnum):
     OPERATOR = "operator"
     REVIEW_PROPOSAL = "review_proposal"
@@ -69,6 +59,12 @@ class LeadClassificationAppliedStatus(StrEnum):
     APPLIED = "applied"
     REVIEW = "review"
     BLOCKED = "blocked"
+
+
+class PausedSearchTrackSelectionStatus(StrEnum):
+    SELECTED = "selected"
+    NO_MATCH = "no_match"
+    AMBIGUOUS = "ambiguous"
 
 
 class PausedSearchAction(StrEnum):
@@ -92,7 +88,8 @@ def _empty_suppressions() -> frozenset[SuppressionType]:
 @dataclass(frozen=True)
 class LeadPausedSearchProfile:
     paused_search_active: bool
-    pause_reason_code: PausedSearchReasonCode | None = None
+    paused_search_track_key: str | None = None
+    paused_search_track_version_id: PausedSearchTrackVersionId | None = None
     pause_reason_note: str | None = None
     reengagement_not_before: datetime | None = None
     reengagement_window_label: str | None = None
@@ -100,6 +97,12 @@ class LeadPausedSearchProfile:
     paused_search_recorded_at: datetime | None = None
     paused_search_recorded_by_user_id: UUID | None = None
     paused_search_last_confirmed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.paused_search_active and (
+            not self.paused_search_track_key or self.paused_search_track_version_id is None
+        ):
+            raise ValueError("active paused-search profiles require a concrete track assignment")
 
 
 @dataclass(frozen=True)
@@ -109,7 +112,6 @@ class LeadClassificationArtifact:
     lead_id: LeadId
     source: str
     outcome: LeadStateClassificationOutcome
-    pause_reason_code: PausedSearchReasonCode | None
     reengagement_not_before: datetime | None
     reengagement_window_label: str | None
     confidence: float
@@ -122,6 +124,9 @@ class LeadClassificationArtifact:
     applied_status: LeadClassificationAppliedStatus
     applied_at: datetime | None
     created_at: datetime
+    selected_track_key: str | None = None
+    track_selection_status: PausedSearchTrackSelectionStatus | None = None
+    track_version_id: UUID | None = None
     prompt_text: str | None = None
     input_context: Mapping[str, object] = field(default_factory=dict)
     raw_llm_response_text: str | None = None
@@ -192,7 +197,8 @@ class CanonicalLeadRecord:
     latest_property_price_band: str | None = None
     latest_property_context_present: bool = False
     paused_search_active: bool = False
-    pause_reason_code: PausedSearchReasonCode | None = None
+    paused_search_track_key: str | None = None
+    paused_search_track_version_id: PausedSearchTrackVersionId | None = None
     pause_reason_note: str | None = None
     reengagement_not_before: datetime | None = None
     reengagement_window_label: str | None = None
@@ -200,6 +206,12 @@ class CanonicalLeadRecord:
     paused_search_recorded_at: datetime | None = None
     paused_search_recorded_by_user_id: UUID | None = None
     paused_search_last_confirmed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.paused_search_active and (
+            not self.paused_search_track_key or self.paused_search_track_version_id is None
+        ):
+            raise ValueError("active paused-search leads require a concrete track assignment")
 
 
 def lead_paused_search_profile(
@@ -209,7 +221,8 @@ def lead_paused_search_profile(
         return None
     return LeadPausedSearchProfile(
         paused_search_active=lead.paused_search_active,
-        pause_reason_code=lead.pause_reason_code,
+        paused_search_track_key=lead.paused_search_track_key,
+        paused_search_track_version_id=lead.paused_search_track_version_id,
         pause_reason_note=lead.pause_reason_note,
         reengagement_not_before=lead.reengagement_not_before,
         reengagement_window_label=lead.reengagement_window_label,

@@ -272,7 +272,8 @@ class LeadModel(Base):
         default=False,
     )
     paused_search_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    pause_reason_code: Mapped[str | None] = mapped_column(String(100))
+    paused_search_track_key: Mapped[str | None] = mapped_column(String(100))
+    paused_search_track_version_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     pause_reason_note: Mapped[str | None] = mapped_column(Text)
     reengagement_not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reengagement_window_label: Mapped[str | None] = mapped_column(String(100))
@@ -313,7 +314,10 @@ class LeadPausedSearchHistoryModel(Base):
     )
     action: Mapped[str] = mapped_column(String(50), nullable=False)
     previous_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    previous_reason_code: Mapped[str | None] = mapped_column(String(100))
+    previous_paused_search_track_key: Mapped[str | None] = mapped_column(String(100))
+    previous_paused_search_track_version_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True)
+    )
     previous_reason_note: Mapped[str | None] = mapped_column(Text)
     previous_reengagement_not_before: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
@@ -327,7 +331,10 @@ class LeadPausedSearchHistoryModel(Base):
     )
     previous_last_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     current_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    current_reason_code: Mapped[str | None] = mapped_column(String(100))
+    current_paused_search_track_key: Mapped[str | None] = mapped_column(String(100))
+    current_paused_search_track_version_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True)
+    )
     current_reason_note: Mapped[str | None] = mapped_column(Text)
     current_reengagement_not_before: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
@@ -360,7 +367,6 @@ class CustomerTimingModel(Base):
     lead_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("leads.lead_id"), nullable=False
     )
-    reason_code: Mapped[str | None] = mapped_column(String(100))
     customer_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source: Mapped[str] = mapped_column(String(100), nullable=False)
     evidence_type: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -395,7 +401,12 @@ class LeadClassificationArtifactModel(Base):
     )
     source: Mapped[str] = mapped_column(String(100), nullable=False)
     outcome: Mapped[str] = mapped_column(String(100), nullable=False)
-    pause_reason_code: Mapped[str | None] = mapped_column(String(100))
+    selected_track_key: Mapped[str | None] = mapped_column(String(255))
+    track_selection_status: Mapped[str | None] = mapped_column(String(50))
+    track_version_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("paused_search_track_versions.track_version_id"),
+    )
     reengagement_not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reengagement_window_label: Mapped[str | None] = mapped_column(String(100))
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
@@ -941,19 +952,13 @@ class PausedSearchTrackVersionModel(Base):
     )
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False)
-    track_family: Mapped[str] = mapped_column(String(100), nullable=False)
+    selection_guidance: Mapped[str] = mapped_column(Text, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     allowed_channels: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
-    default_for_reason_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     fallback_timing_policy: Mapped[str] = mapped_column(String(100), nullable=False)
     maintenance_interval_days: Mapped[int] = mapped_column(Integer, nullable=False)
     reactivation_window_days: Mapped[int] = mapped_column(Integer, nullable=False)
     max_total_touches: Mapped[int] = mapped_column(Integer, nullable=False)
-    requires_review_before_publish: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        default=False,
-    )
     max_duration_days: Mapped[int] = mapped_column(Integer, nullable=False, default=365)
     default_pause_duration_days: Mapped[int] = mapped_column(
         Integer,
@@ -1082,32 +1087,6 @@ class RecurringOccurrenceModel(Base):
     timezone_snapshot: Mapped[str | None] = mapped_column(String(100))
 
 
-class PausedSearchReasonMappingModel(Base):
-    __tablename__ = "paused_search_reason_mappings"
-    __table_args__ = (
-        UniqueConstraint("workspace_id", "reason_code", name="uq_paused_reason_workspace_reason"),
-        Index("ix_paused_reason_mappings_track_version", "workspace_id", "track_version_id"),
-    )
-
-    mapping_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    workspace_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
-    )
-    reason_code: Mapped[str] = mapped_column(String(100), nullable=False)
-    track_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("paused_search_tracks.track_id"), nullable=False
-    )
-    track_version_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("paused_search_track_versions.track_version_id"),
-        nullable=False,
-    )
-    created_by_user_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
 class PausedSearchTrackAssignmentModel(Base):
     __tablename__ = "paused_search_track_assignments"
     __table_args__ = (
@@ -1146,7 +1125,6 @@ class PausedSearchTrackAssignmentModel(Base):
     track_key_snapshot: Mapped[str] = mapped_column(String(255), nullable=False)
     track_name_snapshot: Mapped[str] = mapped_column(String(255), nullable=False)
     track_version_snapshot: Mapped[int] = mapped_column(Integer, nullable=False)
-    reason_code: Mapped[str | None] = mapped_column(String(100))
     source: Mapped[str] = mapped_column(String(50), nullable=False)
     assigned_by_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.user_id", ondelete="SET NULL")

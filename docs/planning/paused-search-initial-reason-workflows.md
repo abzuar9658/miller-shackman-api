@@ -1,3 +1,7 @@
+> **Superseded for paused-search track routing.** Use
+> `paused-search-dynamic-track-classification-correction-plan.md` as the current contract.
+> This historical design is retained for context only and must not drive new implementation.
+
 # Paused-Search Initial Reason Workflows & Setup Plan
 
 ## Goal

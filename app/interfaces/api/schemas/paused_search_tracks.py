@@ -9,13 +9,11 @@ from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchTerminalBehavior,
     PausedSearchTimingBasis,
-    PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackStepPhase,
     generate_paused_search_track_key,
 )
 from app.domain.compliance.contactability import ContactChannel
-from app.domain.leads import PausedSearchReasonCode
 from app.interfaces.api.schemas.campaigns import DormantStepTemplateProfileSchema
 
 
@@ -36,15 +34,13 @@ class PausedSearchTrackStepRequest(BaseModel):
 
 
 class PausedSearchTrackConfigRequest(BaseModel):
-    track_family: PausedSearchTrackFamily
+    selection_guidance: str = Field(min_length=30, max_length=1000)
     enabled: bool
     allowed_channels: list[ContactChannel] = Field(min_length=1)
-    default_for_reason_codes: list[PausedSearchReasonCode] = Field(default_factory=list)
     fallback_timing_policy: PausedSearchFallbackTimingPolicy
     maintenance_interval_days: int = Field(ge=1)
     reactivation_window_days: int = Field(ge=1)
     max_total_touches: int = Field(ge=1)
-    requires_review_before_publish: bool = False
     default_pause_duration_days: int = Field(default=60, ge=30, le=730)
     max_duration_days: int = Field(default=365, ge=30, le=730)
     terminal_behavior: PausedSearchTerminalBehavior = (
@@ -148,22 +144,6 @@ class PausedSearchTemplateListResponse(BaseModel):
     templates: list[PausedSearchTemplateResponse]
 
 
-class PausedSearchCapabilityProfileResponse(BaseModel):
-    profile_key: str
-    profile_version: int
-    reason_code: str
-    min_recurring_interval_days: int
-    max_recurring_interval_days: int
-    max_total_touches: int
-    max_duration_days: int
-    required_safety_tags: list[str]
-    restriction: str
-
-
-class PausedSearchCapabilityProfileListResponse(BaseModel):
-    profiles: list[PausedSearchCapabilityProfileResponse]
-
-
 class PausedSearchTrackResponse(BaseModel):
     track_id: UUID
     workspace_id: UUID
@@ -182,15 +162,13 @@ class PausedSearchTrackVersionResponse(BaseModel):
     track_id: UUID
     version_number: int
     status: CampaignVersionStatus
-    track_family: PausedSearchTrackFamily
+    selection_guidance: str
     enabled: bool
     allowed_channels: list[ContactChannel]
-    default_for_reason_codes: list[PausedSearchReasonCode]
     fallback_timing_policy: PausedSearchFallbackTimingPolicy
     maintenance_interval_days: int
     reactivation_window_days: int
     max_total_touches: int
-    requires_review_before_publish: bool
     default_pause_duration_days: int
     created_by_user_id: UUID
     created_at: datetime
@@ -219,16 +197,6 @@ class PausedSearchTrackStepResponse(BaseModel):
     template_profile: DormantStepTemplateProfileSchema | None
 
 
-class PausedSearchReasonMappingResponse(BaseModel):
-    mapping_id: UUID
-    workspace_id: UUID
-    reason_code: PausedSearchReasonCode
-    track_id: UUID
-    track_version_id: UUID
-    created_by_user_id: UUID
-    created_at: datetime
-
-
 class PausedSearchTrackLeadAssignmentResponse(BaseModel):
     lead_id: UUID
     workflow_id: UUID | None
@@ -244,7 +212,6 @@ class PausedSearchTrackAdminResponse(BaseModel):
     track: PausedSearchTrackResponse | None
     version: PausedSearchTrackVersionResponse | None
     steps: list[PausedSearchTrackStepResponse]
-    reason_mappings: list[PausedSearchReasonMappingResponse]
     assigned_leads: list[PausedSearchTrackLeadAssignmentResponse]
     reasons: list[str]
 
@@ -253,7 +220,6 @@ class PausedSearchTrackSummaryResponse(BaseModel):
     track: PausedSearchTrackResponse
     version: PausedSearchTrackVersionResponse
     step_count: int
-    reason_mappings: list[PausedSearchReasonMappingResponse]
     assigned_leads: list[PausedSearchTrackLeadAssignmentResponse]
 
 
@@ -267,7 +233,6 @@ class PausedSearchTrackDetailResponse(BaseModel):
     track: PausedSearchTrackResponse
     version: PausedSearchTrackVersionResponse
     steps: list[PausedSearchTrackStepResponse]
-    reason_mappings: list[PausedSearchReasonMappingResponse]
     assigned_leads: list[PausedSearchTrackLeadAssignmentResponse]
 
 
@@ -356,10 +321,8 @@ class PausedSearchPolicyReviewResolveRequest(PausedSearchReviewActionRequest):
     resolution_action: Literal[
         "skip",
         "resume_after_revalidation",
-        "migrate",
         "terminalize",
     ]
-    target_track_version_id: UUID | None = None
     terminal_behavior: Literal[
         "complete_keep_paused",
         "pause_for_review",

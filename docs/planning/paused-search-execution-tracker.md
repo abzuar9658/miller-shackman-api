@@ -1,5 +1,10 @@
 # Paused Search Build Checklist and Execution Tracker
 
+> **Superseded for paused-search track routing.** Use
+> `paused-search-dynamic-track-classification-correction-plan.md` as the current contract.
+> This historical tracker must not be used to restore fixed categories, routing mappings, or
+> existing-data migration behavior.
+
 ## Purpose
 
 This tracker turns `paused-search-implementation-plan.md` into a development

@@ -8,14 +8,12 @@ from app.application.services.paused_search_drafting_templates import (
     get_paused_search_drafting_template,
     paused_search_template_keys,
 )
-from app.domain.campaigns.capability_profiles import capability_profile_for_reason
 from app.domain.campaigns.template_registry import (
     TemplateChannel,
     TemplateStatus,
     TemplateVersion,
     validate_template_version,
 )
-from app.domain.leads import PausedSearchReasonCode
 
 
 class TemplateBackfillStatus(StrEnum):
@@ -65,7 +63,15 @@ async def seed_paused_search_templates(
                 "lead_first_name",
                 "message_body",
             ),
-            permitted_use_tags=_required_safety_tags_for_template(template_key),
+            permitted_use_tags=(
+                "no_prohibited_advice",
+                "no_financial_advice",
+                "no_legal_advice",
+                "no_tax_advice",
+                "no_investment_advice",
+                "no_market_predictions",
+                "no_unverified_listing_claims",
+            ),
             status=TemplateStatus.APPROVED,
             approved_at=now,
             created_at=now,
@@ -85,14 +91,3 @@ async def seed_paused_search_templates(
         TemplateBackfillStatus.SEEDED if created_count else TemplateBackfillStatus.ALREADY_PRESENT
     )
     return TemplateBackfillResult(status=status, templates=tuple(seeded))
-
-
-def _required_safety_tags_for_template(template_key: str) -> tuple[str, ...]:
-    normalized_key = template_key.removeprefix("paused-search-")
-    for reason_code in PausedSearchReasonCode:
-        reason_prefix = f"{reason_code.value.replace('_', '-')}-"
-        if normalized_key.startswith(reason_prefix):
-            profile = capability_profile_for_reason(reason_code)
-            if profile is not None:
-                return profile.required_safety_tags
-    return ("no_prohibited_advice",)

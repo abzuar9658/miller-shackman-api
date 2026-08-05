@@ -32,13 +32,13 @@ from app.application.services.llm.lead_state_classification import (
     classify_lead_from_conversation,
 )
 from app.core.config import get_settings
+from app.domain.campaigns import PausedSearchTrackCatalogEntry
 from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
 from app.domain.leads import (
     ActivityReliability,
     CanonicalLeadRecord,
     CRMProvider,
     LeadType,
-    PausedSearchReasonCode,
 )
 from app.infrastructure.providers import build_llm_client
 
@@ -54,7 +54,7 @@ class EvaluationScenario:
     title: str
     description: str
     expected_outcome: str
-    expected_pause_reason: str | None
+    expected_track_key: str | None
     events: tuple[CrmConversationEvent, ...]
     lead_last_meaningful_communication_at: datetime | None
     enrollment_signal: str
@@ -176,10 +176,10 @@ def _paired_events(
 
 
 def _paused_scenario(
-    reason: PausedSearchReasonCode,
+    track_key: str,
     anchor: str,
 ) -> EvaluationScenario:
-    key = reason.value
+    key = track_key
     events = _paired_events(
         key,
         (
@@ -195,7 +195,7 @@ def _paused_scenario(
         title=f"Paused-search: {key}",
         description=f"The lead gives a clear {key} reason and remains viable.",
         expected_outcome="paused_search",
-        expected_pause_reason=key,
+        expected_track_key=key,
         events=events,
         lead_last_meaningful_communication_at=events[-1].occurred_at,
         enrollment_signal="agent_requested_ai_follow_up",
@@ -209,7 +209,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
             title="Dormant: no conversation history",
             description="Agent wants AI follow-up for a lead with no prior conversation.",
             expected_outcome="dormant",
-            expected_pause_reason=None,
+            expected_track_key=None,
             events=(),
             lead_last_meaningful_communication_at=None,
             enrollment_signal="agent_requested_ai_follow_up",
@@ -235,7 +235,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
             title="Dormant: outbound follow-up with no reply",
             description="The agent wants AI to follow up, but the lead never replied.",
             expected_outcome="dormant",
-            expected_pause_reason=None,
+            expected_track_key=None,
             events=outbound_events,
             lead_last_meaningful_communication_at=outbound_events[-1].occurred_at,
             enrollment_signal="agent_requested_ai_follow_up",
@@ -262,7 +262,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
                 "Historical interest is older than the dormant threshold with no fresh reply."
             ),
             expected_outcome="dormant",
-            expected_pause_reason=None,
+            expected_track_key=None,
             events=stale_events,
             lead_last_meaningful_communication_at=stale_events[-1].occurred_at,
             enrollment_signal="agent_requested_ai_follow_up",
@@ -293,7 +293,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
             title="Dormant: fresh reply reroutes to paused-search",
             description="A fresh reply reveals a rates pause, overriding stale dormant history.",
             expected_outcome="paused_search",
-            expected_pause_reason="waiting_for_rates",
+            expected_track_key="waiting_for_rates",
             events=reroute_events,
             lead_last_meaningful_communication_at=reroute_events[-1].occurred_at,
             enrollment_signal="agent_requested_ai_follow_up",
@@ -307,7 +307,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
                 title="Review hold: conflicting and unclear signals",
                 description="The lead is contradictory and does not provide a safe route.",
                 expected_outcome="review_hold",
-                expected_pause_reason=None,
+                expected_track_key=None,
                 events=_paired_events(
                     "review_hold",
                     (
@@ -326,7 +326,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
                 title="Human handoff: active buyer requests an agent",
                 description="The lead has current buying interest and asks for a human call.",
                 expected_outcome="human_handoff",
-                expected_pause_reason=None,
+                expected_track_key=None,
                 events=_paired_events(
                     "human_handoff",
                     (
@@ -345,7 +345,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
                 title="Blocked: explicit opt-out",
                 description="The lead clearly asks the brokerage to stop outreach.",
                 expected_outcome="blocked",
-                expected_pause_reason=None,
+                expected_track_key=None,
                 events=_paired_events(
                     "blocked",
                     (
@@ -376,7 +376,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
                     "A high-intent showing request is historical and has no fresh lead reply."
                 ),
                 expected_outcome="dormant",
-                expected_pause_reason=None,
+                expected_track_key=None,
                 events=stale_showing_events,
                 lead_last_meaningful_communication_at=stale_showing_events[-1].occurred_at,
                 enrollment_signal="agent_requested_ai_follow_up",
@@ -388,7 +388,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
                     "A current showing request must still route to a human after old history."
                 ),
                 expected_outcome="human_handoff",
-                expected_pause_reason=None,
+                expected_track_key=None,
                 events=stale_showing_events
                 + _paired_events(
                     "fresh_showing_after_stale_history",
@@ -404,7 +404,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
                 title="Adversarial: fresh property advice request",
                 description="The lead asks for advice that requires an agent review.",
                 expected_outcome="human_handoff",
-                expected_pause_reason=None,
+                expected_track_key=None,
                 events=_paired_events(
                     "fresh_property_advice",
                     ("Is this listing fairly priced, and what should we offer?",),
@@ -419,7 +419,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
                 title="Adversarial: active buyer interest",
                 description="The lead expresses current buying intent without asking a question.",
                 expected_outcome="human_handoff",
-                expected_pause_reason=None,
+                expected_track_key=None,
                 events=_paired_events(
                     "active_buyer_interest",
                     ("We are ready to make an offer and want to move forward now.",),
@@ -434,7 +434,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
                 title="Adversarial: active seller interest",
                 description="The seller wants to discuss listing their home with an agent.",
                 expected_outcome="human_handoff",
-                expected_pause_reason=None,
+                expected_track_key=None,
                 events=_paired_events(
                     "active_seller_interest",
                     ("We are ready to sell our home and want to discuss listing it.",),
@@ -450,7 +450,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
                 title="Adversarial: no longer interested",
                 description="The lead declines further nurture without using an opt-out keyword.",
                 expected_outcome="blocked",
-                expected_pause_reason=None,
+                expected_track_key=None,
                 events=_paired_events(
                     "not_interested_without_opt_out",
                     (
@@ -468,7 +468,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
                 title="Adversarial: contradictory current signals",
                 description="The lead mixes urgency, uncertainty, and conflicting next steps.",
                 expected_outcome="review_hold",
-                expected_pause_reason=None,
+                expected_track_key=None,
                 events=_paired_events(
                     "contradictory_current_signals",
                     (
@@ -486,30 +486,30 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
     )
 
     anchors = {
-        PausedSearchReasonCode.RENTED_TEMPORARILY: (
+        "rented_temporarily": (
             "We renewed our lease through March, so we are renting temporarily."
         ),
-        PausedSearchReasonCode.TIMING_NOT_RIGHT: (
+        "timing_not_right": (
             "The timing is not right for us until next spring."
         ),
-        PausedSearchReasonCode.WAITING_FOR_RATES: (
+        "waiting_for_rates": (
             "Mortgage rates are too high, so we are waiting for rates to improve."
         ),
-        PausedSearchReasonCode.WAITING_FOR_INVENTORY: (
+        "waiting_for_inventory": (
             "We have not found the right inventory, so we are waiting for more homes."
         ),
-        PausedSearchReasonCode.FINANCIAL_PREP: (
+        "financial_prep": (
             "We need more time to save and get financially prepared for the purchase."
         ),
-        PausedSearchReasonCode.PERSONAL_LIFE_TIMING: (
+        "personal_life_timing": (
             "A new baby and a job change mean our personal timing is not right."
         ),
-        PausedSearchReasonCode.OTHER_KNOWN_PAUSE: (
+        "other_known_pause": (
             "We have an unresolved permit paperwork issue unrelated to rates, inventory, "
             "renting, finances, or personal timing, so we need that resolved first."
         ),
     }
-    scenarios.extend(_paused_scenario(reason, anchor) for reason, anchor in anchors.items())
+    scenarios.extend(_paused_scenario(track_key, anchor) for track_key, anchor in anchors.items())
     return tuple(scenarios)
 
 
@@ -559,8 +559,14 @@ def _classification_payload(result: LeadStateClassificationResult) -> dict[str, 
     return {
         "status": classification.status.value,
         "outcome": classification.outcome.value if classification.outcome else None,
-        "pause_reason_code": (
-            classification.pause_reason_code.value if classification.pause_reason_code else None
+        "selected_track_key": classification.selected_track_key,
+        "track_selection_status": (
+            classification.track_selection_status.value
+            if classification.track_selection_status
+            else None
+        ),
+        "track_version_id": (
+            str(classification.track_version_id) if classification.track_version_id else None
         ),
         "handoff_reason_code": (
             classification.handoff_reason_code.value if classification.handoff_reason_code else None
@@ -580,17 +586,33 @@ def _classification_payload(result: LeadStateClassificationResult) -> dict[str, 
     }
 
 
+def _scenario_catalog(
+    scenario: EvaluationScenario,
+) -> tuple[PausedSearchTrackCatalogEntry, ...]:
+    if scenario.expected_track_key is None:
+        return ()
+    track_key = scenario.expected_track_key
+    return (
+        PausedSearchTrackCatalogEntry(
+            track_key=track_key,
+            display_name=track_key.replace("_", " ").title(),
+            selection_guidance=(
+                f"Select this category when the conversation clearly matches {scenario.description}"
+            ),
+            track_id=uuid5(NAMESPACE, f"evaluation-track:{track_key}"),
+            track_version_id=uuid5(NAMESPACE, f"evaluation-track-version:{track_key}"),
+        ),
+    )
+
+
 def _matches(scenario: EvaluationScenario, result: LeadStateClassificationResult) -> bool:
     return (
         result.status.value == "classified"
         and result.outcome is not None
         and result.outcome.value == scenario.expected_outcome
         and (
-            scenario.expected_pause_reason is None
-            or (
-                result.pause_reason_code is not None
-                and result.pause_reason_code.value == scenario.expected_pause_reason
-            )
+            scenario.expected_track_key is None
+            or result.selected_track_key == scenario.expected_track_key
         )
         and (
             scenario.expected_handoff_reason is None
@@ -609,7 +631,7 @@ def _print_result(
 ) -> bool:
     print("Expected:")
     print(f"  outcome={scenario.expected_outcome}")
-    print(f"  pause_reason_code={scenario.expected_pause_reason}")
+    print(f"  selected_track_key={scenario.expected_track_key}")
     print(f"  handoff_reason_code={scenario.expected_handoff_reason}")
     print("Exact prompt(s) sent:")
     for index, request in enumerate(client.requests, start=1):
@@ -644,6 +666,7 @@ async def _run_scenario(
         now=NOW,
         crm_conversation_events=scenario.events,
         llm_client=recording_client,
+        paused_search_catalog=_scenario_catalog(scenario),
         dormant_threshold_days=DORMANT_THRESHOLD_DAYS,
         model=model,
     )
@@ -686,7 +709,7 @@ def _aggregate_metrics(evaluations: tuple[ScenarioEvaluation, ...]) -> dict[str,
         scenario_signatures.setdefault(item.scenario.key, set()).add(
             (
                 item.result.outcome.value if item.result.outcome else "rejected",
-                item.result.pause_reason_code.value if item.result.pause_reason_code else None,
+                item.result.selected_track_key,
             )
         )
     confidences = [
@@ -795,7 +818,7 @@ def _json_evaluation(item: ScenarioEvaluation) -> dict[str, object]:
         "description": scenario.description,
         "expected": {
             "outcome": scenario.expected_outcome,
-            "pause_reason_code": scenario.expected_pause_reason,
+            "selected_track_key": scenario.expected_track_key,
             "handoff_reason_code": scenario.expected_handoff_reason,
         },
         "events": [_json_event(event) for event in scenario.events],

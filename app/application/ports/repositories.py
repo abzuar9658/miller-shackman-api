@@ -15,10 +15,10 @@ from app.domain.campaigns.paused_search_notifications import (
 from app.domain.campaigns.paused_search_occurrences import RecurringOccurrence
 from app.domain.campaigns.paused_search_reviews import PausedSearchReview
 from app.domain.campaigns.paused_search_tracks import (
-    PausedSearchReasonMapping,
     PausedSearchTrack,
     PausedSearchTrackAdminAuditLog,
     PausedSearchTrackAssignment,
+    PausedSearchTrackCatalogEntry,
     PausedSearchTrackLeadAssignment,
     PausedSearchTrackStep,
     PausedSearchTrackVersion,
@@ -70,7 +70,6 @@ from app.domain.leads import (
     LeadClassificationArtifact,
     LeadPausedSearchHistoryEntry,
     LeadRoutingReview,
-    PausedSearchReasonCode,
 )
 from app.domain.llm import WorkspaceLLMConfig
 from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
@@ -837,7 +836,13 @@ class PausedSearchTrackAdminAuditLogRepository(Protocol):
         raise NotImplementedError
 
 
-class PausedSearchTrackMappingRepository(Protocol):
+class PausedSearchTrackRepository(Protocol):
+    async def list_active_catalog(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> tuple[PausedSearchTrackCatalogEntry, ...]:
+        raise NotImplementedError
+
     async def get_track(
         self,
         workspace_id: WorkspaceId,
@@ -858,14 +863,6 @@ class PausedSearchTrackMappingRepository(Protocol):
         track_version_id: PausedSearchTrackVersionId,
     ) -> tuple[PausedSearchTrackStep, ...]:
         raise NotImplementedError
-
-    async def get_reason_mapping(
-        self,
-        workspace_id: WorkspaceId,
-        reason_code: PausedSearchReasonCode,
-    ) -> PausedSearchReasonMapping | None:
-        raise NotImplementedError
-
 
 class PausedSearchTrackAssignmentRepository(Protocol):
     async def get_active_for_lead(
@@ -1114,40 +1111,6 @@ class PausedSearchTrackAdminRepository(Protocol):
         except_version_id: PausedSearchTrackVersionId | None,
     ) -> None:
         raise NotImplementedError
-
-    async def replace_reason_mappings(
-        self,
-        *,
-        workspace_id: WorkspaceId,
-        track_id: PausedSearchTrackId,
-        track_version_id: PausedSearchTrackVersionId,
-        reason_codes: tuple[PausedSearchReasonCode, ...],
-        actor_user_id: UserId,
-        now: datetime,
-    ) -> tuple[PausedSearchReasonMapping, ...]:
-        raise NotImplementedError
-
-    async def clear_reason_mappings_for_track(
-        self,
-        workspace_id: WorkspaceId,
-        track_id: PausedSearchTrackId,
-    ) -> None:
-        raise NotImplementedError
-
-    async def list_reason_mappings_for_version(
-        self,
-        workspace_id: WorkspaceId,
-        track_version_id: PausedSearchTrackVersionId,
-    ) -> tuple[PausedSearchReasonMapping, ...]:
-        raise NotImplementedError
-
-    async def get_reason_mapping(
-        self,
-        workspace_id: WorkspaceId,
-        reason_code: PausedSearchReasonCode,
-    ) -> PausedSearchReasonMapping | None:
-        raise NotImplementedError
-
 
 class CampaignAdminRepository(Protocol):
     async def get_campaign_by_name(self, workspace_id: WorkspaceId, name: str) -> Any | None:

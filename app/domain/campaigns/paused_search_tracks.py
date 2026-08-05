@@ -14,7 +14,6 @@ from app.domain.common.ids import (
     WorkspaceId,
 )
 from app.domain.compliance.contactability import ContactChannel
-from app.domain.leads import PausedSearchReasonCode
 from app.domain.outbound_drafting import DormantStepTemplateProfile
 
 
@@ -28,12 +27,6 @@ class PausedSearchTrackStatus(StrEnum):
     DRAFT = "draft"
     ACTIVE = "active"
     RETIRED = "retired"
-
-
-class PausedSearchTrackFamily(StrEnum):
-    MAINTENANCE = "maintenance"
-    REACTIVATION = "reactivation"
-    AGENT_OWNED_REMINDER = "agent_owned_reminder"
 
 
 class PausedSearchTrackStepPhase(StrEnum):
@@ -70,11 +63,8 @@ class PausedSearchTrackAdminAuditAction(StrEnum):
 
 
 class PausedSearchTrackAssignmentSource(StrEnum):
-    REASON_MAPPING = "reason_mapping"
-    WORKFLOW_BACKFILL = "workflow_backfill"
-    LEGACY_REASON_BACKFILL = "legacy_reason_backfill"
-    ADMIN_MIGRATION = "admin_migration"
-    ADMIN_REPAIR = "admin_repair"
+    CLASSIFICATION = "classification"
+    OPERATOR = "operator"
 
 
 def _empty_details() -> Mapping[str, object]:
@@ -113,15 +103,13 @@ class PausedSearchTrackVersion:
     track_id: PausedSearchTrackId
     version_number: int
     status: CampaignVersionStatus
-    track_family: PausedSearchTrackFamily
+    selection_guidance: str
     enabled: bool
     allowed_channels: tuple[ContactChannel, ...]
-    default_for_reason_codes: tuple[PausedSearchReasonCode, ...]
     fallback_timing_policy: PausedSearchFallbackTimingPolicy
     maintenance_interval_days: int
     reactivation_window_days: int
     max_total_touches: int
-    requires_review_before_publish: bool
     created_by_user_id: UserId
     created_at: datetime
     published_at: datetime | None = None
@@ -155,17 +143,6 @@ class PausedSearchTrackStep:
 
 
 @dataclass(frozen=True)
-class PausedSearchReasonMapping:
-    mapping_id: UUID
-    workspace_id: WorkspaceId
-    reason_code: PausedSearchReasonCode
-    track_id: PausedSearchTrackId
-    track_version_id: PausedSearchTrackVersionId
-    created_by_user_id: UserId
-    created_at: datetime
-
-
-@dataclass(frozen=True)
 class PausedSearchTrackAssignment:
     assignment_id: UUID
     workspace_id: WorkspaceId
@@ -175,7 +152,6 @@ class PausedSearchTrackAssignment:
     track_key_snapshot: str
     track_name_snapshot: str
     track_version_snapshot: int
-    reason_code: PausedSearchReasonCode | None
     source: PausedSearchTrackAssignmentSource
     assigned_by_user_id: UserId | None
     assigned_at: datetime
@@ -200,5 +176,13 @@ class PausedSearchTrackAdminView:
     track: PausedSearchTrack
     version: PausedSearchTrackVersion
     steps: tuple[PausedSearchTrackStep, ...]
-    reason_mappings: tuple[PausedSearchReasonMapping, ...] = ()
     assigned_leads: tuple[PausedSearchTrackLeadAssignment, ...] = ()
+
+
+@dataclass(frozen=True)
+class PausedSearchTrackCatalogEntry:
+    track_key: str
+    display_name: str
+    selection_guidance: str
+    track_id: PausedSearchTrackId
+    track_version_id: PausedSearchTrackVersionId

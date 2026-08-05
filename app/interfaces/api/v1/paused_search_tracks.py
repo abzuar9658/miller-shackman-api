@@ -49,7 +49,6 @@ from app.application.use_cases.workspace_outbound_drafting import (
     OutboundDraftingPreviewResult,
     preview_workspace_outbound_drafting,
 )
-from app.domain.campaigns.capability_profiles import CAPABILITY_PROFILES
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.campaigns.paused_search_occurrences import RecurringOccurrence
 from app.domain.campaigns.paused_search_reviews import (
@@ -57,7 +56,6 @@ from app.domain.campaigns.paused_search_reviews import (
     PausedSearchReviewAction,
 )
 from app.domain.campaigns.paused_search_tracks import (
-    PausedSearchReasonMapping,
     PausedSearchTerminalBehavior,
     PausedSearchTrack,
     PausedSearchTrackAdminView,
@@ -67,6 +65,7 @@ from app.domain.campaigns.paused_search_tracks import (
 from app.domain.campaigns.paused_search_validation import (
     PausedSearchTrackValidationReport,
     PausedSearchValidationFinding,
+    validation_report_evidence,
 )
 from app.domain.campaigns.template_registry import TemplateVersion
 from app.domain.compliance.contactability import (
@@ -100,14 +99,11 @@ from app.interfaces.api.dependencies.workspace_settings import (
 )
 from app.interfaces.api.schemas.campaigns import DormantStepTemplateProfileSchema
 from app.interfaces.api.schemas.paused_search_tracks import (
-    PausedSearchCapabilityProfileListResponse,
-    PausedSearchCapabilityProfileResponse,
     PausedSearchLeadSummaryResponse,
     PausedSearchMessageReviewEditRequest,
     PausedSearchOccurrenceListResponse,
     PausedSearchOccurrenceResponse,
     PausedSearchPolicyReviewResolveRequest,
-    PausedSearchReasonMappingResponse,
     PausedSearchReviewActionRequest,
     PausedSearchReviewActionResponse,
     PausedSearchReviewListResponse,
@@ -420,7 +416,6 @@ async def resolve_paused_search_review_route(
         reason=payload.reason,
         idempotency_key=payload.idempotency_key,
         resolution_action=payload.resolution_action,
-        target_track_version_id=payload.target_track_version_id,
         terminal_behavior=payload.terminal_behavior,
     )
 
@@ -478,31 +473,6 @@ async def list_retired_paused_search_tracks(
     return PausedSearchTrackListResponse(
         status=result.status.value,
         tracks=[_summary_response(view) for view in result.views],
-    )
-
-
-@router.get("/{workspace_id}/paused-search-tracks/profiles")
-async def list_paused_search_profiles(
-    workspace_id: UUID,
-    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
-) -> PausedSearchCapabilityProfileListResponse:
-    _require_track_viewer(actor)
-    del workspace_id
-    return PausedSearchCapabilityProfileListResponse(
-        profiles=[
-            PausedSearchCapabilityProfileResponse(
-                profile_key=profile.profile_key,
-                profile_version=profile.profile_version,
-                reason_code=profile.reason_code.value,
-                min_recurring_interval_days=profile.min_recurring_interval_days,
-                max_recurring_interval_days=profile.max_recurring_interval_days,
-                max_total_touches=profile.max_total_touches,
-                max_duration_days=profile.max_duration_days,
-                required_safety_tags=list(profile.required_safety_tags),
-                restriction=profile.restriction,
-            )
-            for profile in CAPABILITY_PROFILES.values()
-        ]
     )
 
 
@@ -594,11 +564,8 @@ async def preview_paused_search_track_draft(
     )
     profile = LeadPausedSearchProfile(
         paused_search_active=True,
-        pause_reason_code=(
-            view.version.default_for_reason_codes[0]
-            if view.version.default_for_reason_codes
-            else None
-        ),
+        paused_search_track_key=view.track.track_key,
+        paused_search_track_version_id=view.version.track_version_id,
         reengagement_not_before=payload.reengagement_not_before,
     )
     workflow = LeadWorkflow(
@@ -708,7 +675,7 @@ async def create_paused_search_track(
         event_bus=bundle.event_bus,
     )
     if result.status == PausedSearchTrackDraftStatus.REJECTED:
-        _raise_rejection(result.reasons)
+        _raise_rejection(result.reasons, validation=result.validation)
     assert result.view is not None
     await bundle.session.commit()
     return _admin_response(result.status.value, result.view)
@@ -739,7 +706,7 @@ async def update_paused_search_track(
         event_bus=bundle.event_bus,
     )
     if result.status == PausedSearchTrackDraftStatus.REJECTED:
-        _raise_rejection(result.reasons)
+        _raise_rejection(result.reasons, validation=result.validation)
     assert result.view is not None
     await bundle.session.commit()
     return _admin_response(result.status.value, result.view)
@@ -772,7 +739,7 @@ async def publish_paused_search_track(
         confirm_warnings=payload.confirm_warnings,
     )
     if result.status == PausedSearchTrackPublishStatus.REJECTED:
-        _raise_rejection(result.reasons)
+        _raise_rejection(result.reasons, validation=result.validation)
     assert result.view is not None
     await bundle.session.commit()
     return _admin_response(result.status.value, result.view)
@@ -876,7 +843,6 @@ async def _apply_review_action_route(
     reason: str,
     idempotency_key: str,
     resolution_action: str | None = None,
-    target_track_version_id: UUID | None = None,
     terminal_behavior: str | None = None,
 ) -> PausedSearchReviewActionResponse:
     result = await apply_paused_search_review_action(
@@ -897,9 +863,6 @@ async def _apply_review_action_route(
         workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
         paused_search_history_repository=bundle.paused_search_history_repository,
         paused_search_track_repository=bundle.paused_search_track_repository,
-        paused_search_track_assignment_repository=(
-            bundle.paused_search_track_assignment_repository
-        ),
         lead_workflow_override_audit_repository=bundle.lead_workflow_override_audit_repository,
         workspace_repository=bundle.workspace_repository,
         paused_search_occurrence_repository=bundle.occurrence_transition_repository,
@@ -907,7 +870,6 @@ async def _apply_review_action_route(
         message_repository=bundle.message_repository,
         idempotency_key=idempotency_key,
         resolution_action=resolution_action,
-        target_track_version_id=target_track_version_id,
         terminal_behavior=(
             PausedSearchTerminalBehavior(terminal_behavior)
             if terminal_behavior is not None
@@ -1038,15 +1000,13 @@ def _review_response(
 
 def _config_input(payload: PausedSearchTrackConfigRequest) -> PausedSearchTrackConfigInput:
     return PausedSearchTrackConfigInput(
-        track_family=payload.track_family,
+        selection_guidance=payload.selection_guidance,
         enabled=payload.enabled,
         allowed_channels=tuple(payload.allowed_channels),
-        default_for_reason_codes=tuple(payload.default_for_reason_codes),
         fallback_timing_policy=payload.fallback_timing_policy,
         maintenance_interval_days=payload.maintenance_interval_days,
         reactivation_window_days=payload.reactivation_window_days,
         max_total_touches=payload.max_total_touches,
-        requires_review_before_publish=payload.requires_review_before_publish,
         default_pause_duration_days=payload.default_pause_duration_days,
         max_duration_days=payload.max_duration_days,
         terminal_behavior=payload.terminal_behavior,
@@ -1089,7 +1049,11 @@ def _template_profile_from_schema(
     )
 
 
-def _raise_rejection(reasons: tuple[PausedSearchTrackAdminReasonCode, ...]) -> None:
+def _raise_rejection(
+    reasons: tuple[PausedSearchTrackAdminReasonCode, ...],
+    *,
+    validation: PausedSearchTrackValidationReport | None = None,
+) -> None:
     if PausedSearchTrackAdminReasonCode.PERMISSION_DENIED in reasons:
         code = status.HTTP_403_FORBIDDEN
     elif (
@@ -1099,7 +1063,14 @@ def _raise_rejection(reasons: tuple[PausedSearchTrackAdminReasonCode, ...]) -> N
         code = status.HTTP_404_NOT_FOUND
     else:
         code = status.HTTP_400_BAD_REQUEST
-    raise HTTPException(status_code=code, detail=[reason.value for reason in reasons])
+    if validation is None:
+        detail: object = [reason.value for reason in reasons]
+    else:
+        detail = {
+            "reasons": [reason.value for reason in reasons],
+            "validation": validation_report_evidence(validation),
+        }
+    raise HTTPException(status_code=code, detail=detail)
 
 
 def _admin_response(
@@ -1111,7 +1082,6 @@ def _admin_response(
         track=_track_response(view.track),
         version=_version_response(view.version),
         steps=[_step_response(step) for step in view.steps],
-        reason_mappings=[_mapping_response(mapping) for mapping in view.reason_mappings],
         assigned_leads=[_lead_assignment_response(lead) for lead in view.assigned_leads],
         reasons=[],
     )
@@ -1122,7 +1092,6 @@ def _summary_response(view: PausedSearchTrackAdminView) -> PausedSearchTrackSumm
         track=_track_response(view.track),
         version=_version_response(view.version),
         step_count=len(view.steps),
-        reason_mappings=[_mapping_response(mapping) for mapping in view.reason_mappings],
         assigned_leads=[_lead_assignment_response(lead) for lead in view.assigned_leads],
     )
 
@@ -1136,7 +1105,6 @@ def _detail_response(
         track=_track_response(view.track),
         version=_version_response(view.version),
         steps=[_step_response(step) for step in view.steps],
-        reason_mappings=[_mapping_response(mapping) for mapping in view.reason_mappings],
         assigned_leads=[_lead_assignment_response(lead) for lead in view.assigned_leads],
     )
 
@@ -1148,7 +1116,6 @@ def _track_response(track: PausedSearchTrack) -> PausedSearchTrackResponse:
 def _version_response(version: PausedSearchTrackVersion) -> PausedSearchTrackVersionResponse:
     data = dict(version.__dict__)
     data["allowed_channels"] = list(version.allowed_channels)
-    data["default_for_reason_codes"] = list(version.default_for_reason_codes)
     return PausedSearchTrackVersionResponse(**data)
 
 
@@ -1160,10 +1127,6 @@ def _step_response(step: PausedSearchTrackStep) -> PausedSearchTrackStepResponse
         else None
     )
     return PausedSearchTrackStepResponse(**data)
-
-
-def _mapping_response(mapping: PausedSearchReasonMapping) -> PausedSearchReasonMappingResponse:
-    return PausedSearchReasonMappingResponse(**mapping.__dict__)
 
 
 def _lead_assignment_response(lead: object) -> PausedSearchTrackLeadAssignmentResponse:

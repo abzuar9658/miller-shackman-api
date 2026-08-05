@@ -20,7 +20,7 @@ from app.application.ports.repositories import (
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
     PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
     TemporalSignalOutboxRepository,
     UserRepository,
     WorkflowTransitionRepository,
@@ -32,8 +32,8 @@ from app.application.ports.temporal import TemporalWorkflowStarter
 from app.application.services.lead_routing_review import (
     resolve_pending_routing_reviews_for_lead,
 )
-from app.application.services.paused_search_track_pinning import (
-    resolve_published_paused_search_track_version_id,
+from app.application.services.paused_search_track_assignment import (
+    synchronize_paused_search_track_assignment,
 )
 from app.application.use_cases.lead_manual_enrollment import (
     LeadManualEnrollmentActionStatus,
@@ -51,6 +51,7 @@ from app.application.use_cases.start_paused_search_campaign_enrollment import (
     PausedSearchCampaignEnrollmentStatus,
     start_paused_search_campaign_enrollment,
 )
+from app.domain.campaigns import PausedSearchTrackAssignmentSource
 from app.domain.common.ids import CampaignId, CampaignVersionId, LeadId, WorkspaceId
 from app.domain.identity import AuthenticatedActor
 from app.domain.leads import (
@@ -59,7 +60,6 @@ from app.domain.leads import (
     LeadPausedSearchProfile,
     LeadRoutingReviewResolution,
     LeadStateClassificationOutcome,
-    PausedSearchReasonCode,
 )
 
 
@@ -84,7 +84,7 @@ class LeadReviewHoldResolutionReasonCode(StrEnum):
     PERMISSION_DENIED = "permission_denied"
     REVIEW_HOLD_REQUIRED = "review_hold_required"
     WORKFLOW_ALREADY_EXISTS = "workflow_already_exists"
-    PAUSED_SEARCH_REASON_REQUIRED = "paused_search_reason_required"
+    PAUSED_SEARCH_TRACK_REQUIRED = "paused_search_track_required"
     PAUSED_SEARCH_TRACK_UNAVAILABLE = "paused_search_track_unavailable"
     PAUSED_SEARCH_UPDATE_FAILED = "paused_search_update_failed"
     START_FAILED = "start_failed"
@@ -124,7 +124,7 @@ async def resolve_lead_review_hold(
     campaign_enrollment_repository: CampaignEnrollmentRepository,
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
-    paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_repository: PausedSearchTrackRepository,
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     temporal_workflow_starter: TemporalWorkflowStarter,
@@ -140,7 +140,7 @@ async def resolve_lead_review_hold(
     crm_client: CRMClient | None = None,
     notification_provider: NotificationProvider | None = None,
     user_repository: UserRepository | None = None,
-    pause_reason_code: PausedSearchReasonCode | None = None,
+    selected_track_key: str | None = None,
     pause_reason_note: str | None = None,
     reengagement_not_before: datetime | None = None,
     reengagement_window_label: str | None = None,
@@ -264,7 +264,7 @@ async def resolve_lead_review_hold(
         now=now,
         commit=commit,
         routing_review_repository=routing_review_repository,
-        pause_reason_code=pause_reason_code,
+        selected_track_key=selected_track_key,
         pause_reason_note=pause_reason_note,
         reengagement_not_before=reengagement_not_before,
         reengagement_window_label=reengagement_window_label,
@@ -290,7 +290,7 @@ async def _resolve_to_dormant(
     campaign_enrollment_repository: CampaignEnrollmentRepository,
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
-    paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_repository: PausedSearchTrackRepository,
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
     temporal_workflow_starter: TemporalWorkflowStarter,
     event_bus: EventBus | None,
@@ -429,7 +429,7 @@ async def _resolve_to_paused_search(
     campaign_enrollment_repository: CampaignEnrollmentRepository,
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
-    paused_search_track_repository: PausedSearchTrackMappingRepository,
+    paused_search_track_repository: PausedSearchTrackRepository,
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     temporal_workflow_starter: TemporalWorkflowStarter,
@@ -438,28 +438,27 @@ async def _resolve_to_paused_search(
     now: datetime,
     commit: Callable[[], Awaitable[None]] | None,
     routing_review_repository: LeadRoutingReviewRepository | None,
-    pause_reason_code: PausedSearchReasonCode | None,
+    selected_track_key: str | None,
     pause_reason_note: str | None,
     reengagement_not_before: datetime | None,
     reengagement_window_label: str | None,
     campaign_version_id: CampaignVersionId,
 ) -> LeadReviewHoldResolutionResult:
-    if pause_reason_code is None:
+    if selected_track_key is None:
         return _result(
             LeadReviewHoldResolutionStatus.INVALID,
             resolution=LeadReviewHoldResolution.PAUSED_SEARCH,
             lead_id=lead_id,
             campaign_id=campaign_id,
             artifact=artifact,
-            reasons=(LeadReviewHoldResolutionReasonCode.PAUSED_SEARCH_REASON_REQUIRED,),
+            reasons=(LeadReviewHoldResolutionReasonCode.PAUSED_SEARCH_TRACK_REQUIRED,),
         )
 
-    pinned_track_version_id = await resolve_published_paused_search_track_version_id(
-        workspace_id=workspace_id,
-        pause_reason_code=pause_reason_code,
-        paused_search_track_repository=paused_search_track_repository,
+    catalog = await paused_search_track_repository.list_active_catalog(workspace_id)
+    selected_tracks = tuple(
+        entry for entry in catalog if entry.track_key == selected_track_key
     )
-    if pinned_track_version_id is None:
+    if len(selected_tracks) != 1:
         return _result(
             LeadReviewHoldResolutionStatus.REVIEW_REQUIRED,
             resolution=LeadReviewHoldResolution.PAUSED_SEARCH,
@@ -468,6 +467,7 @@ async def _resolve_to_paused_search(
             artifact=artifact,
             reasons=(LeadReviewHoldResolutionReasonCode.PAUSED_SEARCH_TRACK_UNAVAILABLE,),
         )
+    selected_track = selected_tracks[0]
     if paused_search_track_assignment_repository is None:
         return _result(
             LeadReviewHoldResolutionStatus.REVIEW_REQUIRED,
@@ -478,12 +478,25 @@ async def _resolve_to_paused_search(
             reasons=(LeadReviewHoldResolutionReasonCode.PAUSED_SEARCH_TRACK_UNAVAILABLE,),
         )
 
+    await synchronize_paused_search_track_assignment(
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        clear=False,
+        actor_user_id=actor.user_id,
+        source=PausedSearchTrackAssignmentSource.OPERATOR,
+        assignment_repository=paused_search_track_assignment_repository,
+        track_repository=paused_search_track_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        now=now,
+        target_track_version_id=selected_track.track_version_id,
+    )
+
     paused_result = await update_lead_paused_search(
         actor=actor,
         workspace_id=workspace_id,
         lead_id=lead_id,
         active=True,
-        reason_code=pause_reason_code,
+        selected_track_key=selected_track_key,
         reason_note=pause_reason_note,
         reengagement_not_before=reengagement_not_before,
         reengagement_window_label=reengagement_window_label,

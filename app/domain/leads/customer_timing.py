@@ -4,7 +4,7 @@ from enum import StrEnum
 from uuid import UUID
 
 from app.domain.common.ids import LeadId, WorkspaceId
-from app.domain.leads.canonical import PausedSearchReasonCode, PausedSearchSource
+from app.domain.leads.canonical import PausedSearchSource
 
 
 class CustomerTimingStatus(StrEnum):
@@ -28,7 +28,6 @@ class CustomerTimingCandidate:
     timing_id: UUID
     workspace_id: WorkspaceId
     lead_id: LeadId
-    reason_code: PausedSearchReasonCode | None
     customer_date: datetime | None
     source: PausedSearchSource
     evidence_type: CustomerTimingEvidenceType

@@ -11,7 +11,7 @@ from app.application.ports.repositories import (
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
     PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
     TemporalSignalOutboxRepository,
     WorkspaceLLMConfigRepository,
 )
@@ -70,7 +70,7 @@ async def route_ai_nurture_lead(
     conversation_summary: str | None = None,
     supplemental_crm_conversation_events: tuple[CrmConversationEvent, ...] = (),
     lead_workflow_repository: LeadWorkflowRepository | None = None,
-    paused_search_track_repository: PausedSearchTrackMappingRepository | None = None,
+    paused_search_track_repository: PausedSearchTrackRepository | None = None,
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     routing_review_repository: LeadRoutingReviewRepository | None = None,
@@ -116,19 +116,14 @@ async def route_ai_nurture_lead(
     )
 
     route_result = _route_from_apply_result(apply_result, has_recent_crm_conversation_context)
-    resolved_route_result = _apply_paused_search_fallback(
-        route_result=route_result,
-        lead=lead,
-        has_recent_crm_conversation_context=has_recent_crm_conversation_context,
-    )
     await _sync_pending_routing_review(
         workspace_id=workspace_id,
         lead=lead,
-        route_result=resolved_route_result,
+        route_result=route_result,
         routing_review_repository=routing_review_repository,
         now=now,
     )
-    return resolved_route_result
+    return route_result
 
 
 async def _sync_pending_routing_review(
@@ -156,36 +151,6 @@ async def _sync_pending_routing_review(
         lead_id=lead.lead_id,
         routing_review_repository=routing_review_repository,
         now=now,
-    )
-
-
-def _apply_paused_search_fallback(
-    *,
-    route_result: AiNurtureRouteResult,
-    lead: CanonicalLeadRecord,
-    has_recent_crm_conversation_context: bool,
-) -> AiNurtureRouteResult:
-    """Apply the route precedence: HUMAN_HANDOFF/BLOCKED > PAUSED_SEARCH > DORMANT > REVIEW_HOLD.
-
-    If the lead already carries an active paused-search profile, a fresh
-    classification that returns DORMANT or REVIEW_HOLD does not clear that
-    profile. The route remains PAUSED_SEARCH. Human-handoff and blocked
-    signals still win because they are higher precedence.
-    """
-    if not lead.paused_search_active:
-        return route_result
-    if route_result.route in {
-        AiNurtureRoute.HUMAN_HANDOFF,
-        AiNurtureRoute.BLOCKED,
-        AiNurtureRoute.PAUSED_SEARCH,
-    }:
-        return route_result
-    return AiNurtureRouteResult(
-        route=AiNurtureRoute.PAUSED_SEARCH,
-        reason_codes=("existing_paused_search_profile",),
-        classification_result=route_result.classification_result,
-        artifact=route_result.artifact,
-        has_recent_crm_conversation_context=has_recent_crm_conversation_context,
     )
 
 

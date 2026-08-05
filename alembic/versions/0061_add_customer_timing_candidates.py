@@ -22,7 +22,6 @@ def upgrade() -> None:
         sa.Column("timing_id", sa.UUID(), primary_key=True),
         sa.Column("workspace_id", sa.UUID(), nullable=False),
         sa.Column("lead_id", sa.UUID(), nullable=False),
-        sa.Column("reason_code", sa.String(100)),
         sa.Column("customer_date", sa.DateTime(timezone=True)),
         sa.Column("source", sa.String(100), nullable=False),
         sa.Column("evidence_type", sa.String(100), nullable=False),

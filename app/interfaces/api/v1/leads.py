@@ -55,7 +55,6 @@ from app.application.use_cases.lead_review_hold_resolution import (
 )
 from app.application.use_cases.lead_workflow_overrides import (
     PausedSearchWorkflowOverrideStatus,
-    migrate_paused_search_track_version,
     override_paused_search_timing,
     skip_paused_search_next_touch,
 )
@@ -149,8 +148,6 @@ from app.interfaces.api.schemas.leads import (
     LeadSendabilityResponse,
     LeadWorkflowOverrideAuditLogResponse,
     LeadWorkflowResponse,
-    MigratePausedSearchTrackRequest,
-    MigratePausedSearchTrackResponse,
     OutboundMessageResponse,
     OverridePausedSearchTimingRequest,
     OverridePausedSearchTimingResponse,
@@ -463,7 +460,7 @@ async def resolve_lead_review_hold_route(
         crm_client=manual_bundle.crm_client,
         notification_provider=manual_bundle.notification_provider,
         user_repository=manual_bundle.user_repository,
-        pause_reason_code=request.pause_reason_code,
+        selected_track_key=request.selected_track_key,
         pause_reason_note=request.pause_reason_note,
         reengagement_not_before=request.reengagement_not_before,
         reengagement_window_label=request.reengagement_window_label,
@@ -658,7 +655,7 @@ async def update_lead_paused_search_route(
         workspace_id=workspace_id,
         lead_id=lead_id,
         active=request.active,
-        reason_code=request.reason_code,
+        selected_track_key=request.selected_track_key,
         reason_note=request.reason_note,
         reengagement_not_before=request.reengagement_not_before,
         reengagement_window_label=request.reengagement_window_label,
@@ -738,50 +735,6 @@ async def override_paused_search_timing_route(
         lead_id=result.lead_id,
         workflow_id=result.workflow.workflow_id if result.workflow is not None else None,
         paused_search=_paused_search_profile_response(result.profile),
-        next_action_at=result.workflow.next_action_at if result.workflow is not None else None,
-        reasons=[reason.value for reason in result.reasons],
-    )
-
-
-@router.post(
-    "/{workspace_id}/leads/{lead_id}/paused-search/track-migrations",
-    response_model=MigratePausedSearchTrackResponse,
-)
-async def migrate_paused_search_track_route(
-    workspace_id: UUID,
-    lead_id: UUID,
-    request: MigratePausedSearchTrackRequest,
-    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
-    bundle: Annotated[
-        LeadWorkflowOverrideActionBundle,
-        Depends(get_lead_workflow_override_action_bundle),
-    ],
-) -> MigratePausedSearchTrackResponse:
-    result = await migrate_paused_search_track_version(
-        actor=actor,
-        workspace_id=workspace_id,
-        lead_id=lead_id,
-        target_track_version_id=request.target_track_version_id,
-        reason=request.reason,
-        lead_repository=bundle.lead_repository,
-        lead_workflow_repository=bundle.lead_workflow_repository,
-        lead_workflow_override_audit_repository=bundle.lead_workflow_override_audit_repository,
-        paused_search_track_repository=bundle.paused_search_track_repository,
-        paused_search_track_assignment_repository=(
-            bundle.paused_search_track_assignment_repository
-        ),
-        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
-        workspace_repository=bundle.workspace_repository,
-        paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
-        now=datetime.now(UTC),
-    )
-    _raise_for_override_error(result.status, [reason.value for reason in result.reasons])
-    await bundle.session.commit()
-    return MigratePausedSearchTrackResponse(
-        status=result.status.value,
-        lead_id=result.lead_id,
-        workflow_id=result.workflow.workflow_id if result.workflow is not None else None,
-        target_track_version_id=request.target_track_version_id,
         next_action_at=result.workflow.next_action_at if result.workflow is not None else None,
         reasons=[reason.value for reason in result.reasons],
     )
@@ -962,7 +915,11 @@ def _classification_artifact_response(
         artifact_id=artifact.artifact_id,
         source=artifact.source,
         outcome=artifact.outcome.value,
-        pause_reason_code=artifact.pause_reason_code.value if artifact.pause_reason_code else None,
+        selected_track_key=artifact.selected_track_key,
+        track_selection_status=(
+            artifact.track_selection_status.value if artifact.track_selection_status else None
+        ),
+        track_version_id=artifact.track_version_id,
         reengagement_not_before=artifact.reengagement_not_before,
         reengagement_window_label=artifact.reengagement_window_label,
         confidence=artifact.confidence,
@@ -1219,17 +1176,13 @@ def _paused_search_plan_response(
         track_version_id=plan.version.track_version_id,
         version_number=plan.version.version_number,
         version_status=plan.version.status.value,
-        track_family=plan.version.track_family.value,
+        selection_guidance=plan.version.selection_guidance,
         enabled=plan.version.enabled,
         allowed_channels=[channel.value for channel in plan.version.allowed_channels],
-        default_for_reason_codes=[
-            reason_code.value for reason_code in plan.version.default_for_reason_codes
-        ],
         fallback_timing_policy=plan.version.fallback_timing_policy.value,
         maintenance_interval_days=plan.version.maintenance_interval_days,
         reactivation_window_days=plan.version.reactivation_window_days,
         max_total_touches=plan.version.max_total_touches,
-        requires_review_before_publish=plan.version.requires_review_before_publish,
         default_pause_duration_days=plan.version.default_pause_duration_days,
         max_duration_days=plan.version.max_duration_days,
         terminal_behavior=plan.version.terminal_behavior.value,
@@ -1424,7 +1377,8 @@ def _paused_search_profile_response(
         return None
     return LeadPausedSearchProfileResponse(
         paused_search_active=profile.paused_search_active,
-        pause_reason_code=profile.pause_reason_code.value if profile.pause_reason_code else None,
+        paused_search_track_key=profile.paused_search_track_key,
+        paused_search_track_version_id=profile.paused_search_track_version_id,
         pause_reason_note=profile.pause_reason_note,
         reengagement_not_before=profile.reengagement_not_before,
         reengagement_window_label=profile.reengagement_window_label,

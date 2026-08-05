@@ -1,5 +1,10 @@
 # Paused Search Implementation Plan
 
+> **Superseded for paused-search track routing.** Use
+> `paused-search-dynamic-track-classification-correction-plan.md` as the current contract.
+> This historical plan must not be used to restore removed categories, mappings, or migration
+> support.
+
 ## Purpose
 
 This document turns the approved paused-search design into a safe delivery plan.

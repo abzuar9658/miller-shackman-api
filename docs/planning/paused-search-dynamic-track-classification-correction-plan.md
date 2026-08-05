@@ -1,9 +1,10 @@
 # Paused-Search Dynamic Track Classification Correction Plan
 ## Status
-**Draft for product and engineering approval. No application code or migration changes until approved.**
+**Implemented for development. This document is the current contract; the earlier paused-search
+category and mapping design is superseded.**
 ## 1. Purpose
 Correct paused-search so each admin-defined track is itself a classification category. The application supplies the current published catalog, the LLM selects from that catalog using admin guidance, and the backend pins the exact selected version.
-This replaces the current separate `PausedSearchTrackFamily` plus fixed `PausedSearchReasonCode`-to-track mapping model.
+This replaces the earlier fixed-category routing design with one explicit catalog contract.
 ## 2. Target model
 Each paused-search track contains:
 - stable `track_key` and display name
@@ -12,7 +13,7 @@ Each paused-search track contains:
 - immutable draft/published versions
 - ordered cadence steps, templates, timing, and touch limits
 - code-owned safety capabilities
-There is no separate track-family enum and no reason-code mapping table. `PausedSearchTrackStepPhase` may remain because it describes a cadence step, not a category.
+There is no separate classification-category enum or routing table. `PausedSearchTrackStepPhase` remains because it describes a cadence step, not a classification category.
 ## 3. Selection guidance
 Every classification-eligible version must answer **“When should this track be selected?”** Guidance must:
 - be required before publish and catalog inclusion
@@ -44,56 +45,44 @@ If paused-search is clear but selection is unsafe: stop pending AI outreach; pre
 - **Create:** draft only; unavailable to classification until published.
 - **Publish:** validate guidance, cadence, templates, limits, permissions, and safety; make the new version available to future classifications.
 - **Edit:** create a new immutable version; never mutate a published version.
-- **Retire:** remove from future catalogs; existing assignments remain pinned and are not migrated automatically.
+- **Retire:** remove from future catalogs. Development does not provide a data migration for already-created lead assignments.
 - **Delete:** only an unreferenced retired track; block deletion while assignments, workflows, history, or audit records reference it.
+- **Restore:** return the track to draft and require validation and republishing.
 - **Stable key:** immutable after first publication.
 ## 6. Safety ownership
 Replace reason-derived safety routing with a universal code-owned baseline: consent, suppression, quiet hours, frequency, pre-send checks, human-activity pause, handoff pause, five-interaction cap, maximum duration/touches, and no financial, legal, tax, investment, market-prediction, or unverified-listing claims.
 Any specialized restrictions remain code-owned safety capabilities, not categories. Admin settings may tighten but never weaken them.
 ## 7. Step-by-step delivery plan
-### Phase 0 — Approval and baseline
-1. Approve this target model and decisions in section 9.
-2. Update the business-rule terminology.
-3. Run focused backend/frontend checks and record the baseline.
-4. Keep all legacy fields and read paths during transition.
-### Phase 1 — Additive persistence
-1. Add nullable `selection_guidance` to track versions.
-2. Persist selected key, exact version, catalog snapshot, confidence, and review status.
-3. Add workspace-scoped indexes/constraints.
-4. Preserve family, reason, mapping, and legacy history fields; never fabricate guidance.
-### Phase 2 — Domain and validation
-1. Add guidance to domain, config, API, and persistence models.
-2. Remove family/mapping fields from new write paths.
-3. Validate stable keys, catalog size, duplicate keys, cadence, publication, and version immutability.
-4. Enforce code-owned safety independently of track category.
-### Phase 3 — Catalog and classification
-1. Add an application-layer catalog read contract.
-2. Update the prompt and structured LLM result to select a catalog key.
-3. Keep provider objects inside the LLM adapter.
-4. Validate against the supplied snapshot and persist evidence/review outcomes.
-### Phase 4 — Assignment and workflow
-1. Replace reason-to-track resolution with snapshot-key-to-version assignment.
-2. Update classification application, enrollment, rescheduling, manual override, and Temporal signal paths.
-3. Preserve exact pins for existing workflows.
-4. Ensure uncertain selection pauses safely and retirement never silently migrates a lead.
-### Phase 5 — API and UI
-1. Remove family dropdowns/badges and reason checkboxes.
-2. Add required “When should this track be selected?” guidance input and accessible validation.
-3. Show catalog eligibility, publish errors, version, status, and safety limits.
-4. Preview the exact catalog entry supplied to classification.
-5. Make manual lead controls select an active published track and show its guidance/version.
-6. Add empty-catalog, review, permission, loading, and error states.
-### Phase 6 — Tests, docs, and observability
-1. Update domain, application, persistence, API, frontend, and business-flow tests.
-2. Add migration round-trip, idempotency, and workspace-isolation tests.
-3. Update business rules, planning docs, API docs, completion status, and operations runbook.
-4. Measure catalog size, selected track/version, no-match, ambiguity, low confidence, stale key, concurrent retirement, and manual correction.
-### Phase 7 — Rollout and cleanup
-1. Gate catalog routing by workspace/runtime control.
-2. Monitor review and correction rates before broad enablement.
-3. Keep legacy reads/fields for rollback.
-4. Remove obsolete writes, then perform a separate cleanup migration dropping family and mapping structures.
-5. Preserve historical reason values as legacy audit data where needed.
+### Phase 0 — Contract and schema correction
+1. Make the track catalog the only classification source.
+2. Rewrite the paused-search domain, ORM models, repositories, and Alembic history around track identity, immutable versions, guidance, and assignments.
+3. Do not add compatibility migrations, backfills, default seeding, or existing-lead conversion paths.
+4. Treat development data as disposable when the corrected schema is applied.
+### Phase 1 — Domain and persistence
+1. Require bounded `selection_guidance` on every published version.
+2. Persist selected key, selected version, selection status, confidence, evidence, and review state in the classification artifact.
+3. Enforce workspace-scoped keys, foreign keys, indexes, assignment uniqueness, and version immutability.
+4. Keep safety limits code-owned; configuration may tighten but never weaken them.
+### Phase 2 — Catalog classification
+1. Load only active, published, enabled track versions into a workspace catalog.
+2. Pass only catalog identity, display name, and selection guidance to the classifier.
+3. Validate the returned status and key against the exact catalog snapshot.
+4. Reject unknown, stale, disabled, retired, low-confidence, ambiguous, no-match, and empty-catalog results into review.
+### Phase 3 — Assignment and Temporal execution
+1. Assign a concrete catalog track and exact published version.
+2. Recheck the pinned version immediately before scheduling and sending.
+3. Use the pinned version for cadence steps, timers, retries, signals, and audit events.
+4. Stop automation on uncertainty, human activity, suppression, handoff, or invalidated eligibility.
+### Phase 4 — API and frontend
+1. Expose CRUD, draft validation, preview, publish, retire, restore-to-draft, and guarded delete operations.
+2. Require guidance in the admin editor and show catalog eligibility, version, status, and safety limits.
+3. Make manual selection choose a concrete active published track; do not expose category or mapping controls.
+4. Provide clear review, empty-catalog, permission, loading, error, and responsive states.
+### Phase 5 — Tests, documentation, and verification
+1. Cover domain, application, persistence, API, Temporal, frontend, and full business-flow behavior.
+2. Verify idempotency, pessimistic pre-send locking, tenant isolation, version pinning, and safe review holds.
+3. Run native ARM64 lint, type checks, tests, build, migration graph, and browser checks.
+4. Scan the repository for removed concepts and compatibility paths before release.
 ## 8. Impacted areas
 - **Domain:** paused-search tracks, validation, lead profile/history, and safety capabilities.
 - **Application:** classification, catalog read, assignment/pinning, admin, manual lead controls, and workflow orchestration.
@@ -104,18 +93,12 @@ Any specialized restrictions remain code-owned safety capabilities, not categori
 - Guidance is required to publish and enter the catalog.
 - Only an exact active catalog key can be assigned.
 - Unknown, stale, retired, disabled, low-confidence, ambiguous, and empty-catalog cases hold for review.
-- New leads use new published versions; existing leads retain pinned versions.
+- New leads use only currently active published versions; existing development data is not migrated.
 - Retirement affects future classification only; deletion is blocked while referenced.
 - Guidance/configuration cannot weaken safety.
 - Duplicate events are idempotent; snapshots/audits round-trip with tenant isolation.
 - UI contains no family/reason-mapping controls and the full conversation → classification → cadence → handoff flow passes with fakes.
-## 10. Approval decisions
-Please approve or change these before implementation:
-1. Admin-defined tracks are the only classification categories.
-2. `selection_guidance` is required, versioned, and bounded to 30–1,000 characters.
-3. Maximum 20 active published classification tracks per workspace.
-4. No-match, ambiguity, low confidence, missing catalog, and stale selection always hold for review.
-5. Existing assignments remain pinned through publication and retirement.
-6. Safety is universal/code-owned; tracks can only tighten limits.
-7. Migration is additive first; cleanup follows rollout stability.
-**Implementation begins only after explicit approval of this document and any changes above.**
+## 10. Implementation status
+The clean-development replacement is implemented across the backend domain, persistence, CRUD and
+classification APIs, assignment and Temporal paths, frontend catalog studio, tests, and operational
+documentation. No compatibility migration or existing-lead conversion is part of this implementation.

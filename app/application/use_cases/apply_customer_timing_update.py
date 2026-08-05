@@ -8,7 +8,6 @@ from app.domain.leads import (
     CustomerTimingCandidate,
     CustomerTimingEvidenceType,
     CustomerTimingStatus,
-    PausedSearchReasonCode,
     PausedSearchSource,
 )
 
@@ -23,7 +22,6 @@ async def apply_customer_timing_update(
     *,
     workspace_id: WorkspaceId,
     lead_id: LeadId,
-    reason_code: PausedSearchReasonCode | None,
     customer_date: datetime | None,
     source: PausedSearchSource,
     evidence_type: CustomerTimingEvidenceType,
@@ -42,7 +40,6 @@ async def apply_customer_timing_update(
         timing_id=timing_id or uuid4(),
         workspace_id=workspace_id,
         lead_id=lead_id,
-        reason_code=reason_code,
         customer_date=customer_date,
         source=source,
         evidence_type=evidence_type,

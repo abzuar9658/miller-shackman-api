@@ -23,7 +23,7 @@ from app.application.ports.repositories import (
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
     PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
     TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
     WorkspaceAgentCRMMappingRepository,
@@ -118,7 +118,7 @@ class CampaignServiceBundle:
     crm_conversation_event_repository: CrmConversationEventRepository
     workspace_llm_config_repository: WorkspaceLLMConfigRepository
     lead_workflow_repository: LeadWorkflowRepository
-    paused_search_track_repository: PausedSearchTrackMappingRepository
+    paused_search_track_repository: PausedSearchTrackRepository
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository
     workflow_transition_repository: WorkflowTransitionRepository
     temporal_workflow_starter: TemporalWorkflowStarter

@@ -1,5 +1,10 @@
 # Paused Search Use-Case-by-Use-Case Implementation Plan
 
+> **Superseded for paused-search track routing.** Use
+> `paused-search-dynamic-track-classification-correction-plan.md` as the current contract.
+> This historical plan must not be used to restore removed categories, mappings, or migration
+> support.
+
 ## Purpose
 
 This document translates the slice-based paused-search implementation plan into a use-case-by-use-case delivery plan.

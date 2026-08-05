@@ -1,5 +1,9 @@
 # Paused Search Feature 03 — Nurture Tracks
 
+> **Superseded for paused-search track routing.** Use
+> `paused-search-dynamic-track-classification-correction-plan.md` as the current contract.
+> The design details below are historical and must not drive new implementation work.
+
 ## Purpose
 
 This document defines the actual paused-search nurture strategies that run after

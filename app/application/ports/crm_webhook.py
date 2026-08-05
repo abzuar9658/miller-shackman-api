@@ -21,7 +21,7 @@ from app.application.ports.repositories import (
     LeadWorkflowRepository,
     PausedSearchOccurrenceRepository,
     PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
     TemporalSignalOutboxRepository,
     UserRepository,
     WorkflowTransitionRepository,
@@ -44,7 +44,7 @@ class FollowUpBossWebhookEventBundle:
     campaign_execution_repository: CampaignExecutionRepository
     campaign_enrollment_repository: CampaignEnrollmentRepository
     lead_classification_artifact_repository: LeadClassificationArtifactRepository
-    paused_search_track_repository: PausedSearchTrackMappingRepository
+    paused_search_track_repository: PausedSearchTrackRepository
     crm_conversation_event_repository: CrmConversationEventRepository
     workspace_llm_config_repository: WorkspaceLLMConfigRepository
     crm_client: CRMClient

@@ -2,6 +2,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
@@ -10,6 +11,7 @@ from app.application.services.llm.structured_json import (
     coerce_llm_confidence,
     normalize_llm_json_text,
 )
+from app.domain.campaigns import PausedSearchTrackCatalogEntry
 from app.domain.conversations import (
     CrmConversationEvent,
     CrmConversationEventDirection,
@@ -18,10 +20,10 @@ from app.domain.conversations import (
 from app.domain.leads import (
     CanonicalLeadRecord,
     LeadStateClassificationOutcome,
-    PausedSearchReasonCode,
+    PausedSearchTrackSelectionStatus,
 )
 
-LEAD_STATE_CLASSIFICATION_PROMPT_VERSION = "lead_state_classification:v5"
+LEAD_STATE_CLASSIFICATION_PROMPT_VERSION = "lead_state_classification:v6"
 STRICT_RETRY_PROMPT_VERSION = f"{LEAD_STATE_CLASSIFICATION_PROMPT_VERSION}:strict_retry"
 MIN_LEAD_STATE_CLASSIFICATION_CONFIDENCE = 0.70
 
@@ -35,7 +37,7 @@ class LeadStateClassificationReasonCode(StrEnum):
     INVALID_LLM_RESPONSE = "invalid_llm_response"
     LOW_CONFIDENCE = "low_confidence"
     UNSUPPORTED_OUTCOME = "unsupported_outcome"
-    UNSUPPORTED_REASON_CODE = "unsupported_reason_code"
+    INVALID_TRACK_SELECTION = "invalid_track_selection"
 
 
 class _LLMLeadStateClassificationOutcome(StrEnum):
@@ -56,7 +58,9 @@ class LeadStateClassificationResult:
     usage_tokens: int | None = None
     outcome: LeadStateClassificationOutcome | None = None
     handoff_reason_code: HandoffReasonCode | None = None
-    pause_reason_code: PausedSearchReasonCode | None = None
+    selected_track_key: str | None = None
+    track_selection_status: PausedSearchTrackSelectionStatus | None = None
+    track_version_id: UUID | None = None
     reengagement_not_before: datetime | None = None
     reengagement_window_label: str | None = None
     confidence: float | None = None
@@ -73,7 +77,8 @@ class LeadStateClassificationResult:
 class _LLMLeadStateClassification(BaseModel):
     outcome: _LLMLeadStateClassificationOutcome
     handoff_reason_code: HandoffReasonCode | None = None
-    pause_reason_code: PausedSearchReasonCode | None = None
+    selected_track_key: str | None = None
+    track_selection_status: PausedSearchTrackSelectionStatus | None = None
     reengagement_not_before: str | None = None
     reengagement_window_label: str | None = None
     confidence: float = Field(ge=0.0, le=1.0)
@@ -93,10 +98,20 @@ class _LLMLeadStateClassification(BaseModel):
     @model_validator(mode="after")
     def _validate_reason_codes(self) -> "_LLMLeadStateClassification":
         if self.outcome == _LLMLeadStateClassificationOutcome.PAUSED_SEARCH:
-            if self.pause_reason_code is None:
-                raise ValueError("pause_reason_code is required when outcome is paused_search")
-        elif self.pause_reason_code is not None:
-            raise ValueError("pause_reason_code is only allowed when outcome is paused_search")
+            if self.track_selection_status is None:
+                raise ValueError("track_selection_status is required when outcome is paused_search")
+            if (
+                self.track_selection_status is PausedSearchTrackSelectionStatus.SELECTED
+                and not self.selected_track_key
+            ):
+                raise ValueError("selected_track_key is required when a track is selected")
+            if (
+                self.track_selection_status is not PausedSearchTrackSelectionStatus.SELECTED
+                and self.selected_track_key is not None
+            ):
+                raise ValueError("selected_track_key is only allowed for selected status")
+        elif self.selected_track_key is not None or self.track_selection_status is not None:
+            raise ValueError("track selection is only allowed when outcome is paused_search")
 
         if self.outcome == _LLMLeadStateClassificationOutcome.HUMAN_HANDOFF:
             if self.handoff_reason_code is None:
@@ -117,6 +132,7 @@ async def classify_lead_from_conversation(
     dormant_threshold_days: int | None = None,
     model: str | None = None,
     min_confidence: float = MIN_LEAD_STATE_CLASSIFICATION_CONFIDENCE,
+    paused_search_catalog: tuple[PausedSearchTrackCatalogEntry, ...] = (),
 ) -> LeadStateClassificationResult:
     normalized_events = _normalize_conversation_events(crm_conversation_events)
     input_context = _approved_context_payload(
@@ -125,6 +141,7 @@ async def classify_lead_from_conversation(
         conversation_summary=conversation_summary,
         crm_conversation_events=normalized_events,
         dormant_threshold_days=dormant_threshold_days,
+        paused_search_catalog=paused_search_catalog,
     )
     prompt_text = _build_prompt(input_context)
     llm_result = await _complete_classification_request(
@@ -161,7 +178,11 @@ async def classify_lead_from_conversation(
         llm_result = _combine_retry_metadata(initial_result=llm_result, retry_result=retry_result)
 
     parsed_llm_response = _parsed_llm_response_payload(classification)
-    reasons = _validation_reasons(classification, min_confidence=min_confidence)
+    reasons = _validation_reasons(
+        classification,
+        min_confidence=min_confidence,
+        catalog_keys={entry.track_key for entry in paused_search_catalog},
+    )
     classification, policy_trace = _apply_route_policy(
         classification=classification,
         input_context=input_context,
@@ -178,6 +199,10 @@ async def classify_lead_from_conversation(
             input_context=input_context,
             raw_llm_response_text=llm_result.text,
             parsed_llm_response=parsed_llm_response,
+            outcome=_mapped_outcome(classification.outcome),
+            selected_track_key=classification.selected_track_key,
+            track_selection_status=classification.track_selection_status,
+            track_version_id=_selected_track_version_id(classification, paused_search_catalog),
             reasons=tuple(reasons),
         )
     return LeadStateClassificationResult(
@@ -188,7 +213,9 @@ async def classify_lead_from_conversation(
         usage_tokens=llm_result.usage_tokens,
         outcome=_mapped_outcome(classification.outcome),
         handoff_reason_code=classification.handoff_reason_code,
-        pause_reason_code=classification.pause_reason_code,
+        selected_track_key=classification.selected_track_key,
+        track_selection_status=classification.track_selection_status,
+        track_version_id=_selected_track_version_id(classification, paused_search_catalog),
         reengagement_not_before=_parse_iso_datetime(classification.reengagement_not_before),
         reengagement_window_label=_normalized_optional_text(
             classification.reengagement_window_label
@@ -270,11 +297,33 @@ def _validation_reasons(
     classification: _LLMLeadStateClassification,
     *,
     min_confidence: float,
+    catalog_keys: set[str],
 ) -> list[LeadStateClassificationReasonCode]:
     reasons: list[LeadStateClassificationReasonCode] = []
     if classification.confidence < min_confidence:
         reasons.append(LeadStateClassificationReasonCode.LOW_CONFIDENCE)
+    if (
+        classification.track_selection_status is PausedSearchTrackSelectionStatus.SELECTED
+        and classification.selected_track_key not in catalog_keys
+    ):
+        reasons.append(LeadStateClassificationReasonCode.INVALID_TRACK_SELECTION)
     return reasons
+
+
+def _selected_track_version_id(
+    classification: _LLMLeadStateClassification,
+    catalog: tuple[PausedSearchTrackCatalogEntry, ...],
+) -> UUID | None:
+    if classification.track_selection_status is not PausedSearchTrackSelectionStatus.SELECTED:
+        return None
+    return next(
+        (
+            entry.track_version_id
+            for entry in catalog
+            if entry.track_key == classification.selected_track_key
+        ),
+        None,
+    )
 
 
 def _mapped_outcome(
@@ -312,7 +361,8 @@ def _build_strict_retry_prompt(payload: dict[str, object]) -> str:
     example = {
         "outcome": "paused_search",
         "handoff_reason_code": None,
-        "pause_reason_code": "waiting_for_rates",
+        "selected_track_key": "waiting-for-rates",
+        "track_selection_status": "selected",
         "reengagement_not_before": "2026-09-01",
         "reengagement_window_label": "after summer",
         "confidence": 0.88,
@@ -330,13 +380,14 @@ def _build_strict_retry_prompt(payload: dict[str, object]) -> str:
         "human_handoff, review_hold, blocked, unknown.\n"
         "Use these handoff_reason_code values only when outcome is human_handoff: "
         f"{', '.join(code.value for code in HandoffReasonCode)}.\n"
-        "Use these pause_reason_code values only when outcome is paused_search: "
-        f"{', '.join(code.value for code in PausedSearchReasonCode)}.\n"
+        "For paused_search, select exactly one track_key from paused_search_catalog, or return "
+        "track_selection_status no_match/ambiguous with selected_track_key null.\n"
         "If no route is clearly safe, set outcome to unknown. Unknown maps to review hold.\n"
         "Required JSON schema:\n"
         "- outcome: string enum\n"
         "- handoff_reason_code: string enum or null\n"
-        "- pause_reason_code: string enum or null\n"
+        "- selected_track_key: catalog track_key or null\n"
+        "- track_selection_status: selected, no_match, ambiguous, or null\n"
         "- reengagement_not_before: ISO date string or null\n"
         "- reengagement_window_label: short string or null\n"
         "- confidence: number between 0 and 1\n"
@@ -366,6 +417,7 @@ def _approved_context_payload(
     conversation_summary: str | None,
     crm_conversation_events: tuple[CrmConversationEvent, ...],
     dormant_threshold_days: int | None,
+    paused_search_catalog: tuple[PausedSearchTrackCatalogEntry, ...],
 ) -> dict[str, object]:
     return {
         "task": "classify_lead_state_from_conversation",
@@ -392,6 +444,14 @@ def _approved_context_payload(
             dormant_threshold_days=dormant_threshold_days,
         ),
         "conversation_summary": conversation_summary,
+        "paused_search_catalog": [
+            {
+                "track_key": entry.track_key,
+                "display_name": entry.display_name,
+                "selection_guidance": entry.selection_guidance,
+            }
+            for entry in paused_search_catalog
+        ],
         "recent_messages": [_message_context(event) for event in crm_conversation_events[-20:]],
     }
 
@@ -618,7 +678,8 @@ def _apply_route_policy(
                 update={
                     "outcome": _LLMLeadStateClassificationOutcome.DORMANT,
                     "handoff_reason_code": None,
-                    "pause_reason_code": None,
+                    "selected_track_key": None,
+                    "track_selection_status": None,
                     "evidence": _dormant_policy_evidence(freshness),
                     "summary": _dormant_policy_summary(freshness),
                 }
@@ -630,7 +691,8 @@ def _apply_route_policy(
             applied = classification.model_copy(
                 update={
                     "outcome": _LLMLeadStateClassificationOutcome.REVIEW_HOLD,
-                    "pause_reason_code": None,
+                    "selected_track_key": None,
+                    "track_selection_status": None,
                 }
             )
 
@@ -745,11 +807,12 @@ def _base_prompt_instructions() -> str:
         "signal in the context.\n"
         "A recent lead-authored request for help, a fresh showing request, or a fresh ask "
         "for advice can still be human_handoff even if older dormant history exists.\n"
-        "For paused_search, pause_reason_code must be exactly one of: "
-        f"{', '.join(code.value for code in PausedSearchReasonCode)}.\n"
+        "For paused_search, classify against paused_search_catalog only. Choose one exact "
+        "track_key, or report no_match/ambiguous.\n"
         "For human_handoff, handoff_reason_code must be exactly one of: "
         f"{', '.join(code.value for code in HandoffReasonCode)}.\n"
-        "For outcomes other than paused_search, pause_reason_code must be null.\n"
+        "For outcomes other than paused_search, selected_track_key and "
+        "track_selection_status must be null.\n"
         "For outcomes other than human_handoff, handoff_reason_code must be null.\n"
         "Set reengagement_not_before to an ISO date only if the lead mentioned a concrete date.\n"
         "Set reengagement_window_label to a short human phrase such as "
@@ -761,7 +824,8 @@ def _base_prompt_instructions() -> str:
         "conversation_waiting_on as semantic context. The backend route policy is "
         "authoritative and may override your proposal when freshness or evidence rules fail.\n"
         "summary is a concise explanation under 600 characters.\n"
-        "Return only JSON with keys: outcome, handoff_reason_code, pause_reason_code, "
+        "Return only JSON with keys: outcome, handoff_reason_code, selected_track_key, "
+        "track_selection_status, "
         "reengagement_not_before, reengagement_window_label, confidence, evidence, "
         "evidence_event_ids, lead_goal, last_known_intent, intent_freshness, "
         "conversation_waiting_on, summary."

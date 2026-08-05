@@ -20,7 +20,7 @@ from app.application.ports.repositories import (
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
     PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
     UserRepository,
     WorkflowTransitionRepository,
     WorkspaceHandoffConfigRepository,
@@ -98,7 +98,7 @@ class LeadManualEnrollmentBundle:
     workspace_llm_config_repository: WorkspaceLLMConfigRepository
     llm_client: LLMClient
     crm_conversation_event_repository: CrmConversationEventRepository
-    paused_search_track_repository: PausedSearchTrackMappingRepository
+    paused_search_track_repository: PausedSearchTrackRepository
     routing_review_repository: LeadRoutingReviewRepository
     default_openrouter_model: str
     handoff_repository: HandoffRepository

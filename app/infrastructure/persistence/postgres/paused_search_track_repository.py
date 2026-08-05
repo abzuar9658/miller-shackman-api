@@ -1,7 +1,6 @@
 from datetime import datetime
-from uuid import uuid4
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select
@@ -9,7 +8,6 @@ from sqlalchemy.sql import Select
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchFallbackTimingPolicy,
-    PausedSearchReasonMapping,
     PausedSearchTerminalBehavior,
     PausedSearchTimingBasis,
     PausedSearchTrack,
@@ -17,7 +15,7 @@ from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrackAdminAuditLog,
     PausedSearchTrackAssignment,
     PausedSearchTrackAssignmentSource,
-    PausedSearchTrackFamily,
+    PausedSearchTrackCatalogEntry,
     PausedSearchTrackLeadAssignment,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
@@ -32,14 +30,12 @@ from app.domain.common.ids import (
     WorkspaceId,
 )
 from app.domain.compliance.contactability import ContactChannel
-from app.domain.leads import PausedSearchReasonCode
 from app.domain.outbound_drafting import (
     dormant_step_template_profile_from_mapping,
     dormant_step_template_profile_to_mapping,
 )
 from app.infrastructure.persistence.postgres.models import (
     LeadModel,
-    PausedSearchReasonMappingModel,
     PausedSearchTrackAdminAuditLogModel,
     PausedSearchTrackAssignmentModel,
     PausedSearchTrackModel,
@@ -63,6 +59,36 @@ class PostgresPausedSearchTrackAdminRepository:
             ),
         )
         return tuple(_track_from_model(model) for model in result.scalars().all())
+
+    async def list_active_catalog(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> tuple[PausedSearchTrackCatalogEntry, ...]:
+        result = await self._session.execute(
+            select(PausedSearchTrackModel, PausedSearchTrackVersionModel)
+            .join(
+                PausedSearchTrackVersionModel,
+                PausedSearchTrackVersionModel.track_version_id
+                == PausedSearchTrackModel.active_version_id,
+            )
+            .where(
+                PausedSearchTrackModel.workspace_id == workspace_id,
+                PausedSearchTrackModel.status == PausedSearchTrackStatus.ACTIVE.value,
+                PausedSearchTrackVersionModel.status == CampaignVersionStatus.PUBLISHED.value,
+                PausedSearchTrackVersionModel.enabled.is_(True),
+            )
+            .order_by(PausedSearchTrackModel.track_key.asc())
+        )
+        return tuple(
+            PausedSearchTrackCatalogEntry(
+                track_key=track.track_key,
+                display_name=track.display_name,
+                selection_guidance=version.selection_guidance,
+                track_id=track.track_id,
+                track_version_id=version.track_version_id,
+            )
+            for track, version in result.all()
+        )
 
     async def list_assigned_leads(
         self,
@@ -140,12 +166,6 @@ class PostgresPausedSearchTrackAdminRepository:
                 delete(PausedSearchTrackStepModel).where(
                     PausedSearchTrackStepModel.workspace_id == workspace_id,
                     PausedSearchTrackStepModel.track_version_id.in_(version_ids),
-                )
-            )
-            await self._session.execute(
-                delete(PausedSearchReasonMappingModel).where(
-                    PausedSearchReasonMappingModel.workspace_id == workspace_id,
-                    PausedSearchReasonMappingModel.track_version_id.in_(version_ids),
                 )
             )
             await self._session.execute(
@@ -336,83 +356,6 @@ class PostgresPausedSearchTrackAdminRepository:
             )
         await self._session.execute(statement.values(status=CampaignVersionStatus.RETIRED.value))
 
-    async def replace_reason_mappings(
-        self,
-        *,
-        workspace_id: WorkspaceId,
-        track_id: PausedSearchTrackId,
-        track_version_id: PausedSearchTrackVersionId,
-        reason_codes: tuple[PausedSearchReasonCode, ...],
-        actor_user_id: UserId,
-        now: datetime,
-    ) -> tuple[PausedSearchReasonMapping, ...]:
-        reason_values = [reason_code.value for reason_code in reason_codes]
-        await self._session.execute(
-            delete(PausedSearchReasonMappingModel)
-            .where(PausedSearchReasonMappingModel.workspace_id == workspace_id)
-            .where(
-                or_(
-                    PausedSearchReasonMappingModel.track_id == track_id,
-                    PausedSearchReasonMappingModel.reason_code.in_(reason_values),
-                )
-            ),
-        )
-        mappings: list[PausedSearchReasonMapping] = []
-        for reason_code in reason_codes:
-            result = await self._session.execute(
-                insert(PausedSearchReasonMappingModel)
-                .values(
-                    mapping_id=uuid4(),
-                    workspace_id=workspace_id,
-                    reason_code=reason_code.value,
-                    track_id=track_id,
-                    track_version_id=track_version_id,
-                    created_by_user_id=actor_user_id,
-                    created_at=now,
-                )
-                .returning(PausedSearchReasonMappingModel),
-            )
-            mappings.append(_mapping_from_model(result.scalar_one()))
-        return tuple(mappings)
-
-    async def clear_reason_mappings_for_track(
-        self,
-        workspace_id: WorkspaceId,
-        track_id: PausedSearchTrackId,
-    ) -> None:
-        await self._session.execute(
-            delete(PausedSearchReasonMappingModel)
-            .where(PausedSearchReasonMappingModel.workspace_id == workspace_id)
-            .where(PausedSearchReasonMappingModel.track_id == track_id),
-        )
-
-    async def list_reason_mappings_for_version(
-        self,
-        workspace_id: WorkspaceId,
-        track_version_id: PausedSearchTrackVersionId,
-    ) -> tuple[PausedSearchReasonMapping, ...]:
-        result = await self._session.execute(
-            select(PausedSearchReasonMappingModel)
-            .where(PausedSearchReasonMappingModel.workspace_id == workspace_id)
-            .where(PausedSearchReasonMappingModel.track_version_id == track_version_id)
-            .order_by(PausedSearchReasonMappingModel.reason_code.asc()),
-        )
-        return tuple(_mapping_from_model(model) for model in result.scalars().all())
-
-    async def get_reason_mapping(
-        self,
-        workspace_id: WorkspaceId,
-        reason_code: PausedSearchReasonCode,
-    ) -> PausedSearchReasonMapping | None:
-        result = await self._session.execute(
-            select(PausedSearchReasonMappingModel)
-            .where(PausedSearchReasonMappingModel.workspace_id == workspace_id)
-            .where(PausedSearchReasonMappingModel.reason_code == reason_code.value),
-        )
-        model = result.scalar_one_or_none()
-        return _mapping_from_model(model) if model is not None else None
-
-
 class PostgresPausedSearchTrackAdminAuditLogRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -536,7 +479,6 @@ def _assignment_to_values(assignment: PausedSearchTrackAssignment) -> dict[str, 
         "track_key_snapshot": assignment.track_key_snapshot,
         "track_name_snapshot": assignment.track_name_snapshot,
         "track_version_snapshot": assignment.track_version_snapshot,
-        "reason_code": assignment.reason_code.value if assignment.reason_code is not None else None,
         "source": assignment.source.value,
         "assigned_by_user_id": assignment.assigned_by_user_id,
         "assigned_at": assignment.assigned_at,
@@ -558,9 +500,6 @@ def _assignment_from_model(
         track_key_snapshot=model.track_key_snapshot,
         track_name_snapshot=model.track_name_snapshot,
         track_version_snapshot=model.track_version_snapshot,
-        reason_code=(
-            PausedSearchReasonCode(model.reason_code) if model.reason_code is not None else None
-        ),
         source=PausedSearchTrackAssignmentSource(model.source),
         assigned_by_user_id=model.assigned_by_user_id,
         assigned_at=model.assigned_at,
@@ -605,17 +544,13 @@ def _version_to_values(version: PausedSearchTrackVersion) -> dict[str, object]:
         "track_id": version.track_id,
         "version_number": version.version_number,
         "status": version.status.value,
-        "track_family": version.track_family.value,
+        "selection_guidance": version.selection_guidance,
         "enabled": version.enabled,
         "allowed_channels": [channel.value for channel in version.allowed_channels],
-        "default_for_reason_codes": [
-            reason_code.value for reason_code in version.default_for_reason_codes
-        ],
         "fallback_timing_policy": version.fallback_timing_policy.value,
         "maintenance_interval_days": version.maintenance_interval_days,
         "reactivation_window_days": version.reactivation_window_days,
         "max_total_touches": version.max_total_touches,
-        "requires_review_before_publish": version.requires_review_before_publish,
         "default_pause_duration_days": version.default_pause_duration_days,
         "max_duration_days": version.max_duration_days,
         "terminal_behavior": version.terminal_behavior.value,
@@ -632,17 +567,13 @@ def _version_from_model(model: PausedSearchTrackVersionModel) -> PausedSearchTra
         track_id=model.track_id,
         version_number=model.version_number,
         status=CampaignVersionStatus(model.status),
-        track_family=PausedSearchTrackFamily(model.track_family),
+        selection_guidance=model.selection_guidance,
         enabled=model.enabled,
         allowed_channels=tuple(ContactChannel(channel) for channel in model.allowed_channels),
-        default_for_reason_codes=tuple(
-            PausedSearchReasonCode(reason_code) for reason_code in model.default_for_reason_codes
-        ),
         fallback_timing_policy=PausedSearchFallbackTimingPolicy(model.fallback_timing_policy),
         maintenance_interval_days=model.maintenance_interval_days,
         reactivation_window_days=model.reactivation_window_days,
         max_total_touches=model.max_total_touches,
-        requires_review_before_publish=model.requires_review_before_publish,
         default_pause_duration_days=model.default_pause_duration_days,
         max_duration_days=model.max_duration_days,
         terminal_behavior=PausedSearchTerminalBehavior(model.terminal_behavior),
@@ -701,18 +632,6 @@ def _step_from_model(model: PausedSearchTrackStepModel) -> PausedSearchTrackStep
         interval_days=model.interval_days,
         max_occurrences=model.max_occurrences,
         template_profile=dormant_step_template_profile_from_mapping(model.template_profile),
-    )
-
-
-def _mapping_from_model(model: PausedSearchReasonMappingModel) -> PausedSearchReasonMapping:
-    return PausedSearchReasonMapping(
-        mapping_id=model.mapping_id,
-        workspace_id=model.workspace_id,
-        reason_code=PausedSearchReasonCode(model.reason_code),
-        track_id=model.track_id,
-        track_version_id=model.track_version_id,
-        created_by_user_id=model.created_by_user_id,
-        created_at=model.created_at,
     )
 
 

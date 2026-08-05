@@ -9,7 +9,6 @@ from app.domain.common.ids import LeadId, UserId, WorkspaceId
 
 class LeadWorkflowOverrideAction(StrEnum):
     TIMING_CHANGED = "paused_search_timing_changed"
-    TRACK_VERSION_MIGRATED = "paused_search_track_version_migrated"
     NEXT_TOUCH_SKIPPED = "paused_search_next_touch_skipped"
 
 

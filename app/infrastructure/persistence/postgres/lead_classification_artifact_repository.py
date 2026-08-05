@@ -8,7 +8,7 @@ from app.domain.leads import (
     LeadClassificationAppliedStatus,
     LeadClassificationArtifact,
     LeadStateClassificationOutcome,
-    PausedSearchReasonCode,
+    PausedSearchTrackSelectionStatus,
 )
 from app.infrastructure.persistence.postgres.models import LeadClassificationArtifactModel
 
@@ -62,9 +62,11 @@ def _artifact_to_values(artifact: LeadClassificationArtifact) -> dict[str, objec
         "lead_id": artifact.lead_id,
         "source": artifact.source,
         "outcome": artifact.outcome.value,
-        "pause_reason_code": (
-            artifact.pause_reason_code.value if artifact.pause_reason_code else None
+        "selected_track_key": artifact.selected_track_key,
+        "track_selection_status": (
+            artifact.track_selection_status.value if artifact.track_selection_status else None
         ),
+        "track_version_id": artifact.track_version_id,
         "reengagement_not_before": artifact.reengagement_not_before,
         "reengagement_window_label": artifact.reengagement_window_label,
         "confidence": artifact.confidence,
@@ -91,9 +93,13 @@ def _model_to_artifact(model: LeadClassificationArtifactModel) -> LeadClassifica
         lead_id=model.lead_id,
         source=model.source,
         outcome=LeadStateClassificationOutcome(model.outcome),
-        pause_reason_code=PausedSearchReasonCode(model.pause_reason_code)
-        if model.pause_reason_code
-        else None,
+        selected_track_key=model.selected_track_key,
+        track_selection_status=(
+            PausedSearchTrackSelectionStatus(model.track_selection_status)
+            if model.track_selection_status
+            else None
+        ),
+        track_version_id=model.track_version_id,
         reengagement_not_before=model.reengagement_not_before,
         reengagement_window_label=model.reengagement_window_label,
         confidence=model.confidence,

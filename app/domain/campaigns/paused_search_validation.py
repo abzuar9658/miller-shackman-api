@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
-from app.domain.campaigns.capability_profiles import capability_profile_for_reason
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrack,
     PausedSearchTrackStep,
@@ -16,6 +15,17 @@ from app.domain.campaigns.template_registry import (
 )
 
 MAX_AI_TOUCHES_PER_TRACK = 5
+UNIVERSAL_PAUSED_SEARCH_SAFETY_TAGS = frozenset(
+    {
+        "no_prohibited_advice",
+        "no_financial_advice",
+        "no_legal_advice",
+        "no_tax_advice",
+        "no_investment_advice",
+        "no_market_predictions",
+        "no_unverified_listing_claims",
+    }
+)
 
 
 class PausedSearchValidationSeverity(StrEnum):
@@ -27,8 +37,7 @@ class PausedSearchValidationCode(StrEnum):
     EMPTY_TRACK_KEY = "empty_track_key"
     EMPTY_DISPLAY_NAME = "empty_display_name"
     NO_ALLOWED_CHANNELS = "no_allowed_channels"
-    NO_REASON_MAPPING = "no_reason_mapping"
-    DUPLICATE_REASON_MAPPING = "duplicate_reason_mapping"
+    INVALID_SELECTION_GUIDANCE = "invalid_selection_guidance"
     INVALID_MAINTENANCE_INTERVAL = "invalid_maintenance_interval"
     INVALID_REACTIVATION_WINDOW = "invalid_reactivation_window"
     INVALID_TOUCH_LIMIT = "invalid_touch_limit"
@@ -42,11 +51,7 @@ class PausedSearchValidationCode(StrEnum):
     INVALID_MAX_ATTEMPTS = "invalid_max_attempts"
     INVALID_MAX_OCCURRENCES = "invalid_max_occurrences"
     INVALID_RECURRING_INTERVAL = "invalid_recurring_interval"
-    PROFILE_TOUCH_LIMIT_EXCEEDED = "profile_touch_limit_exceeded"
-    PROFILE_DURATION_EXCEEDED = "profile_duration_exceeded"
-    PROFILE_INTERVAL_OUT_OF_RANGE = "profile_interval_out_of_range"
     VERSION_DISABLED = "version_disabled"
-    LEGACY_PUBLISH_REVIEW_REQUIRED = "legacy_publish_review_required"
     EXPECTED_TOUCHES_CAPPED = "expected_touches_capped"
     WORKSPACE_MISMATCH = "workspace_mismatch"
     VERSION_NOT_IN_TRACK = "version_not_in_track"
@@ -105,7 +110,6 @@ def validate_paused_search_track(
     _validate_track_metadata(track, findings)
     _validate_version(version, steps, findings, for_publish=for_publish)
     _validate_steps(version, steps, findings)
-    _validate_profiles(version, steps, findings)
     if templates is not None:
         _validate_templates(version, steps, templates, findings)
     configured_touches = sum(step.max_occurrences for step in steps)
@@ -163,13 +167,11 @@ def _validate_version(
 ) -> None:
     if not version.allowed_channels:
         _error(findings, PausedSearchValidationCode.NO_ALLOWED_CHANNELS, "allowed_channels")
-    if not version.default_for_reason_codes:
-        _error(findings, PausedSearchValidationCode.NO_REASON_MAPPING, "default_for_reason_codes")
-    elif len(version.default_for_reason_codes) != len(set(version.default_for_reason_codes)):
+    if not 30 <= len(version.selection_guidance.strip()) <= 1000:
         _error(
             findings,
-            PausedSearchValidationCode.DUPLICATE_REASON_MAPPING,
-            "default_for_reason_codes",
+            PausedSearchValidationCode.INVALID_SELECTION_GUIDANCE,
+            "selection_guidance",
         )
     if version.maintenance_interval_days <= 0:
         _error(
@@ -191,19 +193,6 @@ def _validate_version(
         _error(findings, PausedSearchValidationCode.NO_STEPS, "steps")
     if for_publish and not version.enabled:
         _error(findings, PausedSearchValidationCode.VERSION_DISABLED, "enabled")
-    if version.requires_review_before_publish:
-        severity = (
-            PausedSearchValidationSeverity.ERROR
-            if for_publish
-            else PausedSearchValidationSeverity.WARNING
-        )
-        _add(
-            findings,
-            PausedSearchValidationCode.LEGACY_PUBLISH_REVIEW_REQUIRED,
-            severity,
-            "requires_review_before_publish",
-            "legacy draft must be resaved under the current publish contract",
-        )
 
 
 def _validate_steps(
@@ -243,41 +232,6 @@ def _validate_steps(
                 PausedSearchValidationCode.INVALID_RECURRING_INTERVAL,
                 f"{field}.interval_days",
             )
-
-
-def _validate_profiles(
-    version: PausedSearchTrackVersion,
-    steps: tuple[PausedSearchTrackStep, ...],
-    findings: list[PausedSearchValidationFinding],
-) -> None:
-    for reason_code in dict.fromkeys(version.default_for_reason_codes):
-        profile = capability_profile_for_reason(reason_code)
-        if profile is None:
-            continue
-        if version.max_total_touches > profile.max_total_touches:
-            _error(
-                findings,
-                PausedSearchValidationCode.PROFILE_TOUCH_LIMIT_EXCEEDED,
-                "max_total_touches",
-            )
-        if version.max_duration_days > profile.max_duration_days:
-            _error(
-                findings,
-                PausedSearchValidationCode.PROFILE_DURATION_EXCEEDED,
-                "max_duration_days",
-            )
-        for index, step in enumerate(steps):
-            interval = step.interval_days
-            if interval is not None and not (
-                profile.min_recurring_interval_days
-                <= interval
-                <= profile.max_recurring_interval_days
-            ):
-                _error(
-                    findings,
-                    PausedSearchValidationCode.PROFILE_INTERVAL_OUT_OF_RANGE,
-                    f"steps[{index}].interval_days",
-                )
 
 
 def _validate_templates(
@@ -362,11 +316,7 @@ def _validate_templates(
                 field,
                 "template contains variables outside the approved renderer schema",
             )
-        required_tags: set[str] = set()
-        for reason_code in version.default_for_reason_codes:
-            profile = capability_profile_for_reason(reason_code)
-            if profile is not None:
-                required_tags.update(profile.required_safety_tags)
+        required_tags = UNIVERSAL_PAUSED_SEARCH_SAFETY_TAGS
         missing_tags = required_tags.difference(template.permitted_use_tags)
         if missing_tags:
             _add(

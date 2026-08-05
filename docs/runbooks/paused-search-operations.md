@@ -12,7 +12,7 @@ provider status and the occurrence idempotency key.
 - **Expired**: occurrences past the permitted execution window.
 - **Failed**: provider or policy execution failures that reached a terminal failed state.
 - **Uncertain**: provider acceptance is unknown; reconcile before retrying.
-- **Terminal**: sent, skipped, cancelled, or migrated-legacy occurrences.
+- **Terminal**: sent, skipped, cancelled, or completed occurrences.
 - **Fallback**: occurrences sent through an alternate configured channel.
 
 ## Stale timers or due work not moving
@@ -22,8 +22,8 @@ provider status and the occurrence idempotency key.
 2. Check Temporal worker health and the signal/outbox queue for pending or failed entries.
 3. Check the lead's current consent, suppression, ownership, quiet-hours, and recent
    human-activity facts. Do not manually send around a failed pre-send check.
-4. If timing or the track is wrong, use the existing timing override, migration, or
-   skip-next-touch action. These actions cancel stale open occurrences and preserve history.
+4. If timing or the track is wrong, use the supported timing or skip-next-touch action. These
+   actions cancel stale open occurrences and preserve history.
 5. If the workflow is no longer intended to continue, terminalize it instead of deleting
    the occurrence.
 
@@ -41,8 +41,8 @@ provider status and the occurrence idempotency key.
 
 1. Review the latest inbound message, lead facts, track version, authored message, and
    review reason.
-2. Choose an explicit review action: approve, edit the immutable message version, migrate,
-   skip, terminalize, or resolve to a human-owned state.
+2. Choose an explicit review action: approve, edit the immutable message version, skip,
+   terminalize, or resolve to a human-owned state.
 3. Use a reason on every action. Do not edit a sent message or mutate historical occurrence
    state.
 4. If ownership or human activity changed, pause or hand off rather than resuming AI.
@@ -57,12 +57,12 @@ provider status and the occurrence idempotency key.
 - Verify the configured fallback channel has consent and a valid destination before relying
   on fallback.
 
-## Manual migration and resumption
+## Manual track selection and resumption
 
-1. Confirm the target track version is published, enabled, and compatible with the lead's
-   channel permissions and reason mapping.
-2. Migrate through the lead control route. Do not update workflow or occurrence rows directly.
-3. For resume, re-run the current eligibility response immediately before the action. A
+1. Confirm the selected track version is published, enabled, active, and compatible with the
+   lead's channel permissions.
+2. Select the track through the lead control route. Do not update workflow or occurrence rows directly.
+3. For resume, re-run the current eligibility checks immediately before the action. A
    recent human activity signal or another active paused-search workflow blocks the action.
 4. Resolve the human owner and obtain explicit permission. Assigned agents may act only on
    their own leads; managers and brokerage admins may act within their workspace scope.

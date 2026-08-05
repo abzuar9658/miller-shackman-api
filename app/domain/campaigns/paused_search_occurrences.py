@@ -21,7 +21,6 @@ class RecurringOccurrenceStatus(StrEnum):
     EXPIRED = "expired"
     FAILED = "failed"
     UNCERTAIN = "uncertain"
-    MIGRATED_LEGACY = "migrated_legacy"
 
 
 class RecurringOccurrenceOutcome(StrEnum):
@@ -32,9 +31,6 @@ class RecurringOccurrenceOutcome(StrEnum):
     CANCEL = "cancel"
     TERMINALIZE = "terminalize"
     EXPIRED = "expired"
-    # Kept for read compatibility with occurrences created by the first
-    # recurring implementation before the canonical outcome contract.
-    SCHEDULED = "scheduled"
     OCCURRENCE_LIMIT_REACHED = "occurrence_limit_reached"
     DURATION_EXPIRED = "duration_expired"
 
@@ -70,24 +66,9 @@ def occurrence_idempotency_key(
     track_version_id: PausedSearchTrackVersionId,
     step_id: UUID,
     occurrence_number: int,
-    channel: str | None = None,
+    channel: str,
     fallback: bool = False,
-    scheduled_for: datetime | None = None,
 ) -> str:
-    if channel is None:
-        if scheduled_for is None:
-            raise ValueError("channel is required for new occurrence idempotency keys")
-        # Read compatibility for rows created before the canonical key contract.
-        return ":".join(
-            (
-                str(workflow_id),
-                str(track_version_id),
-                str(step_id),
-                str(occurrence_number),
-                scheduled_for.isoformat(),
-            )
-        )
-
     parts = [
         str(workflow_id),
         str(track_version_id),

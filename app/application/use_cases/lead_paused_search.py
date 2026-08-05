@@ -8,7 +8,7 @@ from app.application.ports.repositories import (
     LeadRepository,
     LeadWorkflowRepository,
     PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
     TemporalSignalOutboxRepository,
 )
 from app.application.services.lead_assignment import is_actor_assigned_to_lead
@@ -18,10 +18,10 @@ from app.application.services.lead_nurture_rescheduling import (
 from app.application.services.paused_search_track_assignment import (
     synchronize_paused_search_track_assignment,
 )
-from app.application.services.paused_search_track_pinning import (
-    pin_published_paused_search_track_on_latest_workflow,
+from app.domain.campaigns import (
+    PausedSearchTrackAssignmentSource,
+    PausedSearchTrackCatalogEntry,
 )
-from app.domain.campaigns import PausedSearchTrackAssignmentSource
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.identity import (
     AuthenticatedActor,
@@ -34,7 +34,6 @@ from app.domain.leads import (
     LeadPausedSearchHistoryEntry,
     LeadPausedSearchProfile,
     PausedSearchAction,
-    PausedSearchReasonCode,
     PausedSearchSource,
     lead_paused_search_profile,
 )
@@ -51,6 +50,9 @@ class LeadPausedSearchActionStatus(StrEnum):
 class LeadPausedSearchActionReasonCode(StrEnum):
     PERMISSION_DENIED = "permission_denied"
     LEAD_NOT_FOUND = "lead_not_found"
+    TRACK_REQUIRED = "track_required"
+    TRACK_UNAVAILABLE = "track_unavailable"
+    TRACK_AMBIGUOUS = "track_ambiguous"
 
 
 @dataclass(frozen=True)
@@ -68,15 +70,15 @@ async def update_lead_paused_search(
     workspace_id: WorkspaceId,
     lead_id: LeadId,
     active: bool,
-    reason_code: PausedSearchReasonCode | None,
+    selected_track_key: str | None,
     reason_note: str | None,
     reengagement_not_before: datetime | None,
     reengagement_window_label: str | None,
     lead_repository: LeadRepository,
     paused_search_history_repository: LeadPausedSearchHistoryRepository,
     lead_workflow_repository: LeadWorkflowRepository,
-    paused_search_track_repository: PausedSearchTrackMappingRepository,
-    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
+    paused_search_track_repository: PausedSearchTrackRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     now: datetime,
 ) -> LeadPausedSearchActionResult:
@@ -93,11 +95,41 @@ async def update_lead_paused_search(
             reasons=(LeadPausedSearchActionReasonCode.PERMISSION_DENIED,),
         )
 
+    selected_track: PausedSearchTrackCatalogEntry | None = None
+    if active:
+        normalized_track_key = _normalized_optional_text(selected_track_key)
+        if normalized_track_key is None:
+            return LeadPausedSearchActionResult(
+                status=LeadPausedSearchActionStatus.REJECTED,
+                lead_id=lead_id,
+                reasons=(LeadPausedSearchActionReasonCode.TRACK_REQUIRED,),
+            )
+        catalog = await paused_search_track_repository.list_active_catalog(workspace_id)
+        matches = tuple(entry for entry in catalog if entry.track_key == normalized_track_key)
+        if not matches:
+            return LeadPausedSearchActionResult(
+                status=LeadPausedSearchActionStatus.REJECTED,
+                lead_id=lead_id,
+                reasons=(LeadPausedSearchActionReasonCode.TRACK_UNAVAILABLE,),
+            )
+        if len(matches) != 1:
+            return LeadPausedSearchActionResult(
+                status=LeadPausedSearchActionStatus.REJECTED,
+                lead_id=lead_id,
+                reasons=(LeadPausedSearchActionReasonCode.TRACK_AMBIGUOUS,),
+            )
+        selected_track = matches[0]
+
+    if active:
+        assert selected_track is not None
     previous_profile = lead_paused_search_profile(lead)
     current_profile = (
         LeadPausedSearchProfile(
             paused_search_active=True,
-            pause_reason_code=reason_code,
+            paused_search_track_key=selected_track.track_key if selected_track else None,
+            paused_search_track_version_id=(
+                selected_track.track_version_id if selected_track else None
+            ),
             pause_reason_note=_normalized_optional_text(reason_note),
             reengagement_not_before=reengagement_not_before,
             reengagement_window_label=_normalized_optional_text(reengagement_window_label),
@@ -114,10 +146,10 @@ async def update_lead_paused_search(
         await _synchronize_track_assignment(
             workspace_id=workspace_id,
             lead_id=lead_id,
-            reason_code=(
-                current_profile.pause_reason_code if current_profile is not None else None
-            ),
             clear=current_profile is None,
+            target_track_version_id=(
+                current_profile.paused_search_track_version_id if current_profile else None
+            ),
             actor_user_id=actor.user_id,
             lead_workflow_repository=lead_workflow_repository,
             paused_search_track_repository=paused_search_track_repository,
@@ -133,7 +165,12 @@ async def update_lead_paused_search(
     updated_lead = replace(
         lead,
         paused_search_active=current_profile.paused_search_active if current_profile else False,
-        pause_reason_code=current_profile.pause_reason_code if current_profile else None,
+        paused_search_track_key=(
+            current_profile.paused_search_track_key if current_profile else None
+        ),
+        paused_search_track_version_id=(
+            current_profile.paused_search_track_version_id if current_profile else None
+        ),
         pause_reason_note=current_profile.pause_reason_note if current_profile else None,
         reengagement_not_before=(
             current_profile.reengagement_not_before if current_profile else None
@@ -157,8 +194,10 @@ async def update_lead_paused_search(
     await _synchronize_track_assignment(
         workspace_id=workspace_id,
         lead_id=lead_id,
-        reason_code=(saved_profile.pause_reason_code if saved_profile is not None else None),
         clear=saved_profile is None,
+        target_track_version_id=(
+            saved_profile.paused_search_track_version_id if saved_profile else None
+        ),
         actor_user_id=actor.user_id,
         lead_workflow_repository=lead_workflow_repository,
         paused_search_track_repository=paused_search_track_repository,
@@ -221,35 +260,25 @@ async def _synchronize_track_assignment(
     *,
     workspace_id: WorkspaceId,
     lead_id: LeadId,
-    reason_code: PausedSearchReasonCode | None,
     clear: bool,
+    target_track_version_id: UUID | None,
     actor_user_id: UUID,
     lead_workflow_repository: LeadWorkflowRepository,
-    paused_search_track_repository: PausedSearchTrackMappingRepository,
-    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
+    paused_search_track_repository: PausedSearchTrackRepository,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository,
     now: datetime,
 ) -> None:
-    if paused_search_track_assignment_repository is not None:
-        await synchronize_paused_search_track_assignment(
-            workspace_id=workspace_id,
-            lead_id=lead_id,
-            reason_code=reason_code,
-            clear=clear,
-            actor_user_id=actor_user_id,
-            source=PausedSearchTrackAssignmentSource.REASON_MAPPING,
-            assignment_repository=paused_search_track_assignment_repository,
-            track_mapping_repository=paused_search_track_repository,
-            lead_workflow_repository=lead_workflow_repository,
-            now=now,
-        )
-        return
-    await pin_published_paused_search_track_on_latest_workflow(
+    await synchronize_paused_search_track_assignment(
         workspace_id=workspace_id,
         lead_id=lead_id,
-        pause_reason_code=reason_code,
+        clear=clear,
+        actor_user_id=actor_user_id,
+        source=PausedSearchTrackAssignmentSource.OPERATOR,
+        assignment_repository=paused_search_track_assignment_repository,
+        track_repository=paused_search_track_repository,
         lead_workflow_repository=lead_workflow_repository,
-        paused_search_track_repository=paused_search_track_repository,
         now=now,
+        target_track_version_id=target_track_version_id,
     )
 
 

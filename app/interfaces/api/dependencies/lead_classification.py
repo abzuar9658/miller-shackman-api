@@ -13,7 +13,7 @@ from app.application.ports.repositories import (
     LeadRoutingReviewRepository,
     LeadWorkflowRepository,
     PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
     TemporalSignalOutboxRepository,
     WorkspaceLLMConfigRepository,
 )
@@ -59,7 +59,7 @@ class LeadClassificationActionBundle:
     crm_conversation_event_repository: CrmConversationEventRepository
     workspace_llm_config_repository: WorkspaceLLMConfigRepository
     lead_workflow_repository: LeadWorkflowRepository
-    paused_search_track_repository: PausedSearchTrackMappingRepository
+    paused_search_track_repository: PausedSearchTrackRepository
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository
     llm_client: LLMClient
     default_openrouter_model: str

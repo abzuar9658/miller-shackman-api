@@ -158,11 +158,6 @@ class PausedSearchReviewResolvedSignal(UnblockWorkflowSignal):
 
 
 @dataclass(frozen=True)
-class PausedSearchMigrationRequestedSignal(RescheduleWorkflowSignal):
-    target_track_version_id: UUID | None = None
-
-
-@dataclass(frozen=True)
 class PausedSearchOccurrenceCancelledSignal(RescheduleWorkflowSignal):
     occurrence_id: UUID | None = None
 
@@ -365,23 +360,6 @@ class LeadNurtureWorkflow:
     @workflow.signal(name="paused-search-review-resolved")
     def paused_search_review_resolved(self, signal: PausedSearchReviewResolvedSignal) -> None:
         self.blocked_review_completed(signal)
-
-    @workflow.signal(name="paused-search-migration-requested")
-    def paused_search_migration_requested(
-        self,
-        signal: PausedSearchMigrationRequestedSignal,
-    ) -> None:
-        self._send_blocked = True
-        self._reschedule_requested = True
-        if self._snapshot is not None:
-            self._snapshot = replace(
-                self._snapshot,
-                last_signal="paused_search_migration_requested",
-                last_activity_status="blocked",
-                skip_reason=signal.reason,
-                paused_search_track_version_id=signal.target_track_version_id
-                or self._snapshot.paused_search_track_version_id,
-            )
 
     @workflow.signal(name="paused-search-occurrence-cancelled")
     def paused_search_occurrence_cancelled(

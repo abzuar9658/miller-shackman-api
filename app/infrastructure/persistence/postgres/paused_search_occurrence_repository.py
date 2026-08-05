@@ -281,7 +281,6 @@ _TERMINAL_STATUSES = frozenset(
         RecurringOccurrenceStatus.CANCELLED,
         RecurringOccurrenceStatus.EXPIRED,
         RecurringOccurrenceStatus.FAILED,
-        RecurringOccurrenceStatus.MIGRATED_LEGACY,
     }
 )
 

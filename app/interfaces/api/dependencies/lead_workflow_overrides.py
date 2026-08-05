@@ -11,7 +11,7 @@ from app.application.ports.repositories import (
     LeadWorkflowRepository,
     PausedSearchOccurrenceRepository,
     PausedSearchTrackAssignmentRepository,
-    PausedSearchTrackMappingRepository,
+    PausedSearchTrackRepository,
     TemporalSignalOutboxRepository,
     WorkspaceRepository,
 )
@@ -48,11 +48,11 @@ class LeadWorkflowOverrideActionBundle:
     paused_search_history_repository: LeadPausedSearchHistoryRepository
     lead_workflow_repository: LeadWorkflowRepository
     lead_workflow_override_audit_repository: LeadWorkflowOverrideAuditLogRepository
-    paused_search_track_repository: PausedSearchTrackMappingRepository
+    paused_search_track_repository: PausedSearchTrackRepository
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository
     workspace_repository: WorkspaceRepository
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None
-    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None
 
 
 async def get_lead_workflow_override_action_bundle(

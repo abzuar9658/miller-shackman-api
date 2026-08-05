@@ -100,9 +100,6 @@ from app.interfaces.api.schemas.workspace import WorkspaceOutboundDraftingPrevie
 
 router = APIRouter(tags=["campaigns"])
 
-_ALLOWED_DORMANT_SELECTOR_ROLES: frozenset[WorkspaceMembershipRole] = frozenset(
-    {WorkspaceMembershipRole.BROKERAGE_ADMIN, WorkspaceMembershipRole.MANAGER},
-)
 _WORKSPACE_NURTURE_POLICY_NAME = "Workspace Nurture Settings"
 
 
@@ -272,9 +269,7 @@ async def preview_nurture_settings_route(
         template_profile=(preview_step.template_profile if preview_step is not None else None),
         template_channel=(preview_step.channel if preview_step is not None else None),
         campaign_goal=(
-            preview_step.message_goal
-            if preview_step is not None
-            else "Preview dormant follow-up."
+            preview_step.message_goal if preview_step is not None else "Preview dormant follow-up."
         ),
     )
     if result.status == OutboundDraftingPreviewStatus.REJECTED:
@@ -598,7 +593,7 @@ async def run_dormant_selector_route(
     if not permission.allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only brokerage admins and managers may run the dormant selector.",
+            detail="You do not have permission to run the dormant selector.",
         )
 
     result = await run_dormant_selector_batch(
@@ -751,6 +746,7 @@ async def record_preflight_veto_route(
 
 _ALLOWED_PREFLIGHT_VETO_ROLES: frozenset[WorkspaceMembershipRole] = frozenset(
     {
+        WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN,
         WorkspaceMembershipRole.ASSIGNED_AGENT,
         WorkspaceMembershipRole.MANAGER,
         WorkspaceMembershipRole.BROKERAGE_ADMIN,
@@ -790,7 +786,10 @@ async def _resolve_assigned_agent_veto_actor_id(
 
 
 def _veto_role_from_membership(role: WorkspaceMembershipRole) -> VetoActorRole:
-    if role == WorkspaceMembershipRole.BROKERAGE_ADMIN:
+    if role in {
+        WorkspaceMembershipRole.PLATFORM_SUPER_ADMIN,
+        WorkspaceMembershipRole.BROKERAGE_ADMIN,
+    }:
         return VetoActorRole.BROKERAGE_ADMIN
     if role == WorkspaceMembershipRole.MANAGER:
         return VetoActorRole.MANAGER

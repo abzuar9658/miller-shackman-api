@@ -22,7 +22,6 @@ from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrackAdminAuditAction,
     PausedSearchTrackAdminAuditLog,
     PausedSearchTrackAdminView,
-    PausedSearchTrackFamily,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
@@ -37,7 +36,6 @@ from app.domain.common.ids import PausedSearchTrackId, PausedSearchTrackVersionI
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
 from app.domain.identity import AuthenticatedActor, PermissionCapability, evaluate_permission
-from app.domain.leads import PausedSearchReasonCode
 from app.domain.outbound_drafting import DormantStepTemplateProfile
 
 
@@ -111,15 +109,13 @@ class PausedSearchTrackStepInput:
 
 @dataclass(frozen=True)
 class PausedSearchTrackConfigInput:
-    track_family: PausedSearchTrackFamily
+    selection_guidance: str
     enabled: bool
     allowed_channels: tuple[ContactChannel, ...]
-    default_for_reason_codes: tuple[PausedSearchReasonCode, ...]
     fallback_timing_policy: PausedSearchFallbackTimingPolicy
     maintenance_interval_days: int
     reactivation_window_days: int
     max_total_touches: int
-    requires_review_before_publish: bool
     steps: tuple[PausedSearchTrackStepInput, ...]
     default_pause_duration_days: int = 60
     max_duration_days: int = 365
@@ -515,15 +511,7 @@ async def publish_paused_search_track_version(
             updated_at=now,
         ),
     )
-    mappings = await repository.replace_reason_mappings(
-        workspace_id=workspace_id,
-        track_id=track_id,
-        track_version_id=track_version_id,
-        reason_codes=published_version.default_for_reason_codes,
-        actor_user_id=actor.user_id,
-        now=now,
-    )
-    view = PausedSearchTrackAdminView(active_track, published_version, steps, mappings)
+    view = PausedSearchTrackAdminView(active_track, published_version, steps)
     preview_evidence = paused_search_preview_evidence(
         track,
         version,
@@ -584,7 +572,6 @@ async def retire_paused_search_track(
         )
 
     await repository.retire_published_versions(workspace_id, track_id, except_version_id=None)
-    await repository.clear_reason_mappings_for_track(workspace_id, track_id)
     retired_track = await repository.save_track(
         replace(
             track, status=PausedSearchTrackStatus.RETIRED, active_version_id=None, updated_at=now
@@ -734,8 +721,34 @@ async def restore_retired_paused_search_track(
             reasons=(PausedSearchTrackAdminReasonCode.VERSION_NOT_FOUND,),
         )
 
+    next_version_number = (
+        await repository.get_latest_version_number(workspace_id, track_id)
+    ) + 1
     restored_version = await repository.save_version(
-        replace(version, status=CampaignVersionStatus.DRAFT, published_at=None),
+        replace(
+            version,
+            track_version_id=uuid4(),
+            version_number=next_version_number,
+            status=CampaignVersionStatus.DRAFT,
+            published_at=None,
+            created_by_user_id=actor.user_id,
+            created_at=now,
+        ),
+    )
+    previous_steps = await repository.get_steps(workspace_id, version.track_version_id)
+    restored_steps = tuple(
+        replace(
+            step,
+            step_id=uuid4(),
+            track_version_id=restored_version.track_version_id,
+            created_at=now,
+        )
+        for step in previous_steps
+    )
+    await repository.replace_steps(
+        workspace_id,
+        restored_version.track_version_id,
+        restored_steps,
     )
     restored_track = await repository.save_track(
         replace(
@@ -840,15 +853,13 @@ def _build_version(
         track_id=track_id,
         version_number=version_number,
         status=CampaignVersionStatus.DRAFT,
-        track_family=config.track_family,
+        selection_guidance=config.selection_guidance.strip(),
         enabled=config.enabled,
         allowed_channels=tuple(config.allowed_channels),
-        default_for_reason_codes=tuple(config.default_for_reason_codes),
         fallback_timing_policy=config.fallback_timing_policy,
         maintenance_interval_days=config.maintenance_interval_days,
         reactivation_window_days=config.reactivation_window_days,
         max_total_touches=config.max_total_touches,
-        requires_review_before_publish=config.requires_review_before_publish,
         default_pause_duration_days=config.default_pause_duration_days,
         max_duration_days=config.max_duration_days,
         terminal_behavior=config.terminal_behavior,
@@ -863,15 +874,13 @@ def _replace_version_config(
 ) -> PausedSearchTrackVersion:
     return replace(
         version,
-        track_family=config.track_family,
+        selection_guidance=config.selection_guidance.strip(),
         enabled=config.enabled,
         allowed_channels=tuple(config.allowed_channels),
-        default_for_reason_codes=tuple(config.default_for_reason_codes),
         fallback_timing_policy=config.fallback_timing_policy,
         maintenance_interval_days=config.maintenance_interval_days,
         reactivation_window_days=config.reactivation_window_days,
         max_total_touches=config.max_total_touches,
-        requires_review_before_publish=config.requires_review_before_publish,
         default_pause_duration_days=config.default_pause_duration_days,
         max_duration_days=config.max_duration_days,
         terminal_behavior=config.terminal_behavior,
@@ -953,12 +962,8 @@ async def _view_for_track(
     if version is None:
         return None
     steps = await repository.get_steps(track.workspace_id, version.track_version_id)
-    mappings = await repository.list_reason_mappings_for_version(
-        track.workspace_id,
-        version.track_version_id,
-    )
     assigned_leads = await repository.list_assigned_leads(track.workspace_id, track.track_id)
-    return PausedSearchTrackAdminView(track, version, steps, mappings, assigned_leads)
+    return PausedSearchTrackAdminView(track, version, steps, assigned_leads)
 
 
 async def _append_audit(
@@ -1014,11 +1019,8 @@ def _details_for_view(view: PausedSearchTrackAdminView) -> dict[str, object]:
         "track_status": view.track.status.value,
         "version_number": view.version.version_number,
         "version_status": view.version.status.value,
-        "track_family": view.version.track_family.value,
+        "selection_guidance": view.version.selection_guidance,
         "enabled": view.version.enabled,
         "allowed_channels": [channel.value for channel in view.version.allowed_channels],
-        "default_for_reason_codes": [
-            reason_code.value for reason_code in view.version.default_for_reason_codes
-        ],
         "step_count": len(view.steps),
     }
