@@ -24,6 +24,7 @@ from app.application.ports.repositories import (
     LeadWorkflowRepository,
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
+    PausedSearchAgentReminderRepository,
     PausedSearchOccurrenceRepository,
     PausedSearchReviewRepository,
     PausedSearchTrackRepository,
@@ -88,7 +89,15 @@ from app.domain.campaigns.paused_search_occurrences import (
     RecurringOccurrence,
     RecurringOccurrenceStatus,
 )
-from app.domain.campaigns.paused_search_tracks import PausedSearchTrackStep
+from app.domain.campaigns.paused_search_reminders import (
+    PausedSearchAgentReminder,
+    PausedSearchReminderStatus,
+)
+from app.domain.campaigns.paused_search_tracks import (
+    PausedSearchStepAction,
+    PausedSearchTrackStep,
+    effective_paused_search_step_action,
+)
 from app.domain.campaigns.pre_send import PreSendPolicy
 from app.domain.campaigns.rejected_draft_review import (
     RejectedDraftReview,
@@ -272,6 +281,7 @@ async def execute_campaign_cadence_step(
     template_repository: TemplateRepository | None = None,
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
     paused_search_review_repository: PausedSearchReviewRepository | None = None,
+    paused_search_reminder_repository: PausedSearchAgentReminderRepository | None = None,
     workspace_repository: WorkspaceRepository,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository,
     workspace_llm_config_repository: WorkspaceLLMConfigRepository | None = None,
@@ -452,6 +462,81 @@ async def execute_campaign_cadence_step(
             skip_reason=f"Workflow is not sendable from state {workflow.state.value}.",
         )
 
+    if is_paused_search_step and paused_search_step is not None:
+        step_action = effective_paused_search_step_action(paused_search_step)
+        if step_action is PausedSearchStepAction.SKIP:
+            if (
+                paused_search_occurrence is not None
+                and paused_search_occurrence_repository is not None
+            ):
+                await paused_search_occurrence_repository.update_status(
+                    workspace_id=workspace_id,
+                    occurrence_id=paused_search_occurrence.occurrence_id,
+                    status=RecurringOccurrenceStatus.SKIPPED.value,
+                    now=now,
+                )
+            return CadenceStepExecutionResult(
+                status=CadenceStepExecutionStatus.SKIPPED,
+                workflow=workflow,
+                cadence_step_id=step.cadence_step_id,
+                occurrence_id=(
+                    paused_search_occurrence.occurrence_id
+                    if paused_search_occurrence is not None
+                    else None
+                ),
+                skip_reason="Paused-search step is configured to skip.",
+                has_more_steps=True,
+            )
+        if step_action is PausedSearchStepAction.REMINDER:
+            if paused_search_occurrence is None:
+                return CadenceStepExecutionResult(
+                    status=CadenceStepExecutionStatus.NO_CADENCE_STEP,
+                    workflow=workflow,
+                    cadence_step_id=step.cadence_step_id,
+                    skip_reason="Paused-search reminder requires a planned occurrence.",
+                )
+            if paused_search_reminder_repository is None:
+                return CadenceStepExecutionResult(
+                    status=CadenceStepExecutionStatus.REVIEW,
+                    workflow=workflow,
+                    cadence_step_id=step.cadence_step_id,
+                    occurrence_id=paused_search_occurrence.occurrence_id,
+                    skip_reason="Paused-search reminder dependencies are unavailable.",
+                )
+            reminder = await paused_search_reminder_repository.create_or_get(
+                PausedSearchAgentReminder(
+                    reminder_id=uuid4(),
+                    workspace_id=workspace_id,
+                    lead_id=lead_id,
+                    workflow_id=workflow.workflow_id,
+                    occurrence_id=paused_search_occurrence.occurrence_id,
+                    assigned_user_id=lead.effective_owner_user_id if lead is not None else None,
+                    due_at=paused_search_occurrence.due_at,
+                    status=PausedSearchReminderStatus.PENDING,
+                    title="Paused-search follow-up reminder",
+                    body=paused_search_step.message_goal,
+                    idempotency_key=(
+                        f"paused-search-reminder:{paused_search_occurrence.occurrence_id}"
+                    ),
+                    created_at=now,
+                )
+            )
+            if paused_search_occurrence_repository is not None:
+                await paused_search_occurrence_repository.update_status(
+                    workspace_id=workspace_id,
+                    occurrence_id=paused_search_occurrence.occurrence_id,
+                    status=RecurringOccurrenceStatus.REMINDER_CREATED.value,
+                    now=now,
+                )
+            return CadenceStepExecutionResult(
+                status=CadenceStepExecutionStatus.SKIPPED,
+                workflow=workflow,
+                cadence_step_id=step.cadence_step_id,
+                occurrence_id=reminder.occurrence_id,
+                skip_reason="Paused-search agent reminder created instead of sending.",
+                has_more_steps=True,
+            )
+
     if lead is not None and not lead_has_destination_for_channel(lead, step.channel):
         return await _handle_missing_step_destination(
             workspace_id=workspace_id,
@@ -577,6 +662,7 @@ async def execute_campaign_cadence_step(
                 cadence_step_id=step.cadence_step_id,
                 skip_reason=active_outcome.skip_reason,
             )
+        workflow = active_outcome.workflow
 
     enabled_channels = (step.channel,)
 
@@ -591,6 +677,11 @@ async def execute_campaign_cadence_step(
         template_key=step.template_key,
         template_version=template_version,
         scheduled_for=scheduled_for,
+        message_version=(
+            paused_search_occurrence.occurrence_number
+            if paused_search_occurrence is not None
+            else 1
+        ),
         pre_send_policy=pre_send_policy,
         journey_kind=journey_kind,
         drafting_config=drafting_config,
@@ -659,7 +750,8 @@ async def execute_campaign_cadence_step(
     if (
         is_paused_search_step
         and paused_search_step is not None
-        and paused_search_step.review_required
+        and effective_paused_search_step_action(paused_search_step)
+        is PausedSearchStepAction.REVIEW
         and paused_search_occurrence is not None
     ):
         if (

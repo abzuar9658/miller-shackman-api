@@ -13,6 +13,7 @@ from app.application.ports.repositories import (
     LeadWorkflowOverrideAuditLogRepository,
     LeadWorkflowRepository,
     OutboundMessageRepository,
+    PausedSearchLegacyInventoryRepository,
     PausedSearchOccurrenceOperationsRepository,
     PausedSearchReviewRepository,
     PausedSearchTrackAdminAuditLogRepository,
@@ -81,6 +82,7 @@ class PausedSearchTrackServiceBundle:
 @dataclass
 class PausedSearchTrackReadBundle:
     track_repository: PausedSearchTrackAdminRepository
+    legacy_inventory_repository: PausedSearchLegacyInventoryRepository | None = None
 
 
 @dataclass
@@ -123,6 +125,7 @@ async def get_paused_search_track_read_bundle(
 ) -> PausedSearchTrackReadBundle:
     return PausedSearchTrackReadBundle(
         track_repository=PostgresPausedSearchTrackAdminRepository(session),
+        legacy_inventory_repository=PostgresPausedSearchTrackAdminRepository(session),
     )
 
 

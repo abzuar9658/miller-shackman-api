@@ -36,6 +36,7 @@ from app.application.ports.preflight_digest import (
     PreflightDigestRecord,
     PreflightVetoRecord,
 )
+from app.application.ports.temporal import TemporalWorkflowExecutionMode
 from app.application.services.campaign_enrollment_starter import start_single_campaign_enrollment
 from app.application.services.llm.outbound_message_drafting import (
     outbound_message_draft_prompt_version_for_revision,
@@ -400,6 +401,24 @@ class DemoTemporalWorkflowStarter:
         lead_id: LeadId,
         campaign_version_id: UUID,
         temporal_workflow_id: str,
+        workflow_id: UUID | None = None,
+        execution_mode: TemporalWorkflowExecutionMode = (
+            TemporalWorkflowExecutionMode.STANDARD_CADENCE
+        ),
+        paused_search_track_version_id: UUID | None = None,
+    ) -> None:
+        return None
+
+    async def configure_paused_search_workflow(
+        self,
+        *,
+        temporal_workflow_id: str,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        workflow_id: UUID,
+        paused_search_track_version_id: UUID,
+        occurred_at: datetime,
+        reason: str,
     ) -> None:
         return None
 

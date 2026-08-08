@@ -6,9 +6,12 @@ from uuid import UUID
 from fastapi.testclient import TestClient
 
 from app.application.ports.crm import CRMClient
+from app.application.ports.temporal import TemporalWorkflowExecutionMode
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchTrack,
+    PausedSearchTrackAssignment,
+    PausedSearchTrackAssignmentSource,
     PausedSearchTrackStatus,
     PausedSearchTrackVersion,
 )
@@ -23,7 +26,7 @@ from app.domain.identity import (
     WorkspaceMembershipStatus,
     WorkspaceStatus,
 )
-from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.leads import CanonicalLeadRecord, CRMProvider, PausedSearchSource
 from app.domain.workspace_automation import WorkspaceOperationalControl
 from app.interfaces.api.dependencies.lead_manual_enrollment import (
     LeadManualEnrollmentBundle,
@@ -128,6 +131,46 @@ def test_manual_start_routes_to_paused_search_before_starting_workflow() -> None
     assert client.starter.calls[0]["campaign_version_id"] == VERSION_ID
 
 
+def test_selected_paused_search_start_bypasses_classifier() -> None:
+    client = _client_for_role(
+        WorkspaceMembershipRole.BROKERAGE_ADMIN,
+        classification_outcome="human_handoff",
+        operator_paused_search=True,
+    )
+
+    response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search/start",
+        json={"campaign_id": str(CAMPAIGN_ID)},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "started"
+    assert response.json()["route"] == "paused_search"
+    assert response.json()["reasons"] == ["operator_selected_paused_search_track"]
+    assert client.starter.calls[0]["campaign_version_id"] == VERSION_ID
+    assert (
+        client.starter.calls[0]["execution_mode"]
+        is TemporalWorkflowExecutionMode.PAUSED_SEARCH_RECURRING
+    )
+    assert client.starter.calls[0]["paused_search_track_version_id"] == UUID(
+        "00000000-0000-0000-0000-000000000013"
+    )
+
+
+def test_selected_paused_search_start_requires_operator_assignment() -> None:
+    client = _client_for_role(WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search/start",
+        json={"campaign_id": str(CAMPAIGN_ID)},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "review_hold"
+    assert response.json()["reasons"] == ["operator_paused_search_assignment_required"]
+    assert client.starter.calls == []
+
+
 def test_manual_start_returns_review_hold_when_classification_needs_review() -> None:
     client = _client_for_role(
         WorkspaceMembershipRole.BROKERAGE_ADMIN,
@@ -222,6 +265,7 @@ def _client_for_role(
     already_enrolled: bool = False,
     classification_outcome: str = "dormant",
     classification_confidence: float = 0.91,
+    operator_paused_search: bool = False,
 ) -> LeadManualEnrollmentTestClient:
     app = create_app()
     lead = CanonicalLeadRecord(
@@ -236,6 +280,17 @@ def _client_for_role(
         has_phone=True,
         has_sms_capable_phone=True,
         mapped_custom_fields={"assigned_agent_user_id": str(assigned_agent_user_id)},
+        paused_search_active=operator_paused_search,
+        paused_search_track_key="waiting-rates" if operator_paused_search else None,
+        paused_search_track_version_id=(
+            UUID("00000000-0000-0000-0000-000000000013")
+            if operator_paused_search
+            else None
+        ),
+        paused_search_source=PausedSearchSource.OPERATOR if operator_paused_search else None,
+        paused_search_recorded_at=NOW if operator_paused_search else None,
+        paused_search_recorded_by_user_id=USER_ID if operator_paused_search else None,
+        paused_search_last_confirmed_at=NOW if operator_paused_search else None,
     )
     campaign_repository = FakeCampaignAdminRepository()
     campaign_repository.campaigns[CAMPAIGN_ID] = CampaignAdminCampaign(
@@ -301,6 +356,25 @@ def _client_for_role(
         )
 
     session = _FakeSession()
+    assignment_repository = FakePausedSearchTrackAssignmentRepository(
+        assignments=(
+            PausedSearchTrackAssignment(
+                assignment_id=UUID("00000000-0000-0000-0000-000000000014"),
+                workspace_id=WORKSPACE_ID,
+                lead_id=LEAD_ID,
+                track_id=UUID("00000000-0000-0000-0000-000000000012"),
+                track_version_id=UUID("00000000-0000-0000-0000-000000000013"),
+                track_key_snapshot="waiting-rates",
+                track_name_snapshot="Waiting for rates",
+                track_version_snapshot=1,
+                source=PausedSearchTrackAssignmentSource.OPERATOR,
+                assigned_by_user_id=USER_ID,
+                assigned_at=NOW,
+            ),
+        )
+        if operator_paused_search
+        else ()
+    )
     bundle = LeadManualEnrollmentBundle(
         session=session,
         lead_repository=lead_repository,
@@ -332,7 +406,7 @@ def _client_for_role(
         ),
         crm_conversation_event_repository=FakeCrmConversationEventRepository(),
         paused_search_track_repository=_track_repository(),
-        paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
+        paused_search_track_assignment_repository=assignment_repository,
         routing_review_repository=FakeLeadRoutingReviewRepository(),
         default_openrouter_model="openai/gpt-4o-mini",
         handoff_repository=FakeHandoffRepository(),

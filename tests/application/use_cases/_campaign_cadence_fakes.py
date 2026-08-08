@@ -11,6 +11,10 @@ from app.domain.campaigns.paused_search_occurrences import (
     RecurringOccurrence,
     RecurringOccurrenceStatus,
 )
+from app.domain.campaigns.paused_search_reminders import (
+    PausedSearchAgentReminder,
+    PausedSearchReminderStatus,
+)
 from app.domain.campaigns.paused_search_reviews import PausedSearchReview
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
 from app.domain.campaigns.start_queue import CampaignStatus
@@ -120,6 +124,7 @@ class FakePausedSearchOccurrenceRepository:
         ):
             return self.occurrence
         return None
+
 
     async def create_or_get(self, occurrence: RecurringOccurrence) -> RecurringOccurrence:
         self.occurrence = self.occurrence or occurrence
@@ -237,6 +242,49 @@ class FakePausedSearchOccurrenceRepository:
         ):
             return None
         return self.occurrence
+
+
+class FakePausedSearchAgentReminderRepository:
+    def __init__(self) -> None:
+        self.reminders: dict[str, PausedSearchAgentReminder] = {}
+
+    async def get_by_idempotency_key(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
+    ) -> PausedSearchAgentReminder | None:
+        reminder = self.reminders.get(idempotency_key)
+        if reminder is None or reminder.workspace_id != workspace_id:
+            return None
+        return reminder
+
+    async def create_or_get(
+        self,
+        reminder: PausedSearchAgentReminder,
+    ) -> PausedSearchAgentReminder:
+        return self.reminders.setdefault(reminder.idempotency_key, reminder)
+
+    async def cancel_open_for_workflow(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        now: datetime,
+    ) -> int:
+        cancelled = 0
+        for key, reminder in tuple(self.reminders.items()):
+            if (
+                reminder.workspace_id == workspace_id
+                and reminder.workflow_id == workflow_id
+                and reminder.status is PausedSearchReminderStatus.PENDING
+            ):
+                self.reminders[key] = replace(
+                    reminder,
+                    status=PausedSearchReminderStatus.CANCELLED,
+                    cancelled_at=now,
+                )
+                cancelled += 1
+        return cancelled
 
 
 class FakePausedSearchReviewRepository:

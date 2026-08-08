@@ -82,10 +82,23 @@ Each new track should start from one of these policies. Presets provide safe sta
 ### 2. Permission-based interim check-ins
 
 - Automation pauses immediately.
-- Interim messages are allowed only when the lead explicitly agreed to periodic contact.
+- Interim messages may be authorized either by explicit lead permission or by the
+  published track configuration selected by a brokerage admin.
 - Messages are limited by a configured interval and touch cap.
 - The lead's requested date remains the reactivation boundary.
 - Any reply, opt-out, human activity, or handoff stops the sequence.
+
+The admin-facing interim-contact policy distinguishes these choices:
+
+- `not_allowed`: no maintenance contact before reactivation.
+- `requires_explicit_lead_permission`: maintenance contact requires the lead's
+  explicit agreement to periodic contact.
+- `allowed_by_published_track`: the published track authorizes its configured
+  maintenance cadence for eligible assigned leads.
+
+The last option authorizes workflow behavior only. It never creates email or SMS
+consent and cannot bypass suppression, A2P, quiet-hours, ownership, handoff, or
+pre-send checks.
 
 ### 3. Agent-managed follow-up
 
@@ -150,7 +163,8 @@ The admin must choose the reply policy for each repeatable track. Supported boun
 For a lead who says, “I am waiting for rates to come down, maybe after six months,” an admin could configure:
 
 - a six-month earliest reactivation boundary
-- monthly low-pressure maintenance messages only when the lead has explicitly agreed to interim contact
+- monthly low-pressure maintenance messages according to the published track's
+  interim-contact policy
 - SMS and email as sequential channels, never simultaneous by default
 - a per-step action such as automatic send, review, optional reminder, or skip
 - a reply policy of continue, restart after a delay, re-anchor to updated timing, review, or end
@@ -158,7 +172,12 @@ For a lead who says, “I am waiting for rates to come down, maybe after six mon
 
 If the lead replies during the sequence and classification still indicates waiting for rates, the system can continue or begin another bounded cycle according to that policy. It must preserve the original or newly stated timing boundary and must not blindly repeat step one. If the lead says rates have improved, requests a person, shows buying interest, opts out, or becomes subject to human activity, the waiting-for-rates track stops and the appropriate handoff or suppression path takes precedence.
 
-The lead's statement about waiting for rates does not by itself grant permission for monthly SMS or email. Existing consent for each channel and the approved interim-contact policy are required. If the required permission is absent, the system must not send; it may remain paused, require review, or create an optional reminder.
+The lead's statement about waiting for rates does not by itself create email or
+SMS consent. Existing consent for each channel and the approved interim-contact
+policy are required. An admin may choose the published-track policy for a bounded
+maintenance cadence; if channel consent or any other safety requirement is absent,
+the system must not send and may remain paused, require review, or create an
+optional reminder.
 
 ## Dashboard experience
 
@@ -262,6 +281,7 @@ The implementation is done only when the actual runtime behavior matches the das
 
 ## Related internal references
 
+- `docs/planning/paused-search-track-configuration-phase-by-phase-implementation-plan.md`
 - `docs/planning/paused-search-03-nurture-tracks.md`
 - `docs/planning/paused-search-04-timing-and-reactivation.md`
 - `docs/planning/paused-search-test-matrix-and-verification-plan.md`

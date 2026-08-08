@@ -1,7 +1,7 @@
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from enum import StrEnum
 from hashlib import sha256
 from uuid import UUID
@@ -16,6 +16,7 @@ from app.domain.campaigns.paused_search_timing import (
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrack,
     PausedSearchTrackStep,
+    PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
 )
 from app.domain.campaigns.paused_search_validation import (
@@ -215,6 +216,12 @@ def _plan_occurrences(
         targeted_workflow = replace(workflow, paused_search_track_step_id=step.step_id)
         previous_due_at: datetime | None = None
         for occurrence_number in range(1, step.max_occurrences + 1):
+            planning_now = _planning_now_for_step(
+                step=step,
+                profile=profile,
+                version=version,
+                now=now,
+            )
             plan = plan_next_paused_search_occurrence(
                 profile=profile,
                 track_version=version,
@@ -222,7 +229,7 @@ def _plan_occurrences(
                 steps=steps,
                 workflow=targeted_workflow,
                 timezone=timezone,
-                now=now,
+                now=planning_now,
                 occurrence_number=occurrence_number,
                 previous_due_at=previous_due_at,
                 quiet_hours_enabled=quiet_hours_enabled,
@@ -248,3 +255,20 @@ def _plan_occurrences(
                 return tuple(items)
             previous_due_at = plan.due_at
     return tuple(items)
+
+
+def _planning_now_for_step(
+    *,
+    step: PausedSearchTrackStep,
+    profile: LeadPausedSearchProfile,
+    version: PausedSearchTrackVersion,
+    now: datetime,
+) -> datetime:
+    if step.phase is not PausedSearchTrackStepPhase.REACTIVATION:
+        return now
+    if profile.reengagement_not_before is None:
+        return now
+    boundary = profile.reengagement_not_before - timedelta(
+        days=version.reactivation_window_days
+    )
+    return max(now, boundary)

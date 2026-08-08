@@ -477,6 +477,22 @@ class StartLeadManualEnrollmentResponse(BaseModel):
     error: str | None = None
 
 
+class StartSelectedPausedSearchTrackRequest(BaseModel):
+    campaign_id: UUID
+
+
+class StartSelectedPausedSearchTrackResponse(BaseModel):
+    status: str
+    campaign_id: UUID | None = None
+    campaign_version_id: UUID | None = None
+    campaign_enrollment_id: UUID | None = None
+    workflow_id: UUID | None = None
+    temporal_workflow_id: str | None = None
+    route: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
 class ResolveLeadReviewHoldRequest(BaseModel):
     resolution: str
     campaign_id: UUID

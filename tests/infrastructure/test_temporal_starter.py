@@ -13,6 +13,7 @@ from app.application.ports.temporal import (
     TemporalWorkflowNotFoundError,
 )
 from app.infrastructure.workflows.temporal.lead_nurture import (
+    ConfigurePausedSearchWorkflowSignal,
     InboundProcessedWorkflowSignal,
     PauseWorkflowSignal,
     RescheduleWorkflowSignal,
@@ -173,6 +174,45 @@ async def test_temporal_workflow_starter_sends_reschedule_signal() -> None:
     assert isinstance(signal_arg, RescheduleWorkflowSignal)
     assert signal_arg.reason == "paused_search_profile_updated"
     assert signal_arg.occurred_at == "2026-07-12T12:15:00+00:00"
+
+
+async def test_temporal_workflow_starter_configures_paused_search_workflow() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeHandle:
+        async def signal(self, signal_method: object, signal_arg: object) -> None:
+            captured["signal_method"] = signal_method
+            captured["signal_arg"] = signal_arg
+
+    class FakeClient:
+        def get_workflow_handle(self, workflow_id: str) -> FakeHandle:
+            captured["workflow_id"] = workflow_id
+            return FakeHandle()
+
+    starter = TemporalClientWorkflowStarter(
+        cast(Client, FakeClient()),
+        task_queue="test-task-queue",
+    )
+    workflow_id = UUID("60000000-0000-0000-0000-000000000010")
+    track_version_id = UUID("60000000-0000-0000-0000-000000000011")
+
+    await starter.configure_paused_search_workflow(
+        temporal_workflow_id="workflow-configure",
+        workspace_id=UUID("60000000-0000-0000-0000-000000000001"),
+        lead_id=UUID("60000000-0000-0000-0000-000000000002"),
+        workflow_id=workflow_id,
+        paused_search_track_version_id=track_version_id,
+        occurred_at=datetime(2026, 7, 12, 12, 20, tzinfo=UTC),
+        reason="operator_selected_paused_search_track",
+    )
+
+    assert captured["workflow_id"] == "workflow-configure"
+    assert captured["signal_method"] == "paused-search-configured"
+    signal_arg = captured["signal_arg"]
+    assert isinstance(signal_arg, ConfigurePausedSearchWorkflowSignal)
+    assert signal_arg.workflow_id == workflow_id
+    assert signal_arg.paused_search_track_version_id == track_version_id
+    assert signal_arg.occurred_at == "2026-07-12T12:20:00+00:00"
 
 
 async def test_temporal_workflow_starter_translates_not_found_signal_errors() -> None:

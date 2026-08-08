@@ -63,6 +63,9 @@ from app.application.use_cases.review_queue_read import (
     ReviewQueueReadStatus,
     list_pending_routing_reviews,
 )
+from app.application.use_cases.start_selected_paused_search_track import (
+    start_selected_paused_search_track,
+)
 from app.application.use_cases.terminalize_paused_search import (
     PausedSearchTerminalizationStatus,
     terminalize_paused_search,
@@ -164,6 +167,8 @@ from app.interfaces.api.schemas.leads import (
     SkipPausedSearchNextTouchResponse,
     StartLeadManualEnrollmentRequest,
     StartLeadManualEnrollmentResponse,
+    StartSelectedPausedSearchTrackRequest,
+    StartSelectedPausedSearchTrackResponse,
     TerminalizePausedSearchRequest,
     TerminalizePausedSearchResponse,
     UpdateLeadPausedSearchRequest,
@@ -389,6 +394,60 @@ async def start_lead_manual_enrollment_route(
         )
     await bundle.session.commit()
     return StartLeadManualEnrollmentResponse(
+        status=result.status.value,
+        campaign_id=result.campaign_id,
+        campaign_version_id=result.campaign_version_id,
+        campaign_enrollment_id=result.campaign_enrollment_id,
+        workflow_id=result.workflow_id,
+        temporal_workflow_id=result.temporal_workflow_id,
+        route=result.route.value if result.route is not None else None,
+        reasons=list(result.reasons),
+        error=result.error,
+    )
+
+
+@router.post(
+    "/{workspace_id}/leads/{lead_id}/paused-search/start",
+    response_model=StartSelectedPausedSearchTrackResponse,
+)
+async def start_selected_paused_search_track_route(
+    workspace_id: UUID,
+    lead_id: UUID,
+    request: StartSelectedPausedSearchTrackRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[LeadManualEnrollmentBundle, Depends(get_lead_manual_enrollment_bundle)],
+) -> StartSelectedPausedSearchTrackResponse:
+    if bundle.paused_search_track_assignment_repository is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=["paused_search_track_assignment_unavailable"],
+        )
+    result = await start_selected_paused_search_track(
+        actor=actor,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        campaign_id=request.campaign_id,
+        lead_repository=bundle.lead_repository,
+        campaign_admin_repository=bundle.campaign_admin_repository,
+        campaign_enrollment_repository=bundle.campaign_enrollment_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        temporal_workflow_starter=bundle.temporal_workflow_starter,
+        paused_search_track_repository=bundle.paused_search_track_repository,
+        paused_search_track_assignment_repository=(
+            bundle.paused_search_track_assignment_repository
+        ),
+        workspace_operational_control_repository=bundle.workspace_operational_control_repository,
+        event_bus=bundle.event_bus,
+        commit=bundle.session.commit,
+        now=datetime.now(UTC),
+    )
+    if result.status == LeadManualEnrollmentActionStatus.REJECTED:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=["permission_denied"])
+    if result.status == LeadManualEnrollmentActionStatus.NOT_FOUND:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=list(result.reasons))
+    await bundle.session.commit()
+    return StartSelectedPausedSearchTrackResponse(
         status=result.status.value,
         campaign_id=result.campaign_id,
         campaign_version_id=result.campaign_version_id,

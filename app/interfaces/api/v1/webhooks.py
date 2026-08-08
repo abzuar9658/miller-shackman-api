@@ -108,6 +108,7 @@ async def _handle_inbound_message_event(
             bundle.paused_search_track_assignment_repository
         ),
         paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
+        paused_search_reminder_repository=bundle.paused_search_reminder_repository,
         llm_client=bundle.llm_client,
         event_bus=bundle.event_bus,
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,

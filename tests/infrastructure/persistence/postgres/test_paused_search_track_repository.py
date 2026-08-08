@@ -7,12 +7,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.campaigns import (
+    PausedSearchChannelSequence,
     PausedSearchFallbackTimingPolicy,
+    PausedSearchInterimContactPolicy,
+    PausedSearchReplyPolicy,
+    PausedSearchStepAction,
     PausedSearchTrack,
     PausedSearchTrackAdminAuditAction,
     PausedSearchTrackAdminAuditLog,
     PausedSearchTrackAssignment,
     PausedSearchTrackAssignmentSource,
+    PausedSearchTrackMode,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
@@ -91,6 +96,30 @@ async def test_paused_search_track_repository_saves_versions_steps_mappings_and_
     preserved_audit = audit_result.scalar_one()
     assert preserved_audit.track_id is None
     assert preserved_audit.track_version_id is None
+
+
+async def test_paused_search_track_repository_round_trips_policy_contract(
+    postgres_session: AsyncSession,
+) -> None:
+    await _create_workspace_and_user(postgres_session)
+    repository = PostgresPausedSearchTrackAdminRepository(postgres_session)
+    await repository.save_track(_track())
+    version = replace(
+        _version(),
+        track_mode=PausedSearchTrackMode.PERMISSION_BASED_INTERIM_CONTACT,
+        interim_contact_policy=PausedSearchInterimContactPolicy.REQUIRES_EXPLICIT_LEAD_PERMISSION,
+        reply_policy=PausedSearchReplyPolicy.RESTART_AFTER_DELAY,
+        channel_sequence=PausedSearchChannelSequence.SEQUENTIAL,
+        max_cycles=6,
+        max_ai_interactions=4,
+    )
+    step = replace(_step(), action=PausedSearchStepAction.REMINDER)
+
+    await repository.save_version(version)
+    await repository.replace_steps(WORKSPACE_ID, VERSION_ID, (step,))
+
+    assert await repository.get_version(WORKSPACE_ID, VERSION_ID) == version
+    assert await repository.get_steps(WORKSPACE_ID, VERSION_ID) == (step,)
 
 
 def test_paused_search_track_publish_read_is_workspace_scoped_and_locked() -> None:
@@ -236,6 +265,12 @@ def _version() -> PausedSearchTrackVersion:
         max_total_touches=2,
         created_by_user_id=USER_ID,
         created_at=NOW,
+        track_mode=PausedSearchTrackMode.CUSTOM_BOUNDED,
+        interim_contact_policy=PausedSearchInterimContactPolicy.NOT_ALLOWED,
+        reply_policy=PausedSearchReplyPolicy.END,
+        channel_sequence=PausedSearchChannelSequence.SEQUENTIAL,
+        max_cycles=1,
+        max_ai_interactions=5,
     )
 
 
@@ -252,6 +287,7 @@ def _step() -> PausedSearchTrackStep:
         template_key="paused-search-maintenance-email-1",
         max_attempts=1,
         review_required=False,
+        action=PausedSearchStepAction.SEND,
         created_at=NOW,
     )
 

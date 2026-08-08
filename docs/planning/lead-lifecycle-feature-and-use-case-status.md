@@ -20,16 +20,16 @@
 |---|---|---|
 | CRM lead fetch / sync into platform | ✅ | Canonical lead sync is broad, well-tested, and has no meaningful Phase 1-specific blocker in approved scope |
 | Tag-based entry into nurture | ✅ | CRM-tag and dormant-selector entry now stop safely at the boundary and only start allowed routes in approved scope |
-| Contactability / enrollment eligibility | ✅ | Core rules and tests are strong; no meaningful Phase 3-specific blocker remains |
+| Contactability / enrollment eligibility | ✅ | Core rules are strong and cover the approved V1 decision boundary |
 | Lead-state classification and route selection | ✅ | Core precedence, explicit routing-review records, and reply-time rerouting coverage justify closure in approved scope |
 | Dormant nurture path | ✅ | Runtime, entry safety, and no-workflow review resolution are now in place |
 | Paused-search path | ✅ | Selector start safety, timing-aware scheduling, cadence execution, and workflow rescheduling are all covered in approved scope |
 | Human handoff path | ✅ | Inbound and tag-time handoff paths now both create/reuse handoffs and complete CRM and notification side effects in approved scope |
-| Blocked / suppression path | ✅ | Suppression mechanics, consent gating, and SMS compliance blocking now align with approved Phase 1 rules |
+| Blocked / suppression path | 🟡 | Suppression mechanics are strong; CRM fetch failure recovery still needs resolution |
 | Inbound reply handling / continue-AI logic | ✅ | Broad test coverage now includes the remaining skipped-transition and blocked-acknowledgment edge cases |
-| Human activity pause | ✅ | Pause flow covers notes, outbound calls/texts, peopleUpdated stage/status/tags; ownership changes remain non-pausing |
+| Human activity pause | ✅ | Pause flow covers primary notes/calls/texts/people events in approved scope; additional FUB event types are a documented non-blocking limitation |
 | Manual override / resume | ✅ | Core override and resume flows are implemented; remaining gaps are advanced UI-control surfaces |
-| Workflow runtime and final pre-send safety | 🟢 | Temporal runtime, long-wait hardening, and final pre-send safety are now in place |
+| Workflow runtime and final pre-send safety | 🟡 | Temporal and final checks exist, but real pre-send facts and durable uncertain-send reconciliation remain incomplete |
 
 ## Lead lifecycle map
 
@@ -57,7 +57,7 @@ The current lead lifecycle is best understood in this order:
 
 ## Phase 1 — Lead fetch / CRM sync into platform
 
-**Status:** ✅ Closed
+**Status:** 🟡 Partial
 
 **What exists**
 - Follow Up Boss snapshot sync imports leads into canonical lead records.
@@ -76,7 +76,7 @@ The current lead lifecycle is best understood in this order:
 - `test_sync_reconciles_ownership_change_without_pausing_workflow_or_cancelling_messages`
 
 **Important gaps / edge cases**
-- No meaningful Phase 1-specific blocker remains in approved scope: sync updates owner mapping without pausing outreach, and downstream read surfaces scope review/handoff visibility from the effective owner.
+- CRM webhook resource-fetch failures are currently acknowledged and persisted as ignored rather than retried durably; see Gap 6.
 
 ---
 
@@ -100,7 +100,6 @@ The current lead lifecycle is best understood in this order:
 - `tests/application/use_cases/test_business_flow_harness.py`
 
 **Important gaps / edge cases**
-- No Phase 2-specific unsafe start gap remains.
 - CRM-tag entry now only starts dormant outreach for a true `dormant` route.
 - `paused_search`, `human_handoff`, `review_hold`, and `blocked` outcomes now stop at the entry boundary instead of falling through into dormant workflow start.
 - Dormant-selector entry now has focused coverage proving `blocked` and `review_hold` candidates do not start and that review-hold can persist a pending routing review.
@@ -130,7 +129,7 @@ The current lead lifecycle is best understood in this order:
 - `tests/application/use_cases/test_run_dormant_selector_batch.py`
 
 **Important gaps / edge cases**
-- None. This phase is closed.
+- No cross-cutting gap is currently tracked for this phase; pre-send checks re-verify eligibility immediately before send.
 
 ---
 
@@ -170,13 +169,13 @@ The current lead lifecycle is best understood in this order:
 - `tests/application/use_cases/test_process_inbound_message_event.py` — reply-time rerouting cases.
 
 **Important gaps / edge cases**
-- None. This phase is closed.
+- No cross-cutting gap is currently tracked for this phase.
 
 ---
 
 ## Phase 5 — Dormant path
 
-**Status:** ✅ Closed
+**Status:** 🟡 Partial
 
 **What should happen**
 - A silent lead with no known reason enters light, respectful re-engagement.
@@ -290,7 +289,7 @@ The current lead lifecycle is best understood in this order:
 - Contact suppression events can pause or suppress workflows depending on remaining usable channels.
 - Lead suppression evidence is stored on the lead.
 - Unknown or denied channel permission blocks automated outreach.
-- SMS requires an explicitly approved workspace compliance state before automated send or continuation.
+- Workspace SMS compliance (A2P/10DLC) state is stored and configurable, but per the V1 destination-only contactability rule it does not block automated SMS send or continuation (see Phase 3).
 
 **Main implementation**
 - `process_contact_suppression_event.py`
@@ -307,7 +306,7 @@ The current lead lifecycle is best understood in this order:
 **Important gaps / edge cases**
 - No Phase 8-specific blocker remains.
 - An AI-derived `BLOCKED` route from tag-time classification now stops safely before workflow start.
-- Continue-AI and handoff acknowledgment sends now pause safely when contactability or SMS compliance blocks the channel.
+- Continue-AI and handoff acknowledgment sends now pause safely when contactability blocks the channel.
 
 ---
 
@@ -430,8 +429,9 @@ The current lead lifecycle is best understood in this order:
 - `tests/domain/campaigns/test_pre_send.py`
 
 **Important gaps / edge cases**
-- No critical runtime/send-safety blocker remains in this phase.
-- Remaining follow-up is operator history/control surface work, not Temporal/runtime safety itself.
+- Production call sites do not populate the global/campaign/channel pre-send facts; see Gap 2.
+- Standard dormant UNCERTAIN sends have no callback/timeout reconciliation; see Gap 4.
+- Provider failure and activity-crash handling lack a durable exception/reconciliation boundary; see Gaps 5 and 7.
 
 ---
 
@@ -454,12 +454,195 @@ The current lead lifecycle is best understood in this order:
 
 ## Biggest lifecycle gaps before calling this production-grade
 
-1. **Complete tag-time human handoff side effects**
-   - the routing decision is safe now, but enrollment-time `human_handoff` still does not perform the full handoff workflow.
-2. **Expose advanced workflow controls**
-   - `track migration`, `skip next touch`, and `timing override` still are not surfaced in the main operator flow.
-3. **Surface routing-review history**
-   - resolved/superseded review records are persisted, but they are not yet shown in lead detail or reporting.
+1. **Close the cross-cutting safety gaps documented below**
+   - especially pre-send fact population, uncertain-send reconciliation, and durable CRM/provider failure recovery.
+2. **Decide on cross-campaign and re-entry policy**
+   - decide whether one lead may have multiple active campaigns or needs a re-entry cool-down.
+3. **Expose advanced workflow controls and routing history**
+   - `track migration`, `skip next touch`, `timing override`, and resolved/superseded review history remain operator-surface work.
+
+## Open architectural gaps (cross-cutting, found during Step 7 deep-dive)
+
+These were found while verifying completion, handoff, suppression, and re-entry
+(the product-flow step after cadence execution and reply handling). They are not
+isolated bugs in one phase — each cuts across enrollment, cadence execution, and/or
+send safety. None of these have been fixed yet; this section only documents them so
+a decision can be made before implementation.
+
+### Gap 1 — No guard against a lead being active in two campaigns at once
+
+**Where:** `app/infrastructure/persistence/postgres/workflow_repository.py`
+(`get_latest_for_lead_for_update`, `get_latest_for_lead`) and
+`app/application/services/campaign_enrollment_starter.py` (`start_single_campaign_enrollment`).
+
+`LeadWorkflowRepository.get_latest_for_lead_for_update` is scoped only by
+`(workspace_id, lead_id)` — not by `campaign_id`. `start_single_campaign_enrollment`
+creates a new `LeadWorkflow` row whenever `CampaignEnrollmentRepository.get_by_lead_and_campaign`
+finds no existing enrollment **for that specific campaign**. Nothing checks whether the
+lead already has an active `LeadWorkflow` in a *different* campaign before starting a
+second one. `execute_campaign_cadence_step` then loads "the latest workflow for this
+lead" regardless of which campaign_version_id was passed in, so a second campaign's
+cadence execution can silently no-op (cursor mismatch) rather than fail loudly, or in
+some orderings can begin driving the wrong workflow row.
+
+**Impact:** A lead can end up FIFO-enrolled into two campaigns simultaneously with no
+explicit product decision or rejection path. Behavior in that state is undefined rather
+than deliberately blocked or queued.
+
+**Suggested remediation (pick one, needs a product decision):**
+- Reject/queue a new enrollment if `get_latest_for_lead` returns a non-terminal workflow
+  belonging to a different `campaign_id` (explicit single-active-campaign-at-a-time rule), or
+- Explicitly support multiple concurrent campaigns per lead by scoping
+  `get_latest_for_lead_for_update` and cadence execution by `(lead_id, campaign_id)`
+  instead of lead-only.
+
+### Gap 2 — Global/campaign/channel frequency-limit fields are defined but never populated
+
+**Where:** `app/domain/campaigns/pre_send.py` (`PreSendFacts`), and every call site that
+constructs it: `app/application/use_cases/plan_outbound_message.py::_select_channel`,
+`app/application/use_cases/campaign_cadence_execution.py` (`PlanNextOutboundMessageContext`,
+`OutboundSendContext` construction), `continue_ai_conversation_after_inbound.py`.
+
+`PreSendFacts` carries `last_global_outreach_at`, `last_campaign_outreach_at`,
+`last_channel_outreach_at`, `other_channel_sent_at`, `lead_replied_since_scheduled`,
+`recent_human_activity`, `handoff_active`, and `human_owned`. `evaluate_pre_send_safety`
+correctly uses all of them (frequency-limit blocking, simultaneous-channel blocking,
+human-control blocking). But **every production call site leaves these at their dataclass
+defaults** (`None`/`False`) — none of `execute_campaign_cadence_step`,
+`plan_next_outbound_message_for_lead`, or `continue_ai_conversation_after_inbound` looks up
+the lead's last outreach timestamps, current handoff/human-owned state, or "replied since
+scheduled" status before building the context. There is no test that exercises a real
+frequency-limit block via the actual cadence path — `tests/domain/campaigns/test_pre_send.py`
+only tests the pure function.
+
+**Impact:** The documented "no more than one automated outreach attempt within 24 hours
+across all channels" rule (AGENTS.md, Messaging Rules) and "no simultaneous SMS and email"
+rule are not enforced in the real send path at all. The only things actually preventing a
+double-send today are workflow-state gating (`WAITING_FOR_RESPONSE` cursor logic) and the
+per-cadence-step idempotency key — not the frequency-limit policy that exists specifically
+for this purpose.
+
+**Suggested remediation:** Wire real lookups (e.g. `OutboundMessageRepository` query for
+most-recent sent message globally / per-campaign / per-channel, `Handoff`/workflow-state
+lookups for `handoff_active`/`human_owned`, last-inbound-message timestamp for
+`lead_replied_since_scheduled`) into the context builders in `campaign_cadence_execution.py`
+and `continue_ai_conversation_after_inbound.py` before constructing `PreSendFacts`, as
+defense-in-depth alongside the existing workflow-state checks.
+
+### Gap 3 — No cool-down/gap enforced after a workflow reaches a terminal state
+
+**Where:** `app/application/services/campaign_enrollment_starter.py`,
+`app/infrastructure/persistence/postgres/dormant_candidate_selector.py`.
+
+Once a `LeadWorkflow` reaches `COMPLETED`, `SUPPRESSED`, or `CLOSED`, nothing prevents
+immediate re-enrollment into a different campaign (or the same campaign, once a new
+enrollment row is created). The dormant-candidate selector's "already enrolled" exclusion
+is scoped to `(workspace_id, campaign_id, lead_id)` only, so a lead who just completed
+Campaign A is immediately selectable for Campaign B on the very next selector run.
+
+**Impact:** Combined with Gap 1, a lead could be re-enrolled and get simultaneous or
+back-to-back campaign membership with no explicit minimum gap — this may be acceptable
+for V1's FIFO-only design, but it is not a deliberate decision recorded anywhere.
+
+**Suggested remediation:** Decide whether V1 needs a minimum re-entry cool-down after
+terminal states, and if so enforce it in the enrollment eligibility check
+(`evaluate_campaign_enrollment`) using the lead's most recent terminal `LeadWorkflow`.
+
+### Gap 4 — Dormant/cadence path has no reconciliation for UNCERTAIN provider sends (unlike paused-search)
+
+**Where:** `app/application/use_cases/campaign_cadence_execution.py`
+(`_pause_after_block`, called for `SendOutboundMessageStatus.UNCERTAIN` on the plain
+dormant/cadence path), `app/application/use_cases/process_provider_delivery_callback.py`.
+
+For the **paused-search** path, an `UNCERTAIN` send is tracked via `RecurringOccurrence`,
+and there is a full reconciliation story: `process_provider_delivery_callback` auto-resolves
+the occurrence and wakes the workflow via `BLOCKED_REVIEW_COMPLETED` once the provider
+confirms delivery, and `timeout_uncertain_paused_search_occurrence` fails it out after 24h
+if the provider never confirms. For the **plain dormant/cadence** path, an `UNCERTAIN` send
+result goes straight to `_pause_after_block`, which transitions the workflow to `PAUSED`
+with `pause_reason="cadence_step_blocked"` — there is no occurrence-equivalent record, and
+`process_provider_delivery_callback`'s auto-resume logic is gated on
+`occurrence_repository is not None` / matching `RecurringOccurrence`, so it never fires for
+a dormant-path message.
+
+**Impact:** A dormant-path lead whose provider send comes back `UNCERTAIN` (e.g. missing
+`provider_message_id`) is paused indefinitely and requires manual resume even if the
+provider's later delivery callback confirms the message actually sent successfully. The
+paused-search path does not have this problem; the dormant path does.
+
+**Suggested remediation:** Either extend `process_provider_delivery_callback` to also
+auto-resume plain dormant workflows paused for `UNCERTAIN` sends (symmetric with the
+paused-search occurrence logic), or explicitly document that dormant-path `UNCERTAIN`
+sends always require manual operator resolution.
+
+### Gap 5 — Provider retry is a single in-process retry only; no durable exception queue
+
+**Where:** `app/application/use_cases/send_outbound_message.py` (`_send_sms`, `_send_email`).
+
+`_send_sms`/`_send_email` retry exactly once, inline, with a fixed 0.1s sleep, and only for
+`ProviderFailureKind.TEMPORARY`. There is no exponential backoff, no durable/cross-process
+retry, and no separate "exception queue" for sends that exhaust retries — a `FAILED` result
+just pauses the workflow (`_pause_after_block`), which is indistinguishable in the data
+model from any other policy-based pause. AGENTS.md's Reliability Guidelines call for
+"exponential backoff," a "maximum retry count," and moving "unresolved failures to an
+exception queue" as a distinct concept from a generic paused workflow.
+
+**Impact:** Not unsafe (failures do stop the workflow rather than silently drop the
+message), but there is no way to distinguish "paused because of a transient provider outage
+that should be retried later" from "paused because of a policy/business-rule block" without
+reading `pause_reason` metadata by hand, and no durable retry-with-backoff exists outside
+the single inline retry.
+
+**Suggested remediation:** Decide whether V1 needs a distinct exception-queue surface (e.g.
+a queryable view over `PAUSED` workflows with `pause_reason="cadence_step_blocked"` and a
+`FAILED` message with `failure_kind=TEMPORARY`/`UNCERTAIN`), or whether the existing
+pause-and-manually-resume flow is considered sufficient for V1 scope.
+
+### Gap 6 — CRM webhook resource-fetch failures are recorded as ignored, not retryable
+
+**Where:** `app/infrastructure/crm/follow_up_boss/webhook_event_handler.py` and
+`app/infrastructure/crm/follow_up_boss/webhook_event_mappers.py`.
+
+The webhook envelope is accepted and routed to a mapper, but mapper resource fetches return
+`(0, 1)` when Follow Up Boss returns no resource. The handler then persists the envelope as
+`IGNORED` and the API returns success. There is no retryable status, retry scheduling, or
+operator queue for a transient CRM/API outage. The same pattern applies when a resource
+payload is incomplete enough that all child records are skipped.
+
+**Impact:** A webhook can be acknowledged successfully while its lead activity, suppression,
+or human-pause side effects never happen. A later full CRM sync may eventually repair the lead
+snapshot, but it does not guarantee replay of the missed event or preservation of the event's
+original ordering relative to outbound work.
+
+**Suggested remediation:** Distinguish `IGNORED` unsupported/irrelevant events from
+`RETRYABLE_FAILURE` fetch/parse failures. Persist the failure reason and retry metadata, return
+an appropriate non-success response when safe, and replay through a durable worker with bounded
+backoff. Keep provider event idempotency so replay cannot duplicate side effects.
+
+### Gap 7 — Temporal activity failures can strand a workflow without a durable operator-visible retry state
+
+**Where:** `app/infrastructure/workflows/temporal/lead_nurture.py` and
+`app/application/use_cases/campaign_cadence_execution.py`.
+
+The cadence activity uses `RetryPolicy(maximum_attempts=1)` because replaying an external
+provider side effect could duplicate a send. That protects against blind duplicate dispatch,
+but if the activity or process fails after the provider call and before the message/workflow
+state is durably recorded, Temporal does not retry the activity and the workflow has no built-in
+exception record to reconcile the uncertain operation. The in-process provider retry does not
+solve process crashes or database outages.
+
+**Impact:** A workflow can remain in an active or waiting state with an outbound operation whose
+actual provider result is unknown, without a durable retry/exception item or automatic
+reconciliation path. Operators cannot reliably distinguish a provider outage, process crash,
+database failure, or successful-but-unrecorded send.
+
+**Suggested remediation:** Introduce an explicit durable dispatch boundary: persist an outbound
+send request and idempotency key transactionally, dispatch it from a worker, reconcile provider
+status by idempotency key/provider message id, and only then advance the Temporal workflow. If
+that architecture is deferred, persist an explicit `UNCERTAIN` exception record before allowing
+the workflow to wait and expose it for bounded operator reconciliation.
+
+---
 
 ## Overall verdict
 

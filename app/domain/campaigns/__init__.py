@@ -33,6 +33,12 @@ from app.domain.campaigns.paused_search_occurrences import (
     RecurringOccurrenceStatus,
     occurrence_idempotency_key,
 )
+from app.domain.campaigns.paused_search_reply_policy import (
+    PausedSearchReplyContext,
+    PausedSearchReplyDecision,
+    decide_paused_search_reply,
+    has_valid_explicit_new_timing,
+)
 from app.domain.campaigns.paused_search_reviews import (
     PausedSearchReview,
     PausedSearchReviewAction,
@@ -50,7 +56,11 @@ from app.domain.campaigns.paused_search_timing import (
     plan_paused_search_next_action,
 )
 from app.domain.campaigns.paused_search_tracks import (
+    PausedSearchChannelSequence,
     PausedSearchFallbackTimingPolicy,
+    PausedSearchInterimContactPolicy,
+    PausedSearchReplyPolicy,
+    PausedSearchStepAction,
     PausedSearchTerminalBehavior,
     PausedSearchTimingBasis,
     PausedSearchTrack,
@@ -61,10 +71,12 @@ from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrackAssignmentSource,
     PausedSearchTrackCatalogEntry,
     PausedSearchTrackLeadAssignment,
+    PausedSearchTrackMode,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
+    effective_paused_search_step_action,
     generate_paused_search_track_key,
 )
 from app.domain.campaigns.paused_search_validation import (
@@ -148,6 +160,12 @@ __all__ = [
     "OutboundMessage",
     "OutboundMessageStatus",
     "PausedSearchFallbackTimingPolicy",
+    "PausedSearchChannelSequence",
+    "PausedSearchInterimContactPolicy",
+    "PausedSearchReplyPolicy",
+    "PausedSearchReplyContext",
+    "PausedSearchReplyDecision",
+    "PausedSearchStepAction",
     "PausedSearchTerminalBehavior",
     "PausedSearchTrack",
     "PausedSearchTrackAssignment",
@@ -160,6 +178,7 @@ __all__ = [
     "PausedSearchTrackStatus",
     "PausedSearchTrackStep",
     "PausedSearchTrackStepPhase",
+    "PausedSearchTrackMode",
     "PausedSearchTimingBasis",
     "PausedSearchTrackVersion",
     "MAX_AI_TOUCHES_PER_TRACK",
@@ -195,4 +214,7 @@ __all__ = [
     "validate_template_version",
     "apply_review_action",
     "generate_paused_search_track_key",
+    "effective_paused_search_step_action",
+    "decide_paused_search_reply",
+    "has_valid_explicit_new_timing",
 ]

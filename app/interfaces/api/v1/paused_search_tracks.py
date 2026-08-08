@@ -5,6 +5,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from app.application.use_cases.paused_search_legacy_inventory import (
+    inventory_paused_search_legacy_versions,
+)
 from app.application.use_cases.paused_search_operations import (
     PausedSearchOperationsStatus,
     PausedSearchReviewActionResult,
@@ -100,6 +103,9 @@ from app.interfaces.api.dependencies.workspace_settings import (
 from app.interfaces.api.schemas.campaigns import DormantStepTemplateProfileSchema
 from app.interfaces.api.schemas.paused_search_tracks import (
     PausedSearchLeadSummaryResponse,
+    PausedSearchLegacyInventoryResponse,
+    PausedSearchLegacyInventoryVersionResponse,
+    PausedSearchLegacyInventoryWorkflowResponse,
     PausedSearchMessageReviewEditRequest,
     PausedSearchOccurrenceListResponse,
     PausedSearchOccurrenceResponse,
@@ -436,6 +442,52 @@ async def list_paused_search_tracks(
     return PausedSearchTrackListResponse(
         status=result.status.value,
         tracks=[_summary_response(view) for view in result.views],
+    )
+
+
+@router.get(
+    "/{workspace_id}/paused-search-tracks/legacy-inventory",
+    response_model=PausedSearchLegacyInventoryResponse,
+)
+async def inventory_paused_search_legacy_versions_route(
+    workspace_id: UUID,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[PausedSearchTrackReadBundle, Depends(get_paused_search_track_read_bundle)],
+) -> PausedSearchLegacyInventoryResponse:
+    if bundle.legacy_inventory_repository is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    report = await inventory_paused_search_legacy_versions(
+        actor=actor,
+        workspace_id=workspace_id,
+        repository=bundle.legacy_inventory_repository,
+    )
+    if report.permission_denied:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="permission_denied")
+    return PausedSearchLegacyInventoryResponse(
+        status="ok",
+        workspace_id=report.workspace_id,
+        legacy_version_count=len(report.versions),
+        active_workflow_count=len(report.active_workflows),
+        versions=[
+            PausedSearchLegacyInventoryVersionResponse(
+                track_version_id=version.track_version_id,
+                track_id=version.track_id,
+                version_number=version.version_number,
+                active_workflow_ids=list(version.active_workflow_ids),
+            )
+            for version in report.versions
+        ],
+        active_workflows=[
+            PausedSearchLegacyInventoryWorkflowResponse(
+                workflow_id=workflow.workflow_id,
+                lead_id=workflow.lead_id,
+                track_version_id=workflow.paused_search_track_version_id,
+                state=workflow.state.value,
+                next_action_at=workflow.next_action_at,
+            )
+            for workflow in report.active_workflows
+            if workflow.paused_search_track_version_id is not None
+        ],
     )
 
 
@@ -1004,12 +1056,19 @@ def _config_input(payload: PausedSearchTrackConfigRequest) -> PausedSearchTrackC
         enabled=payload.enabled,
         allowed_channels=tuple(payload.allowed_channels),
         fallback_timing_policy=payload.fallback_timing_policy,
-        maintenance_interval_days=payload.maintenance_interval_days,
+        maintenance_interval_days=payload.default_pause_duration_days,
         reactivation_window_days=payload.reactivation_window_days,
         max_total_touches=payload.max_total_touches,
         default_pause_duration_days=payload.default_pause_duration_days,
         max_duration_days=payload.max_duration_days,
         terminal_behavior=payload.terminal_behavior,
+        track_mode=payload.track_mode,
+        interim_contact_policy=payload.interim_contact_policy,
+        reply_policy=payload.reply_policy,
+        channel_sequence=payload.channel_sequence,
+        max_cycles=payload.max_cycles,
+        max_ai_interactions=payload.max_ai_interactions,
+        restart_delay_days=payload.restart_delay_days,
         steps=tuple(
             PausedSearchTrackStepInput(
                 phase=step.phase,
@@ -1018,7 +1077,8 @@ def _config_input(payload: PausedSearchTrackConfigRequest) -> PausedSearchTrackC
                 message_goal=step.message_goal,
                 template_key=step.template_key,
                 max_attempts=step.max_attempts,
-                review_required=step.review_required,
+                action=step.action,
+                review_required=False,
                 interval_days=step.interval_days,
                 max_occurrences=step.max_occurrences,
                 template_version_id=step.template_version_id,
@@ -1080,7 +1140,7 @@ def _admin_response(
     return PausedSearchTrackAdminResponse(
         status=status_value,
         track=_track_response(view.track),
-        version=_version_response(view.version),
+        version=_version_response(view.version, view.compatibility.value),
         steps=[_step_response(step) for step in view.steps],
         assigned_leads=[_lead_assignment_response(lead) for lead in view.assigned_leads],
         reasons=[],
@@ -1090,7 +1150,7 @@ def _admin_response(
 def _summary_response(view: PausedSearchTrackAdminView) -> PausedSearchTrackSummaryResponse:
     return PausedSearchTrackSummaryResponse(
         track=_track_response(view.track),
-        version=_version_response(view.version),
+        version=_version_response(view.version, view.compatibility.value),
         step_count=len(view.steps),
         assigned_leads=[_lead_assignment_response(lead) for lead in view.assigned_leads],
     )
@@ -1103,7 +1163,7 @@ def _detail_response(
     return PausedSearchTrackDetailResponse(
         status=status_value,
         track=_track_response(view.track),
-        version=_version_response(view.version),
+        version=_version_response(view.version, view.compatibility.value),
         steps=[_step_response(step) for step in view.steps],
         assigned_leads=[_lead_assignment_response(lead) for lead in view.assigned_leads],
     )
@@ -1113,9 +1173,13 @@ def _track_response(track: PausedSearchTrack) -> PausedSearchTrackResponse:
     return PausedSearchTrackResponse(**track.__dict__)
 
 
-def _version_response(version: PausedSearchTrackVersion) -> PausedSearchTrackVersionResponse:
+def _version_response(
+    version: PausedSearchTrackVersion,
+    compatibility: str = "guided",
+) -> PausedSearchTrackVersionResponse:
     data = dict(version.__dict__)
     data["allowed_channels"] = list(version.allowed_channels)
+    data["compatibility"] = compatibility
     return PausedSearchTrackVersionResponse(**data)
 
 

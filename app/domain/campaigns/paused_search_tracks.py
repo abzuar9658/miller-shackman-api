@@ -29,9 +29,58 @@ class PausedSearchTrackStatus(StrEnum):
     RETIRED = "retired"
 
 
+class PausedSearchTrackCompatibility(StrEnum):
+    """Whether a track version uses fields retained only for legacy reads."""
+
+    GUIDED = "guided"
+    LEGACY = "legacy"
+
+
 class PausedSearchTrackStepPhase(StrEnum):
     MAINTENANCE = "maintenance"
     REACTIVATION = "reactivation"
+
+
+class PausedSearchTrackMode(StrEnum):
+    WAIT_UNTIL_REQUESTED_DATE = "wait_until_requested_date"
+    PERMISSION_BASED_INTERIM_CONTACT = "permission_based_interim_contact"
+    AGENT_MANAGED = "agent_managed"
+    SCHEDULED_REACTIVATION = "scheduled_reactivation"
+    CUSTOM_BOUNDED = "custom_bounded"
+
+
+class PausedSearchInterimContactPolicy(StrEnum):
+    NOT_ALLOWED = "not_allowed"
+    REQUIRES_EXPLICIT_LEAD_PERMISSION = "requires_explicit_lead_permission"
+    ALLOWED_BY_PUBLISHED_TRACK = "allowed_by_published_track"
+
+
+def paused_search_interim_contact_is_configured(
+    policy: PausedSearchInterimContactPolicy,
+) -> bool:
+    """Return whether a track policy permits configured maintenance contact."""
+
+    return policy is not PausedSearchInterimContactPolicy.NOT_ALLOWED
+
+
+class PausedSearchStepAction(StrEnum):
+    SEND = "send"
+    REVIEW = "review"
+    REMINDER = "reminder"
+    SKIP = "skip"
+
+
+class PausedSearchReplyPolicy(StrEnum):
+    CONTINUE = "continue"
+    RESTART_AFTER_DELAY = "restart_after_delay"
+    REANCHOR_TO_NEW_TIMING = "reanchor_to_new_timing"
+    REVIEW_OR_REMIND = "review_or_remind"
+    END = "end"
+
+
+class PausedSearchChannelSequence(StrEnum):
+    SEQUENTIAL = "sequential"
+    SIMULTANEOUS = "simultaneous"
 
 
 class PausedSearchTimingBasis(StrEnum):
@@ -118,7 +167,15 @@ class PausedSearchTrackVersion:
     terminal_behavior: PausedSearchTerminalBehavior = (
         PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED
     )
-
+    track_mode: PausedSearchTrackMode = PausedSearchTrackMode.CUSTOM_BOUNDED
+    interim_contact_policy: PausedSearchInterimContactPolicy = (
+        PausedSearchInterimContactPolicy.NOT_ALLOWED
+    )
+    reply_policy: PausedSearchReplyPolicy = PausedSearchReplyPolicy.END
+    channel_sequence: PausedSearchChannelSequence = PausedSearchChannelSequence.SEQUENTIAL
+    max_cycles: int = 1
+    max_ai_interactions: int = 5
+    restart_delay_days: int = 30
 
 @dataclass(frozen=True)
 class PausedSearchTrackStep:
@@ -140,6 +197,15 @@ class PausedSearchTrackStep:
     max_occurrences: int = 1
     template_version_id: UUID | None = None
     template_profile: DormantStepTemplateProfile | None = None
+    action: PausedSearchStepAction | None = None
+
+
+def effective_paused_search_step_action(step: PausedSearchTrackStep) -> PausedSearchStepAction:
+    """Return the canonical action while reading legacy step records safely."""
+
+    if step.action is not None:
+        return step.action
+    return PausedSearchStepAction.REVIEW if step.review_required else PausedSearchStepAction.SEND
 
 
 @dataclass(frozen=True)
@@ -177,6 +243,12 @@ class PausedSearchTrackAdminView:
     version: PausedSearchTrackVersion
     steps: tuple[PausedSearchTrackStep, ...]
     assigned_leads: tuple[PausedSearchTrackLeadAssignment, ...] = ()
+
+    @property
+    def compatibility(self) -> PausedSearchTrackCompatibility:
+        if any(step.action is None and step.review_required for step in self.steps):
+            return PausedSearchTrackCompatibility.LEGACY
+        return PausedSearchTrackCompatibility.GUIDED
 
 
 @dataclass(frozen=True)

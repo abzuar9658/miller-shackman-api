@@ -6,9 +6,14 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.domain.campaigns import (
     CampaignVersionStatus,
+    PausedSearchChannelSequence,
     PausedSearchFallbackTimingPolicy,
+    PausedSearchInterimContactPolicy,
+    PausedSearchReplyPolicy,
+    PausedSearchStepAction,
     PausedSearchTerminalBehavior,
     PausedSearchTimingBasis,
+    PausedSearchTrackMode,
     PausedSearchTrackStatus,
     PausedSearchTrackStepPhase,
     generate_paused_search_track_key,
@@ -18,13 +23,14 @@ from app.interfaces.api.schemas.campaigns import DormantStepTemplateProfileSchem
 
 
 class PausedSearchTrackStepRequest(BaseModel):
+    model_config = {"extra": "forbid"}
     phase: PausedSearchTrackStepPhase
     channel: ContactChannel
     delay_hours: int = Field(ge=0)
     message_goal: str = Field(min_length=1, max_length=500)
     template_key: str = Field(min_length=1, max_length=255)
     max_attempts: int = Field(ge=1)
-    review_required: bool = False
+    action: PausedSearchStepAction | None = None
     interval_days: int | None = Field(default=None, ge=14, le=365)
     max_occurrences: int = Field(default=1, ge=1)
     template_version_id: UUID | None = None
@@ -34,11 +40,11 @@ class PausedSearchTrackStepRequest(BaseModel):
 
 
 class PausedSearchTrackConfigRequest(BaseModel):
+    model_config = {"extra": "forbid"}
     selection_guidance: str = Field(min_length=30, max_length=1000)
     enabled: bool
     allowed_channels: list[ContactChannel] = Field(min_length=1)
     fallback_timing_policy: PausedSearchFallbackTimingPolicy
-    maintenance_interval_days: int = Field(ge=1)
     reactivation_window_days: int = Field(ge=1)
     max_total_touches: int = Field(ge=1)
     default_pause_duration_days: int = Field(default=60, ge=30, le=730)
@@ -46,6 +52,15 @@ class PausedSearchTrackConfigRequest(BaseModel):
     terminal_behavior: PausedSearchTerminalBehavior = (
         PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED
     )
+    track_mode: PausedSearchTrackMode = PausedSearchTrackMode.CUSTOM_BOUNDED
+    interim_contact_policy: PausedSearchInterimContactPolicy = (
+        PausedSearchInterimContactPolicy.NOT_ALLOWED
+    )
+    reply_policy: PausedSearchReplyPolicy = PausedSearchReplyPolicy.END
+    channel_sequence: PausedSearchChannelSequence = PausedSearchChannelSequence.SEQUENTIAL
+    max_cycles: int = Field(default=1, ge=1, le=12)
+    max_ai_interactions: int = Field(default=5, ge=1, le=5)
+    restart_delay_days: int = Field(default=30, ge=1, le=730)
     steps: list[PausedSearchTrackStepRequest] = Field(min_length=1)
 
 
@@ -175,6 +190,14 @@ class PausedSearchTrackVersionResponse(BaseModel):
     published_at: datetime | None
     max_duration_days: int
     terminal_behavior: PausedSearchTerminalBehavior
+    track_mode: PausedSearchTrackMode
+    interim_contact_policy: PausedSearchInterimContactPolicy
+    reply_policy: PausedSearchReplyPolicy
+    channel_sequence: PausedSearchChannelSequence
+    max_cycles: int
+    max_ai_interactions: int
+    restart_delay_days: int
+    compatibility: Literal["guided", "legacy"] = "guided"
 
 
 class PausedSearchTrackStepResponse(BaseModel):
@@ -187,6 +210,7 @@ class PausedSearchTrackStepResponse(BaseModel):
     message_goal: str
     template_key: str
     max_attempts: int
+    action: PausedSearchStepAction | None
     review_required: bool
     created_at: datetime
     interval_days: int | None
@@ -226,6 +250,30 @@ class PausedSearchTrackSummaryResponse(BaseModel):
 class PausedSearchTrackListResponse(BaseModel):
     status: str
     tracks: list[PausedSearchTrackSummaryResponse]
+
+
+class PausedSearchLegacyInventoryVersionResponse(BaseModel):
+    track_version_id: UUID
+    track_id: UUID
+    version_number: int
+    active_workflow_ids: list[UUID]
+
+
+class PausedSearchLegacyInventoryWorkflowResponse(BaseModel):
+    workflow_id: UUID
+    lead_id: UUID
+    track_version_id: UUID
+    state: str
+    next_action_at: datetime | None
+
+
+class PausedSearchLegacyInventoryResponse(BaseModel):
+    status: str
+    workspace_id: UUID
+    legacy_version_count: int
+    active_workflow_count: int
+    versions: list[PausedSearchLegacyInventoryVersionResponse]
+    active_workflows: list[PausedSearchLegacyInventoryWorkflowResponse]
 
 
 class PausedSearchTrackDetailResponse(BaseModel):

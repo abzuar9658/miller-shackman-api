@@ -34,6 +34,7 @@ from app.domain.campaigns import (
     PausedSearchTrackAssignmentSource,
     PausedSearchTrackCatalogEntry,
 )
+from app.domain.campaigns.paused_search_reply_policy import has_valid_explicit_new_timing
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.conversations import CrmConversationEvent
 from app.domain.identity import (
@@ -308,8 +309,16 @@ async def _apply_paused_search(
         paused_search_track_key=classification_result.selected_track_key,
         paused_search_track_version_id=classification_result.track_version_id,
         pause_reason_note=None,
-        reengagement_not_before=classification_result.reengagement_not_before,
-        reengagement_window_label=classification_result.reengagement_window_label,
+        reengagement_not_before=_validated_reengagement_not_before(
+            classification_result=classification_result,
+            previous_profile=previous_profile,
+            now=now,
+        ),
+        reengagement_window_label=_validated_reengagement_window_label(
+            classification_result=classification_result,
+            previous_profile=previous_profile,
+            now=now,
+        ),
         paused_search_source=paused_search_source,
         paused_search_recorded_at=now,
         paused_search_recorded_by_user_id=None,
@@ -473,6 +482,34 @@ def _action_for_change(
     if previous_profile is None:
         return PausedSearchAction.SET
     return PausedSearchAction.UPDATED
+
+
+def _validated_reengagement_not_before(
+    *,
+    classification_result: LeadStateClassificationResult,
+    previous_profile: LeadPausedSearchProfile | None,
+    now: datetime,
+) -> datetime | None:
+    if has_valid_explicit_new_timing(
+        timing=classification_result.reengagement_not_before,
+        now=now,
+    ):
+        return classification_result.reengagement_not_before
+    return previous_profile.reengagement_not_before if previous_profile is not None else None
+
+
+def _validated_reengagement_window_label(
+    *,
+    classification_result: LeadStateClassificationResult,
+    previous_profile: LeadPausedSearchProfile | None,
+    now: datetime,
+) -> str | None:
+    if has_valid_explicit_new_timing(
+        timing=classification_result.reengagement_not_before,
+        now=now,
+    ):
+        return classification_result.reengagement_window_label
+    return previous_profile.reengagement_window_label if previous_profile is not None else None
 
 
 def _lead_with_paused_search_profile(

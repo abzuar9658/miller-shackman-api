@@ -93,6 +93,133 @@ def test_create_generates_track_key_when_omitted(
     assert response.json()["track"]["track_key"] == "rate-watch"
 
 
+def test_policy_contract_round_trips_through_admin_api(
+    paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
+) -> None:
+    payload = _payload()
+    payload.update(
+        {
+            "track_mode": "permission_based_interim_contact",
+            "interim_contact_policy": "requires_explicit_lead_permission",
+            "reply_policy": "continue",
+            "channel_sequence": "sequential",
+            "max_cycles": 6,
+            "max_ai_interactions": 4,
+            "restart_delay_days": 45,
+        }
+    )
+    payload["steps"][0]["action"] = "send"
+
+    response = paused_search_track_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks",
+        json=payload,
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["version"]["track_mode"] == "permission_based_interim_contact"
+    assert body["version"]["interim_contact_policy"] == "requires_explicit_lead_permission"
+    assert body["version"]["reply_policy"] == "continue"
+    assert body["version"]["max_cycles"] == 6
+    assert body["version"]["max_ai_interactions"] == 4
+    assert body["version"]["restart_delay_days"] == 45
+    assert body["steps"][0]["action"] == "send"
+
+
+def test_admin_configured_interim_contact_policy_round_trips_through_admin_api(
+    paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
+) -> None:
+    payload = _payload()
+    payload.update(
+        {
+            "track_mode": "permission_based_interim_contact",
+            "interim_contact_policy": "allowed_by_published_track",
+        }
+    )
+
+    response = paused_search_track_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks",
+        json=payload,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["version"]["interim_contact_policy"] == (
+        "allowed_by_published_track"
+    )
+
+
+def test_policy_contract_rejects_cycle_limit_above_code_bound(
+    paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
+) -> None:
+    payload = _payload()
+    payload["max_cycles"] = 13
+
+    response = paused_search_track_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks",
+        json=payload,
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("legacy_field", ["maintenance_interval_days"])
+def test_draft_rejects_removed_legacy_request_fields(
+    paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
+    legacy_field: str,
+) -> None:
+    payload = _payload()
+    payload[legacy_field] = 30
+
+    response = paused_search_track_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks",
+        json=payload,
+    )
+
+    assert response.status_code == 422
+    assert any(error["loc"][-1] == legacy_field for error in response.json()["detail"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("fallback_timing_policy", "use_maintenance_interval"),
+        ("reply_policy", "restart_after_delay"),
+        ("reply_policy", "review_or_remind"),
+        ("channel_sequence", "simultaneous"),
+    ],
+)
+def test_draft_rejects_deprecated_policy_choices(
+    paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
+    field: str,
+    value: str,
+) -> None:
+    payload = _payload()
+    payload[field] = value
+
+    response = paused_search_track_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks",
+        json=payload,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == ["legacy_configuration_not_allowed"]
+
+
+def test_draft_rejects_deprecated_step_actions(
+    paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
+) -> None:
+    payload = _payload()
+    payload["steps"][0]["action"] = "review"
+
+    response = paused_search_track_admin_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/paused-search-tracks",
+        json=payload,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == ["legacy_configuration_not_allowed"]
+
+
 def test_invalid_configuration_returns_validation_findings(
     paused_search_track_admin_client: PausedSearchTrackAdminTestClient,
 ) -> None:
@@ -301,10 +428,10 @@ def _payload() -> dict[str, Any]:
         "selection_guidance": "Select when a lead waits for mortgage rates to improve.",
         "enabled": True,
         "allowed_channels": ["email"],
-        "fallback_timing_policy": "use_maintenance_interval",
-        "maintenance_interval_days": 60,
+        "fallback_timing_policy": "use_default_pause_duration",
         "reactivation_window_days": 30,
         "max_total_touches": 4,
+        "restart_delay_days": 30,
         "steps": [
             {
                 "phase": "maintenance",
@@ -313,7 +440,7 @@ def _payload() -> dict[str, Any]:
                 "message_goal": "Check in about home search timing.",
                 "template_key": "paused-search-email-1",
                 "max_attempts": 1,
-                "review_required": False,
+                "action": "send",
             }
         ],
     }

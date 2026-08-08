@@ -1,6 +1,7 @@
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
+from math import ceil
 from uuid import UUID, uuid4, uuid5
 
 from app.application.ports.event_bus import EventBus
@@ -15,19 +16,25 @@ from app.application.use_cases.preview_paused_search_track import (
 )
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.paused_search_tracks import (
+    PausedSearchChannelSequence,
     PausedSearchFallbackTimingPolicy,
+    PausedSearchInterimContactPolicy,
+    PausedSearchReplyPolicy,
+    PausedSearchStepAction,
     PausedSearchTerminalBehavior,
     PausedSearchTimingBasis,
     PausedSearchTrack,
     PausedSearchTrackAdminAuditAction,
     PausedSearchTrackAdminAuditLog,
     PausedSearchTrackAdminView,
+    PausedSearchTrackMode,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
 )
 from app.domain.campaigns.paused_search_validation import (
+    MAX_AI_TOUCHES_PER_TRACK,
     PausedSearchTrackValidationReport,
     validate_paused_search_track,
 )
@@ -54,6 +61,7 @@ class PausedSearchTrackAdminReasonCode(StrEnum):
     PREVIEW_REFERENCE_REQUIRED = "preview_reference_required"
     PREVIEW_REFERENCE_MISMATCH = "preview_reference_mismatch"
     WARNINGS_NOT_ACKNOWLEDGED = "warnings_not_acknowledged"
+    LEGACY_CONFIGURATION_NOT_ALLOWED = "legacy_configuration_not_allowed"
 
 
 class PausedSearchTrackDraftStatus(StrEnum):
@@ -105,6 +113,7 @@ class PausedSearchTrackStepInput:
     timing_basis: PausedSearchTimingBasis = PausedSearchTimingBasis.CUSTOMER_REENGAGEMENT_DATE
     fallback_channel: ContactChannel | None = None
     template_profile: DormantStepTemplateProfile | None = None
+    action: PausedSearchStepAction | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +130,78 @@ class PausedSearchTrackConfigInput:
     max_duration_days: int = 365
     terminal_behavior: PausedSearchTerminalBehavior = (
         PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED
+    )
+    track_mode: PausedSearchTrackMode = PausedSearchTrackMode.CUSTOM_BOUNDED
+    interim_contact_policy: PausedSearchInterimContactPolicy = (
+        PausedSearchInterimContactPolicy.NOT_ALLOWED
+    )
+    reply_policy: PausedSearchReplyPolicy = PausedSearchReplyPolicy.END
+    channel_sequence: PausedSearchChannelSequence = PausedSearchChannelSequence.SEQUENTIAL
+    max_cycles: int = 1
+    max_ai_interactions: int = 5
+    restart_delay_days: int = 30
+    compatibility: str = "guided"
+
+
+MAX_PAUSED_SEARCH_DURATION_DAYS = 730
+
+
+def _effective_safety_limits(
+    config: PausedSearchTrackConfigInput,
+) -> tuple[int, int]:
+    """Keep code-owned limits large enough for the configured cadence.
+
+    The request still carries these fields for API compatibility, but a track
+    must not silently cap its own configured steps below their occurrence
+    count. Customer-date reactivation tracks also need the full platform
+    duration so a future lead-selected date is not expired prematurely.
+    """
+
+    configured_touches = sum(step.max_occurrences for step in config.steps)
+    max_total_touches = min(
+        MAX_AI_TOUCHES_PER_TRACK,
+        max(config.max_total_touches, configured_touches),
+    )
+
+    cadence_horizon_days = max(
+        (
+            ceil(step.delay_hours / 24)
+            + max(0, step.max_occurrences - 1) * (step.interval_days or 0)
+            for step in config.steps
+        ),
+        default=30,
+    )
+    has_customer_date_reactivation = any(
+        step.phase is PausedSearchTrackStepPhase.REACTIVATION
+        and step.timing_basis is PausedSearchTimingBasis.CUSTOMER_REENGAGEMENT_DATE
+        for step in config.steps
+    )
+    required_duration_days = (
+        MAX_PAUSED_SEARCH_DURATION_DAYS if has_customer_date_reactivation else cadence_horizon_days
+    )
+    max_duration_days = min(
+        MAX_PAUSED_SEARCH_DURATION_DAYS,
+        max(config.max_duration_days, required_duration_days),
+    )
+    return max_total_touches, max_duration_days
+
+
+def _is_legacy_configuration(config: PausedSearchTrackConfigInput) -> bool:
+    return (
+        config.compatibility == "legacy"
+        or config.fallback_timing_policy
+        is PausedSearchFallbackTimingPolicy.USE_MAINTENANCE_INTERVAL
+        or config.reply_policy
+        in {
+            PausedSearchReplyPolicy.RESTART_AFTER_DELAY,
+            PausedSearchReplyPolicy.REVIEW_OR_REMIND,
+        }
+        or config.channel_sequence is PausedSearchChannelSequence.SIMULTANEOUS
+        or any(
+            step.review_required
+            or step.action in {PausedSearchStepAction.REVIEW, PausedSearchStepAction.REMINDER}
+            for step in config.steps
+        )
     )
 
 
@@ -270,6 +351,9 @@ async def create_draft_paused_search_track(
 ) -> PausedSearchTrackDraftResult:
     if not _can_administer_tracks(actor):
         return _draft_rejected(PausedSearchTrackAdminReasonCode.PERMISSION_DENIED)
+    legacy_rejection = _reject_new_legacy_configuration(config)
+    if legacy_rejection is not None:
+        return legacy_rejection
     if await repository.get_track_by_key(workspace_id, track_key.strip()) is not None:
         return _draft_rejected(PausedSearchTrackAdminReasonCode.TRACK_KEY_TAKEN)
 
@@ -345,6 +429,9 @@ async def update_draft_paused_search_track(
 ) -> PausedSearchTrackDraftResult:
     if not _can_administer_tracks(actor):
         return _draft_rejected(PausedSearchTrackAdminReasonCode.PERMISSION_DENIED)
+    legacy_rejection = _reject_new_legacy_configuration(config)
+    if legacy_rejection is not None:
+        return legacy_rejection
 
     track = await repository.get_track(workspace_id, track_id)
     if track is None:
@@ -721,9 +808,7 @@ async def restore_retired_paused_search_track(
             reasons=(PausedSearchTrackAdminReasonCode.VERSION_NOT_FOUND,),
         )
 
-    next_version_number = (
-        await repository.get_latest_version_number(workspace_id, track_id)
-    ) + 1
+    next_version_number = (await repository.get_latest_version_number(workspace_id, track_id)) + 1
     restored_version = await repository.save_version(
         replace(
             version,
@@ -817,6 +902,21 @@ def _draft_rejected(
     )
 
 
+def _reject_new_legacy_configuration(
+    config: PausedSearchTrackConfigInput,
+) -> PausedSearchTrackDraftResult | None:
+    """Prevent new drafts from opting into deprecated compatibility behavior.
+
+    Persisted versions are still read and executed unchanged. New guided drafts
+    must express recurrence through explicit step policy instead of the legacy
+    maintenance interval or boolean review switch.
+    """
+
+    if _is_legacy_configuration(config):
+        return _draft_rejected(PausedSearchTrackAdminReasonCode.LEGACY_CONFIGURATION_NOT_ALLOWED)
+    return None
+
+
 def _publish_rejected(
     reason: PausedSearchTrackAdminReasonCode,
     *,
@@ -847,6 +947,7 @@ def _build_version(
     config: PausedSearchTrackConfigInput,
     now: datetime,
 ) -> PausedSearchTrackVersion:
+    max_total_touches, max_duration_days = _effective_safety_limits(config)
     return PausedSearchTrackVersion(
         track_version_id=track_version_id,
         workspace_id=workspace_id,
@@ -859,10 +960,17 @@ def _build_version(
         fallback_timing_policy=config.fallback_timing_policy,
         maintenance_interval_days=config.maintenance_interval_days,
         reactivation_window_days=config.reactivation_window_days,
-        max_total_touches=config.max_total_touches,
+        max_total_touches=max_total_touches,
         default_pause_duration_days=config.default_pause_duration_days,
-        max_duration_days=config.max_duration_days,
+        max_duration_days=max_duration_days,
         terminal_behavior=config.terminal_behavior,
+        track_mode=config.track_mode,
+        interim_contact_policy=config.interim_contact_policy,
+        reply_policy=config.reply_policy,
+        channel_sequence=config.channel_sequence,
+        max_cycles=config.max_cycles,
+        max_ai_interactions=config.max_ai_interactions,
+        restart_delay_days=config.restart_delay_days,
         created_by_user_id=actor.user_id,
         created_at=now,
     )
@@ -872,6 +980,7 @@ def _replace_version_config(
     version: PausedSearchTrackVersion,
     config: PausedSearchTrackConfigInput,
 ) -> PausedSearchTrackVersion:
+    max_total_touches, max_duration_days = _effective_safety_limits(config)
     return replace(
         version,
         selection_guidance=config.selection_guidance.strip(),
@@ -880,10 +989,17 @@ def _replace_version_config(
         fallback_timing_policy=config.fallback_timing_policy,
         maintenance_interval_days=config.maintenance_interval_days,
         reactivation_window_days=config.reactivation_window_days,
-        max_total_touches=config.max_total_touches,
+        max_total_touches=max_total_touches,
         default_pause_duration_days=config.default_pause_duration_days,
-        max_duration_days=config.max_duration_days,
+        max_duration_days=max_duration_days,
         terminal_behavior=config.terminal_behavior,
+        track_mode=config.track_mode,
+        interim_contact_policy=config.interim_contact_policy,
+        reply_policy=config.reply_policy,
+        channel_sequence=config.channel_sequence,
+        max_cycles=config.max_cycles,
+        max_ai_interactions=config.max_ai_interactions,
+        restart_delay_days=config.restart_delay_days,
     )
 
 
@@ -913,6 +1029,7 @@ def _build_steps(
             timing_basis=step.timing_basis,
             fallback_channel=step.fallback_channel,
             template_profile=step.template_profile,
+            action=step.action,
             created_at=now,
         )
         for index, step in enumerate(config.steps)

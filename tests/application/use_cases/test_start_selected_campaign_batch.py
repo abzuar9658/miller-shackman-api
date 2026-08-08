@@ -3,6 +3,7 @@ from uuid import UUID
 
 import pytest
 
+from app.application.ports.temporal import TemporalWorkflowExecutionMode
 from app.application.use_cases.campaign_enrollment_types import LeadStartStatus
 from app.application.use_cases.start_selected_campaign_batch import start_selected_campaign_batch
 from app.domain.campaigns.enrollment import CampaignEnrollmentSource, CampaignEnrollmentStatus
@@ -182,6 +183,11 @@ async def test_commits_before_starting_temporal_workflow(
             lead_id: UUID,
             campaign_version_id: UUID,
             temporal_workflow_id: str,
+            workflow_id: UUID | None = None,
+            execution_mode: TemporalWorkflowExecutionMode = (
+                TemporalWorkflowExecutionMode.STANDARD_CADENCE
+            ),
+            paused_search_track_version_id: UUID | None = None,
         ) -> None:
             call_order.append("start")
             await super().start_lead_nurture_workflow(
@@ -189,6 +195,9 @@ async def test_commits_before_starting_temporal_workflow(
                 lead_id=lead_id,
                 campaign_version_id=campaign_version_id,
                 temporal_workflow_id=temporal_workflow_id,
+                    workflow_id=workflow_id,
+                    execution_mode=execution_mode,
+                    paused_search_track_version_id=paused_search_track_version_id,
             )
 
     async def commit() -> None:

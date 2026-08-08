@@ -8,6 +8,7 @@ from app.application.ports.temporal import (
     PauseLeadNurtureWorkflowSignal,
     RescheduleLeadNurtureWorkflowSignal,
     ResumeLeadNurtureWorkflowSignal,
+    TemporalWorkflowExecutionMode,
     UnblockLeadNurtureWorkflowSignal,
 )
 from app.domain.campaigns.enrollment import CampaignEnrollment
@@ -179,6 +180,11 @@ class FakeTemporalWorkflowStarter:
         lead_id: LeadId,
         campaign_version_id: CampaignVersionId,
         temporal_workflow_id: str,
+        workflow_id: UUID | None = None,
+        execution_mode: TemporalWorkflowExecutionMode = (
+            TemporalWorkflowExecutionMode.STANDARD_CADENCE
+        ),
+        paused_search_track_version_id: UUID | None = None,
     ) -> None:
         self.calls.append(
             {
@@ -186,10 +192,37 @@ class FakeTemporalWorkflowStarter:
                 "lead_id": lead_id,
                 "campaign_version_id": campaign_version_id,
                 "temporal_workflow_id": temporal_workflow_id,
+                "workflow_id": workflow_id,
+                "execution_mode": execution_mode,
+                "paused_search_track_version_id": paused_search_track_version_id,
             }
         )
         if self.always_fail:
             raise RuntimeError("Temporal start failed")
+
+    async def configure_paused_search_workflow(
+        self,
+        *,
+        temporal_workflow_id: str,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        workflow_id: UUID,
+        paused_search_track_version_id: UUID,
+        occurred_at: datetime,
+        reason: str,
+    ) -> None:
+        self.calls.append(
+            {
+                "temporal_workflow_id": temporal_workflow_id,
+                "workspace_id": workspace_id,
+                "lead_id": lead_id,
+                "workflow_id": workflow_id,
+                "paused_search_track_version_id": paused_search_track_version_id,
+                "occurred_at": occurred_at,
+                "reason": reason,
+                "operation": "configure_paused_search_workflow",
+            }
+        )
 
 
 class FakeLeadNurtureWorkflowSignaler:

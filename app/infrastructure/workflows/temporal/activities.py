@@ -43,6 +43,9 @@ from app.infrastructure.persistence.postgres.outbound_message_repository import 
     PostgresOutboundMessageCRMCompletionRepository,
     PostgresOutboundMessageRepository,
 )
+from app.infrastructure.persistence.postgres.paused_search_agent_reminder_repository import (
+    PostgresPausedSearchAgentReminderRepository,
+)
 from app.infrastructure.persistence.postgres.paused_search_notification_repository import (
     PostgresPausedSearchNotificationRepository,
 )
@@ -161,6 +164,7 @@ async def execute_campaign_cadence_step_activity(
             template_repository=PostgresTemplateRepository(session),
             paused_search_occurrence_repository=PostgresPausedSearchOccurrenceRepository(session),
             paused_search_review_repository=PostgresPausedSearchReviewRepository(session),
+            paused_search_reminder_repository=PostgresPausedSearchAgentReminderRepository(session),
             workspace_repository=PostgresWorkspaceRepository(session),
             workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
             workspace_llm_config_repository=PostgresWorkspaceLLMConfigRepository(session),

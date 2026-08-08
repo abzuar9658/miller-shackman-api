@@ -968,6 +968,19 @@ class PausedSearchTrackVersionModel(Base):
     terminal_behavior: Mapped[str] = mapped_column(
         String(50), nullable=False, default="complete_keep_paused"
     )
+    track_mode: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="custom_bounded"
+    )
+    interim_contact_policy: Mapped[str] = mapped_column(
+        String(80), nullable=False, default="not_allowed"
+    )
+    reply_policy: Mapped[str] = mapped_column(String(50), nullable=False, default="end")
+    channel_sequence: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="sequential"
+    )
+    max_cycles: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    max_ai_interactions: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    restart_delay_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
     created_by_user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
     )
@@ -1014,6 +1027,7 @@ class PausedSearchTrackStepModel(Base):
     template_version_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
     review_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    action: Mapped[str] = mapped_column(String(20), nullable=False, default="send")
     interval_days: Mapped[int | None] = mapped_column(Integer)
     max_occurrences: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -1085,6 +1099,48 @@ class RecurringOccurrenceModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     timezone_snapshot: Mapped[str | None] = mapped_column(String(100))
+
+
+class PausedSearchAgentReminderModel(Base):
+    __tablename__ = "paused_search_agent_reminders"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "idempotency_key",
+            name="uq_paused_search_agent_reminders_workspace_idempotency",
+        ),
+        Index(
+            "ix_paused_search_agent_reminders_workspace_status_due",
+            "workspace_id",
+            "status",
+            "due_at",
+        ),
+    )
+
+    reminder_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    lead_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.lead_id"), nullable=False
+    )
+    workflow_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("lead_workflows.workflow_id"), nullable=False
+    )
+    occurrence_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("paused_search_occurrences.occurrence_id"), nullable=False
+    )
+    assigned_user_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PausedSearchTrackAssignmentModel(Base):

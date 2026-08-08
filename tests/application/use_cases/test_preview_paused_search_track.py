@@ -10,7 +10,10 @@ from app.application.use_cases.preview_paused_search_track import (
 )
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
+    PausedSearchInterimContactPolicy,
+    PausedSearchReplyPolicy,
     PausedSearchTrack,
+    PausedSearchTrackMode,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
@@ -156,6 +159,11 @@ def _version() -> PausedSearchTrackVersion:
         maintenance_interval_days=30,
         reactivation_window_days=30,
         max_total_touches=2,
+        track_mode=PausedSearchTrackMode.PERMISSION_BASED_INTERIM_CONTACT,
+        interim_contact_policy=(
+            PausedSearchInterimContactPolicy.REQUIRES_EXPLICIT_LEAD_PERMISSION
+        ),
+        reply_policy=PausedSearchReplyPolicy.CONTINUE,
         created_by_user_id=USER_ID,
         created_at=NOW,
     )

@@ -3,9 +3,14 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from app.domain.campaigns import (
+    PausedSearchChannelSequence,
     PausedSearchFallbackTimingPolicy,
+    PausedSearchInterimContactPolicy,
+    PausedSearchReplyPolicy,
+    PausedSearchStepAction,
     PausedSearchTerminalBehavior,
     PausedSearchTrack,
+    PausedSearchTrackMode,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
@@ -132,6 +137,103 @@ def test_profile_based_step_does_not_require_legacy_template_binding() -> None:
     assert report.errors == ()
 
 
+def test_legacy_review_flag_maps_to_canonical_step_action() -> None:
+    from app.domain.campaigns import effective_paused_search_step_action
+
+    assert effective_paused_search_step_action(_step()) is PausedSearchStepAction.SEND
+    assert effective_paused_search_step_action(replace(_step(), review_required=True)) is (
+        PausedSearchStepAction.REVIEW
+    )
+
+
+def test_permission_based_interim_track_requires_explicit_lead_permission() -> None:
+    report = validate_paused_search_track(
+        track=_track(),
+        version=replace(
+            _version(),
+            track_mode=PausedSearchTrackMode.PERMISSION_BASED_INTERIM_CONTACT,
+        ),
+        steps=(_step(),),
+        for_publish=True,
+    )
+
+    assert PausedSearchValidationCode.INTERIM_PERMISSION_REQUIRED in {
+        finding.code for finding in report.errors
+    }
+
+
+def test_recurring_maintenance_requires_explicit_lead_permission() -> None:
+    report = validate_paused_search_track(
+        track=_track(),
+        version=_version(),
+        steps=(_step(interval_days=30, max_occurrences=2),),
+        for_publish=True,
+    )
+
+    assert PausedSearchValidationCode.INTERIM_PERMISSION_REQUIRED in {
+        finding.code for finding in report.errors
+    }
+
+
+def test_recurring_maintenance_is_valid_with_explicit_permission() -> None:
+    report = validate_paused_search_track(
+        track=_track(),
+        version=replace(
+            _version(),
+            track_mode=PausedSearchTrackMode.PERMISSION_BASED_INTERIM_CONTACT,
+            interim_contact_policy=(
+                PausedSearchInterimContactPolicy.REQUIRES_EXPLICIT_LEAD_PERMISSION
+            ),
+            reply_policy=PausedSearchReplyPolicy.CONTINUE,
+        ),
+        steps=(_step(interval_days=30, max_occurrences=2),),
+        for_publish=True,
+    )
+
+    assert report.errors == ()
+
+
+def test_recurring_maintenance_is_valid_when_allowed_by_published_track() -> None:
+    report = validate_paused_search_track(
+        track=_track(),
+        version=replace(
+            _version(),
+            track_mode=PausedSearchTrackMode.PERMISSION_BASED_INTERIM_CONTACT,
+            interim_contact_policy=PausedSearchInterimContactPolicy.ALLOWED_BY_PUBLISHED_TRACK,
+        ),
+        steps=(_step(interval_days=30, max_occurrences=2),),
+        for_publish=True,
+    )
+
+    assert report.errors == ()
+
+
+def test_send_action_cannot_also_require_review() -> None:
+    report = validate_paused_search_track(
+        track=_track(),
+        version=_version(),
+        steps=(_step(action=PausedSearchStepAction.SEND, review_required=True),),
+        for_publish=True,
+    )
+
+    assert PausedSearchValidationCode.INCOMPATIBLE_STEP_ACTION in {
+        finding.code for finding in report.errors
+    }
+
+
+def test_simultaneous_channel_sequence_is_blocked_until_runtime_support_exists() -> None:
+    report = validate_paused_search_track(
+        track=_track(),
+        version=replace(_version(), channel_sequence=PausedSearchChannelSequence.SIMULTANEOUS),
+        steps=(_step(),),
+        for_publish=True,
+    )
+
+    assert PausedSearchValidationCode.UNSUPPORTED_CHANNEL_SEQUENCE in {
+        finding.code for finding in report.errors
+    }
+
+
 def test_validation_reports_all_blocking_configuration_findings() -> None:
     version = replace(
         _version(),
@@ -216,6 +318,8 @@ def _step(
     *,
     interval_days: int | None = None,
     max_occurrences: int = 1,
+    action: PausedSearchStepAction | None = None,
+    review_required: bool = False,
 ) -> PausedSearchTrackStep:
     return PausedSearchTrackStep(
         step_id=STEP_ID,
@@ -228,8 +332,9 @@ def _step(
         message_goal="Check whether plans changed.",
         template_key="paused-search-maintenance-email-1",
         max_attempts=1,
-        review_required=False,
+        review_required=review_required,
         created_at=NOW,
         interval_days=interval_days,
         max_occurrences=max_occurrences,
+        action=action,
     )

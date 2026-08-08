@@ -13,7 +13,10 @@ from app.application.ports.repositories import (
     WorkflowTransitionRepository,
     WorkspaceOperationalControlRepository,
 )
-from app.application.ports.temporal import TemporalWorkflowStarter
+from app.application.ports.temporal import (
+    TemporalWorkflowExecutionMode,
+    TemporalWorkflowStarter,
+)
 from app.application.services.campaign_enrollment_starter import start_single_campaign_enrollment
 from app.application.services.paused_search_track_assignment import (
     synchronize_paused_search_track_assignment,
@@ -102,6 +105,11 @@ async def start_paused_search_campaign_enrollment(
             status=PausedSearchCampaignEnrollmentStatus.REVIEW_HOLD,
             reason_codes=reason_codes + ("paused_search_track_assignment_unavailable",),
         )
+    if active_assignment.track_version_id is None:
+        return PausedSearchCampaignEnrollmentResult(
+            status=PausedSearchCampaignEnrollmentStatus.REVIEW_HOLD,
+            reason_codes=reason_codes + ("paused_search_track_assignment_unavailable",),
+        )
 
     existing = await campaign_enrollment_repository.get_by_lead_and_campaign(
         workspace_id,
@@ -125,6 +133,7 @@ async def start_paused_search_campaign_enrollment(
             metadata=_paused_search_enrollment_metadata(lead),
             initial_workflow_state=WorkflowState.ACTIVE_NURTURE,
             paused_search_track_version_id=active_assignment.track_version_id,
+            execution_mode=TemporalWorkflowExecutionMode.PAUSED_SEARCH_RECURRING,
             event_bus=event_bus,
             workspace_operational_control_repository=workspace_operational_control_repository,
             commit=commit,
@@ -185,6 +194,19 @@ async def start_paused_search_campaign_enrollment(
             )
         if transition_result.workflow is not None:
             pinned_workflow = transition_result.workflow
+
+    if existing is not None and pinned_workflow.temporal_workflow_id is not None:
+        if commit is not None:
+            await commit()
+        await temporal_workflow_starter.configure_paused_search_workflow(
+            temporal_workflow_id=pinned_workflow.temporal_workflow_id,
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            workflow_id=pinned_workflow.workflow_id,
+            paused_search_track_version_id=active_assignment.track_version_id,
+            occurred_at=now,
+            reason="operator_selected_paused_search_track",
+        )
 
     lead_result = LeadStartResult(
         lead_id=lead_id,

@@ -135,6 +135,7 @@ class InboundProcessedWorkflowSignal:
     workflow_transition_id: UUID | None = None
     inbound_action: str | None = None
     reason: str | None = None
+    paused_search_reply_decision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,16 @@ class RescheduleWorkflowSignal:
     reason: str
     actor_user_id: UUID | None = None
     external_event_id: UUID | None = None
+
+
+@dataclass(frozen=True)
+class ConfigurePausedSearchWorkflowSignal:
+    workspace_id: UUID
+    lead_id: UUID
+    workflow_id: UUID
+    paused_search_track_version_id: UUID
+    occurred_at: str
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -391,14 +402,19 @@ class LeadNurtureWorkflow:
 
     @workflow.signal(name="inbound-processed")
     def inbound_processed(self, signal: InboundProcessedWorkflowSignal) -> None:
-        self._send_blocked = True
+        resumes_paused_search = signal.paused_search_reply_decision in {
+            "continue",
+            "reanchor",
+            "end",
+        }
+        self._send_blocked = not resumes_paused_search
         self._reschedule_requested = True
         if self._snapshot is not None:
             self._snapshot = replace(
                 self._snapshot,
                 last_signal="inbound_processed",
                 last_activity="inbound_processed",
-                last_activity_status="blocked",
+                last_activity_status="unblocked" if resumes_paused_search else "blocked",
                 skip_reason=signal.reason,
             )
 
@@ -410,6 +426,23 @@ class LeadNurtureWorkflow:
                 self._snapshot,
                 last_signal="reschedule_requested",
                 last_activity="reschedule_requested",
+                last_activity_status="updated",
+                skip_reason=signal.reason,
+            )
+
+    @workflow.signal(name="paused-search-configured")
+    def paused_search_configured(self, signal: ConfigurePausedSearchWorkflowSignal) -> None:
+        self._execution_mode = LeadNurtureExecutionMode.PAUSED_SEARCH_RECURRING
+        self._send_blocked = False
+        self._reschedule_requested = True
+        if self._snapshot is not None:
+            self._snapshot = replace(
+                self._snapshot,
+                workflow_id=signal.workflow_id,
+                execution_mode=LeadNurtureExecutionMode.PAUSED_SEARCH_RECURRING,
+                paused_search_track_version_id=signal.paused_search_track_version_id,
+                last_signal="paused_search_configured",
+                last_activity="paused_search_configured",
                 last_activity_status="updated",
                 skip_reason=signal.reason,
             )

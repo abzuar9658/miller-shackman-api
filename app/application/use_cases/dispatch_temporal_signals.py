@@ -188,6 +188,10 @@ def _inbound_processed_signal(
         workflow_transition_id=_optional_uuid_from_payload(payload, "workflow_transition_id"),
         inbound_action=_optional_string_from_payload(payload, "inbound_action"),
         reason=_optional_string_from_payload(payload, "reason"),
+        paused_search_reply_decision=_optional_string_from_payload(
+            payload,
+            "paused_search_reply_decision",
+        ),
     )
 
 

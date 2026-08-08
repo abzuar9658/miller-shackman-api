@@ -9,7 +9,10 @@ from app.application.ports.repositories import (
     WorkflowTransitionRepository,
     WorkspaceOperationalControlRepository,
 )
-from app.application.ports.temporal import TemporalWorkflowStarter
+from app.application.ports.temporal import (
+    TemporalWorkflowExecutionMode,
+    TemporalWorkflowStarter,
+)
 from app.application.services.workspace_automation_control import (
     resolve_workspace_operational_control,
     workspace_automation_block_reason,
@@ -63,6 +66,9 @@ async def start_single_campaign_enrollment(
         WorkflowTransitionReasonCode.CAMPAIGN_ENROLLMENT_STARTED
     ),
     paused_search_track_version_id: PausedSearchTrackVersionId | None = None,
+    execution_mode: TemporalWorkflowExecutionMode = (
+        TemporalWorkflowExecutionMode.STANDARD_CADENCE
+    ),
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     commit: Callable[[], Awaitable[None]] | None = None,
@@ -157,6 +163,9 @@ async def start_single_campaign_enrollment(
             lead_id=lead_id,
             campaign_version_id=campaign_version_id,
             temporal_workflow_id=temporal_workflow_id,
+            workflow_id=workflow_id,
+            execution_mode=execution_mode,
+            paused_search_track_version_id=paused_search_track_version_id,
         )
     except Exception as error:
         return LeadStartResult(

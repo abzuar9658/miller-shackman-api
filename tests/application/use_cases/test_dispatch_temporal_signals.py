@@ -4,6 +4,7 @@ from typing import cast
 from uuid import UUID
 
 from app.application.ports.temporal import (
+    InboundProcessedLeadNurtureWorkflowSignal,
     LeadNurtureWorkflowSignaler,
     PauseLeadNurtureWorkflowSignal,
     RescheduleLeadNurtureWorkflowSignal,
@@ -313,6 +314,33 @@ async def test_dispatch_temporal_signals_sends_resume_requested_signal() -> None
     assert signaler.calls[0]["temporal_workflow_id"] == "workflow-123"
     resume_signal = cast(ResumeLeadNurtureWorkflowSignal, signaler.calls[0]["signal"])
     assert resume_signal.reason == "agent approved follow-up"
+
+
+async def test_dispatch_temporal_signals_preserves_paused_search_reply_decision() -> None:
+    repository = FakeTemporalSignalOutboxRepository()
+    await repository.append(
+        replace(
+            _entry(),
+            payload={
+                **_entry().payload,
+                "paused_search_reply_decision": "restart",
+            },
+        )
+    )
+    signaler = FakeLeadNurtureWorkflowSignaler()
+
+    result = await dispatch_temporal_signals(
+        temporal_signal_outbox_repository=repository,
+        lead_nurture_workflow_signaler=signaler,
+        now=NOW,
+    )
+
+    assert result.sent_count == 1
+    inbound_signal = cast(
+        InboundProcessedLeadNurtureWorkflowSignal,
+        signaler.calls[0]["signal"],
+    )
+    assert inbound_signal.paused_search_reply_decision == "restart"
 
 
 async def test_dispatch_temporal_signals_sends_blocked_review_completed_signal() -> None:

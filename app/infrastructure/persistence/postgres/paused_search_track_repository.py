@@ -7,7 +7,11 @@ from sqlalchemy.sql import Select
 
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.paused_search_tracks import (
+    PausedSearchChannelSequence,
     PausedSearchFallbackTimingPolicy,
+    PausedSearchInterimContactPolicy,
+    PausedSearchReplyPolicy,
+    PausedSearchStepAction,
     PausedSearchTerminalBehavior,
     PausedSearchTimingBasis,
     PausedSearchTrack,
@@ -17,10 +21,12 @@ from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrackAssignmentSource,
     PausedSearchTrackCatalogEntry,
     PausedSearchTrackLeadAssignment,
+    PausedSearchTrackMode,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
+    effective_paused_search_step_action,
 )
 from app.domain.common.ids import (
     LeadId,
@@ -34,6 +40,7 @@ from app.domain.outbound_drafting import (
     dormant_step_template_profile_from_mapping,
     dormant_step_template_profile_to_mapping,
 )
+from app.domain.workflows import LeadWorkflow
 from app.infrastructure.persistence.postgres.models import (
     LeadModel,
     PausedSearchTrackAdminAuditLogModel,
@@ -49,6 +56,56 @@ from app.infrastructure.persistence.postgres.workflow_models import LeadWorkflow
 class PostgresPausedSearchTrackAdminRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def list_legacy_versions(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> tuple[tuple[PausedSearchTrackVersion, tuple[PausedSearchTrackStep, ...]], ...]:
+        result = await self._session.execute(
+            select(PausedSearchTrackVersionModel)
+            .where(PausedSearchTrackVersionModel.workspace_id == workspace_id)
+            .order_by(
+                PausedSearchTrackVersionModel.track_id,
+                PausedSearchTrackVersionModel.version_number,
+            )
+        )
+        versions: list[tuple[PausedSearchTrackVersion, tuple[PausedSearchTrackStep, ...]]] = []
+        for model in result.scalars().all():
+            steps_result = await self._session.execute(
+                select(PausedSearchTrackStepModel)
+                .where(
+                    PausedSearchTrackStepModel.workspace_id == workspace_id,
+                    PausedSearchTrackStepModel.track_version_id == model.track_version_id,
+                )
+                .order_by(PausedSearchTrackStepModel.step_order)
+            )
+            steps = tuple(_step_from_model(step) for step in steps_result.scalars().all())
+            version = _version_from_model(model)
+            if any(step.action is None and step.review_required for step in steps):
+                versions.append((version, steps))
+        return tuple(versions)
+
+    async def list_active_workflows_for_versions(
+        self,
+        workspace_id: WorkspaceId,
+        track_version_ids: tuple[PausedSearchTrackVersionId, ...],
+    ) -> tuple[LeadWorkflow, ...]:
+        if not track_version_ids:
+            return ()
+        result = await self._session.execute(
+            select(LeadWorkflowModel)
+            .where(
+                LeadWorkflowModel.workspace_id == workspace_id,
+                LeadWorkflowModel.paused_search_track_version_id.in_(track_version_ids),
+                LeadWorkflowModel.state.in_(
+                    ("queued", "active_nurture", "waiting_for_response", "response_processing")
+                ),
+            )
+            .order_by(LeadWorkflowModel.last_transition_at.asc())
+        )
+        from app.infrastructure.persistence.postgres.workflow_repository import _model_to_workflow
+
+        return tuple(_model_to_workflow(model) for model in result.scalars().all())
 
     async def list_tracks(self, workspace_id: WorkspaceId) -> tuple[PausedSearchTrack, ...]:
         result = await self._session.execute(
@@ -554,6 +611,13 @@ def _version_to_values(version: PausedSearchTrackVersion) -> dict[str, object]:
         "default_pause_duration_days": version.default_pause_duration_days,
         "max_duration_days": version.max_duration_days,
         "terminal_behavior": version.terminal_behavior.value,
+        "track_mode": version.track_mode.value,
+        "interim_contact_policy": version.interim_contact_policy.value,
+        "reply_policy": version.reply_policy.value,
+        "channel_sequence": version.channel_sequence.value,
+        "max_cycles": version.max_cycles,
+        "max_ai_interactions": version.max_ai_interactions,
+        "restart_delay_days": version.restart_delay_days,
         "created_by_user_id": version.created_by_user_id,
         "published_at": version.published_at,
         "created_at": version.created_at,
@@ -577,6 +641,13 @@ def _version_from_model(model: PausedSearchTrackVersionModel) -> PausedSearchTra
         default_pause_duration_days=model.default_pause_duration_days,
         max_duration_days=model.max_duration_days,
         terminal_behavior=PausedSearchTerminalBehavior(model.terminal_behavior),
+        track_mode=PausedSearchTrackMode(model.track_mode),
+        interim_contact_policy=PausedSearchInterimContactPolicy(model.interim_contact_policy),
+        reply_policy=PausedSearchReplyPolicy(model.reply_policy),
+        channel_sequence=PausedSearchChannelSequence(model.channel_sequence),
+        max_cycles=model.max_cycles,
+        max_ai_interactions=model.max_ai_interactions,
+        restart_delay_days=model.restart_delay_days,
         created_by_user_id=model.created_by_user_id,
         published_at=model.published_at,
         created_at=model.created_at,
@@ -604,6 +675,7 @@ def _step_to_values(step: PausedSearchTrackStep) -> dict[str, object]:
         ),
         "max_attempts": step.max_attempts,
         "review_required": step.review_required,
+        "action": effective_paused_search_step_action(step).value,
         "interval_days": step.interval_days,
         "max_occurrences": step.max_occurrences,
         "created_at": step.created_at,
@@ -628,6 +700,7 @@ def _step_from_model(model: PausedSearchTrackStepModel) -> PausedSearchTrackStep
         template_version_id=model.template_version_id,
         max_attempts=model.max_attempts,
         review_required=model.review_required,
+        action=PausedSearchStepAction(model.action),
         created_at=model.created_at,
         interval_days=model.interval_days,
         max_occurrences=model.max_occurrences,

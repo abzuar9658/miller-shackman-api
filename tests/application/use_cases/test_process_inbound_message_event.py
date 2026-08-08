@@ -23,6 +23,7 @@ from app.application.use_cases.process_inbound_message_event import (
 )
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
+    PausedSearchReplyPolicy,
     PausedSearchTrack,
     PausedSearchTrackStatus,
     PausedSearchTrackVersion,
@@ -37,6 +38,7 @@ from app.domain.campaigns.outbound_message import (
     OutboundMessageCRMCompletionRecord,
     OutboundMessageStatus,
 )
+from app.domain.campaigns.paused_search_reply_policy import PausedSearchReplyDecision
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance import SmsComplianceState, WorkspaceContactPolicy
@@ -65,6 +67,7 @@ from app.domain.leads import (
     CRMProvider,
     LeadPausedSearchHistoryEntry,
     PausedSearchSource,
+    lead_paused_search_profile,
 )
 from app.domain.llm import WorkspaceLLMConfig
 from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
@@ -720,6 +723,8 @@ def _lead_state_classification_json(
     summary: str = "Lead state updated from latest reply.",
     handoff_reason_code: str | None = None,
     selected_track_key: str | None = None,
+    reengagement_not_before: str | None = None,
+    reengagement_window_label: str | None = None,
 ) -> str:
     payload: dict[str, object] = {
         "outcome": outcome,
@@ -730,8 +735,8 @@ def _lead_state_classification_json(
         "selected_track_key": selected_track_key,
         "track_selection_status": "selected" if selected_track_key is not None else None,
         "pause_reason_note": None,
-        "reengagement_not_before": None,
-        "reengagement_window_label": None,
+        "reengagement_not_before": reengagement_not_before,
+        "reengagement_window_label": reengagement_window_label,
     }
     return json.dumps(payload)
 
@@ -905,6 +910,8 @@ def _continue_ai_dependencies(
     external_event_repository: FakeExternalEventRepository | None = None,
     sms_compliance_state: SmsComplianceState = SmsComplianceState.APPROVED,
     channel: ContactChannel = ContactChannel.SMS,
+    paused_search_reply_policy: PausedSearchReplyPolicy = PausedSearchReplyPolicy.END,
+    restart_delay_days: int = 30,
 ) -> _ContinueAIDependencies:
     crm_client = FakeCRMClient()
     return {
@@ -922,7 +929,10 @@ def _continue_ai_dependencies(
         "outbound_message_crm_completion_repository": FakeOutboundMessageCRMCompletionRepository(),
         "lead_workflow_repository": _workflow_repository(workflow),
         "workflow_transition_repository": FakeWorkflowTransitionRepository(),
-        "paused_search_track_repository": _paused_search_track_repository(),
+        "paused_search_track_repository": _paused_search_track_repository(
+            reply_policy=paused_search_reply_policy,
+            restart_delay_days=restart_delay_days,
+        ),
         "paused_search_track_assignment_repository": (
             FakePausedSearchTrackAssignmentRepository()
         ),
@@ -954,7 +964,11 @@ def _workflow_repository(workflow: LeadWorkflow) -> FakeLeadWorkflowRepository:
     return repository
 
 
-def _paused_search_track_repository() -> FakePausedSearchTrackAdminRepository:
+def _paused_search_track_repository(
+    *,
+    reply_policy: PausedSearchReplyPolicy = PausedSearchReplyPolicy.END,
+    restart_delay_days: int = 30,
+) -> FakePausedSearchTrackAdminRepository:
     return FakePausedSearchTrackAdminRepository(
         tracks=(
             PausedSearchTrack(
@@ -985,6 +999,8 @@ def _paused_search_track_repository() -> FakePausedSearchTrackAdminRepository:
                 maintenance_interval_days=30,
                 reactivation_window_days=30,
                 max_total_touches=6,
+                reply_policy=reply_policy,
+                restart_delay_days=restart_delay_days,
                 created_by_user_id=UUID("00000000-0000-0000-0000-000000000043"),
                 created_at=NOW,
                 published_at=NOW,
@@ -1880,9 +1896,12 @@ async def test_continue_ai_reroute_to_review_hold_creates_pending_routing_review
     assert routing_review_repository.saved[0].status.value == "pending"
 
 
-async def test_continue_ai_reroutes_existing_paused_search_to_human_handoff() -> None:
+async def test_paused_search_policy_prevents_ai_continuation_before_reclassification() -> None:
     workflow = _workflow()
-    dependencies = _continue_ai_dependencies(workflow=workflow)
+    dependencies = _continue_ai_dependencies(
+        workflow=workflow,
+        paused_search_reply_policy=PausedSearchReplyPolicy.CONTINUE,
+    )
     lead_repository = dependencies["lead_repository"]
     conversation_repository = dependencies["conversation_repository"]
     lead_workflow_repository = dependencies["lead_workflow_repository"]
@@ -1921,14 +1940,267 @@ async def test_continue_ai_reroutes_existing_paused_search_to_human_handoff() ->
 
     assert result.status == ProcessInboundMessageEventStatus.PROCESSED
     assert result.inbound_action == InboundAction.CONTINUE_AI
-    assert result.continue_ai_status == ContinueAIStatus.BLOCKED
-    assert result.continue_ai_pause_reason == "ai_continuation_rerouted_to_human_handoff"
+    assert result.paused_search_reply_decision is PausedSearchReplyDecision.CONTINUE
+    assert result.continue_ai_status is None
     assert len(sms_provider.messages) == 0
     final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     final_conversation = conversation_repository.by_id[CONVERSATION_ID]
-    assert final_workflow.state == WorkflowState.PAUSED
-    assert final_conversation.status == ConversationStatus.PAUSED
+    assert final_workflow.state == WorkflowState.ACTIVE_NURTURE
+    assert final_conversation.status == ConversationStatus.ACTIVE_AI
     assert len(workflow_transition_repository.transitions) == 1
+
+
+async def test_paused_search_continue_policy_resumes_without_ai_reply() -> None:
+    workflow = _workflow()
+    dependencies = _continue_ai_dependencies(
+        workflow=workflow,
+        paused_search_reply_policy=PausedSearchReplyPolicy.CONTINUE,
+    )
+    lead_repository = dependencies["lead_repository"]
+    assert lead_repository.lead is not None
+    lead_repository.lead = replace(
+        lead_repository.lead,
+        paused_search_active=True,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=TRACK_VERSION_ID,
+        paused_search_source=PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
+    )
+
+    result = await process_inbound_message_event(
+        event=_event(body="We may be ready to look again soon."),
+        llm_client=_FakeLLMClientForContinuation(
+            classification_text=_classification_json(
+                intent="general_reply",
+                summary_text="Lead may be ready to resume the search.",
+            ),
+            draft_text=_draft_json(),
+        ),
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        **dependencies,
+    )
+
+    saved_workflow = dependencies["lead_workflow_repository"].latest_by_lead[
+        (WORKSPACE_ID, LEAD_ID)
+    ]
+    assert result.inbound_action is InboundAction.CONTINUE_AI
+    assert result.paused_search_reply_decision is PausedSearchReplyDecision.CONTINUE
+    assert result.continue_ai_status is None
+    assert saved_workflow.state is WorkflowState.ACTIVE_NURTURE
+    assert dependencies["sms_provider"].messages == []
+    assert len(dependencies["temporal_signal_outbox_repository"].entries) == 1
+
+
+async def test_paused_search_restart_policy_delays_resume_signal() -> None:
+    workflow = _workflow()
+    dependencies = _continue_ai_dependencies(
+        workflow=workflow,
+        paused_search_reply_policy=PausedSearchReplyPolicy.RESTART_AFTER_DELAY,
+        restart_delay_days=14,
+    )
+    lead_repository = dependencies["lead_repository"]
+    assert lead_repository.lead is not None
+    lead_repository.lead = replace(
+        lead_repository.lead,
+        paused_search_active=True,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=TRACK_VERSION_ID,
+        paused_search_source=PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
+    )
+
+    result = await process_inbound_message_event(
+        event=_event(body="We are ready to restart our search."),
+        llm_client=_FakeLLMClientForContinuation(
+            classification_text=_classification_json(
+                intent="general_reply",
+                summary_text="Lead wants to restart the paused search.",
+            ),
+            draft_text=_draft_json(),
+        ),
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        **dependencies,
+    )
+
+    entries = dependencies["temporal_signal_outbox_repository"].entries.values()
+    by_signal = {entry.signal_name: entry for entry in entries}
+    assert result.paused_search_reply_decision is PausedSearchReplyDecision.RESTART
+    assert result.continue_ai_status is None
+    assert by_signal[TemporalSignalName.INBOUND_PROCESSED].available_at == NOW
+    assert by_signal[TemporalSignalName.RESUME_REQUESTED].available_at == NOW + timedelta(days=14)
+    assert by_signal[TemporalSignalName.RESUME_REQUESTED].idempotency_key == (
+        f"paused-search-restart-resume:{EXTERNAL_EVENT_ID}"
+    )
+    duplicate = await process_inbound_message_event(
+        event=_event(body="We are ready to restart our search."),
+        llm_client=FakeLLMClient(
+            _classification_json(
+                intent="general_reply",
+                summary_text="Duplicate delivery.",
+            )
+        ),
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        **dependencies,
+    )
+
+    assert duplicate.status is ProcessInboundMessageEventStatus.DUPLICATE
+    assert len(dependencies["temporal_signal_outbox_repository"].entries) == 2
+    assert len(dependencies["workflow_transition_repository"].transitions) == 1
+
+
+async def test_paused_search_reanchor_without_explicit_timing_requires_review() -> None:
+    workflow = _workflow()
+    dependencies = _continue_ai_dependencies(
+        workflow=workflow,
+        paused_search_reply_policy=PausedSearchReplyPolicy.REANCHOR_TO_NEW_TIMING,
+    )
+    lead_repository = dependencies["lead_repository"]
+    assert lead_repository.lead is not None
+    lead_repository.lead = replace(
+        lead_repository.lead,
+        paused_search_active=True,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=TRACK_VERSION_ID,
+        paused_search_source=PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
+    )
+
+    result = await process_inbound_message_event(
+        event=_event(body="I am still unsure about when we will move."),
+        llm_client=_FakeLLMClientForContinuation(
+            classification_text=_classification_json(
+                intent="general_reply",
+                summary_text="Lead has not provided a new timing.",
+            ),
+            draft_text=_draft_json(),
+        ),
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        **dependencies,
+    )
+
+    saved_workflow = dependencies["lead_workflow_repository"].latest_by_lead[
+        (WORKSPACE_ID, LEAD_ID)
+    ]
+    assert result.inbound_action is InboundAction.PAUSE_FOR_REVIEW
+    assert result.inbound_action_reason is InboundActionReasonCode.PAUSED_SEARCH_REPLY_REVIEW
+    assert result.paused_search_reply_decision is PausedSearchReplyDecision.REVIEW
+    assert saved_workflow.state is WorkflowState.PAUSED
+    assert dependencies["sms_provider"].messages == []
+
+
+async def test_paused_search_reanchor_applies_validated_future_timing() -> None:
+    workflow = _workflow()
+    dependencies = _continue_ai_dependencies(
+        workflow=workflow,
+        paused_search_reply_policy=PausedSearchReplyPolicy.REANCHOR_TO_NEW_TIMING,
+    )
+    lead_repository = dependencies["lead_repository"]
+    assert lead_repository.lead is not None
+    lead_repository.lead = replace(
+        lead_repository.lead,
+        paused_search_active=True,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=TRACK_VERSION_ID,
+        paused_search_source=PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
+        reengagement_not_before=NOW + timedelta(days=30),
+    )
+    llm_client = _FakeLLMClientForContinuation(
+        classification_text=_classification_json(
+            intent="general_reply",
+            summary_text="Lead shared a concrete future timing.",
+        ),
+        draft_text=_draft_json(),
+        lead_state_text=_lead_state_classification_json(
+            outcome="paused_search",
+            selected_track_key="waiting-for-rates",
+            reengagement_not_before="2026-08-15T00:00:00+00:00",
+            reengagement_window_label="after summer",
+            summary="Lead wants to resume the search after summer.",
+        ),
+    )
+
+    result = await process_inbound_message_event(
+        event=_event(body="Let's look again after summer."),
+        llm_client=llm_client,
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        **dependencies,
+    )
+
+    assert result.paused_search_reply_decision is PausedSearchReplyDecision.REANCHOR
+    assert result.inbound_action is InboundAction.CONTINUE_AI
+    assert result.continue_ai_status is None
+    assert lead_repository.lead is not None
+    profile = lead_paused_search_profile(lead_repository.lead)
+    assert profile is not None
+    assert profile.reengagement_not_before == datetime(2026, 8, 15, tzinfo=UTC)
+    assert profile.reengagement_window_label == "after summer"
+    lead_state_requests = [
+        request
+        for request in llm_client.requests
+        if "classify_lead_state_from_conversation" in request.prompt
+    ]
+    assert len(lead_state_requests) == 1
+
+
+async def test_paused_search_reanchor_rejects_past_timing_and_holds_for_review() -> None:
+    workflow = _workflow()
+    dependencies = _continue_ai_dependencies(
+        workflow=workflow,
+        paused_search_reply_policy=PausedSearchReplyPolicy.REANCHOR_TO_NEW_TIMING,
+    )
+    lead_repository = dependencies["lead_repository"]
+    assert lead_repository.lead is not None
+    lead_repository.lead = replace(
+        lead_repository.lead,
+        paused_search_active=True,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=TRACK_VERSION_ID,
+        paused_search_source=PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
+        reengagement_not_before=NOW + timedelta(days=30),
+        reengagement_window_label="after winter",
+    )
+
+    result = await process_inbound_message_event(
+        event=_event(body="We already moved last month."),
+        llm_client=_FakeLLMClientForContinuation(
+            classification_text=_classification_json(
+                intent="general_reply",
+                summary_text="Lead did not provide a usable future timing.",
+            ),
+            draft_text=_draft_json(),
+            lead_state_text=_lead_state_classification_json(
+                outcome="paused_search",
+                selected_track_key="waiting-for-rates",
+                reengagement_not_before="2026-06-01T00:00:00+00:00",
+            ),
+        ),
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        **dependencies,
+    )
+
+    assert result.paused_search_reply_decision is PausedSearchReplyDecision.REVIEW
+    assert result.inbound_action is InboundAction.PAUSE_FOR_REVIEW
+    assert lead_repository.lead is not None
+    profile = lead_paused_search_profile(lead_repository.lead)
+    assert profile is not None
+    assert profile.reengagement_not_before == NOW + timedelta(days=30)
+    assert profile.reengagement_window_label == "after winter"
+    assert lead_repository.paused_search_history == []
 
 
 async def test_continue_ai_sends_outbound_email_and_returns_to_waiting_for_response() -> None:

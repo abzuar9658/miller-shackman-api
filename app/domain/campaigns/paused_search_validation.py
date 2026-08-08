@@ -4,9 +4,14 @@ from enum import StrEnum
 from uuid import UUID
 
 from app.domain.campaigns.paused_search_tracks import (
+    PausedSearchChannelSequence,
+    PausedSearchStepAction,
     PausedSearchTrack,
+    PausedSearchTrackMode,
     PausedSearchTrackStep,
     PausedSearchTrackVersion,
+    effective_paused_search_step_action,
+    paused_search_interim_contact_is_configured,
 )
 from app.domain.campaigns.template_registry import (
     ALLOWED_TEMPLATE_VARIABLES,
@@ -15,6 +20,7 @@ from app.domain.campaigns.template_registry import (
 )
 
 MAX_AI_TOUCHES_PER_TRACK = 5
+MAX_PAUSED_SEARCH_CYCLES = 12
 UNIVERSAL_PAUSED_SEARCH_SAFETY_TAGS = frozenset(
     {
         "no_prohibited_advice",
@@ -42,6 +48,12 @@ class PausedSearchValidationCode(StrEnum):
     INVALID_REACTIVATION_WINDOW = "invalid_reactivation_window"
     INVALID_TOUCH_LIMIT = "invalid_touch_limit"
     INVALID_DURATION = "invalid_duration"
+    INVALID_CYCLE_LIMIT = "invalid_cycle_limit"
+    INVALID_AI_INTERACTION_LIMIT = "invalid_ai_interaction_limit"
+    INTERIM_PERMISSION_REQUIRED = "interim_permission_required"
+    INVALID_STEP_ACTION = "invalid_step_action"
+    INCOMPATIBLE_STEP_ACTION = "incompatible_step_action"
+    UNSUPPORTED_CHANNEL_SEQUENCE = "unsupported_channel_sequence"
     NO_STEPS = "no_steps"
     INVALID_STEP_ORDER = "invalid_step_order"
     STEP_CHANNEL_NOT_ALLOWED = "step_channel_not_allowed"
@@ -189,6 +201,29 @@ def _validate_version(
         _error(findings, PausedSearchValidationCode.INVALID_TOUCH_LIMIT, "max_total_touches")
     if not 30 <= version.max_duration_days <= 730:
         _error(findings, PausedSearchValidationCode.INVALID_DURATION, "max_duration_days")
+    if not 0 < version.max_cycles <= MAX_PAUSED_SEARCH_CYCLES:
+        _error(findings, PausedSearchValidationCode.INVALID_CYCLE_LIMIT, "max_cycles")
+    if not 0 < version.max_ai_interactions <= MAX_AI_TOUCHES_PER_TRACK:
+        _error(
+            findings,
+            PausedSearchValidationCode.INVALID_AI_INTERACTION_LIMIT,
+            "max_ai_interactions",
+        )
+    if (
+        version.track_mode is PausedSearchTrackMode.PERMISSION_BASED_INTERIM_CONTACT
+        and not paused_search_interim_contact_is_configured(version.interim_contact_policy)
+    ):
+        _error(
+            findings,
+            PausedSearchValidationCode.INTERIM_PERMISSION_REQUIRED,
+            "interim_contact_policy",
+        )
+    if version.channel_sequence is PausedSearchChannelSequence.SIMULTANEOUS:
+        _error(
+            findings,
+            PausedSearchValidationCode.UNSUPPORTED_CHANNEL_SEQUENCE,
+            "channel_sequence",
+        )
     if not steps:
         _error(findings, PausedSearchValidationCode.NO_STEPS, "steps")
     if for_publish and not version.enabled:
@@ -206,6 +241,15 @@ def _validate_steps(
     allowed_channels = set(version.allowed_channels)
     for index, step in enumerate(steps):
         field = f"steps[{index}]"
+        action = effective_paused_search_step_action(step)
+        if step.action is not None and not isinstance(step.action, PausedSearchStepAction):
+            _error(findings, PausedSearchValidationCode.INVALID_STEP_ACTION, f"{field}.action")
+        if action is PausedSearchStepAction.SEND and step.review_required:
+            _error(
+                findings,
+                PausedSearchValidationCode.INCOMPATIBLE_STEP_ACTION,
+                f"{field}.action",
+            )
         if step.channel not in allowed_channels:
             _error(
                 findings, PausedSearchValidationCode.STEP_CHANNEL_NOT_ALLOWED, f"{field}.channel"
@@ -230,6 +274,17 @@ def _validate_steps(
             _error(
                 findings,
                 PausedSearchValidationCode.INVALID_RECURRING_INTERVAL,
+                f"{field}.interval_days",
+            )
+        if (
+            step.phase.value == "maintenance"
+            and step.interval_days is not None
+            and step.max_occurrences > 1
+            and not paused_search_interim_contact_is_configured(version.interim_contact_policy)
+        ):
+            _error(
+                findings,
+                PausedSearchValidationCode.INTERIM_PERMISSION_REQUIRED,
                 f"{field}.interval_days",
             )
 

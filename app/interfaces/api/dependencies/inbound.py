@@ -26,6 +26,7 @@ from app.application.ports.repositories import (
     LeadWorkflowRepository,
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
+    PausedSearchAgentReminderRepository,
     PausedSearchOccurrenceRepository,
     PausedSearchTrackAssignmentRepository,
     PausedSearchTrackRepository,
@@ -78,6 +79,9 @@ from app.infrastructure.persistence.postgres.outbound_message_repository import 
 from app.infrastructure.persistence.postgres.outbox_event_repository import (
     PostgresOutboxEventRepository,
     PostgresTransactionalEventBus,
+)
+from app.infrastructure.persistence.postgres.paused_search_agent_reminder_repository import (
+    PostgresPausedSearchAgentReminderRepository,
 )
 from app.infrastructure.persistence.postgres.paused_search_occurrence_repository import (
     PostgresPausedSearchOccurrenceRepository,
@@ -162,6 +166,7 @@ class InboundServiceBundle:
     routing_review_repository: LeadRoutingReviewRepository | None = None
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None
+    paused_search_reminder_repository: PausedSearchAgentReminderRepository | None = None
 
 
 async def get_inbound_service_bundle(
@@ -193,6 +198,7 @@ async def get_inbound_service_bundle(
             session
         ),
         paused_search_occurrence_repository=PostgresPausedSearchOccurrenceRepository(session),
+        paused_search_reminder_repository=PostgresPausedSearchAgentReminderRepository(session),
         lead_workflow_repository=PostgresLeadWorkflowRepository(session),
         workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
         workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),

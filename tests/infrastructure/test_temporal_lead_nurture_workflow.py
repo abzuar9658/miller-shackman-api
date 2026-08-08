@@ -423,6 +423,29 @@ async def test_lead_nurture_workflow_inbound_processed_signal_blocks_sends() -> 
     assert workflow_instance._snapshot.skip_reason == "human_requested"
 
 
+def test_lead_nurture_workflow_inbound_paused_search_continue_unblocks() -> None:
+    workflow_instance = LeadNurtureWorkflow()
+    workflow_instance._snapshot = LeadNurtureWorkflowSnapshot(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+    )
+
+    workflow_instance.inbound_processed(
+        InboundProcessedWorkflowSignal(
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            occurred_at=NOW.isoformat(),
+            inbound_action="continue_ai",
+            reason="general_reply",
+            paused_search_reply_decision="continue",
+        )
+    )
+
+    assert workflow_instance._send_blocked is False
+    assert workflow_instance._snapshot.last_activity_status == "unblocked"
+
+
 async def test_lead_nurture_workflow_reschedule_signal_interrupts_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

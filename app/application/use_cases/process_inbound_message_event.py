@@ -1,6 +1,6 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import cast
 from uuid import UUID, uuid4
@@ -29,6 +29,7 @@ from app.application.ports.repositories import (
     LeadWorkflowRepository,
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
+    PausedSearchAgentReminderRepository,
     PausedSearchOccurrenceRepository,
     PausedSearchTrackAssignmentRepository,
     PausedSearchTrackRepository,
@@ -62,6 +63,11 @@ from app.application.services.lead_routing_review import (
 from app.application.services.llm.handoff_acknowledgment_drafting import (
     draft_handoff_acknowledgment,
     resolve_lead_acknowledgment_prompt_text,
+)
+from app.application.services.llm.lead_state_classification import (
+    LeadStateClassificationResult,
+    LeadStateClassificationStatus,
+    classify_lead_from_conversation,
 )
 from app.application.services.llm.reply_classification import (
     InboundReplyIntent,
@@ -113,6 +119,16 @@ from app.application.use_cases.send_outbound_message import (
     send_outbound_message,
 )
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
+from app.domain.campaigns.paused_search_reply_policy import (
+    PausedSearchReplyContext,
+    PausedSearchReplyDecision,
+    decide_paused_search_reply,
+    has_valid_explicit_new_timing,
+)
+from app.domain.campaigns.paused_search_tracks import (
+    PausedSearchReplyPolicy,
+    PausedSearchTrackVersion,
+)
 from app.domain.campaigns.pre_send import PreSendPolicy
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import (
@@ -137,7 +153,13 @@ from app.domain.conversations import (
 )
 from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
-from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.leads import (
+    CanonicalLeadRecord,
+    CRMProvider,
+    LeadStateClassificationOutcome,
+    PausedSearchTrackSelectionStatus,
+    lead_paused_search_profile,
+)
 from app.domain.workflows import (
     LeadWorkflow,
     TemporalSignalName,
@@ -237,6 +259,7 @@ class ProcessInboundMessageEventResult:
     continue_ai_pause_reason: str | None = None
     reasons: tuple[ProcessInboundMessageEventReasonCode, ...] = ()
     classification_reasons: tuple[ReplyClassificationReasonCode, ...] = ()
+    paused_search_reply_decision: PausedSearchReplyDecision | None = None
 
 
 async def process_inbound_message_event(
@@ -269,6 +292,7 @@ async def process_inbound_message_event(
     paused_search_track_repository: PausedSearchTrackRepository | None = None,
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
+    paused_search_reminder_repository: PausedSearchAgentReminderRepository | None = None,
     event_bus: EventBus | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None = None,
@@ -416,6 +440,36 @@ async def process_inbound_message_event(
         classification=classification,
     )
     inbound_decision = evaluate_inbound_action(classification)
+    paused_search_track_version = await _get_pinned_paused_search_track_version(
+        lead=lead,
+        paused_search_track_repository=paused_search_track_repository,
+    )
+    precomputed_lead_state_classification = await _classify_paused_search_timing_if_needed(
+        lead=lead,
+        conversation=conversation,
+        external_event_id=saved_event.external_event_id,
+        inbound_body=event.body,
+        inbound_occurred_at=event.received_at,
+        now=now,
+        inbound_decision=inbound_decision,
+        track_version=paused_search_track_version,
+        paused_search_track_repository=paused_search_track_repository,
+        crm_conversation_event_repository=crm_conversation_event_repository,
+        conversation_summary_repository=conversation_summary_repository,
+        llm_client=llm_client,
+        model=openrouter_model,
+    )
+    paused_search_reply_decision = await _resolve_paused_search_reply_decision(
+        lead=lead,
+        inbound_decision=inbound_decision,
+        track_version=paused_search_track_version,
+        lead_state_classification=precomputed_lead_state_classification,
+        now=now,
+    )
+    inbound_decision = _apply_paused_search_reply_action(
+        inbound_decision=inbound_decision,
+        paused_search_reply_decision=paused_search_reply_decision,
+    )
     if classification.status == ReplyClassificationStatus.REJECTED:
         await conversation_repository.save(
             replace(conversation, status=ConversationStatus.PAUSED, updated_at=now),
@@ -443,6 +497,7 @@ async def process_inbound_message_event(
             lead_workflow_repository=lead_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
             paused_search_occurrence_repository=paused_search_occurrence_repository,
+            paused_search_reminder_repository=paused_search_reminder_repository,
             now=now,
             external_event_id=saved_event.external_event_id,
             conversation_id=conversation.conversation_id,
@@ -491,6 +546,8 @@ async def process_inbound_message_event(
             workflow_transition=workflow_transition,
             inbound_action=inbound_decision.action,
             inbound_action_reason=inbound_decision.reason_code,
+            paused_search_reply_decision=None,
+            paused_search_restart_delay_days=None,
             now=now,
         )
         rejected_review_tag = await _review_tag_for_decision(
@@ -569,7 +626,10 @@ async def process_inbound_message_event(
         )
 
     handoff_required = inbound_decision.action == InboundAction.HUMAN_HANDOFF
-    is_continue_ai = inbound_decision.action == InboundAction.CONTINUE_AI
+    is_continue_ai = (
+        inbound_decision.action == InboundAction.CONTINUE_AI
+        and paused_search_reply_decision is None
+    )
     review_tag = await _review_tag_for_decision(
         workspace_id=event.workspace_id,
         inbound_action=inbound_decision.action,
@@ -743,6 +803,7 @@ async def process_inbound_message_event(
             lead_workflow_repository=lead_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
             paused_search_occurrence_repository=paused_search_occurrence_repository,
+            paused_search_reminder_repository=paused_search_reminder_repository,
             now=now,
             external_event_id=saved_event.external_event_id,
             conversation_id=conversation.conversation_id,
@@ -753,6 +814,7 @@ async def process_inbound_message_event(
                 else pending_handoff_id
             ),
             intent=classification.intent,
+            paused_search_reply_decision=paused_search_reply_decision,
             transition_id_factory=workflow_transition_id_factory,
         )
     if workflow_transition.workflow is not None:
@@ -764,6 +826,7 @@ async def process_inbound_message_event(
                     inbound_action=inbound_decision.action,
                     continue_ai_result=continue_ai_result,
                     existing_open_handoff=existing_open_handoff,
+                workflow_state=workflow_transition.workflow.state,
                 ),
                 campaign_id=workflow_transition.workflow.campaign_id,
                 workflow_id=workflow_transition.workflow.workflow_id,
@@ -902,6 +965,12 @@ async def process_inbound_message_event(
         workflow_transition=workflow_transition,
         inbound_action=inbound_decision.action,
         inbound_action_reason=inbound_decision.reason_code,
+        paused_search_reply_decision=paused_search_reply_decision,
+        paused_search_restart_delay_days=(
+            paused_search_track_version.restart_delay_days
+            if paused_search_track_version is not None
+            else None
+        ),
         now=now,
     )
     review_notification = await _send_review_notification_if_configured(
@@ -935,6 +1004,7 @@ async def process_inbound_message_event(
         handoff=handoff,
         existing_handoff_reused=existing_open_handoff is not None and created_handoff is None,
         signal_queued=signal_queued,
+        paused_search_reply_decision=paused_search_reply_decision,
     )
     await external_event_repository.save(
         replace(
@@ -947,6 +1017,12 @@ async def process_inbound_message_event(
         ),
     )
     if not (continue_ai_result is not None and continue_ai_result.lead_state_rerouted):
+        classification_for_reclassification = _hold_invalid_paused_search_reanchor(
+            lead=lead,
+            track_version=paused_search_track_version,
+            classification_result=precomputed_lead_state_classification,
+            now=now,
+        )
         await _maybe_reclassify_lead_state_after_inbound(
             lead=lead,
             workspace_id=event.workspace_id,
@@ -964,6 +1040,7 @@ async def process_inbound_message_event(
             paused_search_track_assignment_repository=(
                 paused_search_track_assignment_repository
             ),
+            precomputed_classification_result=classification_for_reclassification,
             now=now,
         )
     return ProcessInboundMessageEventResult(
@@ -983,6 +1060,7 @@ async def process_inbound_message_event(
         intent=classification.intent,
         inbound_action=inbound_decision.action,
         inbound_action_reason=inbound_decision.reason_code,
+        paused_search_reply_decision=paused_search_reply_decision,
         handoff_required=handoff_required,
         handoff_completion_status=handoff_completion_result.status
         if handoff_completion_result is not None
@@ -1055,6 +1133,183 @@ def _apply_explicit_opt_out_override(
         evidence=InboundReplyRuleEvidence(),
         opt_out_detected=True,
     )
+
+
+async def _resolve_paused_search_reply_decision(
+    *,
+    lead: CanonicalLeadRecord,
+    inbound_decision: InboundActionDecision,
+    track_version: PausedSearchTrackVersion | None,
+    lead_state_classification: LeadStateClassificationResult | None,
+    now: datetime,
+) -> PausedSearchReplyDecision | None:
+    if inbound_decision.action != InboundAction.CONTINUE_AI:
+        return None
+    profile = lead_paused_search_profile(lead)
+    if profile is None:
+        return None
+    if track_version is None:
+        return PausedSearchReplyDecision.REVIEW
+    return decide_paused_search_reply(
+        track_version.reply_policy,
+        PausedSearchReplyContext(
+            same_paused_search_track=True,
+            explicit_new_timing=_has_valid_same_track_timing(
+                lead=lead,
+                lead_state_classification=lead_state_classification,
+                now=now,
+            ),
+        ),
+    )
+
+
+async def _get_pinned_paused_search_track_version(
+    *,
+    lead: CanonicalLeadRecord,
+    paused_search_track_repository: PausedSearchTrackRepository | None,
+) -> PausedSearchTrackVersion | None:
+    profile = lead_paused_search_profile(lead)
+    if (
+        profile is None
+        or profile.paused_search_track_version_id is None
+        or paused_search_track_repository is None
+    ):
+        return None
+    return await paused_search_track_repository.get_version(
+        lead.workspace_id,
+        profile.paused_search_track_version_id,
+    )
+
+
+async def _classify_paused_search_timing_if_needed(
+    *,
+    lead: CanonicalLeadRecord,
+    conversation: Conversation,
+    external_event_id: UUID,
+    inbound_body: str,
+    inbound_occurred_at: datetime,
+    now: datetime,
+    inbound_decision: InboundActionDecision,
+    track_version: PausedSearchTrackVersion | None,
+    paused_search_track_repository: PausedSearchTrackRepository | None,
+    crm_conversation_event_repository: CrmConversationEventRepository | None,
+    conversation_summary_repository: ConversationSummaryRepository,
+    llm_client: LLMClient,
+    model: str | None,
+) -> LeadStateClassificationResult | None:
+    if (
+        inbound_decision.action != InboundAction.CONTINUE_AI
+        or track_version is None
+        or track_version.reply_policy is not PausedSearchReplyPolicy.REANCHOR_TO_NEW_TIMING
+        or paused_search_track_repository is None
+    ):
+        return None
+    if lead_paused_search_profile(lead) is None:
+        return None
+    catalog = await paused_search_track_repository.list_active_catalog(lead.workspace_id)
+    crm_events = (
+        await crm_conversation_event_repository.list_for_lead(
+            lead.workspace_id,
+            lead.lead_id,
+            limit=20,
+        )
+        if crm_conversation_event_repository is not None
+        else ()
+    )
+    supplemental_events = _current_inbound_conversation_events(
+        lead=lead,
+        conversation=conversation,
+        external_event_id=external_event_id,
+        body=inbound_body,
+        occurred_at=inbound_occurred_at,
+        now=now,
+    )
+    previous_summary = await conversation_summary_repository.get_latest_for_conversation(
+        lead.workspace_id,
+        conversation.conversation_id,
+    )
+    return await classify_lead_from_conversation(
+        lead=lead,
+        now=now,
+        conversation_summary=previous_summary.summary_text if previous_summary else None,
+        crm_conversation_events=(*crm_events, *supplemental_events),
+        llm_client=llm_client,
+        model=model,
+        paused_search_catalog=catalog,
+    )
+
+
+def _has_valid_same_track_timing(
+    *,
+    lead: CanonicalLeadRecord,
+    lead_state_classification: LeadStateClassificationResult | None,
+    now: datetime,
+) -> bool:
+    profile = lead_paused_search_profile(lead)
+    if profile is None or lead_state_classification is None:
+        return False
+    return (
+        lead_state_classification.status is LeadStateClassificationStatus.CLASSIFIED
+        and lead_state_classification.outcome is LeadStateClassificationOutcome.PAUSED_SEARCH
+        and lead_state_classification.track_selection_status
+        is PausedSearchTrackSelectionStatus.SELECTED
+        and lead_state_classification.selected_track_key == profile.paused_search_track_key
+        and lead_state_classification.track_version_id == profile.paused_search_track_version_id
+        and has_valid_explicit_new_timing(
+            timing=lead_state_classification.reengagement_not_before,
+            now=now,
+        )
+    )
+
+
+def _hold_invalid_paused_search_reanchor(
+    *,
+    lead: CanonicalLeadRecord,
+    track_version: PausedSearchTrackVersion | None,
+    classification_result: LeadStateClassificationResult | None,
+    now: datetime,
+) -> LeadStateClassificationResult | None:
+    if (
+        classification_result is None
+        or track_version is None
+        or track_version.reply_policy is not PausedSearchReplyPolicy.REANCHOR_TO_NEW_TIMING
+        or classification_result.outcome is not LeadStateClassificationOutcome.PAUSED_SEARCH
+        or _has_valid_same_track_timing(
+            lead=lead,
+            lead_state_classification=classification_result,
+            now=now,
+        )
+    ):
+        return classification_result
+    return replace(
+        classification_result,
+        outcome=LeadStateClassificationOutcome.REVIEW_HOLD,
+        selected_track_key=None,
+        track_selection_status=None,
+        track_version_id=None,
+        reengagement_not_before=None,
+        reengagement_window_label=None,
+    )
+
+
+def _apply_paused_search_reply_action(
+    *,
+    inbound_decision: InboundActionDecision,
+    paused_search_reply_decision: PausedSearchReplyDecision | None,
+) -> InboundActionDecision:
+    if paused_search_reply_decision is PausedSearchReplyDecision.REVIEW:
+        return replace(
+            inbound_decision,
+            action=InboundAction.PAUSE_FOR_REVIEW,
+            reason_code=InboundActionReasonCode.PAUSED_SEARCH_REPLY_REVIEW,
+        )
+    if paused_search_reply_decision is PausedSearchReplyDecision.END:
+        return replace(
+            inbound_decision,
+            action=InboundAction.COMPLETE_AUTOMATION,
+            reason_code=InboundActionReasonCode.PAUSED_SEARCH_REPLY_ENDED,
+        )
+    return inbound_decision
 
 
 def _is_explicit_opt_out(channel: ContactChannel, body: str) -> bool:
@@ -1711,6 +1966,7 @@ async def _apply_workflow_transition_if_configured(
     lead_workflow_repository: LeadWorkflowRepository | None,
     workflow_transition_repository: WorkflowTransitionRepository | None,
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
+    paused_search_reminder_repository: PausedSearchAgentReminderRepository | None = None,
     now: datetime,
     external_event_id: UUID | None,
     conversation_id: UUID | None,
@@ -1718,6 +1974,7 @@ async def _apply_workflow_transition_if_configured(
     handoff_id: UUID | None = None,
     intent: InboundReplyIntent | None = None,
     classification_reasons: tuple[str, ...] = (),
+    paused_search_reply_decision: PausedSearchReplyDecision | None = None,
     transition_id_factory: Callable[[], UUID] | None = None,
 ) -> InboundWorkflowTransitionOutcome:
     if lead_workflow_repository is None or workflow_transition_repository is None:
@@ -1730,6 +1987,7 @@ async def _apply_workflow_transition_if_configured(
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
         paused_search_occurrence_repository=paused_search_occurrence_repository,
+        paused_search_reminder_repository=paused_search_reminder_repository,
         now=now,
         external_event_id=external_event_id,
         conversation_id=conversation_id,
@@ -1737,6 +1995,7 @@ async def _apply_workflow_transition_if_configured(
         handoff_id=handoff_id,
         intent=intent,
         classification_reasons=classification_reasons,
+        paused_search_reply_decision=paused_search_reply_decision,
         transition_id_factory=transition_id_factory,
     )
 
@@ -1933,6 +2192,8 @@ async def _enqueue_inbound_processed_signal_if_configured(
     workflow_transition: InboundWorkflowTransitionOutcome,
     inbound_action: InboundAction,
     inbound_action_reason: InboundActionReasonCode,
+    paused_search_reply_decision: PausedSearchReplyDecision | None,
+    paused_search_restart_delay_days: int | None,
     now: datetime,
 ) -> bool:
     workflow = workflow_transition.workflow
@@ -1958,6 +2219,11 @@ async def _enqueue_inbound_processed_signal_if_configured(
                 ),
                 "inbound_action": inbound_action.value,
                 "reason": inbound_action_reason.value,
+                "paused_search_reply_decision": (
+                    paused_search_reply_decision.value
+                    if paused_search_reply_decision is not None
+                    else None
+                ),
             },
             idempotency_key=f"inbound-processed:{external_event_id}",
             available_at=now,
@@ -1965,6 +2231,29 @@ async def _enqueue_inbound_processed_signal_if_configured(
             updated_at=now,
         )
     )
+    if paused_search_reply_decision is PausedSearchReplyDecision.RESTART:
+        if paused_search_restart_delay_days is None or paused_search_restart_delay_days < 1:
+            raise ValueError("restart policy requires a positive configured restart delay")
+        resume_at = now + timedelta(days=paused_search_restart_delay_days)
+        await temporal_signal_outbox_repository.append(
+            TemporalSignalOutboxEntry(
+                temporal_signal_id=uuid4(),
+                workspace_id=event.workspace_id,
+                workflow_id=workflow.workflow_id,
+                temporal_workflow_id=workflow.temporal_workflow_id,
+                signal_name=TemporalSignalName.RESUME_REQUESTED,
+                payload={
+                    "lead_id": str(workflow.lead_id),
+                    "occurred_at": resume_at.isoformat(),
+                    "external_event_id": str(external_event_id),
+                    "reason": "paused_search_restart_delay_elapsed",
+                },
+                idempotency_key=f"paused-search-restart-resume:{external_event_id}",
+                available_at=resume_at,
+                created_at=now,
+                updated_at=now,
+            )
+        )
     return True
 
 
@@ -2038,6 +2327,7 @@ def _conversation_status_after_inbound(
     inbound_action: InboundAction,
     continue_ai_result: ContinueAIResult | None,
     existing_open_handoff: Handoff | None,
+    workflow_state: WorkflowState | None = None,
 ) -> ConversationStatus:
     if inbound_action == InboundAction.HUMAN_HANDOFF:
         if existing_open_handoff is not None and current_status == ConversationStatus.HUMAN_OWNED:
@@ -2046,6 +2336,8 @@ def _conversation_status_after_inbound(
     if inbound_action in {InboundAction.SUPPRESS, InboundAction.COMPLETE_AUTOMATION}:
         return ConversationStatus.CLOSED
     if continue_ai_result is None:
+        if workflow_state is not None:
+            return _conversation_status_from_workflow_state(workflow_state)
         return ConversationStatus.PAUSED
     if continue_ai_result.status in {ContinueAIStatus.SENT, ContinueAIStatus.ALREADY_SENT}:
         return ConversationStatus.ACTIVE_AI
@@ -2158,6 +2450,7 @@ def _build_inbound_processing_audit(
     handoff: Handoff | None,
     existing_handoff_reused: bool,
     signal_queued: bool,
+    paused_search_reply_decision: PausedSearchReplyDecision | None = None,
 ) -> dict[str, object]:
     return {
         "classifier": {
@@ -2187,6 +2480,11 @@ def _build_inbound_processing_audit(
                 else None
             ),
             "handoff_required": handoff_required,
+            "paused_search_reply_decision": (
+                paused_search_reply_decision.value
+                if paused_search_reply_decision is not None
+                else None
+            ),
         },
         "continuation": {
             "continue_ai_status": (
@@ -2292,6 +2590,7 @@ async def _maybe_reclassify_lead_state_after_inbound(
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
     now: datetime,
     routing_review_repository: LeadRoutingReviewRepository | None,
+    precomputed_classification_result: LeadStateClassificationResult | None,
 ) -> None:
     if (
         artifact_repository is None
@@ -2319,6 +2618,7 @@ async def _maybe_reclassify_lead_state_after_inbound(
         lead_workflow_repository=lead_workflow_repository,
         paused_search_track_repository=paused_search_track_repository,
         paused_search_track_assignment_repository=paused_search_track_assignment_repository,
+        precomputed_classification_result=precomputed_classification_result,
     )
     if routing_review_repository is not None:
         if classification_result.status == ApplyLeadStateClassificationStatus.REVIEW:

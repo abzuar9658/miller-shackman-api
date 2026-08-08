@@ -8,9 +8,11 @@ from app.domain.campaigns.paused_search_occurrences import RecurringOccurrenceOu
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchTimingBasis,
+    PausedSearchTrackMode,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
+    paused_search_interim_contact_is_configured,
 )
 from app.domain.common.ids import PausedSearchTrackStepId
 from app.domain.leads import LeadPausedSearchProfile
@@ -203,12 +205,17 @@ def plan_paused_search_next_action(
         reference_time=now,
     )
     if phase is None:
+        reason_detail = (
+            "Maintenance outreach is not permitted for this track."
+            if _maintenance_outreach_blocked(track_version)
+            else "no actionable phase for current profile and track timing"
+        )
         return PausedSearchNextActionPlan(
             next_action_at=None,
             phase=None,
             step_id=None,
             reason_code=PausedSearchTimingReasonCode.HOLD_FOR_REVIEW,
-            reason_detail="no actionable phase for current profile and track timing",
+            reason_detail=reason_detail,
         )
 
     targeted_step_id: UUID | None = workflow.paused_search_track_step_id
@@ -296,14 +303,25 @@ def _determine_phase(
         )
         if reference_time >= reactivation_start:
             return PausedSearchTrackStepPhase.REACTIVATION
+        if _maintenance_outreach_blocked(track_version):
+            return None
         return PausedSearchTrackStepPhase.MAINTENANCE
     if (
         track_version.fallback_timing_policy
         is PausedSearchFallbackTimingPolicy.USE_MAINTENANCE_INTERVAL
     ):
+        if _maintenance_outreach_blocked(track_version):
+            return None
         return PausedSearchTrackStepPhase.MAINTENANCE
 
     return None
+
+
+def _maintenance_outreach_blocked(track_version: PausedSearchTrackVersion) -> bool:
+    return (
+        track_version.track_mode is PausedSearchTrackMode.PERMISSION_BASED_INTERIM_CONTACT
+        and not paused_search_interim_contact_is_configured(track_version.interim_contact_policy)
+    )
 
 
 def _resolve_step_for_phase(

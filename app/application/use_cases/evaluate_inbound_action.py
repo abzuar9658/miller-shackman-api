@@ -27,6 +27,8 @@ class InboundActionReasonCode(StrEnum):
     UNCLEAR_INTENT = "unclear_intent"
     NOT_INTERESTED = "not_interested"
     GENERAL_REPLY = "general_reply"
+    PAUSED_SEARCH_REPLY_REVIEW = "paused_search_reply_review"
+    PAUSED_SEARCH_REPLY_ENDED = "paused_search_reply_ended"
 
 
 @dataclass(frozen=True)

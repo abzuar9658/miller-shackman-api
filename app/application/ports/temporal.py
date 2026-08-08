@@ -1,9 +1,15 @@
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
 from app.domain.common.ids import CampaignVersionId, LeadId, WorkspaceId
+
+
+class TemporalWorkflowExecutionMode(StrEnum):
+    STANDARD_CADENCE = "standard_cadence"
+    PAUSED_SEARCH_RECURRING = "paused_search_recurring"
 
 
 class TemporalWorkflowSignalError(RuntimeError):
@@ -22,6 +28,24 @@ class TemporalWorkflowStarter(Protocol):
         lead_id: LeadId,
         campaign_version_id: CampaignVersionId,
         temporal_workflow_id: str,
+        workflow_id: UUID | None = None,
+        execution_mode: TemporalWorkflowExecutionMode = (
+            TemporalWorkflowExecutionMode.STANDARD_CADENCE
+        ),
+        paused_search_track_version_id: UUID | None = None,
+    ) -> None:
+        raise NotImplementedError
+
+    async def configure_paused_search_workflow(
+        self,
+        *,
+        temporal_workflow_id: str,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        workflow_id: UUID,
+        paused_search_track_version_id: UUID,
+        occurred_at: datetime,
+        reason: str,
     ) -> None:
         raise NotImplementedError
 
@@ -67,6 +91,7 @@ class InboundProcessedLeadNurtureWorkflowSignal:
     workflow_transition_id: UUID | None = None
     inbound_action: str | None = None
     reason: str | None = None
+    paused_search_reply_decision: str | None = None
 
 
 @dataclass(frozen=True)

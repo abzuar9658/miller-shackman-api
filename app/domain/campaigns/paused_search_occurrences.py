@@ -16,6 +16,7 @@ class RecurringOccurrenceStatus(StrEnum):
     REVIEW_REQUESTED = "review_requested"
     APPROVED = "approved"
     SENT = "sent"
+    REMINDER_CREATED = "reminder_created"
     SKIPPED = "skipped"
     CANCELLED = "cancelled"
     EXPIRED = "expired"

@@ -21,10 +21,14 @@ from app.application.use_cases.paused_search_track_admin import (
 )
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
+    PausedSearchInterimContactPolicy,
+    PausedSearchTimingBasis,
     PausedSearchTrack,
     PausedSearchTrackAdminAuditLog,
+    PausedSearchTrackAdminView,
     PausedSearchTrackCatalogEntry,
     PausedSearchTrackLeadAssignment,
+    PausedSearchTrackMode,
     PausedSearchTrackStatus,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
@@ -110,6 +114,54 @@ def test_create_draft_paused_search_track_persists_audit_and_event() -> None:
     assert event_bus.events[-1].event_type == DomainEventType.PAUSED_SEARCH_TRACK_DRAFT_CREATED
 
 
+def test_create_draft_derives_safety_limits_from_configured_cadence() -> None:
+    base = _config(max_total_touches=3)
+    email = replace(
+        base.steps[0],
+        interval_days=30,
+        max_occurrences=2,
+        timing_basis=PausedSearchTimingBasis.WORKFLOW_CREATED_AT,
+    )
+    sms = replace(
+        email,
+        channel=ContactChannel.SMS,
+        template_key="paused-search-maintenance-sms-1",
+    )
+    reactivation = replace(
+        base.steps[0],
+        phase=PausedSearchTrackStepPhase.REACTIVATION,
+        delay_hours=24,
+        template_key="paused-search-reactivation-email-1",
+        timing_basis=PausedSearchTimingBasis.CUSTOMER_REENGAGEMENT_DATE,
+    )
+    config = replace(
+        base,
+        allowed_channels=(ContactChannel.EMAIL, ContactChannel.SMS),
+        track_mode=PausedSearchTrackMode.PERMISSION_BASED_INTERIM_CONTACT,
+        interim_contact_policy=PausedSearchInterimContactPolicy.ALLOWED_BY_PUBLISHED_TRACK,
+        max_duration_days=365,
+        steps=(email, sms, reactivation),
+    )
+
+    result = _run(
+        create_draft_paused_search_track(
+            actor=_actor(),
+            workspace_id=WORKSPACE_ID,
+            track_key="waiting-for-rates-derived-limits",
+            display_name="Waiting for rates derived limits",
+            config=config,
+            repository=FakePausedSearchTrackAdminRepository(),
+            audit_log_repository=FakePausedSearchTrackAuditLogRepository(),
+            now=NOW,
+        )
+    )
+
+    assert result.status is PausedSearchTrackDraftStatus.CREATED
+    assert result.view is not None
+    assert result.view.version.max_total_touches == 5
+    assert result.view.version.max_duration_days == 730
+
+
 def test_create_draft_rejects_assigned_agent_and_short_guidance() -> None:
     permission_result = _run(
         create_draft_paused_search_track(
@@ -140,6 +192,43 @@ def test_create_draft_rejects_assigned_agent_and_short_guidance() -> None:
     assert permission_result.reasons[0].value == "permission_denied"
     assert guidance_result.status == PausedSearchTrackDraftStatus.REJECTED
     assert guidance_result.reasons[0].value == "invalid_configuration"
+
+
+def test_create_draft_rejects_legacy_review_configuration() -> None:
+    config = replace(
+        _config(),
+        steps=(replace(_config().steps[0], review_required=True),),
+    )
+
+    result = _run(
+        create_draft_paused_search_track(
+            actor=_actor(),
+            workspace_id=WORKSPACE_ID,
+            track_key="legacy-review",
+            display_name="Legacy review track",
+            config=config,
+            repository=FakePausedSearchTrackAdminRepository(),
+            audit_log_repository=FakePausedSearchTrackAuditLogRepository(),
+            now=NOW,
+        )
+    )
+
+    assert result.status is PausedSearchTrackDraftStatus.REJECTED
+    assert result.reasons[0].value == "legacy_configuration_not_allowed"
+
+
+def test_existing_legacy_version_remains_readable() -> None:
+    version = _version(status=CampaignVersionStatus.PUBLISHED)
+    legacy_step = replace(_step_tuple(VERSION_ID)[0], review_required=True)
+    view = PausedSearchTrackAdminView(
+        _track(status=PausedSearchTrackStatus.ACTIVE),
+        version,
+        (legacy_step,),
+    )
+
+    assert version.maintenance_interval_days == 90
+    assert version.restart_delay_days == 30
+    assert view.compatibility.value == "legacy"
 
 
 def test_publish_track_version_retires_previous_version() -> None:
@@ -559,6 +648,7 @@ class FakePausedSearchTrackAdminRepository:
                 and version.status == CampaignVersionStatus.PUBLISHED
             ):
                 self.versions[version_id] = replace(version, status=CampaignVersionStatus.RETIRED)
+
 
 class FakePausedSearchTrackAuditLogRepository:
     def __init__(self) -> None:

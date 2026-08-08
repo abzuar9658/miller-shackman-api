@@ -1,3 +1,6 @@
+from datetime import datetime
+from uuid import UUID
+
 from temporalio.client import Client
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -7,6 +10,7 @@ from app.application.ports.temporal import (
     PauseLeadNurtureWorkflowSignal,
     RescheduleLeadNurtureWorkflowSignal,
     ResumeLeadNurtureWorkflowSignal,
+    TemporalWorkflowExecutionMode,
     TemporalWorkflowNotFoundError,
     TemporalWorkflowStarter,
     UnblockLeadNurtureWorkflowSignal,
@@ -14,7 +18,9 @@ from app.application.ports.temporal import (
 from app.core.config import Settings, get_settings
 from app.domain.common.ids import CampaignVersionId, LeadId, WorkspaceId
 from app.infrastructure.workflows.temporal.lead_nurture import (
+    ConfigurePausedSearchWorkflowSignal,
     InboundProcessedWorkflowSignal,
+    LeadNurtureExecutionMode,
     LeadNurtureWorkflow,
     LeadNurtureWorkflowInput,
     PauseWorkflowSignal,
@@ -37,6 +43,11 @@ class TemporalClientWorkflowStarter:
         lead_id: LeadId,
         campaign_version_id: CampaignVersionId,
         temporal_workflow_id: str,
+        workflow_id: UUID | None = None,
+        execution_mode: TemporalWorkflowExecutionMode = (
+            TemporalWorkflowExecutionMode.STANDARD_CADENCE
+        ),
+        paused_search_track_version_id: UUID | None = None,
     ) -> None:
         await self._client.start_workflow(
             LeadNurtureWorkflow.run,
@@ -44,6 +55,9 @@ class TemporalClientWorkflowStarter:
                 workspace_id=workspace_id,
                 lead_id=lead_id,
                 campaign_version_id=campaign_version_id,
+                workflow_id=workflow_id,
+                execution_mode=LeadNurtureExecutionMode(execution_mode.value),
+                paused_search_track_version_id=paused_search_track_version_id,
             ),
             id=temporal_workflow_id,
             task_queue=self._task_queue,
@@ -65,6 +79,30 @@ class TemporalClientWorkflowStarter:
                 reason=signal.reason,
                 actor_user_id=signal.actor_user_id,
                 external_event_id=signal.external_event_id,
+            ),
+        )
+
+    async def configure_paused_search_workflow(
+        self,
+        *,
+        temporal_workflow_id: str,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        workflow_id: UUID,
+        paused_search_track_version_id: UUID,
+        occurred_at: datetime,
+        reason: str,
+    ) -> None:
+        await self._signal(
+            temporal_workflow_id=temporal_workflow_id,
+            signal_name="paused-search-configured",
+            signal_arg=ConfigurePausedSearchWorkflowSignal(
+                workspace_id=workspace_id,
+                lead_id=lead_id,
+                workflow_id=workflow_id,
+                paused_search_track_version_id=paused_search_track_version_id,
+                occurred_at=occurred_at.isoformat(),
+                reason=reason,
             ),
         )
 
@@ -125,6 +163,7 @@ class TemporalClientWorkflowStarter:
                 workflow_transition_id=signal.workflow_transition_id,
                 inbound_action=signal.inbound_action,
                 reason=signal.reason,
+                paused_search_reply_decision=signal.paused_search_reply_decision,
             ),
         )
 

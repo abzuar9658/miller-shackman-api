@@ -13,6 +13,7 @@ from app.domain.campaigns.paused_search_notifications import (
     PausedSearchNotificationPolicy,
 )
 from app.domain.campaigns.paused_search_occurrences import RecurringOccurrence
+from app.domain.campaigns.paused_search_reminders import PausedSearchAgentReminder
 from app.domain.campaigns.paused_search_reviews import PausedSearchReview
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrack,
@@ -245,6 +246,30 @@ class PausedSearchNotificationRepository(Protocol):
         raise NotImplementedError
 
     async def save(self, notification: PausedSearchNotification) -> PausedSearchNotification:
+        raise NotImplementedError
+
+
+class PausedSearchAgentReminderRepository(Protocol):
+    async def get_by_idempotency_key(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
+    ) -> PausedSearchAgentReminder | None:
+        raise NotImplementedError
+
+    async def create_or_get(
+        self,
+        reminder: PausedSearchAgentReminder,
+    ) -> PausedSearchAgentReminder:
+        raise NotImplementedError
+
+    async def cancel_open_for_workflow(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        workflow_id: UUID,
+        now: datetime,
+    ) -> int:
         raise NotImplementedError
 
 
@@ -862,6 +887,21 @@ class PausedSearchTrackRepository(Protocol):
         workspace_id: WorkspaceId,
         track_version_id: PausedSearchTrackVersionId,
     ) -> tuple[PausedSearchTrackStep, ...]:
+        raise NotImplementedError
+
+
+class PausedSearchLegacyInventoryRepository(Protocol):
+    async def list_legacy_versions(
+        self,
+        workspace_id: WorkspaceId,
+    ) -> tuple[tuple[PausedSearchTrackVersion, tuple[PausedSearchTrackStep, ...]], ...]:
+        raise NotImplementedError
+
+    async def list_active_workflows_for_versions(
+        self,
+        workspace_id: WorkspaceId,
+        track_version_ids: tuple[PausedSearchTrackVersionId, ...],
+    ) -> tuple[LeadWorkflow, ...]:
         raise NotImplementedError
 
 class PausedSearchTrackAssignmentRepository(Protocol):
