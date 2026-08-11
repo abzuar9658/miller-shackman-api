@@ -17,6 +17,8 @@ from app.application.ports.crm import (
     CRMActivityTranscriptSegment,
     CRMAgent,
     CRMAgentDirectoryEntry,
+    CRMResourceFetchError,
+    CRMResourceFetchFailureKind,
 )
 from app.application.ports.crm_sync import CanonicalLeadSnapshotPage
 from app.domain.campaigns.outbound_message import OutboundMessage
@@ -349,11 +351,41 @@ class FollowUpBossCRMClient:
         uri: str,
     ) -> dict[str, Any] | None:
         _ = workspace_id
-        response = await self._client.get(self._with_follow_up_boss_people_fields(uri))
+        try:
+            response = await self._client.get(self._with_follow_up_boss_people_fields(uri))
+        except httpx.RequestError as exc:
+            raise CRMResourceFetchError(
+                CRMResourceFetchFailureKind.TRANSIENT,
+                "crm_resource_transport_failure",
+            ) from exc
         if response.status_code == 404:
-            return None
-        response.raise_for_status()
-        return cast("dict[str, Any]", response.json())
+            raise CRMResourceFetchError(
+                CRMResourceFetchFailureKind.PERMANENT,
+                "crm_resource_not_found",
+            )
+        if response.status_code == 429 or response.status_code >= 500:
+            raise CRMResourceFetchError(
+                CRMResourceFetchFailureKind.TRANSIENT,
+                f"crm_resource_http_{response.status_code}",
+            )
+        if response.status_code >= 400:
+            raise CRMResourceFetchError(
+                CRMResourceFetchFailureKind.PERMANENT,
+                f"crm_resource_http_{response.status_code}",
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise CRMResourceFetchError(
+                CRMResourceFetchFailureKind.UNKNOWN,
+                "crm_resource_invalid_json",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise CRMResourceFetchError(
+                CRMResourceFetchFailureKind.UNKNOWN,
+                "crm_resource_invalid_payload",
+            )
+        return cast("dict[str, Any]", payload)
 
     def _with_follow_up_boss_people_fields(self, uri: str) -> str:
         parsed = urlparse(uri)

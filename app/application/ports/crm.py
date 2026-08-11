@@ -1,4 +1,5 @@
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -51,6 +52,19 @@ class CRMActivity(BaseModel):
     direction: str | None = None
     details: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
     transcript_segments: list[CRMActivityTranscriptSegment] = Field(default_factory=list)
+
+
+class CRMResourceFetchFailureKind(StrEnum):
+    TRANSIENT = "transient"
+    PERMANENT = "permanent"
+    UNKNOWN = "unknown"
+
+
+class CRMResourceFetchError(Exception):
+    def __init__(self, kind: CRMResourceFetchFailureKind, reason: str) -> None:
+        super().__init__(reason)
+        self.kind = kind
+        self.reason = reason
 
 
 class CRMClient(Protocol):

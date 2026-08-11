@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 import pytest
 
+from app.application.ports.crm import CRMResourceFetchError, CRMResourceFetchFailureKind
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
 from app.domain.campaigns.pre_send import ProviderSendStatus
 from app.domain.compliance.contactability import ContactChannel
@@ -199,6 +200,35 @@ async def test_fetch_resource_by_uri_requests_all_fields_for_people_resource(
         "path": "/v1/people",
         "query": "id=123&fields=allFields",
     }
+
+
+@pytest.mark.parametrize(
+    ("status", "failure_kind"),
+    [
+        (404, CRMResourceFetchFailureKind.PERMANENT),
+        (429, CRMResourceFetchFailureKind.TRANSIENT),
+        (503, CRMResourceFetchFailureKind.TRANSIENT),
+    ],
+)
+async def test_fetch_resource_by_uri_classifies_http_failures(
+    workspace_id: uuid.UUID,
+    status: int,
+    failure_kind: CRMResourceFetchFailureKind,
+) -> None:
+    client = FollowUpBossCRMClient(api_key="key")
+    client._client = httpx.AsyncClient(
+        auth=client._auth,
+        base_url=client._base_url,
+        transport=_transport({"message": "failure"}, status=status),
+    )
+
+    with pytest.raises(CRMResourceFetchError) as error:
+        await client.fetch_resource_by_uri(
+            workspace_id,
+            "https://api.followupboss.com/v1/textMessages?id=123",
+        )
+
+    assert error.value.kind is failure_kind
 
 
 async def test_list_lead_snapshots_maps_payload_and_pagination_metadata(
