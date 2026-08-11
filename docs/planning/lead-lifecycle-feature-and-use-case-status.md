@@ -29,7 +29,7 @@
 | Inbound reply handling / continue-AI logic | ✅ | Broad test coverage now includes the remaining skipped-transition and blocked-acknowledgment edge cases |
 | Human activity pause | ✅ | Pause flow covers primary notes/calls/texts/people events in approved scope; additional FUB event types are a documented non-blocking limitation |
 | Manual override / resume | ✅ | Core override and resume flows are implemented; remaining gaps are advanced UI-control surfaces |
-| Workflow runtime and final pre-send safety | 🟡 | Temporal and final checks exist, but real pre-send facts and durable uncertain-send reconciliation remain incomplete |
+| Workflow runtime and final pre-send safety | 🟡 | Temporal and final checks exist; pre-send facts and dormant-path uncertain-send reconciliation are implemented, while provider/crash durability remains open |
 
 ## Lead lifecycle map
 
@@ -429,9 +429,9 @@ The current lead lifecycle is best understood in this order:
 - `tests/domain/campaigns/test_pre_send.py`
 
 **Important gaps / edge cases**
-- Production call sites do not populate the global/campaign/channel pre-send facts; see Gap 2.
-- Standard dormant UNCERTAIN sends have no callback/timeout reconciliation; see Gap 4.
-- Provider failure and activity-crash handling lack a durable exception/reconciliation boundary; see Gaps 5 and 7.
+- Production call sites now populate the global/campaign/channel pre-send facts; see Gap 2.
+- Standard dormant UNCERTAIN sends now have callback/timeout reconciliation; see Gap 4.
+- Activity-crash handling still lacks a durable dispatch boundary; see Gap 7.
 
 ---
 
@@ -455,10 +455,8 @@ The current lead lifecycle is best understood in this order:
 ## Biggest lifecycle gaps before calling this production-grade
 
 1. **Close the cross-cutting safety gaps documented below**
-   - especially pre-send fact population, uncertain-send reconciliation, and durable CRM/provider failure recovery.
-2. **Decide on cross-campaign and re-entry policy**
-   - decide whether one lead may have multiple active campaigns or needs a re-entry cool-down.
-3. **Expose advanced workflow controls and routing history**
+   - especially enrollment/re-entry safety, pre-send fact population, uncertain-send reconciliation, and durable CRM/provider failure recovery.
+2. **Expose advanced workflow controls and routing history**
    - `track migration`, `skip next touch`, `timing override`, and resolved/superseded review history remain operator-surface work.
 
 ## Open architectural gaps (cross-cutting, found during Step 7 deep-dive)
@@ -466,10 +464,34 @@ The current lead lifecycle is best understood in this order:
 These were found while verifying completion, handoff, suppression, and re-entry
 (the product-flow step after cadence execution and reply handling). They are not
 isolated bugs in one phase — each cuts across enrollment, cadence execution, and/or
-send safety. None of these have been fixed yet; this section only documents them so
-a decision can be made before implementation.
+send safety. Slices 1, 2, 3, and 4 (Gaps 1–5) are implemented and validated; Gaps 6–7 remain open.
+
+All seven gaps are confirmed in scope and approved for implementation. The product
+decisions each gap was waiting on are now recorded in the gap's **Decision** entry
+below, and the agreed delivery order is in
+[Approved implementation plan](#approved-implementation-plan).
+
+### Approved implementation plan
+
+Gaps are implemented in slices, not one gap at a time, because some of them govern the
+same decision boundary and would otherwise produce conflicting rules in separate paths.
+
+| Slice | Gaps | Scope |
+|---|---|---|
+| 1 — Enrollment and re-entry safety | 1, 3 | One active workflow per lead across campaigns; no automatic re-entry after a terminal state; explicit admin-only re-enrollment |
+| 2 — Pre-send fact population | 2 | Populate global/campaign/channel frequency facts and human-control facts from durable history; fail closed when unknown |
+| 3 — Uncertain-send reconciliation | 4 | Durable reconciliation for dormant-path `UNCERTAIN` sends, with bounded timeout and no duplicate dispatch |
+| 4 — Durable provider failure handling | 5 | Bounded exponential backoff, maximum attempt count, and an operator-visible exception surface distinct from a policy pause |
+| 5 — Selective CRM webhook retry | 6 | Classify failures, retry only resolvable ones with bounded attempts, persist reason and final disposition |
+| 6 — Temporal failure durability | 7 | Durable operator-visible record for exhausted/crashed activities, preserving send-once safety |
+
+Each slice must land with explicit rules in the domain/application layers, fresh
+permission and eligibility checks where relevant, idempotent external behavior, audit
+records, and focused tests before the full regression suite is run.
 
 ### Gap 1 — No guard against a lead being active in two campaigns at once
+
+**Status:** Resolved in Slice 1 and validated on 2026-08-09.
 
 **Where:** `app/infrastructure/persistence/postgres/workflow_repository.py`
 (`get_latest_for_lead_for_update`, `get_latest_for_lead`) and
@@ -489,14 +511,20 @@ some orderings can begin driving the wrong workflow row.
 explicit product decision or rejection path. Behavior in that state is undefined rather
 than deliberately blocked or queued.
 
-**Suggested remediation (pick one, needs a product decision):**
-- Reject/queue a new enrollment if `get_latest_for_lead` returns a non-terminal workflow
-  belonging to a different `campaign_id` (explicit single-active-campaign-at-a-time rule), or
-- Explicitly support multiple concurrent campaigns per lead by scoping
-  `get_latest_for_lead_for_update` and cadence execution by `(lead_id, campaign_id)`
-  instead of lead-only.
+**Decision:** A lead must never be active in more than one campaign or workflow at a
+time. Concurrent campaigns per lead are explicitly not supported in V1.
+
+**Remediation:** Reject a new enrollment if the lead already has a non-terminal
+`LeadWorkflow`, regardless of `campaign_id`. The check must run under the existing
+pessimistic lock so concurrent tag events and selector runs cannot both create an active
+workflow, must stay idempotent for a repeat enrollment into the same campaign, and must
+record an explicit rejection reason rather than silently no-op.
+
+**Slice:** 1 — implemented together with Gap 3.
 
 ### Gap 2 — Global/campaign/channel frequency-limit fields are defined but never populated
+
+**Status:** Resolved in Slice 2 and validated on 2026-08-09.
 
 **Where:** `app/domain/campaigns/pre_send.py` (`PreSendFacts`), and every call site that
 constructs it: `app/application/use_cases/plan_outbound_message.py::_select_channel`,
@@ -522,14 +550,24 @@ double-send today are workflow-state gating (`WAITING_FOR_RESPONSE` cursor logic
 per-cadence-step idempotency key — not the frequency-limit policy that exists specifically
 for this purpose.
 
-**Suggested remediation:** Wire real lookups (e.g. `OutboundMessageRepository` query for
+**Decision:** The documented frequency and simultaneous-channel limits must be enforced in
+the real send path. Unknown or unavailable facts must fail closed and block the send rather
+than fall through to a permissive default.
+
+**Remediation:** Wire real lookups (e.g. `OutboundMessageRepository` query for
 most-recent sent message globally / per-campaign / per-channel, `Handoff`/workflow-state
 lookups for `handoff_active`/`human_owned`, last-inbound-message timestamp for
 `lead_replied_since_scheduled`) into the context builders in `campaign_cadence_execution.py`
 and `continue_ai_conversation_after_inbound.py` before constructing `PreSendFacts`, as
-defense-in-depth alongside the existing workflow-state checks.
+defense-in-depth alongside the existing workflow-state checks. Add tests that exercise a
+real frequency-limit block and a real simultaneous-channel block through the cadence path,
+not only the pure function.
+
+**Slice:** 2.
 
 ### Gap 3 — No cool-down/gap enforced after a workflow reaches a terminal state
+
+**Status:** Resolved in Slice 1 and validated on 2026-08-09.
 
 **Where:** `app/application/services/campaign_enrollment_starter.py`,
 `app/infrastructure/persistence/postgres/dormant_candidate_selector.py`.
@@ -541,14 +579,27 @@ is scoped to `(workspace_id, campaign_id, lead_id)` only, so a lead who just com
 Campaign A is immediately selectable for Campaign B on the very next selector run.
 
 **Impact:** Combined with Gap 1, a lead could be re-enrolled and get simultaneous or
-back-to-back campaign membership with no explicit minimum gap — this may be acceptable
-for V1's FIFO-only design, but it is not a deliberate decision recorded anywhere.
+back-to-back campaign membership with no explicit minimum gap.
 
-**Suggested remediation:** Decide whether V1 needs a minimum re-entry cool-down after
-terminal states, and if so enforce it in the enrollment eligibility check
-(`evaluate_campaign_enrollment`) using the lead's most recent terminal `LeadWorkflow`.
+**Decision:** A lead that reached `COMPLETED`, `SUPPRESSED`, or `CLOSED` must never be
+re-enrolled automatically. Re-entry requires an explicit manual enrollment by an
+authorized admin, into either the nurture route or the paused-search route.
+
+**Remediation:** Enforce the terminal-state exclusion in enrollment eligibility
+(`evaluate_campaign_enrollment`) using the lead's most recent terminal `LeadWorkflow`, and
+exclude such leads from the dormant-candidate selector and CRM-tag entry path. Manual
+re-enrollment must be permission-checked, carry an explicit reason, re-run consent,
+suppression, ownership, and eligibility checks at the moment of enrollment, and produce an
+audit record naming the acting user and chosen route. The manual enrollment API requires a
+non-blank reason for terminal re-entry and stores it as `manual_reentry_reason` in workflow
+transition metadata. Aggregate enrollment reporting distinguishes an active workflow in
+another campaign from a terminal workflow that requires manual re-entry.
+
+**Slice:** 1 — implemented together with Gap 1.
 
 ### Gap 4 — Dormant/cadence path has no reconciliation for UNCERTAIN provider sends (unlike paused-search)
+
+**Status:** Resolved in Slice 3 and validated on 2026-08-09.
 
 **Where:** `app/application/use_cases/campaign_cadence_execution.py`
 (`_pause_after_block`, called for `SendOutboundMessageStatus.UNCERTAIN` on the plain
@@ -558,66 +609,83 @@ For the **paused-search** path, an `UNCERTAIN` send is tracked via `RecurringOcc
 and there is a full reconciliation story: `process_provider_delivery_callback` auto-resolves
 the occurrence and wakes the workflow via `BLOCKED_REVIEW_COMPLETED` once the provider
 confirms delivery, and `timeout_uncertain_paused_search_occurrence` fails it out after 24h
-if the provider never confirms. For the **plain dormant/cadence** path, an `UNCERTAIN` send
-result goes straight to `_pause_after_block`, which transitions the workflow to `PAUSED`
-with `pause_reason="cadence_step_blocked"` — there is no occurrence-equivalent record, and
-`process_provider_delivery_callback`'s auto-resume logic is gated on
-`occurrence_repository is not None` / matching `RecurringOccurrence`, so it never fires for
-a dormant-path message.
+if the provider never confirms. Slice 3 adds the equivalent, but deliberately separate,
+`OutboundSendReconciliation` record for the plain dormant/cadence path. It persists the
+pending record with the outbound idempotency key and Temporal workflow identifiers, blocks
+redispatch, resolves confirmed callbacks, and marks unresolved records `TIMED_OUT` after 24h.
 
-**Impact:** A dormant-path lead whose provider send comes back `UNCERTAIN` (e.g. missing
-`provider_message_id`) is paused indefinitely and requires manual resume even if the
-provider's later delivery callback confirms the message actually sent successfully. The
-paused-search path does not have this problem; the dormant path does.
+**Resolved impact:** A dormant-path lead whose provider send comes back `UNCERTAIN` (for
+example, with a missing `provider_message_id`) no longer requires an untracked manual resume
+when a later callback confirms the send. The callback wakes the workflow through the
+transactional signal outbox; a timeout remains operator-visible and does not redispatch.
 
-**Suggested remediation:** Either extend `process_provider_delivery_callback` to also
-auto-resume plain dormant workflows paused for `UNCERTAIN` sends (symmetric with the
-paused-search occurrence logic), or explicitly document that dormant-path `UNCERTAIN`
-sends always require manual operator resolution.
+**Decision:** The dormant path must get the same durable reconciliation story as the
+paused-search path. An `UNCERTAIN` send must never be resolved by re-sending.
+
+**Remediation:** Implemented in Slice 3 through the durable reconciliation model/repository,
+the provider callback resolver, the Temporal timeout activity, and the no-redispatch guard.
+While the record is unresolved, no further send for that cadence step may dispatch.
+
+**Slice:** 3.
 
 ### Gap 5 — Provider retry is a single in-process retry only; no durable exception queue
 
+**Status:** Resolved in Slice 4 and validated on 2026-08-09.
+
 **Where:** `app/application/use_cases/send_outbound_message.py` (`_send_sms`, `_send_email`).
 
-`_send_sms`/`_send_email` retry exactly once, inline, with a fixed 0.1s sleep, and only for
-`ProviderFailureKind.TEMPORARY`. There is no exponential backoff, no durable/cross-process
-retry, and no separate "exception queue" for sends that exhaust retries — a `FAILED` result
-just pauses the workflow (`_pause_after_block`), which is indistinguishable in the data
-model from any other policy-based pause. AGENTS.md's Reliability Guidelines call for
+Before Slice 4, `_send_sms`/`_send_email` retried exactly once, inline, with a fixed 0.1s sleep,
+and only for `ProviderFailureKind.TEMPORARY`. There was no exponential backoff, no durable/
+cross-process retry, and no separate "exception queue" for sends that exhausted retries — a
+`FAILED` result just paused the workflow (`_pause_after_block`), which was indistinguishable
+in the data model from any other policy-based pause. AGENTS.md's Reliability Guidelines call for
 "exponential backoff," a "maximum retry count," and moving "unresolved failures to an
 exception queue" as a distinct concept from a generic paused workflow.
 
-**Impact:** Not unsafe (failures do stop the workflow rather than silently drop the
-message), but there is no way to distinguish "paused because of a transient provider outage
-that should be retried later" from "paused because of a policy/business-rule block" without
-reading `pause_reason` metadata by hand, and no durable retry-with-backoff exists outside
-the single inline retry.
+**Resolved impact:** Temporary provider failures now use bounded exponential retry, persist
+attempt state on the outbound message, and exhausted/permanent failures create a durable
+operator-review record. Cadence metadata and `pause_reason=provider_failure_exhausted`
+distinguish provider failures from policy pauses.
 
-**Suggested remediation:** Decide whether V1 needs a distinct exception-queue surface (e.g.
-a queryable view over `PAUSED` workflows with `pause_reason="cadence_step_blocked"` and a
-`FAILED` message with `failure_kind=TEMPORARY`/`UNCERTAIN`), or whether the existing
-pause-and-manually-resume flow is considered sufficient for V1 scope.
+**Decision:** V1 needs bounded durable retries and a distinct operator-visible exception
+surface. Retries must never be unbounded, and only classified transient failures may be
+retried.
+
+**Remediation:** Implemented in Slice 4 through persisted outbound attempt columns, bounded
+temporary-only retry, `OutboundProviderFailure` records, and distinct cadence pause metadata.
+Policy failures are not retried, and uncertain sends continue through Slice 3 reconciliation.
+
+**Slice:** 4.
 
 ### Gap 6 — CRM webhook resource-fetch failures are recorded as ignored, not retryable
+
+**Status:** Resolved in Slice 5 and validated on 2026-08-09.
 
 **Where:** `app/infrastructure/crm/follow_up_boss/webhook_event_handler.py` and
 `app/infrastructure/crm/follow_up_boss/webhook_event_mappers.py`.
 
-The webhook envelope is accepted and routed to a mapper, but mapper resource fetches return
-`(0, 1)` when Follow Up Boss returns no resource. The handler then persists the envelope as
-`IGNORED` and the API returns success. There is no retryable status, retry scheduling, or
-operator queue for a transient CRM/API outage. The same pattern applies when a resource
-payload is incomplete enough that all child records are skipped.
+The webhook envelope was accepted and routed to a mapper, but mapper resource fetches returned
+`(0, 1)` when Follow Up Boss returned no resource. The handler then persisted the envelope as
+`IGNORED` and the API returned success. There was no retryable status, retry scheduling, or
+operator queue for a transient CRM/API outage.
 
 **Impact:** A webhook can be acknowledged successfully while its lead activity, suppression,
 or human-pause side effects never happen. A later full CRM sync may eventually repair the lead
 snapshot, but it does not guarantee replay of the missed event or preservation of the event's
 original ordering relative to outbound work.
 
-**Suggested remediation:** Distinguish `IGNORED` unsupported/irrelevant events from
-`RETRYABLE_FAILURE` fetch/parse failures. Persist the failure reason and retry metadata, return
-an appropriate non-success response when safe, and replay through a durable worker with bounded
-backoff. Keep provider event idempotency so replay cannot duplicate side effects.
+**Decision:** Fetch failures must be retried, but never indefinitely. The failure reason
+must be captured and classified first, so only failures that could plausibly resolve on a
+later attempt are retried. Permanent failures must be recorded as terminal, not retried.
+
+**Remediation:** Implemented in Slice 5. `fetch_resource_by_uri` and webhook mappers now classify
+HTTP, transport, and payload failures; `ExternalEvent` persists the failure kind, reason, attempt count, and
+retry schedule; and the retry worker replays due envelopes with a maximum of three attempts.
+Permanent and exhausted records remain terminal and operator-visible. Replay updates the
+original idempotent envelope, so child side effects are not duplicated. `make check` passed
+with 1,259 tests passing and 2 skipped.
+
+**Slice:** 5.
 
 ### Gap 7 — Temporal activity failures can strand a workflow without a durable operator-visible retry state
 
@@ -636,11 +704,18 @@ actual provider result is unknown, without a durable retry/exception item or aut
 reconciliation path. Operators cannot reliably distinguish a provider outage, process crash,
 database failure, or successful-but-unrecorded send.
 
-**Suggested remediation:** Introduce an explicit durable dispatch boundary: persist an outbound
+**Decision:** The system must never send a duplicate message as a result of a crash, retry,
+or unrecorded send. Recovery from an unknown provider result must go through reconciliation,
+never through a blind re-dispatch.
+
+**Remediation:** Introduce an explicit durable dispatch boundary: persist an outbound
 send request and idempotency key transactionally, dispatch it from a worker, reconcile provider
 status by idempotency key/provider message id, and only then advance the Temporal workflow. If
 that architecture is deferred, persist an explicit `UNCERTAIN` exception record before allowing
-the workflow to wait and expose it for bounded operator reconciliation.
+the workflow to wait and expose it for bounded operator reconciliation. Either way, the
+send-once guarantee is enforced by the persisted idempotency key, not by workflow timing.
+
+**Slice:** 6.
 
 ---
 
@@ -656,12 +731,13 @@ This is **not just a toy project** anymore. The platform already has real struct
 - handoff side effects
 - paused-search track modeling
 
-However, the remaining weak spots have narrowed from broad routing/review gaps down to tag-time handoff completion, advanced workflow controls, and review-history visibility.
+However, the remaining weak spots have narrowed from broad routing/review gaps down to the seven cross-cutting gaps above, plus advanced workflow controls and review-history visibility.
 
 So the honest read is:
 
 - **runtime foundation:** real
 - **business route integrity:** materially safer, with explicit routing reviews and a shared pending-review queue now in place
 - **manual control / review model:** materially real, with remaining gaps concentrated in advanced workflow controls and review-history visibility
+- **enrollment, send, and failure safety:** the weakest remaining area, and the subject of the approved six-slice implementation plan above
 
-If the goal is to make the platform feel like a genuine lead-nurturing system, the next engineering priority should be to finish tag-time handoff completion and close the remaining advanced operator-control/history gaps.
+The next engineering priority is to work the approved implementation plan in slice order, starting with enrollment and re-entry safety, then close the remaining advanced operator-control/history gaps.

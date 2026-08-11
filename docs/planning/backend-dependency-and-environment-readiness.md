@@ -401,9 +401,11 @@ For production readiness, the backend also needs explicit operational dependenci
 - health checks for API, workers, database, broker, and workflow runtime
 - backup and recovery procedures for stateful services
 
-The codebase currently declares `sentry-sdk` and `prometheus-client`, but no active
-backend integration or configuration was found. Those dependencies should therefore
-be treated as planned or partial rather than production-ready.
+The codebase declares and now integrates `prometheus-client` for the outbound-send
+dispatcher. The API exposes an aggregate `/api/v1/metrics` endpoint when
+`METRICS_ENABLED=true`, and the dispatcher records cycle, outcome, queue-age, and
+failure metrics. The endpoint must remain private to the monitoring network. Sentry
+is still declared but does not yet have an active application integration.
 
 ## Current Dependency Gaps
 
