@@ -20,9 +20,11 @@ PROCESS_PATTERNS: list[tuple[str, str]] = [
     ("api", "uvicorn app.main:app"),
     ("temporal-worker", "temporal_worker import main"),
     ("temporal-signal-dispatcher", "temporal_signal_dispatcher_worker import main"),
+    ("outbound-send-dispatcher", "outbound_send_dispatch_worker import main"),
     ("outbox-publisher", "outbox_publisher_worker import main"),
     ("crm-sync-worker", "crm_sync_worker import main"),
     ("crm-sync-scheduler", "crm_sync_scheduler_worker import main"),
+    ("crm-webhook-retry-worker", "crm_webhook_retry_worker import main"),
     ("crm-history-import-worker", "crm_history_import_worker import main"),
 ]
 

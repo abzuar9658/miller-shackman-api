@@ -1,13 +1,13 @@
-.PHONY: infra-up infra-down infra-logs infra-ps db-ui-up db-ui-down db-ui-logs run worker outbox-publisher temporal-signal-dispatcher crm-sync-worker crm-sync-scheduler crm-sync-publisher crm-history-import-worker listing-crawl-worker listing-crawl-scheduler start-all start-temporal start-workers stop-all tail-logs test lint format typecheck check migrate revision
+.PHONY: infra-up infra-down infra-logs infra-ps db-ui-up db-ui-down db-ui-logs run worker outbox-publisher temporal-signal-dispatcher outbound-send-dispatcher crm-sync-worker crm-sync-scheduler crm-webhook-retry-worker crm-sync-publisher crm-history-import-worker listing-crawl-worker listing-crawl-scheduler report-paused-search-messages start-all start-temporal start-workers stop-all tail-logs test lint format typecheck check migrate revision
 
 infra-up:
-	docker compose up -d postgres cloudbeaver rabbitmq redis temporal temporal-ui mailpit
+	docker compose up -d --build
 
 infra-down:
 	docker compose down
 
 infra-logs:
-	docker compose logs -f postgres cloudbeaver rabbitmq redis temporal temporal-ui mailpit
+	docker compose logs -f api outbound-send-dispatcher prometheus grafana
 
 infra-ps:
 	docker compose ps
@@ -33,11 +33,17 @@ outbox-publisher:
 temporal-signal-dispatcher:
 	uv run python -c "import asyncio; from app.interfaces.workers.temporal_signal_dispatcher_worker import main; asyncio.run(main())"
 
+outbound-send-dispatcher:
+	uv run python -c "import asyncio; from app.interfaces.workers.outbound_send_dispatch_worker import main; asyncio.run(main())"
+
 crm-sync-worker:
 	uv run python -c "import asyncio; from app.interfaces.workers.crm_sync_worker import main; asyncio.run(main())"
 
 crm-sync-scheduler:
 	uv run python -c "import asyncio; from app.interfaces.workers.crm_sync_scheduler_worker import main; asyncio.run(main())"
+
+crm-webhook-retry-worker:
+	uv run python -c "import asyncio; from app.interfaces.workers.crm_webhook_retry_worker import main; asyncio.run(main())"
 
 crm-sync-publisher: outbox-publisher
 
@@ -52,6 +58,9 @@ listing-crawl-scheduler:
 
 test:
 	uv run pytest
+
+report-paused-search-messages:
+	uv run python scripts/report_paused_search_messages.py $(ARGS)
 
 lint:
 	uv run ruff check .

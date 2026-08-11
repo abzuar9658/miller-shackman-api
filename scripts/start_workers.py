@@ -4,11 +4,13 @@ Usage:
     arch -arm64 uv run python scripts/start_workers.py [--group all|temporal|workers]
 
 Groups:
-    all      - API, Temporal worker, signal dispatcher, outbox publisher,
-               CRM sync worker, CRM sync scheduler, CRM history import worker
-    temporal - Temporal worker + signal dispatcher
-    workers  - API + outbox publisher + CRM sync worker + CRM sync scheduler +
+    all      - API, Temporal worker, signal dispatcher, outbound send dispatcher,
+               outbox publisher,
+               CRM sync worker, CRM sync scheduler, CRM webhook retry worker,
                CRM history import worker
+    temporal - Temporal worker + signal dispatcher + outbound send dispatcher
+    workers  - API + outbound send dispatcher + outbox publisher + CRM sync worker +
+               CRM webhook retry worker + CRM history import worker
 """
 
 from __future__ import annotations
@@ -40,20 +42,25 @@ WORKER_DEFINITIONS: dict[str, list[tuple[str, list[str]]]] = {
         ("api", [sys.executable, "-m", "uvicorn", "app.main:app", "--reload"]),
         ("temporal-worker", _worker_command("temporal_worker")),
         ("temporal-signal-dispatcher", _worker_command("temporal_signal_dispatcher_worker")),
+        ("outbound-send-dispatcher", _worker_command("outbound_send_dispatch_worker")),
         ("outbox-publisher", _worker_command("outbox_publisher_worker")),
         ("crm-sync-worker", _worker_command("crm_sync_worker")),
         ("crm-sync-scheduler", _worker_command("crm_sync_scheduler_worker")),
+        ("crm-webhook-retry-worker", _worker_command("crm_webhook_retry_worker")),
         ("crm-history-import-worker", _worker_command("crm_history_import_worker")),
     ],
     "temporal": [
         ("temporal-worker", _worker_command("temporal_worker")),
         ("temporal-signal-dispatcher", _worker_command("temporal_signal_dispatcher_worker")),
+        ("outbound-send-dispatcher", _worker_command("outbound_send_dispatch_worker")),
     ],
     "workers": [
         ("api", [sys.executable, "-m", "uvicorn", "app.main:app", "--reload"]),
+        ("outbound-send-dispatcher", _worker_command("outbound_send_dispatch_worker")),
         ("outbox-publisher", _worker_command("outbox_publisher_worker")),
         ("crm-sync-worker", _worker_command("crm_sync_worker")),
         ("crm-sync-scheduler", _worker_command("crm_sync_scheduler_worker")),
+        ("crm-webhook-retry-worker", _worker_command("crm_webhook_retry_worker")),
         ("crm-history-import-worker", _worker_command("crm_history_import_worker")),
     ],
 }
@@ -67,9 +74,11 @@ PROCESS_PATTERNS: list[tuple[str, str]] = [
     ("api", "uvicorn app.main:app"),
     ("temporal-worker", "temporal_worker import main"),
     ("temporal-signal-dispatcher", "temporal_signal_dispatcher_worker import main"),
+    ("outbound-send-dispatcher", "outbound_send_dispatch_worker import main"),
     ("outbox-publisher", "outbox_publisher_worker import main"),
     ("crm-sync-worker", "crm_sync_worker import main"),
     ("crm-sync-scheduler", "crm_sync_scheduler_worker import main"),
+    ("crm-webhook-retry-worker", "crm_webhook_retry_worker import main"),
     ("crm-history-import-worker", "crm_history_import_worker import main"),
 ]
 
