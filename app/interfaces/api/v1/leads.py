@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.application.ports.lead_activity import LeadActivityItem
 from app.application.ports.lead_read import LeadReadLeadRepository
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
+from app.application.services.lead_cadence_progress import LeadCadenceProgressView
 from app.application.services.lead_decision_tree import LeadDecisionTreeView
 from app.application.use_cases.apply_lead_state_classification import (
     ApplyLeadStateClassificationStatus,
@@ -125,6 +126,8 @@ from app.interfaces.api.schemas.leads import (
     InboundMessageResponse,
     LeadActivityItemResponse,
     LeadAssignedCRMAgentResponse,
+    LeadCadenceProgressResponse,
+    LeadCadenceStepProgressResponse,
     LeadChannelContactabilityResponse,
     LeadChannelSendabilityResponse,
     LeadClassificationArtifactResponse,
@@ -278,6 +281,8 @@ async def get_lead_route(
         user_repository=bundle.user_repository,
         crm_agent_repository=bundle.crm_agent_repository,
         routing_review_repository=bundle.routing_review_repository,
+        campaign_enrollment_repository=bundle.campaign_enrollment_repository,
+        campaign_execution_repository=bundle.campaign_execution_repository,
     )
     if result.status == LeadReadStatus.REJECTED:
         raise HTTPException(
@@ -357,6 +362,7 @@ async def start_lead_manual_enrollment_route(
         workspace_id=workspace_id,
         lead_id=lead_id,
         campaign_id=request.campaign_id,
+        reason=request.reason,
         lead_repository=bundle.lead_repository,
         campaign_admin_repository=bundle.campaign_admin_repository,
         campaign_enrollment_repository=bundle.campaign_enrollment_repository,
@@ -375,6 +381,7 @@ async def start_lead_manual_enrollment_route(
         ),
         routing_review_repository=bundle.routing_review_repository,
         commit=bundle.session.commit,
+        rollback=bundle.rollback,
         event_bus=bundle.event_bus,
         now=datetime.now(UTC),
         default_openrouter_model=bundle.default_openrouter_model,
@@ -392,6 +399,8 @@ async def start_lead_manual_enrollment_route(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=list(result.reasons),
         )
+    if result.status == LeadManualEnrollmentActionStatus.REENTRY_REASON_REQUIRED:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=[result.error])
     await bundle.session.commit()
     return StartLeadManualEnrollmentResponse(
         status=result.status.value,
@@ -427,6 +436,7 @@ async def start_selected_paused_search_track_route(
         workspace_id=workspace_id,
         lead_id=lead_id,
         campaign_id=request.campaign_id,
+        reason=request.reason,
         lead_repository=bundle.lead_repository,
         campaign_admin_repository=bundle.campaign_admin_repository,
         campaign_enrollment_repository=bundle.campaign_enrollment_repository,
@@ -440,12 +450,15 @@ async def start_selected_paused_search_track_route(
         workspace_operational_control_repository=bundle.workspace_operational_control_repository,
         event_bus=bundle.event_bus,
         commit=bundle.session.commit,
+        rollback=bundle.rollback,
         now=datetime.now(UTC),
     )
     if result.status == LeadManualEnrollmentActionStatus.REJECTED:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=["permission_denied"])
     if result.status == LeadManualEnrollmentActionStatus.NOT_FOUND:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=list(result.reasons))
+    if result.status == LeadManualEnrollmentActionStatus.REENTRY_REASON_REQUIRED:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=[result.error])
     await bundle.session.commit()
     return StartSelectedPausedSearchTrackResponse(
         status=result.status.value,
@@ -512,6 +525,7 @@ async def resolve_lead_review_hold_route(
         now=datetime.now(UTC),
         default_openrouter_model=classification_bundle.default_openrouter_model,
         commit=manual_bundle.session.commit,
+        rollback=manual_bundle.rollback,
         routing_review_repository=classification_bundle.routing_review_repository,
         handoff_repository=manual_bundle.handoff_repository,
         handoff_completion_repository=manual_bundle.handoff_completion_repository,
@@ -1153,6 +1167,10 @@ def _lead_detail_response(
         else None,
         qualification_plan=_qualification_plan_response(view.qualification_plan),
         decision_tree=_decision_tree_response(view.decision_tree),
+        status_narrative=view.status_narrative,
+        cadence_progress=[
+            _cadence_progress_response(item) for item in view.cadence_progress
+        ],
         workflow_transitions=[_transition_response(item) for item in view.workflow_transitions],
         workflow_override_audits=[
             _workflow_override_audit_response(item) for item in view.workflow_override_audits
@@ -1168,6 +1186,33 @@ def _lead_detail_response(
         inbound_messages=[_inbound_message_response(item) for item in view.inbound_messages],
         outbound_messages=[_outbound_message_response(item) for item in view.outbound_messages],
         handoffs=[handoff_response(item) for item in view.handoffs],
+    )
+
+
+def _cadence_progress_response(view: LeadCadenceProgressView) -> LeadCadenceProgressResponse:
+    return LeadCadenceProgressResponse(
+        journey=view.journey.value,
+        flow_name=view.flow_name,
+        steps=[
+            LeadCadenceStepProgressResponse(
+                step_id=step.step_id,
+                step_order=step.step_order,
+                channel=step.channel.value,
+                delay_hours=step.delay_hours,
+                message_goal=step.message_goal,
+                status=step.status.value,
+                attempt_count=step.attempt_count,
+                sent_at=step.sent_at,
+                scheduled_for=step.scheduled_for,
+                last_failure_reason=step.last_failure_reason,
+                phase=step.phase,
+            )
+            for step in view.steps
+        ],
+        total_steps=view.total_steps,
+        completed_steps=view.completed_steps,
+        current_step_order=view.current_step_order,
+        next_action_at=view.next_action_at,
     )
 
 

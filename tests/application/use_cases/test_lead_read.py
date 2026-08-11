@@ -4,6 +4,13 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from app.application.ports.lead_activity import LeadActivityItem, LeadActivityKind
+from app.application.services.lead_cadence_progress import (
+    CadenceStepProgressStatus,
+    LeadCadenceJourney,
+    build_dormant_cadence_progress,
+    build_lead_status_narrative,
+    build_paused_search_cadence_progress,
+)
 from app.application.services.lead_decision_tree import (
     PausedSearchTrackOptionSpec,
     build_lead_decision_tree,
@@ -15,7 +22,7 @@ from app.application.use_cases.lead_read import (
     get_lead_detail_view,
     list_lead_views,
 )
-from app.domain.campaigns.execution import CampaignVersionStatus
+from app.domain.campaigns.execution import CampaignCadenceStep, CampaignVersionStatus
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchFallbackTimingPolicy,
@@ -447,6 +454,239 @@ def test_paused_search_plan_uses_assignment_without_workflow() -> None:
     assert plan.track.track_key == "rates-watch"
     assert plan.version.version_number == 3
     assert plan.steps[0].template_key == "paused_search_rates_watch_reactivation"
+
+
+def _cadence_step(step_id: UUID, order: int, channel: ContactChannel) -> CampaignCadenceStep:
+    return CampaignCadenceStep(
+        cadence_step_id=step_id,
+        workspace_id=WORKSPACE_ID,
+        campaign_version_id=UUID("00000000-0000-0000-0000-000000000030"),
+        step_order=order,
+        channel=channel,
+        delay_hours=24,
+        message_goal=f"Step {order} goal",
+        template_key=f"step-{order}",
+        max_attempts=1,
+        created_at=NOW,
+    )
+
+
+def _step_message(
+    step_id: UUID,
+    status: OutboundMessageStatus,
+    *,
+    failure_reason: str | None = None,
+) -> OutboundMessage:
+    return replace(
+        _outbound_message(),
+        message_id=UUID(int=hash((str(step_id), status.value)) % (2**32)),
+        cadence_step_id=str(step_id),
+        status=status,
+        sent_at=NOW if status == OutboundMessageStatus.SENT else None,
+        failure_reason=failure_reason,
+    )
+
+
+STEP_1 = UUID("00000000-0000-0000-0000-000000000031")
+STEP_2 = UUID("00000000-0000-0000-0000-000000000032")
+STEP_3 = UUID("00000000-0000-0000-0000-000000000033")
+
+
+def test_dormant_cadence_progress_derives_steps_without_cursor() -> None:
+    steps = (
+        _cadence_step(STEP_1, 1, ContactChannel.EMAIL),
+        _cadence_step(STEP_2, 2, ContactChannel.SMS),
+        _cadence_step(STEP_3, 3, ContactChannel.EMAIL),
+    )
+    messages = (
+        _step_message(STEP_1, OutboundMessageStatus.SENT),
+        _step_message(STEP_2, OutboundMessageStatus.FAILED, failure_reason="undeliverable"),
+    )
+    workflow = replace(
+        _workflow(),
+        current_step_id=None,
+        paused_search_track_version_id=None,
+        paused_search_track_step_id=None,
+    )
+
+    progress = build_dormant_cadence_progress(
+        flow_name="Dormant Buyers",
+        cadence_steps=steps,
+        outbound_messages=messages,
+        workflow=workflow,
+    )
+
+    assert progress is not None
+    assert progress.journey == LeadCadenceJourney.DORMANT
+    assert progress.total_steps == 3
+    assert progress.completed_steps == 1
+    statuses = {step.step_id: step.status for step in progress.steps}
+    assert statuses[STEP_1] == CadenceStepProgressStatus.COMPLETED
+    assert statuses[STEP_2] == CadenceStepProgressStatus.FAILED
+    assert statuses[STEP_3] == CadenceStepProgressStatus.UPCOMING
+    assert progress.current_step_order is None
+    failed_step = next(step for step in progress.steps if step.step_id == STEP_2)
+    assert failed_step.last_failure_reason == "undeliverable"
+    assert failed_step.attempt_count == 1
+
+
+def test_dormant_cadence_progress_uses_cursor_when_present() -> None:
+    steps = (
+        _cadence_step(STEP_1, 1, ContactChannel.EMAIL),
+        _cadence_step(STEP_2, 2, ContactChannel.SMS),
+    )
+    workflow = replace(
+        _workflow(),
+        current_step_id=STEP_2,
+        paused_search_track_version_id=None,
+        paused_search_track_step_id=None,
+    )
+
+    progress = build_dormant_cadence_progress(
+        flow_name="Dormant Buyers",
+        cadence_steps=steps,
+        outbound_messages=(_step_message(STEP_1, OutboundMessageStatus.SENT),),
+        workflow=workflow,
+    )
+
+    assert progress is not None
+    assert progress.current_step_order == 2
+    statuses = {step.step_id: step.status for step in progress.steps}
+    assert statuses[STEP_1] == CadenceStepProgressStatus.COMPLETED
+    assert statuses[STEP_2] == CadenceStepProgressStatus.CURRENT
+
+
+def test_dormant_cadence_progress_terminal_workflow_has_no_current_step() -> None:
+    steps = (_cadence_step(STEP_1, 1, ContactChannel.EMAIL),)
+    workflow = replace(
+        _workflow(),
+        state=WorkflowState.COMPLETED,
+        current_step_id=None,
+    )
+
+    progress = build_dormant_cadence_progress(
+        flow_name="Dormant Buyers",
+        cadence_steps=steps,
+        outbound_messages=(),
+        workflow=workflow,
+    )
+
+    assert progress is not None
+    assert progress.current_step_order is None
+    assert progress.steps[0].status == CadenceStepProgressStatus.UPCOMING
+
+
+def test_paused_search_cadence_progress_uses_track_cursor() -> None:
+    steps = (_paused_search_maintenance_step(), _paused_search_track_step())
+    workflow = _workflow()  # cursor points at reactivation step ...16
+
+    progress = build_paused_search_cadence_progress(
+        flow_name="Rates Watch",
+        track_steps=steps,
+        outbound_messages=(),
+        workflow=workflow,
+    )
+
+    assert progress is not None
+    assert progress.journey == LeadCadenceJourney.PAUSED_SEARCH
+    current = next(
+        step
+        for step in progress.steps
+        if step.step_id == UUID("00000000-0000-0000-0000-000000000016")
+    )
+    assert current.status == CadenceStepProgressStatus.CURRENT
+    assert current.phase == "reactivation"
+
+
+def test_status_narrative_without_workflow() -> None:
+    narrative = build_lead_status_narrative(workflow=None, progress_views=(), now=NOW)
+    assert "No nurture workflow yet" in narrative
+
+
+def test_status_narrative_includes_step_and_next_action() -> None:
+    steps = (
+        _cadence_step(STEP_1, 1, ContactChannel.EMAIL),
+        _cadence_step(STEP_2, 2, ContactChannel.SMS),
+    )
+    workflow = replace(
+        _workflow(),
+        current_step_id=STEP_2,
+        next_action_at=datetime(2030, 1, 2, 15, 0, tzinfo=UTC),
+        paused_search_track_version_id=None,
+        paused_search_track_step_id=None,
+    )
+    progress = build_dormant_cadence_progress(
+        flow_name="Dormant Buyers",
+        cadence_steps=steps,
+        outbound_messages=(_step_message(STEP_1, OutboundMessageStatus.SENT),),
+        workflow=workflow,
+    )
+    assert progress is not None
+
+    narrative = build_lead_status_narrative(
+        workflow=workflow,
+        progress_views=(progress,),
+        now=NOW,
+    )
+
+    assert "Waiting for the lead to respond" in narrative
+    assert "step 2 of 2 in Dormant Buyers" in narrative
+    assert "next action scheduled for" in narrative
+
+
+def test_status_narrative_paused_includes_reason() -> None:
+    workflow = replace(
+        _workflow(),
+        state=WorkflowState.PAUSED,
+        pause_reason="Agent activity detected",
+    )
+
+    narrative = build_lead_status_narrative(workflow=workflow, progress_views=(), now=NOW)
+
+    assert "AI outreach is paused" in narrative
+    assert "Agent activity detected" in narrative
+
+
+def test_get_lead_detail_view_includes_cadence_progress_and_narrative() -> None:
+    result = asyncio.run(
+        get_lead_detail_view(
+            actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            lead_repository=FakeLeadRepository((_lead(),)),
+            paused_search_history_repository=FakeLeadPausedSearchHistoryRepository(()),
+            classification_artifact_repository=FakeLeadClassificationArtifactRepository(()),
+            workflow_repository=FakeLeadWorkflowRepository((_workflow(),)),
+            workflow_override_audit_repository=FakeLeadWorkflowOverrideAuditLogRepository(()),
+            workflow_transition_repository=FakeWorkflowTransitionRepository(()),
+            paused_search_track_repository=FakePausedSearchTrackAdminRepository(
+                tracks=(_paused_search_track(),),
+                versions=(_paused_search_track_version(),),
+                steps=(_paused_search_maintenance_step(), _paused_search_track_step()),
+            ),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(
+                (_paused_search_track_assignment(),)
+            ),
+            activity_repository=FakeLeadActivityRepository(()),
+            rejected_draft_review_repository=FakeRejectedDraftReviewRepository(()),
+            routing_review_repository=_routing_review_repository(),
+            inbound_message_repository=FakeInboundMessageRepository(()),
+            outbound_message_repository=FakeOutboundMessageRepository(()),
+            handoff_repository=FakeHandoffRepository(()),
+            user_repository=FakeUserRepository({USER_ID: _user()}),
+            crm_agent_repository=FakeCRMAgentRepository(()),
+            now=NOW,
+        )
+    )
+
+    assert result.status == LeadReadStatus.OK
+    assert result.view is not None
+    assert len(result.view.cadence_progress) == 1
+    paused_progress = result.view.cadence_progress[0]
+    assert paused_progress.journey == LeadCadenceJourney.PAUSED_SEARCH
+    assert paused_progress.flow_name == "Rates Watch"
+    assert result.view.status_narrative is not None
+    assert "Waiting for the lead to respond" in result.view.status_narrative
 
 
 def test_assigned_agent_get_lead_detail_view_rejects_unowned_lead() -> None:

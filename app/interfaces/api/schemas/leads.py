@@ -380,6 +380,30 @@ class PendingRoutingReviewListResponse(BaseModel):
     items: list[PendingRoutingReviewItemResponse]
 
 
+class LeadCadenceStepProgressResponse(BaseModel):
+    step_id: UUID
+    step_order: int
+    channel: str
+    delay_hours: int
+    message_goal: str
+    status: str
+    attempt_count: int
+    sent_at: datetime | None = None
+    scheduled_for: datetime | None = None
+    last_failure_reason: str | None = None
+    phase: str | None = None
+
+
+class LeadCadenceProgressResponse(BaseModel):
+    journey: str
+    flow_name: str
+    steps: list[LeadCadenceStepProgressResponse] = Field(default_factory=list)
+    total_steps: int
+    completed_steps: int
+    current_step_order: int | None = None
+    next_action_at: datetime | None = None
+
+
 class LeadDetailResponse(BaseModel):
     status: str
     lead: LeadResponse
@@ -388,6 +412,8 @@ class LeadDetailResponse(BaseModel):
     latest_handoff: HandoffResponse | None = None
     qualification_plan: LeadQualificationPlanResponse | None = None
     decision_tree: LeadDecisionTreeResponse
+    status_narrative: str | None = None
+    cadence_progress: list[LeadCadenceProgressResponse] = Field(default_factory=list)
     workflow_transitions: list[WorkflowTransitionResponse]
     workflow_override_audits: list[LeadWorkflowOverrideAuditLogResponse] = Field(
         default_factory=list
@@ -463,6 +489,7 @@ class LeadManualEnrollmentOptionsResponse(BaseModel):
 
 class StartLeadManualEnrollmentRequest(BaseModel):
     campaign_id: UUID
+    reason: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 class StartLeadManualEnrollmentResponse(BaseModel):
@@ -479,6 +506,7 @@ class StartLeadManualEnrollmentResponse(BaseModel):
 
 class StartSelectedPausedSearchTrackRequest(BaseModel):
     campaign_id: UUID
+    reason: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 class StartSelectedPausedSearchTrackResponse(BaseModel):

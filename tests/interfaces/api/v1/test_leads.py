@@ -131,6 +131,7 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeOutboundMessageRepository as FakeCadenceOutboundMessageRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
+    FakeCampaignEnrollmentRepository,
     FakeTemporalSignalOutboxRepository,
 )
 from tests.application.use_cases._lead_read_fakes import (
@@ -863,6 +864,8 @@ def _client_for_role(
         crm_agent_repository=FakeCRMAgentRepository(),
         routing_review_repository=_routing_review_repository(routing_reviews),
         workspace_contact_policy_repository=policy_repository,
+        campaign_enrollment_repository=FakeCampaignEnrollmentRepository(),
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
     )
     resume_read_bundle = LeadResumeReadBundle(
         lead_repository=bundle.lead_repository,

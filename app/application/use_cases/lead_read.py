@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
+from typing import cast
 
 from app.application.ports.lead_activity import (
     LeadActivityItem,
@@ -24,6 +25,8 @@ from app.application.ports.lead_read import (
 )
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
+    CampaignExecutionRepository,
     CRMAgentRepository,
     LeadRoutingReviewRepository,
     PausedSearchTrackAssignmentRepository,
@@ -33,12 +36,18 @@ from app.application.services.lead_assignment import (
     lead_assigned_agent_user_id,
     lead_effective_owner_user_id,
 )
+from app.application.services.lead_cadence_progress import (
+    LeadCadenceProgressView,
+    build_dormant_cadence_progress,
+    build_lead_status_narrative,
+    build_paused_search_cadence_progress,
+)
 from app.application.services.lead_decision_tree import (
     LeadDecisionTreeView,
     PausedSearchTrackOptionSpec,
     build_lead_decision_tree,
 )
-from app.domain.campaigns.execution import CampaignVersionStatus
+from app.domain.campaigns.execution import CampaignExecutionConfig, CampaignVersionStatus
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrack,
@@ -115,6 +124,8 @@ class LeadDetailView:
     inbound_messages: tuple[InboundMessage, ...]
     outbound_messages: tuple[OutboundMessage, ...]
     handoffs: tuple[Handoff, ...]
+    cadence_progress: tuple[LeadCadenceProgressView, ...] = ()
+    status_narrative: str | None = None
 
 
 @dataclass(frozen=True)
@@ -242,6 +253,9 @@ async def get_lead_detail_view(
     user_repository: LeadReadUserRepository,
     crm_agent_repository: CRMAgentRepository,
     routing_review_repository: LeadRoutingReviewRepository,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
+    campaign_execution_repository: CampaignExecutionRepository | None = None,
+    now: datetime | None = None,
 ) -> LeadDetailResult:
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
     if lead is None:
@@ -350,6 +364,20 @@ async def get_lead_detail_view(
         latest_workflow=latest_workflow,
         latest_handoff=lead_view.latest_handoff,
     )
+    outbound_messages = await outbound_message_repository.list_for_lead(workspace_id, lead_id)
+    cadence_progress = await _cadence_progress_views(
+        workspace_id=workspace_id,
+        workflow=latest_workflow,
+        paused_search_plan=paused_search_plan,
+        outbound_messages=outbound_messages,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        campaign_execution_repository=campaign_execution_repository,
+    )
+    status_narrative = build_lead_status_narrative(
+        workflow=latest_workflow,
+        progress_views=cadence_progress,
+        now=now if now is not None else datetime.now(UTC),
+    )
     return LeadDetailResult(
         status=LeadReadStatus.OK,
         view=LeadDetailView(
@@ -370,12 +398,81 @@ async def get_lead_detail_view(
             ),
             activity_items=await activity_repository.list_for_lead(workspace_id, lead_id),
             inbound_messages=await inbound_message_repository.list_for_lead(workspace_id, lead_id),
-            outbound_messages=await outbound_message_repository.list_for_lead(
-                workspace_id, lead_id
-            ),
+            outbound_messages=outbound_messages,
             handoffs=handoffs,
+            cadence_progress=cadence_progress,
+            status_narrative=status_narrative,
         ),
     )
+
+
+async def _cadence_progress_views(
+    *,
+    workspace_id: WorkspaceId,
+    workflow: LeadWorkflow | None,
+    paused_search_plan: LeadPausedSearchPlanView | None,
+    outbound_messages: tuple[OutboundMessage, ...],
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None,
+    campaign_execution_repository: CampaignExecutionRepository | None,
+) -> tuple[LeadCadenceProgressView, ...]:
+    views: list[LeadCadenceProgressView] = []
+    dormant_config = await _dormant_campaign_config(
+        workspace_id=workspace_id,
+        workflow=workflow,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        campaign_execution_repository=campaign_execution_repository,
+    )
+    if dormant_config is not None:
+        dormant_progress = build_dormant_cadence_progress(
+            flow_name=dormant_config.campaign_name,
+            cadence_steps=dormant_config.cadence_steps,
+            outbound_messages=outbound_messages,
+            workflow=workflow,
+        )
+        if dormant_progress is not None:
+            views.append(dormant_progress)
+    if paused_search_plan is not None:
+        paused_progress = build_paused_search_cadence_progress(
+            flow_name=paused_search_plan.track.display_name,
+            track_steps=paused_search_plan.steps,
+            outbound_messages=outbound_messages,
+            workflow=workflow,
+        )
+        if paused_progress is not None:
+            views.append(paused_progress)
+    return tuple(views)
+
+
+async def _dormant_campaign_config(
+    *,
+    workspace_id: WorkspaceId,
+    workflow: LeadWorkflow | None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None,
+    campaign_execution_repository: CampaignExecutionRepository | None,
+) -> CampaignExecutionConfig | None:
+    if (
+        workflow is None
+        or campaign_enrollment_repository is None
+        or campaign_execution_repository is None
+    ):
+        return None
+    enrollment = await campaign_enrollment_repository.get_by_lead_and_campaign(
+        workspace_id,
+        workflow.lead_id,
+        workflow.campaign_id,
+    )
+    if enrollment is not None and enrollment.campaign_version_id is not None:
+        config = await campaign_execution_repository.get_by_version_id(
+            workspace_id,
+            enrollment.campaign_version_id,
+        )
+        if config is not None:
+            return cast(CampaignExecutionConfig, config)
+    fallback = await campaign_execution_repository.get_active_for_campaign(
+        workspace_id,
+        workflow.campaign_id,
+    )
+    return cast("CampaignExecutionConfig | None", fallback)
 
 
 async def _paused_search_plan_view(

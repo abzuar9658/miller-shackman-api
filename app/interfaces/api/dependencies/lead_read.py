@@ -21,12 +21,20 @@ from app.application.ports.lead_read import (
 )
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
+    CampaignExecutionRepository,
     CRMAgentRepository,
     LeadRoutingReviewRepository,
     PausedSearchTrackAssignmentRepository,
     WorkspaceContactPolicyRepository,
 )
 from app.core.database import get_session
+from app.infrastructure.persistence.postgres.campaign_enrollment_repository import (
+    PostgresCampaignEnrollmentRepository,
+)
+from app.infrastructure.persistence.postgres.campaign_execution_repository import (
+    PostgresCampaignExecutionRepository,
+)
 from app.infrastructure.persistence.postgres.conversation_repository import (
     PostgresCrmConversationEventRepository,
     PostgresHandoffRepository,
@@ -86,6 +94,8 @@ class LeadReadBundle:
     crm_agent_repository: CRMAgentRepository
     routing_review_repository: LeadRoutingReviewRepository
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository
+    campaign_enrollment_repository: CampaignEnrollmentRepository
+    campaign_execution_repository: CampaignExecutionRepository
 
 
 async def get_lead_read_bundle(
@@ -112,4 +122,6 @@ async def get_lead_read_bundle(
         crm_agent_repository=PostgresCRMAgentRepository(session),
         routing_review_repository=PostgresLeadRoutingReviewRepository(session),
         workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
+        campaign_enrollment_repository=PostgresCampaignEnrollmentRepository(session),
+        campaign_execution_repository=PostgresCampaignExecutionRepository(session),
     )
