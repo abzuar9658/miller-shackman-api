@@ -99,6 +99,10 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
             ),
         ),
         journey_kind=OutboundJourneyKind.DORMANT,
+        message_purpose=(
+            "Ask whether the lead's lease-end timing changed and whether a future "
+            "reconnection would be useful."
+        ),
         llm_client=llm,
     )
 
@@ -106,9 +110,11 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
     assert result.body == "Hi there,\n\nare you still thinking about making a move this year?"
     assert result.model == "openai/gpt-4o-mini"
     assert result.usage_tokens == 42
-    assert llm.requests[0].prompt_version == "outbound_message_draft:v10:r1"
+    assert llm.requests[0].prompt_version == "outbound_message_draft:v12:r1"
     assert "Austin" in llm.requests[0].prompt
-    assert '"journey_kind": "dormant"' in llm.requests[0].prompt
+    assert "Journey: dormant" in llm.requests[0].prompt  # v12 structured format
+    assert "lease-end timing changed" in llm.requests[0].prompt
+    assert "## Writing Objective" in llm.requests[0].prompt  # v12 structured format
     assert "Do not invent listings" in llm.requests[0].prompt
     assert "For dormant outreach, treat the lead as quiet for an unknown reason" in (
         llm.requests[0].prompt
@@ -125,9 +131,10 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
         "You are an administrative follow-up assistant for a real estate brokerage."
         in llm.requests[0].prompt
     )
-    assert "conversation_memory_summary" in llm.requests[0].prompt
-    assert "recent_conversation_items" in llm.requests[0].prompt
-    assert "recent_outbound_messages" in llm.requests[0].prompt
+    # v12 uses structured sections instead of JSON field names
+    assert "Conversation summary:" in llm.requests[0].prompt
+    assert "## Recent Conversation" in llm.requests[0].prompt
+    assert "## Recent Outbound Messages" in llm.requests[0].prompt
     assert "Avoid repeating the same greeting" in llm.requests[0].prompt
 
 
@@ -227,18 +234,19 @@ async def test_includes_safe_listing_relevance_brief_in_prompt_when_present() ->
         llm_client=llm,
     )
 
-    assert "approved_listing_context" in llm.requests[0].prompt
-    assert "listing_relevance_brief" in llm.requests[0].prompt
-    assert "listing_message_guidance" in llm.requests[0].prompt
-    assert '"must_acknowledge_current_matches": true' in llm.requests[0].prompt
+    # v12 uses structured sections instead of JSON field names
+    assert "# Approved Listing Context" in llm.requests[0].prompt
+    assert "## Listing Relevance" in llm.requests[0].prompt
+    assert "## Listing Message Guidance" in llm.requests[0].prompt
     assert "Bronx" in llm.requests[0].prompt
     assert "Throgs Neck" in llm.requests[0].prompt
     assert "StreetEasy" in llm.requests[0].prompt
-    assert "budget_alignment_note" in llm.requests[0].prompt
+    assert "Budget alignment:" in llm.requests[0].prompt
     assert "Use this factual basis once in general terms" in llm.requests[0].prompt
     assert "Ask whether they want their assigned agent to send a few current options." in (
         llm.requests[0].prompt
     )
+    # Safety: should not include exact addresses or prices
     assert "2738 Miles Avenue" not in llm.requests[0].prompt
     assert "$650,000" not in llm.requests[0].prompt
 
@@ -259,8 +267,8 @@ async def test_prompt_forbids_implying_availability_when_no_listing_context() ->
     )
 
     prompt = llm.requests[0].prompt
-    assert "approved_listing_context" in prompt
-    assert '"approved_listing_context": null' in prompt
+    # v12 shows a "No Listing Context Available" section when no listing context exists
+    assert "# No Listing Context Available" in prompt
     assert "MUST NOT imply that listings, properties, or options are currently available" in prompt
     assert "great options available right now" in prompt
 

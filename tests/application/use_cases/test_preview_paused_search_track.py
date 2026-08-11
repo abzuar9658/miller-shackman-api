@@ -1,6 +1,6 @@
 from collections.abc import Coroutine
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -129,6 +129,32 @@ def test_preview_does_not_project_sends_beyond_runtime_touch_cap() -> None:
     assert len(result.occurrences) == 1
     assert result.maximum_logical_touches == 1
     assert result.validation.warnings[0].code is PausedSearchValidationCode.EXPECTED_TOUCHES_CAPPED
+
+
+def test_preview_derives_maintenance_recurrence_from_reactivation_window() -> None:
+    step = replace(_step(), delay_hours=0, max_occurrences=1)
+    result = _run(
+        preview_paused_search_track_version(
+            actor=_actor(),
+            track=_track(),
+            version=replace(_version(), max_total_touches=5),
+            steps=(step,),
+            profile=replace(
+                _profile(),
+                reengagement_not_before=NOW + timedelta(days=120),
+            ),
+            workflow=_workflow(),
+            timezone="UTC",
+            now=NOW,
+        )
+    )
+
+    assert [occurrence.plan.occurrence_number for occurrence in result.occurrences] == [
+        1,
+        2,
+        3,
+    ]
+    assert result.occurrences[-1].plan.due_at == NOW + timedelta(days=60)
 
 
 def _track() -> PausedSearchTrack:

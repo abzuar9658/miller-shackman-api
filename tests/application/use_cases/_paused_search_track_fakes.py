@@ -73,10 +73,18 @@ class FakePausedSearchTrackAdminRepository:
     ) -> tuple[PausedSearchTrackCatalogEntry, ...]:
         entries: list[PausedSearchTrackCatalogEntry] = []
         for track in self._tracks.values():
-            if track.workspace_id != workspace_id or track.active_version_id is None:
+            if (
+                track.workspace_id != workspace_id
+                or track.status is not PausedSearchTrackStatus.ACTIVE
+                or track.active_version_id is None
+            ):
                 continue
             version = self._versions.get((workspace_id, track.active_version_id))
-            if version is None or not version.enabled:
+            if (
+                version is None
+                or version.status is not CampaignVersionStatus.PUBLISHED
+                or not version.enabled
+            ):
                 continue
             entries.append(
                 PausedSearchTrackCatalogEntry(

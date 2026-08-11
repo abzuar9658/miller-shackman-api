@@ -1069,6 +1069,8 @@ def _config_input(payload: PausedSearchTrackConfigRequest) -> PausedSearchTrackC
         max_cycles=payload.max_cycles,
         max_ai_interactions=payload.max_ai_interactions,
         restart_delay_days=payload.restart_delay_days,
+        email_writing_purpose=payload.email_writing_purpose,
+        sms_writing_purpose=payload.sms_writing_purpose,
         steps=tuple(
             PausedSearchTrackStepInput(
                 phase=step.phase,

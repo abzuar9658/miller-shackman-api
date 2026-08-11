@@ -16,6 +16,8 @@ from app.application.use_cases.preview_paused_search_track import (
 )
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.paused_search_tracks import (
+    DEFAULT_PAUSED_SEARCH_EMAIL_WRITING_PURPOSE,
+    DEFAULT_PAUSED_SEARCH_SMS_WRITING_PURPOSE,
     PausedSearchChannelSequence,
     PausedSearchFallbackTimingPolicy,
     PausedSearchInterimContactPolicy,
@@ -140,10 +142,22 @@ class PausedSearchTrackConfigInput:
     max_cycles: int = 1
     max_ai_interactions: int = 5
     restart_delay_days: int = 30
+    email_writing_purpose: str = DEFAULT_PAUSED_SEARCH_EMAIL_WRITING_PURPOSE
+    sms_writing_purpose: str = DEFAULT_PAUSED_SEARCH_SMS_WRITING_PURPOSE
     compatibility: str = "guided"
 
 
 MAX_PAUSED_SEARCH_DURATION_DAYS = 730
+
+
+def _configured_occurrence_cap(step: PausedSearchTrackStepInput) -> int:
+    if (
+        step.phase is PausedSearchTrackStepPhase.MAINTENANCE
+        and step.interval_days is not None
+        and step.max_occurrences == 1
+    ):
+        return MAX_AI_TOUCHES_PER_TRACK
+    return step.max_occurrences
 
 
 def _effective_safety_limits(
@@ -157,7 +171,7 @@ def _effective_safety_limits(
     duration so a future lead-selected date is not expired prematurely.
     """
 
-    configured_touches = sum(step.max_occurrences for step in config.steps)
+    configured_touches = sum(_configured_occurrence_cap(step) for step in config.steps)
     max_total_touches = min(
         MAX_AI_TOUCHES_PER_TRACK,
         max(config.max_total_touches, configured_touches),
@@ -166,7 +180,7 @@ def _effective_safety_limits(
     cadence_horizon_days = max(
         (
             ceil(step.delay_hours / 24)
-            + max(0, step.max_occurrences - 1) * (step.interval_days or 0)
+            + max(0, _configured_occurrence_cap(step) - 1) * (step.interval_days or 0)
             for step in config.steps
         ),
         default=30,
@@ -971,6 +985,8 @@ def _build_version(
         max_cycles=config.max_cycles,
         max_ai_interactions=config.max_ai_interactions,
         restart_delay_days=config.restart_delay_days,
+        email_writing_purpose=config.email_writing_purpose.strip(),
+        sms_writing_purpose=config.sms_writing_purpose.strip(),
         created_by_user_id=actor.user_id,
         created_at=now,
     )
@@ -1000,6 +1016,8 @@ def _replace_version_config(
         max_cycles=config.max_cycles,
         max_ai_interactions=config.max_ai_interactions,
         restart_delay_days=config.restart_delay_days,
+        email_writing_purpose=config.email_writing_purpose.strip(),
+        sms_writing_purpose=config.sms_writing_purpose.strip(),
     )
 
 

@@ -44,6 +44,8 @@ class PausedSearchValidationCode(StrEnum):
     EMPTY_DISPLAY_NAME = "empty_display_name"
     NO_ALLOWED_CHANNELS = "no_allowed_channels"
     INVALID_SELECTION_GUIDANCE = "invalid_selection_guidance"
+    INVALID_EMAIL_WRITING_PURPOSE = "invalid_email_writing_purpose"
+    INVALID_SMS_WRITING_PURPOSE = "invalid_sms_writing_purpose"
     INVALID_MAINTENANCE_INTERVAL = "invalid_maintenance_interval"
     INVALID_REACTIVATION_WINDOW = "invalid_reactivation_window"
     INVALID_TOUCH_LIMIT = "invalid_touch_limit"
@@ -185,6 +187,18 @@ def _validate_version(
             PausedSearchValidationCode.INVALID_SELECTION_GUIDANCE,
             "selection_guidance",
         )
+    if not 20 <= len(version.email_writing_purpose.strip()) <= 1000:
+        _error(
+            findings,
+            PausedSearchValidationCode.INVALID_EMAIL_WRITING_PURPOSE,
+            "email_writing_purpose",
+        )
+    if not 20 <= len(version.sms_writing_purpose.strip()) <= 1000:
+        _error(
+            findings,
+            PausedSearchValidationCode.INVALID_SMS_WRITING_PURPOSE,
+            "sms_writing_purpose",
+        )
     if version.maintenance_interval_days <= 0:
         _error(
             findings,
@@ -279,7 +293,6 @@ def _validate_steps(
         if (
             step.phase.value == "maintenance"
             and step.interval_days is not None
-            and step.max_occurrences > 1
             and not paused_search_interim_contact_is_configured(version.interim_contact_policy)
         ):
             _error(

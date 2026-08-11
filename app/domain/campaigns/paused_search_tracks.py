@@ -16,6 +16,15 @@ from app.domain.common.ids import (
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.outbound_drafting import DormantStepTemplateProfile
 
+DEFAULT_PAUSED_SEARCH_EMAIL_WRITING_PURPOSE = (
+    "Write a track-specific paused-search email that acknowledges the lead's stated "
+    "reason for waiting and asks one low-pressure question."
+)
+DEFAULT_PAUSED_SEARCH_SMS_WRITING_PURPOSE = (
+    "Write a concise track-specific paused-search SMS that acknowledges the lead's "
+    "stated reason for waiting and invites a brief reply."
+)
+
 
 def generate_paused_search_track_key(display_name: str) -> str:
     key = display_name.strip().lower().replace("&", " and ")
@@ -176,6 +185,8 @@ class PausedSearchTrackVersion:
     max_cycles: int = 1
     max_ai_interactions: int = 5
     restart_delay_days: int = 30
+    email_writing_purpose: str = DEFAULT_PAUSED_SEARCH_EMAIL_WRITING_PURPOSE
+    sms_writing_purpose: str = DEFAULT_PAUSED_SEARCH_SMS_WRITING_PURPOSE
 
 @dataclass(frozen=True)
 class PausedSearchTrackStep:

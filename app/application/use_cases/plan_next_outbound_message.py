@@ -91,6 +91,7 @@ class PlanNextOutboundMessageContext:
     activity_items: tuple[LeadActivityItem, ...] = ()
     drafting_config: WorkspaceOutboundDraftingConfig | None = None
     template_profile: DormantStepTemplateProfile | None = None
+    paused_search_writing_purpose: str | None = None
 
 
 async def plan_next_outbound_message_for_lead(
@@ -171,6 +172,7 @@ async def plan_next_outbound_message_for_lead(
         journey_kind=context.journey_kind,
         drafting_config=context.drafting_config,
         template_profile=context.template_profile,
+        paused_search_writing_purpose=context.paused_search_writing_purpose,
         preflight_vetoed=context.preflight_vetoed,
         handoff_active=context.handoff_active,
         human_owned=context.human_owned,
@@ -253,6 +255,7 @@ async def plan_next_outbound_message_for_lead(
         journey_kind=context.journey_kind,
         drafting_config=context.drafting_config,
         template_profile=context.template_profile,
+        paused_search_writing_purpose=context.paused_search_writing_purpose,
         preflight_vetoed=context.preflight_vetoed,
         handoff_active=context.handoff_active,
         human_owned=context.human_owned,

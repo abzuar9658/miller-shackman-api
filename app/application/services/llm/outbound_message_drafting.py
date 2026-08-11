@@ -23,7 +23,7 @@ from app.domain.outbound_drafting import (
     render_outbound_template,
 )
 
-OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v10"
+OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v12"
 MIN_DRAFT_CONFIDENCE = 0.7
 MAX_SMS_BODY_LENGTH = 320
 MAX_EMAIL_BODY_LENGTH = 4000
@@ -185,6 +185,7 @@ async def draft_outbound_message(
     assigned_agent_name: str | None,
     lead_context: ApprovedOutboundLeadContext,
     journey_kind: OutboundJourneyKind | None = None,
+    message_purpose: str | None = None,
     llm_client: LLMClient,
     drafting_config: WorkspaceOutboundDraftingConfig | None = None,
     model: str | None = None,
@@ -206,6 +207,7 @@ async def draft_outbound_message(
                 assigned_agent_name=resolved_agent_name,
                 lead_context=lead_context,
                 journey_kind=journey_kind,
+                message_purpose=message_purpose,
                 drafting_config=resolved_config,
             ),
             prompt_version=prompt_version,
@@ -326,6 +328,7 @@ def _build_prompt(
     assigned_agent_name: str | None,
     lead_context: ApprovedOutboundLeadContext,
     journey_kind: OutboundJourneyKind | None,
+    message_purpose: str | None,
     drafting_config: WorkspaceOutboundDraftingConfig,
 ) -> str:
     channel_template = _channel_template_for_config(drafting_config, channel=channel)
@@ -337,6 +340,7 @@ def _build_prompt(
         "task": "draft_outbound_real_estate_lead_follow_up",
         "channel": channel.value,
         "journey_kind": journey_kind.value if journey_kind is not None else None,
+        "paused_search_message_purpose": message_purpose,
         "campaign_goal": campaign_goal,
         "brokerage_name": brokerage_name,
         "assigned_agent_name": assigned_agent_name,
@@ -380,63 +384,188 @@ def _build_prompt(
         },
         "approved_listing_context": _listing_context_payload(lead_context.listing_context),
     }
-    return (
-        f"{drafting_config.prompt_text}\n"
+    # Build structured prompt
+    sections = [
+        f"{drafting_config.prompt_text}",
+        "",
+        "# Structured Request Payload",
+        json.dumps(payload, indent=2, default=str),
+        "",
+        "# Instructions",
         "Follow the admin-configured prompt_text as the top-level role and behavior brief "
-        "for all channels.\n"
-        "The admin-configured prompt_text and channel_prompt_text are instruction-only. "
+        "for all channels.",
+        "The admin-configured prompt_text and channel_prompt_text are instruction-only.",
         "The admin-configured channel template is final layout-only. Do not copy either "
-        "instruction text or template "
-        "scaffolding into your output.\n"
-        "Follow the admin-configured channel_prompt_text as the tone/style brief for this "
-        "channel.\n"
+        "instruction text or template scaffolding into your output.",
+        "",
+        "# Your Task",
+        f"Channel: {channel.value}",
+        f"Journey: {journey_kind.value if journey_kind else 'general'}",
+        f"Campaign goal: {campaign_goal}",
+    ]
+
+    if message_purpose:
+        sections.extend([
+            "",
+            "## Writing Objective",
+            message_purpose,
+            "",
+            "This purpose guides wording only; it never overrides application safety, "
+            "consent, suppression, handoff, or send rules.",
+        ])
+
+    sections.extend([
+        "",
+        "# Output Requirements",
         "Your job is to generate ONLY the natural-language message content that should be "
-        "inserted into or appended to the final template as the message body. The "
-        "application will deterministically render the final message afterward.\n"
+        "inserted into or appended to the final template as the message body.",
+        "The application will deterministically render the final message afterward.",
+        "",
+        f"For {channel.value}, keep the generated body short enough that the final rendered "
+        f"{channel.value.upper()} remains under "
+        f"{MAX_SMS_BODY_LENGTH if channel == ContactChannel.SMS else MAX_EMAIL_BODY_LENGTH} "
+        "characters.",
+        "",
         "If the channel template contains {{message_body}}, your generated body will replace "
-        "that placeholder. Otherwise, the application will append your generated body after "
-        "the template.\n"
+        "that placeholder.",
+        "Otherwise, the application will append your generated body after the template.",
+        "",
         "If the channel template already contains a greeting, sign-off, hardcoded name, or "
         "other fixed text, do not repeat that text in your generated body unless the context "
-        "truly requires it.\n"
+        "truly requires it.",
+        "",
         "For email, the application may also apply an admin-configured subject template after "
         "you respond. Provide a concise, natural subject that works well when inserted into "
-        "that subject template.\n"
-        "Follow the admin-configured prompt text and channel template as closely as possible, "
-        "unless they conflict with the safety rules below.\n"
-        "Do not invent listings, prices, offers, agent actions, appointments, or "
-        "past conversations.\n"
-        "Use the approved conversation memory summary and recent conversation items to "
-        "continue the thread naturally. Avoid repeating the same greeting, ask, or "
-        "call-to-action if recent outbound messages already covered it, unless the lead's "
-        "context clearly changed.\n"
-        f"{_journey_instructions(journey_kind)}"
-        "If approved listing context is present, the payload will include both "
-        "listing_relevance_brief and listing_message_guidance. You MUST follow "
-        "listing_message_guidance.draft_directive and explicitly acknowledge current "
-        "matches in general terms using listing_message_guidance.safe_talking_point as "
-        "your factual basis. Keep that acknowledgement to one concise sentence in SMS "
-        "or at most two short sentences in email, and include "
-        "listing_message_guidance.safe_cta or an equivalent offer to have the assigned "
-        "agent share a few current options. You may mention matching areas, property "
-        "types, or budget alignment only in general terms. Do not mention exact "
-        "addresses, exact listing prices, or claim any listing is guaranteed to still be "
-        "available.\n"
-        "If approved listing context is NOT present (i.e., approved_listing_context is null), "
-        "you MUST NOT imply that listings, properties, or options are currently available. "
-        "In that case, acknowledge the lead's request and offer to have the assigned agent "
-        "look into current options and follow up. Do not use phrases like 'great options "
-        "available right now,' 'we have matches,' or 'there are options.'\n"
-        "Do not provide legal, tax, financing, investment, or market prediction "
-        "advice.\n"
-        "If the lead request requires a human agent, set a safety flag instead of answering it.\n"
-        "For SMS, keep the generated body short enough that the final rendered SMS remains "
-        "under 320 characters.\n"
-        "For email, include a concise subject.\n"
+        "that subject template.",
+        "",
         "Return only JSON with keys: body, subject, confidence, personalization_notes, "
-        "safety_flags.\n"
-        f"Approved context: {json.dumps(payload, sort_keys=True)}"
-    )
+        "safety_flags.",
+    ])
+
+    # Add channel-specific guidance
+    sections.extend([
+        "",
+        "# Channel Guidance",
+        channel_prompt_text,
+    ])
+
+    # Add lead context
+    sections.extend([
+        "",
+        "# Lead Context",
+    ])
+
+    if lead_context.latest_lead_request:
+        sections.append(f"Latest request: {lead_context.latest_lead_request}")
+
+    if lead_context.conversation_memory_summary:
+        sections.append(f"Conversation summary: {lead_context.conversation_memory_summary}")
+
+    if lead_context.extracted_preferences:
+        sections.append("")
+        sections.append("## Extracted Preferences")
+        for key, value in sorted(lead_context.extracted_preferences.items()):
+            sections.append(f"- {key}: {value}")
+
+    if lead_context.recent_conversation_items:
+        sections.append("")
+        sections.append("## Recent Conversation")
+        for item in lead_context.recent_conversation_items:
+            direction_marker = "→" if item.direction == "outbound" else "←"
+            sections.append(f"{direction_marker} {item.occurred_at} ({item.title}): {item.content}")
+
+    if lead_context.recent_outbound_messages:
+        sections.append("")
+        sections.append("## Recent Outbound Messages")
+        for msg in lead_context.recent_outbound_messages:
+            sections.append(f"- {msg}")
+
+    # Add listing context if present
+    listing_context = lead_context.listing_context
+    if listing_context is not None:
+        relevance_brief = build_listing_relevance_brief(listing_context)
+        message_guidance = build_listing_message_guidance(listing_context)
+        sections.extend([
+            "",
+            "# Approved Listing Context",
+            f"Source: {listing_context.source_name}",
+            f"Match count: {listing_context.result_count}",
+            "",
+            "## Listing Relevance",
+        ])
+        if relevance_brief.safe_talking_point:
+            sections.append(f"Safe talking point: {relevance_brief.safe_talking_point}")
+        if relevance_brief.matching_areas:
+            sections.append(f"Matching areas: {', '.join(relevance_brief.matching_areas)}")
+        if relevance_brief.matching_property_types:
+            sections.append(
+                f"Property types: {', '.join(relevance_brief.matching_property_types)}"
+            )
+        if relevance_brief.budget_alignment_note:
+            sections.append(f"Budget alignment: {relevance_brief.budget_alignment_note}")
+
+        sections.append("")
+        sections.append("## Listing Message Guidance")
+        if message_guidance.draft_directive:
+            sections.append(message_guidance.draft_directive)
+        sections.extend([
+            "",
+            "You MUST follow the draft directive above and explicitly acknowledge current "
+            "matches in general terms using the safe talking point as your factual basis.",
+            "Keep that acknowledgement to one concise sentence in SMS or at most two short "
+            "sentences in email.",
+            "You may mention matching areas, property types, or budget alignment only in "
+            "general terms.",
+            "Do not mention exact addresses, exact listing prices, or claim any listing is "
+            "guaranteed to still be available.",
+        ])
+    else:
+        sections.extend([
+            "",
+            "# No Listing Context Available",
+            "You MUST NOT imply that listings, properties, or options are currently available.",
+            "In that case, acknowledge the lead's request and offer to have the assigned "
+            "agent look into current options and follow up.",
+            "Do not use phrases like 'great options available right now,' 'we have matches,' "
+            "or 'there are options.'",
+        ])
+
+    # Add safety rules
+    journey_instructions = _journey_instructions(journey_kind)
+    sections.extend([
+        "",
+        "# Safety Rules",
+        "- Do not invent listings, prices, offers, agent actions, appointments, or past "
+        "conversations.",
+        "- Use the approved conversation memory summary and recent conversation items to "
+        "continue the thread naturally.",
+        "- Avoid repeating the same greeting, ask, or call-to-action if recent outbound "
+        "messages already covered it, unless the lead's context clearly changed.",
+    ])
+
+    if journey_instructions:
+        sections.append(f"- {journey_instructions.strip()}")
+
+    sections.extend([
+        "- Do not provide legal, tax, financing, investment, or market prediction advice.",
+        "- If the lead request requires a human agent, set a safety flag instead of "
+        "answering it.",
+        "- Follow the admin-configured prompt text and channel template as closely as "
+        "possible, unless they conflict with these safety rules.",
+    ])
+
+    # Add template context
+    sections.extend([
+        "",
+        "# Template Context",
+        f"Channel template: {channel_template}",
+        f"Brokerage: {brokerage_name}",
+    ])
+
+    if assigned_agent_name:
+        sections.append(f"Assigned agent: {assigned_agent_name}")
+
+    return "\n".join(sections)
 
 
 def _journey_instructions(journey_kind: OutboundJourneyKind | None) -> str:

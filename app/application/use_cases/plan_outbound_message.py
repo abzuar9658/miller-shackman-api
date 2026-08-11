@@ -122,6 +122,7 @@ class OutboundPlanningContext:
     other_channel_sent_at: datetime | None = None
     drafting_config: WorkspaceOutboundDraftingConfig | None = None
     template_profile: DormantStepTemplateProfile | None = None
+    paused_search_writing_purpose: str | None = None
 
 
 @dataclass(frozen=True)
@@ -274,6 +275,7 @@ async def plan_outbound_message_for_lead_record(
         journey_kind=context.journey_kind,
         llm_client=llm_client,
         drafting_config=drafting_config,
+        message_purpose=context.paused_search_writing_purpose,
         model=openrouter_model,
     )
     if draft_result.status != OutboundMessageDraftStatus.DRAFTED or draft_result.body is None:

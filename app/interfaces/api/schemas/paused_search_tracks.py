@@ -18,6 +18,10 @@ from app.domain.campaigns import (
     PausedSearchTrackStepPhase,
     generate_paused_search_track_key,
 )
+from app.domain.campaigns.paused_search_tracks import (
+    DEFAULT_PAUSED_SEARCH_EMAIL_WRITING_PURPOSE,
+    DEFAULT_PAUSED_SEARCH_SMS_WRITING_PURPOSE,
+)
 from app.domain.compliance.contactability import ContactChannel
 from app.interfaces.api.schemas.campaigns import DormantStepTemplateProfileSchema
 
@@ -61,6 +65,16 @@ class PausedSearchTrackConfigRequest(BaseModel):
     max_cycles: int = Field(default=1, ge=1, le=12)
     max_ai_interactions: int = Field(default=5, ge=1, le=5)
     restart_delay_days: int = Field(default=30, ge=1, le=730)
+    email_writing_purpose: str = Field(
+        default=DEFAULT_PAUSED_SEARCH_EMAIL_WRITING_PURPOSE,
+        min_length=20,
+        max_length=1000,
+    )
+    sms_writing_purpose: str = Field(
+        default=DEFAULT_PAUSED_SEARCH_SMS_WRITING_PURPOSE,
+        min_length=20,
+        max_length=1000,
+    )
     steps: list[PausedSearchTrackStepRequest] = Field(min_length=1)
 
 
@@ -197,6 +211,8 @@ class PausedSearchTrackVersionResponse(BaseModel):
     max_cycles: int
     max_ai_interactions: int
     restart_delay_days: int
+    email_writing_purpose: str
+    sms_writing_purpose: str
     compatibility: Literal["guided", "legacy"] = "guided"
 
 

@@ -11,6 +11,7 @@ from app.domain.campaigns.paused_search_timing import (
     PausedSearchOccurrencePlan,
     PausedSearchTimingReasonCode,
     paused_search_duration_end,
+    paused_search_step_occurrence_cap,
     plan_next_paused_search_occurrence,
 )
 from app.domain.campaigns.paused_search_tracks import (
@@ -118,7 +119,7 @@ async def preview_paused_search_track_version(
         occurrences=occurrences,
         maximum_logical_touches=min(
             version.max_total_touches,
-            sum(step.max_occurrences for step in steps),
+            sum(paused_search_step_occurrence_cap(step, version) for step in steps),
         ),
         expires_at=expires_at,
         local_expires_at=expires_at.astimezone(ZoneInfo(timezone)),
@@ -139,7 +140,7 @@ def paused_search_preview_evidence(
         "selection_guidance": version.selection_guidance,
         "maximum_logical_touches": min(
             version.max_total_touches,
-            sum(step.max_occurrences for step in steps),
+            sum(paused_search_step_occurrence_cap(step, version) for step in steps),
         ),
         "max_duration_days": version.max_duration_days,
         "terminal_behavior": version.terminal_behavior.value,
@@ -215,7 +216,8 @@ def _plan_occurrences(
     for step in sorted(steps, key=lambda item: item.step_order):
         targeted_workflow = replace(workflow, paused_search_track_step_id=step.step_id)
         previous_due_at: datetime | None = None
-        for occurrence_number in range(1, step.max_occurrences + 1):
+        occurrence_cap = paused_search_step_occurrence_cap(step, version)
+        for occurrence_number in range(1, occurrence_cap + 1):
             planning_now = _planning_now_for_step(
                 step=step,
                 profile=profile,
@@ -236,6 +238,8 @@ def _plan_occurrences(
                 quiet_hours_start=quiet_hours_start,
                 quiet_hours_end=quiet_hours_end,
             )
+            if plan.reason_code is PausedSearchTimingReasonCode.MAINTENANCE_WINDOW_ENDED:
+                break
             items.append(
                 PausedSearchTrackPreviewOccurrence(
                     plan=plan,
