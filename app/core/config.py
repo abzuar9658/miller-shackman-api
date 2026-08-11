@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     environment: str = Field(default="local")
     debug: bool = False
     log_level: str = "INFO"
+    metrics_enabled: bool = False
     frontend_app_base_url: str = "http://localhost:5173"
 
     api_v1_prefix: str = "/api/v1"
@@ -36,6 +37,13 @@ class Settings(BaseSettings):
     crm_sync_pending_stale_timeout_seconds: int = 600
     crm_sync_running_stale_timeout_seconds: int = 300
     crm_sync_running_heartbeat_interval_seconds: int = 30
+    crm_webhook_retry_poll_seconds: int = 5
+    crm_webhook_retry_batch_size: int = 10
+    outbound_send_dispatch_poll_seconds: float = 1.0
+    outbound_send_dispatch_batch_size: int = 100
+    outbound_send_dispatch_stale_seconds: int = 300
+    outbound_send_dispatch_metrics_host: str = "127.0.0.1"
+    outbound_send_dispatch_metrics_port: int = Field(default=9101, ge=1, le=65535)
     listing_source_crawl_queue_name: str = "miller_schackman.listing_source_crawl"
     listing_source_crawl_worker_prefetch_count: int = 1
     listing_source_crawl_scheduler_poll_seconds: int = 60
