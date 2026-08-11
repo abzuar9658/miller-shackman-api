@@ -5,6 +5,7 @@ from app.domain.workflows.models import (
     WorkflowTransitionError,
     WorkflowTransitionReasonCode,
     WorkflowTransitionResult,
+    is_terminal_workflow_state,
     transition_workflow,
 )
 from app.domain.workflows.override_audit import (
@@ -29,5 +30,6 @@ __all__ = [
     "TemporalSignalName",
     "TemporalSignalOutboxEntry",
     "TemporalSignalOutboxStatus",
+    "is_terminal_workflow_state",
     "transition_workflow",
 ]

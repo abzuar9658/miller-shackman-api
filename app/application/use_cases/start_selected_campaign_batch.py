@@ -22,6 +22,8 @@ class StartSelectedCampaignBatchResult:
     campaign_id: CampaignId
     started_count: int
     already_enrolled_count: int
+    already_active_elsewhere_count: int
+    terminal_requires_manual_enrollment_count: int
     failed_count: int
     lead_results: tuple[LeadStartResult, ...]
 
@@ -41,13 +43,17 @@ async def start_selected_campaign_batch(
     temporal_workflow_starter: TemporalWorkflowStarter,
     now: datetime,
     metadata: Mapping[str, object] | None = None,
+    reentry_reason: str | None = None,
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     commit: Callable[[], Awaitable[None]] | None = None,
+    rollback: Callable[[], Awaitable[None]] | None = None,
 ) -> StartSelectedCampaignBatchResult:
     lead_results: list[LeadStartResult] = []
     started_count = 0
     already_enrolled_count = 0
+    already_active_elsewhere_count = 0
+    terminal_requires_manual_enrollment_count = 0
     failed_count = 0
 
     for lead_id in lead_ids:
@@ -83,11 +89,19 @@ async def start_selected_campaign_batch(
             commit=commit,
             now=now,
             metadata=metadata,
+            reentry_reason=reentry_reason,
             event_bus=event_bus,
+            rollback=rollback,
         )
         lead_results.append(result)
         if result.status == LeadStartStatus.STARTED:
             started_count += 1
+        elif result.status == LeadStartStatus.ALREADY_ENROLLED:
+            already_enrolled_count += 1
+        elif result.status == LeadStartStatus.ALREADY_ACTIVE_ELSEWHERE:
+            already_active_elsewhere_count += 1
+        elif result.status == LeadStartStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT:
+            terminal_requires_manual_enrollment_count += 1
         else:
             failed_count += 1
 
@@ -96,6 +110,8 @@ async def start_selected_campaign_batch(
         campaign_id=campaign_id,
         started_count=started_count,
         already_enrolled_count=already_enrolled_count,
+        already_active_elsewhere_count=already_active_elsewhere_count,
+        terminal_requires_manual_enrollment_count=terminal_requires_manual_enrollment_count,
         failed_count=failed_count,
         lead_results=tuple(lead_results),
     )

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time
 from typing import cast
 from uuid import UUID
@@ -27,6 +27,7 @@ from app.domain.identity import (
     WorkspaceStatus,
 )
 from app.domain.leads import CanonicalLeadRecord, CRMProvider, PausedSearchSource
+from app.domain.workflows import WorkflowState
 from app.domain.workspace_automation import WorkspaceOperationalControl
 from app.interfaces.api.dependencies.lead_manual_enrollment import (
     LeadManualEnrollmentBundle,
@@ -74,6 +75,8 @@ LEAD_ID = UUID("00000000-0000-0000-0000-000000000002")
 USER_ID = UUID("00000000-0000-0000-0000-000000000003")
 CAMPAIGN_ID = UUID("00000000-0000-0000-0000-000000000004")
 VERSION_ID = UUID("00000000-0000-0000-0000-000000000005")
+OTHER_CAMPAIGN_ID = UUID("00000000-0000-0000-0000-000000000006")
+OTHER_VERSION_ID = UUID("00000000-0000-0000-0000-000000000007")
 
 
 @dataclass
@@ -81,6 +84,7 @@ class LeadManualEnrollmentTestClient:
     client: TestClient
     starter: FakeTemporalWorkflowStarter
     session: object
+    bundle: LeadManualEnrollmentBundle
 
 
 def test_brokerage_admin_can_list_and_start_manual_enrollment() -> None:
@@ -155,6 +159,69 @@ def test_selected_paused_search_start_bypasses_classifier() -> None:
     assert client.starter.calls[0]["paused_search_track_version_id"] == UUID(
         "00000000-0000-0000-0000-000000000013"
     )
+
+
+def test_selected_paused_search_terminal_reentry_requires_admin_reason() -> None:
+    client = _client_for_role(
+        WorkspaceMembershipRole.BROKERAGE_ADMIN,
+        operator_paused_search=True,
+        include_other_campaign=True,
+    )
+    first_response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search/start",
+        json={"campaign_id": str(CAMPAIGN_ID)},
+    )
+    assert first_response.status_code == 200
+    _set_latest_workflow_state(client, WorkflowState.COMPLETED)
+
+    missing_reason_response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search/start",
+        json={"campaign_id": str(OTHER_CAMPAIGN_ID)},
+    )
+    accepted_response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search/start",
+        json={
+            "campaign_id": str(OTHER_CAMPAIGN_ID),
+            "reason": "Lead requested renewed outreach.",
+        },
+    )
+
+    assert missing_reason_response.status_code == 422
+    assert accepted_response.status_code == 200
+    assert accepted_response.json()["status"] == "started"
+
+
+def test_assigned_agent_cannot_reenter_terminal_workflow() -> None:
+    client = _client_for_role(
+        WorkspaceMembershipRole.ASSIGNED_AGENT,
+        operator_paused_search=True,
+        include_other_campaign=True,
+    )
+    first_response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search/start",
+        json={"campaign_id": str(CAMPAIGN_ID)},
+    )
+    assert first_response.status_code == 200
+    _set_latest_workflow_state(client, WorkflowState.CLOSED)
+
+    response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search/start",
+        json={
+            "campaign_id": str(OTHER_CAMPAIGN_ID),
+            "reason": "Agent requested renewed outreach.",
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def _set_latest_workflow_state(
+    client: LeadManualEnrollmentTestClient,
+    state: WorkflowState,
+) -> None:
+    repository = cast(FakeLeadWorkflowRepository, client.bundle.lead_workflow_repository)
+    key = (WORKSPACE_ID, LEAD_ID)
+    repository.latest_by_lead[key] = replace(repository.latest_by_lead[key], state=state)
 
 
 def test_selected_paused_search_start_requires_operator_assignment() -> None:
@@ -266,6 +333,7 @@ def _client_for_role(
     classification_outcome: str = "dormant",
     classification_confidence: float = 0.91,
     operator_paused_search: bool = False,
+    include_other_campaign: bool = False,
 ) -> LeadManualEnrollmentTestClient:
     app = create_app()
     lead = CanonicalLeadRecord(
@@ -325,6 +393,18 @@ def _client_for_role(
         created_at=NOW,
         published_at=NOW,
     )
+    if include_other_campaign:
+        campaign_repository.campaigns[OTHER_CAMPAIGN_ID] = replace(
+            campaign_repository.campaigns[CAMPAIGN_ID],
+            campaign_id=OTHER_CAMPAIGN_ID,
+            name="Other campaign",
+            active_version_id=OTHER_VERSION_ID,
+        )
+        campaign_repository.versions[OTHER_VERSION_ID] = replace(
+            campaign_repository.versions[VERSION_ID],
+            campaign_version_id=OTHER_VERSION_ID,
+            campaign_id=OTHER_CAMPAIGN_ID,
+        )
     starter = FakeTemporalWorkflowStarter()
     enrollment_repository = FakeCampaignEnrollmentRepository()
     lead_repository = FakeLeadRepository(lead)
@@ -424,6 +504,7 @@ def _client_for_role(
         client=TestClient(app),
         starter=starter,
         session=session,
+        bundle=bundle,
     )
 
 
@@ -445,6 +526,9 @@ class _FakeSession:
 
     async def commit(self) -> None:
         self.commits += 1
+
+    async def rollback(self) -> None:
+        return None
 
 
 def _track_repository() -> FakePausedSearchTrackAdminRepository:

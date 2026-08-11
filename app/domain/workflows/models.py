@@ -201,6 +201,10 @@ def _validate_transition(from_state: WorkflowState, to_state: WorkflowState) -> 
     )
 
 
+def is_terminal_workflow_state(state: WorkflowState) -> bool:
+    return state in _terminal_states()
+
+
 def _terminal_states() -> frozenset[WorkflowState]:
     return frozenset({WorkflowState.COMPLETED, WorkflowState.SUPPRESSED, WorkflowState.CLOSED})
 

@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Protocol
 
@@ -131,6 +132,7 @@ class CampaignServiceBundle:
     event_bus: EventBus
     routing_review_repository: LeadRoutingReviewRepository | None = None
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None
+    rollback: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass
@@ -183,4 +185,5 @@ async def get_campaign_service_bundle(
         notification_provider=build_notification_provider(settings),
         event_bus=PostgresTransactionalEventBus(PostgresOutboxEventRepository(session)),
         routing_review_repository=PostgresLeadRoutingReviewRepository(session),
+        rollback=session.rollback,
     )

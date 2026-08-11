@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Protocol
 
@@ -109,6 +110,7 @@ class LeadManualEnrollmentBundle:
     user_repository: UserRepository
     event_bus: EventBus
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None
+    rollback: Callable[[], Awaitable[None]] | None = None
 
 
 async def get_lead_manual_enrollment_bundle(
@@ -147,4 +149,5 @@ async def get_lead_manual_enrollment_bundle(
         notification_provider=build_notification_provider(settings),
         user_repository=PostgresUserRepository(session),
         event_bus=PostgresTransactionalEventBus(PostgresOutboxEventRepository(session)),
+        rollback=session.rollback,
     )

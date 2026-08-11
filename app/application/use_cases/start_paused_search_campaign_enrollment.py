@@ -46,6 +46,8 @@ class PausedSearchCampaignEnrollmentStatus(StrEnum):
     ALREADY_ENROLLED = "already_enrolled"
     REVIEW_HOLD = "review_hold"
     FAILED = "failed"
+    REENTRY_REASON_REQUIRED = "reentry_reason_required"
+    TERMINAL_REQUIRES_MANUAL_ENROLLMENT = "terminal_requires_manual_enrollment"
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,8 @@ async def start_paused_search_campaign_enrollment(
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
     commit: Callable[[], Awaitable[None]] | None,
     now: datetime,
+    reentry_reason: str | None = None,
+    rollback: Callable[[], Awaitable[None]] | None = None,
 ) -> PausedSearchCampaignEnrollmentResult:
     if workspace_operational_control_repository is not None:
         operational_control = await resolve_workspace_operational_control(
@@ -137,6 +141,8 @@ async def start_paused_search_campaign_enrollment(
             event_bus=event_bus,
             workspace_operational_control_repository=workspace_operational_control_repository,
             commit=commit,
+            reentry_reason=reentry_reason,
+            rollback=rollback,
         )
     else:
         lead_result = LeadStartResult(
@@ -147,7 +153,16 @@ async def start_paused_search_campaign_enrollment(
 
     if lead_result.status not in {LeadStartStatus.STARTED, LeadStartStatus.ALREADY_ENROLLED}:
         return PausedSearchCampaignEnrollmentResult(
-            status=PausedSearchCampaignEnrollmentStatus.FAILED,
+            status=(
+                PausedSearchCampaignEnrollmentStatus.REENTRY_REASON_REQUIRED
+                if lead_result.status == LeadStartStatus.REENTRY_REASON_REQUIRED
+                else (
+                    PausedSearchCampaignEnrollmentStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+                    if lead_result.status
+                    == LeadStartStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+                    else PausedSearchCampaignEnrollmentStatus.FAILED
+                )
+            ),
             lead_result=lead_result,
             error=lead_result.error or "failed to start enrollment",
         )

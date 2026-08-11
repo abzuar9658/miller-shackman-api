@@ -1,4 +1,6 @@
+from dataclasses import replace
 from datetime import UTC, datetime, time
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -454,6 +456,60 @@ async def test_duplicate_paused_search_tag_event_returns_already_enrolled() -> N
     assert first_result.status == CRMTagCampaignEnrollmentStatus.STARTED
     assert second_result.status == CRMTagCampaignEnrollmentStatus.ALREADY_ENROLLED
     assert len(enrollments.enrollments) == 1
+    assert len(temporal.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_paused_search_tag_cannot_reenter_terminal_workflow() -> None:
+    lead_repo = FakeLeadRepository()
+    workflow_repo = FakeLeadWorkflowRepository()
+    enrollments = FakeCampaignEnrollmentRepository()
+    temporal = FakeTemporalWorkflowStarter()
+    lead = await _lead(tags=("configured_tag",), repository=lead_repo, paused_search_active=True)
+    config_repository = FakeCampaignExecutionRepository(
+        _config(
+            campaign_id=CAMPAIGN_ID,
+            version_id=VERSION_ID,
+            crm_enrollment_tag="configured_tag",
+        )
+    )
+    common: dict[str, Any] = {
+        "workspace_id": WORKSPACE_ID,
+        "lead": lead,
+        "observed_at": NOW,
+        "now": NOW,
+        "campaign_execution_repository": config_repository,
+        "workspace_contact_policy_repository": FakeWorkspaceContactPolicyRepository(
+            _contact_policy()
+        ),
+        "campaign_enrollment_repository": enrollments,
+        "lead_workflow_repository": workflow_repo,
+        "workflow_transition_repository": FakeWorkflowTransitionRepository(),
+        "temporal_workflow_starter": temporal,
+        "lead_repository": lead_repo,
+        "paused_search_history_repository": lead_repo,
+        "paused_search_track_repository": _paused_search_track_repository(),
+        "paused_search_track_assignment_repository": FakePausedSearchTrackAssignmentRepository(),
+        "artifact_repository": FakeLeadClassificationArtifactRepository(),
+        "crm_conversation_event_repository": FakeCrmConversationEventRepository(),
+        "workspace_llm_config_repository": FakeWorkspaceLLMConfigRepository(),
+        "llm_client": FakeClassificationLLMClient(outcome="dormant"),
+    }
+    first_result = await process_crm_tag_campaign_enrollment(**common)
+    assert first_result.status == CRMTagCampaignEnrollmentStatus.STARTED
+    workflow = workflow_repo.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    workflow_repo.latest_by_lead[(WORKSPACE_ID, LEAD_ID)] = replace(
+        workflow,
+        state=WorkflowState.COMPLETED,
+    )
+    enrollments.enrollments.clear()
+
+    second_result = await process_crm_tag_campaign_enrollment(**common)
+
+    assert (
+        second_result.status
+        == CRMTagCampaignEnrollmentStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+    )
     assert len(temporal.calls) == 1
 
 

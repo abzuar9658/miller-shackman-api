@@ -38,6 +38,7 @@ async def start_selected_paused_search_track(
     workspace_id: WorkspaceId,
     lead_id: LeadId,
     campaign_id: CampaignId,
+    reason: str | None,
     lead_repository: LeadRepository,
     campaign_admin_repository: CampaignAdminRepository,
     campaign_enrollment_repository: CampaignEnrollmentRepository,
@@ -49,6 +50,7 @@ async def start_selected_paused_search_track(
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
     event_bus: EventBus | None,
     commit: Callable[[], Awaitable[None]] | None,
+    rollback: Callable[[], Awaitable[None]] | None,
     now: datetime,
 ) -> StartLeadManualEnrollmentResult:
     lead = await lead_repository.get_by_id_for_update(workspace_id, lead_id)
@@ -130,6 +132,8 @@ async def start_selected_paused_search_track(
         workspace_operational_control_repository=workspace_operational_control_repository,
         commit=commit,
         now=now,
+        reentry_reason=reason,
+        rollback=rollback,
     )
     return _result_from_paused_search_enrollment(
         campaign_id=campaign_id,
@@ -159,6 +163,12 @@ def _result_from_paused_search_enrollment(
             LeadManualEnrollmentActionStatus.REVIEW_HOLD
         ),
         PausedSearchCampaignEnrollmentStatus.FAILED: LeadManualEnrollmentActionStatus.FAILED,
+        PausedSearchCampaignEnrollmentStatus.REENTRY_REASON_REQUIRED: (
+            LeadManualEnrollmentActionStatus.REENTRY_REASON_REQUIRED
+        ),
+        PausedSearchCampaignEnrollmentStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT: (
+            LeadManualEnrollmentActionStatus.REJECTED
+        ),
     }
     return StartLeadManualEnrollmentResult(
         status=status_by_enrollment_status[result_status],

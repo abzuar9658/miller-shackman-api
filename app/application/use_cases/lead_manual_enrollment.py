@@ -58,6 +58,7 @@ from app.domain.identity import (
     evaluate_permission,
 )
 from app.domain.leads import CanonicalLeadRecord
+from app.domain.workflows import WorkflowState
 
 
 class LeadManualEnrollmentOptionsStatus(StrEnum):
@@ -75,6 +76,7 @@ class LeadManualEnrollmentActionStatus(StrEnum):
     FAILED = "failed"
     NOT_FOUND = "not_found"
     REJECTED = "rejected"
+    REENTRY_REASON_REQUIRED = "reentry_reason_required"
 
 
 class LeadManualEnrollmentReasonCode(StrEnum):
@@ -87,6 +89,7 @@ class LeadManualEnrollmentReasonCode(StrEnum):
     LEAD_ALREADY_ENROLLED_IN_AVAILABLE_CAMPAIGNS = "lead_already_enrolled_in_available_campaigns"
     CAMPAIGNS_DISALLOW_AGENT_MANUAL_ENROLLMENT = "campaigns_disallow_agent_manual_enrollment"
     NO_STARTABLE_CAMPAIGNS = "no_startable_campaigns"
+    REENTRY_REASON_REQUIRED = "reentry_reason_required"
 
 
 @dataclass(frozen=True)
@@ -226,6 +229,7 @@ async def start_lead_manual_enrollment(
     workspace_id: WorkspaceId,
     lead_id: LeadId,
     campaign_id: CampaignId,
+    reason: str | None = None,
     lead_repository: LeadRepository,
     campaign_admin_repository: CampaignAdminRepository,
     campaign_enrollment_repository: CampaignEnrollmentRepository,
@@ -245,6 +249,7 @@ async def start_lead_manual_enrollment(
     default_openrouter_model: str,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     commit: Callable[[], Awaitable[None]] | None = None,
+    rollback: Callable[[], Awaitable[None]] | None = None,
     handoff_repository: HandoffRepository | None = None,
     handoff_completion_repository: HandoffCompletionRepository | None = None,
     workspace_handoff_config_repository: WorkspaceHandoffConfigRepository | None = None,
@@ -276,6 +281,38 @@ async def start_lead_manual_enrollment(
         return StartLeadManualEnrollmentResult(
             status=LeadManualEnrollmentActionStatus.REJECTED,
             reasons=(LeadManualEnrollmentReasonCode.PERMISSION_DENIED,),
+        )
+
+    latest_workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
+        workspace_id,
+        lead_id,
+    )
+    enrollment_source = manual_enrollment_source(actor)
+    if (
+        latest_workflow is not None
+        and latest_workflow.state
+        in {WorkflowState.COMPLETED, WorkflowState.SUPPRESSED, WorkflowState.CLOSED}
+        and enrollment_source != CampaignEnrollmentSource.MANUAL_ADMIN
+    ):
+        return StartLeadManualEnrollmentResult(
+            status=LeadManualEnrollmentActionStatus.REJECTED,
+            campaign_id=campaign_id,
+            campaign_version_id=version.campaign_version_id,
+            reasons=(LeadManualEnrollmentReasonCode.PERMISSION_DENIED,),
+            error="Terminal workflow re-entry requires an authorized admin.",
+        )
+    if (
+        latest_workflow is not None
+        and latest_workflow.state
+        in {WorkflowState.COMPLETED, WorkflowState.SUPPRESSED, WorkflowState.CLOSED}
+        and not (reason and reason.strip())
+    ):
+        return StartLeadManualEnrollmentResult(
+            status=LeadManualEnrollmentActionStatus.REENTRY_REASON_REQUIRED,
+            campaign_id=campaign_id,
+            campaign_version_id=version.campaign_version_id,
+            reasons=(LeadManualEnrollmentReasonCode.REENTRY_REASON_REQUIRED,),
+            error="A reason is required for manual re-entry after a terminal workflow.",
         )
 
     existing = await campaign_enrollment_repository.get_by_lead_and_campaign(
@@ -336,7 +373,7 @@ async def start_lead_manual_enrollment(
             campaign_version_id=version.campaign_version_id,
             lead_id=lead_id,
             lead=current_lead or lead,
-            source=manual_enrollment_source(actor),
+            source=enrollment_source,
             reason_codes=route_result.reason_codes,
             actor_user_id=actor.user_id,
             campaign_enrollment_repository=campaign_enrollment_repository,
@@ -351,6 +388,8 @@ async def start_lead_manual_enrollment(
             commit=commit,
             now=now,
             event_bus=event_bus,
+            reentry_reason=reason,
+            rollback=rollback,
         )
         if paused_search_result.status == PausedSearchCampaignEnrollmentStatus.REVIEW_HOLD:
             await record_pending_ai_nurture_routing_review(
@@ -367,6 +406,31 @@ async def start_lead_manual_enrollment(
                 campaign_version_id=version.campaign_version_id,
                 route=AiNurtureRoute.REVIEW_HOLD,
                 reasons=paused_search_result.reason_codes,
+            )
+        if (
+            paused_search_result.lead_result is not None
+            and paused_search_result.lead_result.status == LeadStartStatus.REENTRY_REASON_REQUIRED
+        ):
+            return StartLeadManualEnrollmentResult(
+                status=LeadManualEnrollmentActionStatus.REENTRY_REASON_REQUIRED,
+                campaign_id=campaign_id,
+                campaign_version_id=version.campaign_version_id,
+                route=AiNurtureRoute.PAUSED_SEARCH,
+                reasons=paused_search_result.reason_codes,
+                error=paused_search_result.error,
+            )
+        if (
+            paused_search_result.lead_result is not None
+            and paused_search_result.lead_result.status
+            == LeadStartStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+        ):
+            return StartLeadManualEnrollmentResult(
+                status=LeadManualEnrollmentActionStatus.REJECTED,
+                campaign_id=campaign_id,
+                campaign_version_id=version.campaign_version_id,
+                route=AiNurtureRoute.PAUSED_SEARCH,
+                reasons=(LeadManualEnrollmentReasonCode.PERMISSION_DENIED,),
+                error=paused_search_result.error,
             )
         if paused_search_result.status == PausedSearchCampaignEnrollmentStatus.ALREADY_ENROLLED:
             return StartLeadManualEnrollmentResult(
@@ -486,7 +550,7 @@ async def start_lead_manual_enrollment(
         campaign_id=campaign_id,
         campaign_version_id=version.campaign_version_id,
         lead_id=lead_id,
-        source=manual_enrollment_source(actor),
+        source=enrollment_source,
         reason_codes=(),
         actor_user_id=actor.user_id,
         campaign_enrollment_repository=campaign_enrollment_repository,
@@ -497,6 +561,8 @@ async def start_lead_manual_enrollment(
         commit=commit,
         now=now,
         event_bus=event_bus,
+        reentry_reason=reason,
+        rollback=rollback,
     )
     return StartLeadManualEnrollmentResult(
         status=(
@@ -505,7 +571,16 @@ async def start_lead_manual_enrollment(
             else (
                 LeadManualEnrollmentActionStatus.ALREADY_ENROLLED
                 if result.status == LeadStartStatus.ALREADY_ENROLLED
-                else LeadManualEnrollmentActionStatus.FAILED
+                else (
+                    LeadManualEnrollmentActionStatus.REENTRY_REASON_REQUIRED
+                    if result.status == LeadStartStatus.REENTRY_REASON_REQUIRED
+                    else (
+                        LeadManualEnrollmentActionStatus.REJECTED
+                        if result.status
+                        == LeadStartStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+                        else LeadManualEnrollmentActionStatus.FAILED
+                    )
+                )
             )
         ),
         campaign_id=campaign_id,

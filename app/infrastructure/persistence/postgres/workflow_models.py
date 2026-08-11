@@ -96,6 +96,13 @@ class LeadWorkflowModel(Base):
                 "('queued', 'active_nurture', 'waiting_for_response', 'response_processing')"
             ),
         ),
+        Index(
+            "uq_lead_workflows_non_terminal_lead",
+            "workspace_id",
+            "lead_id",
+            unique=True,
+            postgresql_where=text("state NOT IN ('completed', 'suppressed', 'closed')"),
+        ),
     )
 
     workflow_id: Mapped[UUID] = mapped_column(

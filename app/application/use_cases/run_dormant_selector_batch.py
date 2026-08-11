@@ -97,6 +97,8 @@ class DormantSelectorBatchResult:
     selected_count: int
     held_back_count: int
     started_count: int
+    already_active_elsewhere_count: int
+    terminal_requires_manual_enrollment_count: int
     paused_search_started_count: int
     started_lead_ids: tuple[LeadId, ...]
     veto_window_expires_at: datetime | None
@@ -145,6 +147,7 @@ async def run_dormant_selector_batch(
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     commit: Callable[[], Awaitable[None]] | None = None,
+    rollback: Callable[[], Awaitable[None]] | None = None,
     routing_review_repository: LeadRoutingReviewRepository | None = None,
 ) -> DormantSelectorBatchResult:
     batch_id = batch_id or str(uuid4())
@@ -282,6 +285,8 @@ async def run_dormant_selector_batch(
     ]
 
     dormant_started_or_enrolled_lead_ids: tuple[LeadId, ...] = ()
+    already_active_elsewhere_count = 0
+    terminal_requires_manual_enrollment_count = 0
     if dormant_selected_lead_ids:
         start_result = await start_selected_campaign_batch(
             workspace_id=workspace_id,
@@ -296,11 +301,16 @@ async def run_dormant_selector_batch(
             workflow_transition_repository=workflow_transition_repository,
             temporal_workflow_starter=temporal_workflow_starter,
             commit=commit,
+            rollback=rollback,
             now=now,
             event_bus=event_bus,
             workspace_operational_control_repository=workspace_operational_control_repository,
         )
         started_count = start_result.started_count
+        already_active_elsewhere_count = start_result.already_active_elsewhere_count
+        terminal_requires_manual_enrollment_count = (
+            start_result.terminal_requires_manual_enrollment_count
+        )
         dormant_started_or_enrolled_lead_ids = tuple(
             result.lead_id
             for result in start_result.lead_results
@@ -327,6 +337,7 @@ async def run_dormant_selector_batch(
         event_bus=event_bus,
         workspace_operational_control_repository=workspace_operational_control_repository,
         commit=commit,
+        rollback=rollback,
         now=now,
     )
     started_lead_ids = tuple(
@@ -350,6 +361,8 @@ async def run_dormant_selector_batch(
         selected_count=len(selected_lead_ids),
         held_back_count=len(start_decision.held_back),
         started_count=started_count,
+        already_active_elsewhere_count=already_active_elsewhere_count,
+        terminal_requires_manual_enrollment_count=terminal_requires_manual_enrollment_count,
         paused_search_started_count=paused_search_started_count,
         started_lead_ids=started_lead_ids,
         veto_window_expires_at=start_decision.veto_window_expires_at,
@@ -368,6 +381,8 @@ def _result(
     selected_count: int = 0,
     held_back_count: int = 0,
     started_count: int = 0,
+    already_active_elsewhere_count: int = 0,
+    terminal_requires_manual_enrollment_count: int = 0,
     paused_search_started_count: int = 0,
     started_lead_ids: tuple[LeadId, ...] = (),
     veto_window_expires_at: datetime | None = None,
@@ -384,6 +399,8 @@ def _result(
         selected_count=selected_count,
         held_back_count=held_back_count,
         started_count=started_count,
+        already_active_elsewhere_count=already_active_elsewhere_count,
+        terminal_requires_manual_enrollment_count=terminal_requires_manual_enrollment_count,
         paused_search_started_count=paused_search_started_count,
         started_lead_ids=started_lead_ids,
         veto_window_expires_at=veto_window_expires_at,
@@ -521,6 +538,7 @@ async def _start_paused_search_candidates(
     event_bus: EventBus | None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
     commit: Callable[[], Awaitable[None]] | None,
+    rollback: Callable[[], Awaitable[None]] | None,
     now: datetime,
 ) -> tuple[int, tuple[LeadId, ...]]:
     if (
@@ -553,6 +571,7 @@ async def _start_paused_search_candidates(
             event_bus=event_bus,
             workspace_operational_control_repository=workspace_operational_control_repository,
             commit=commit,
+            rollback=rollback,
             now=now,
         )
         if result.status in {

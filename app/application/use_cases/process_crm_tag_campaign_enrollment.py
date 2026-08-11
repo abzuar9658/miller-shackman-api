@@ -76,6 +76,8 @@ class CRMTagCampaignEnrollmentStatus(StrEnum):
     HELD = "held"
     STARTED = "started"
     ALREADY_ENROLLED = "already_enrolled"
+    ALREADY_ACTIVE_ELSEWHERE = "already_active_elsewhere"
+    TERMINAL_REQUIRES_MANUAL_ENROLLMENT = "terminal_requires_manual_enrollment"
     FAILED = "failed"
     PAUSED_SEARCH = "paused_search"
     HUMAN_HANDOFF = "human_handoff"
@@ -125,6 +127,7 @@ async def process_crm_tag_campaign_enrollment(
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     commit: Callable[[], Awaitable[None]] | None = None,
+    rollback: Callable[[], Awaitable[None]] | None = None,
     default_openrouter_model: str = "openai/gpt-4o-mini",
     routing_review_repository: LeadRoutingReviewRepository | None = None,
     handoff_repository: HandoffRepository | None = None,
@@ -254,6 +257,7 @@ async def process_crm_tag_campaign_enrollment(
             event_bus=event_bus,
             workspace_operational_control_repository=workspace_operational_control_repository,
             commit=commit,
+            rollback=rollback,
             now=now,
         )
 
@@ -401,6 +405,7 @@ async def process_crm_tag_campaign_enrollment(
         event_bus=event_bus,
         workspace_operational_control_repository=workspace_operational_control_repository,
         commit=commit,
+        rollback=rollback,
         now=now,
     )
     lead_result = start_result.lead_results[0] if start_result.lead_results else None
@@ -427,6 +432,25 @@ async def process_crm_tag_campaign_enrollment(
             campaign_version_id=matched_config.campaign_version_id,
             matched_tag=matched_config.crm_enrollment_tag,
             campaign_enrollment_id=lead_result.campaign_enrollment_id,
+        )
+    if lead_result is not None and lead_result.status in {
+        LeadStartStatus.ALREADY_ACTIVE_ELSEWHERE,
+        LeadStartStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT,
+    }:
+        return CRMTagCampaignEnrollmentResult(
+            status=(
+                CRMTagCampaignEnrollmentStatus.ALREADY_ACTIVE_ELSEWHERE
+                if lead_result.status == LeadStartStatus.ALREADY_ACTIVE_ELSEWHERE
+                else CRMTagCampaignEnrollmentStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+            ),
+            workspace_id=workspace_id,
+            lead_id=lead.lead_id,
+            campaign_id=matched_config.campaign_id,
+            campaign_version_id=matched_config.campaign_version_id,
+            matched_tag=matched_config.crm_enrollment_tag,
+            workflow_id=lead_result.workflow_id,
+            reason_codes=route_result.reason_codes,
+            error=lead_result.error,
         )
     return CRMTagCampaignEnrollmentResult(
         status=CRMTagCampaignEnrollmentStatus.FAILED,
@@ -455,6 +479,7 @@ async def _start_paused_search_campaign(
     event_bus: EventBus | None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
     commit: Callable[[], Awaitable[None]] | None,
+    rollback: Callable[[], Awaitable[None]] | None,
     now: datetime,
 ) -> CRMTagCampaignEnrollmentResult:
     result = await start_paused_search_campaign_enrollment(
@@ -475,6 +500,7 @@ async def _start_paused_search_campaign(
         event_bus=event_bus,
         workspace_operational_control_repository=workspace_operational_control_repository,
         commit=commit,
+        rollback=rollback,
         now=now,
     )
     lead_result = result.lead_result
@@ -512,7 +538,12 @@ async def _start_paused_search_campaign(
             route=AiNurtureRoute.REVIEW_HOLD,
         )
     return CRMTagCampaignEnrollmentResult(
-        status=CRMTagCampaignEnrollmentStatus.FAILED,
+        status=(
+            CRMTagCampaignEnrollmentStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+            if result.status
+            == PausedSearchCampaignEnrollmentStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+            else CRMTagCampaignEnrollmentStatus.FAILED
+        ),
         workspace_id=workspace_id,
         lead_id=lead_id,
         campaign_id=matched_config.campaign_id,

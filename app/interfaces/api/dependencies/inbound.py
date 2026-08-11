@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Protocol
 
@@ -167,6 +168,7 @@ class InboundServiceBundle:
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None
     paused_search_reminder_repository: PausedSearchAgentReminderRepository | None = None
+    rollback: Callable[[], Awaitable[None]] | None = None
 
 
 async def get_inbound_service_bundle(
@@ -224,4 +226,5 @@ async def get_inbound_service_bundle(
         sms_provider=build_sms_provider(settings),
         email_provider=build_email_provider(settings),
         routing_review_repository=PostgresLeadRoutingReviewRepository(session),
+        rollback=session.rollback,
     )

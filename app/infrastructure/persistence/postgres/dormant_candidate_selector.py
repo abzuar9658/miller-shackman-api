@@ -9,7 +9,10 @@ from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.leads.canonical import ActivityReliability
 from app.infrastructure.persistence.postgres.lead_repository import _model_to_record
 from app.infrastructure.persistence.postgres.models import LeadModel
-from app.infrastructure.persistence.postgres.workflow_models import CampaignEnrollmentModel
+from app.infrastructure.persistence.postgres.workflow_models import (
+    CampaignEnrollmentModel,
+    LeadWorkflowModel,
+)
 
 
 class PostgresDormantCandidateSelector(DormantCandidateSelector):
@@ -67,6 +70,14 @@ def _select_candidates_statement(
         )
         .correlate(LeadModel)
     )
+    has_any_workflow = (
+        select(LeadWorkflowModel)
+        .where(
+            LeadWorkflowModel.workspace_id == workspace_id,
+            LeadWorkflowModel.lead_id == LeadModel.lead_id,
+        )
+        .correlate(LeadModel)
+    )
     return (
         select(LeadModel)
         .where(
@@ -75,6 +86,7 @@ def _select_candidates_statement(
             LeadModel.last_meaningful_communication_at.is_not(None),
             LeadModel.last_meaningful_communication_at <= cutoff,
             ~exists(already_enrolled),
+            ~exists(has_any_workflow),
         )
         .order_by(LeadModel.last_meaningful_communication_at.asc())
         .limit(limit)

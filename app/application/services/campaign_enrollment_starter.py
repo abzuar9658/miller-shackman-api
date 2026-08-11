@@ -1,4 +1,5 @@
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -24,6 +25,10 @@ from app.domain.campaigns.enrollment import (
     CampaignEnrollmentSource,
     CampaignEnrollmentStatus,
     build_enrollment_reason_codes,
+)
+from app.domain.campaigns.enrollment_admission import (
+    EnrollmentAdmissionOutcome,
+    evaluate_lead_enrollment_admission,
 )
 from app.domain.common.ids import (
     CampaignId,
@@ -61,6 +66,7 @@ async def start_single_campaign_enrollment(
     transition_id: UUID | None = None,
     temporal_workflow_id: str | None = None,
     metadata: Mapping[str, object] | None = None,
+    reentry_reason: str | None = None,
     initial_workflow_state: WorkflowState = WorkflowState.QUEUED,
     initial_transition_reason_code: WorkflowTransitionReasonCode = (
         WorkflowTransitionReasonCode.CAMPAIGN_ENROLLMENT_STARTED
@@ -72,6 +78,7 @@ async def start_single_campaign_enrollment(
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     commit: Callable[[], Awaitable[None]] | None = None,
+    rollback: Callable[[], Awaitable[None]] | None = None,
 ) -> LeadStartResult:
     operational_control = await resolve_workspace_operational_control(
         workspace_id=workspace_id,
@@ -82,6 +89,31 @@ async def start_single_campaign_enrollment(
             lead_id=lead_id,
             status=LeadStartStatus.FAILED,
             error=workspace_automation_block_reason(operational_control),
+        )
+
+    latest_workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
+        workspace_id,
+        lead_id,
+    )
+    admission = evaluate_lead_enrollment_admission(
+        campaign_id=campaign_id,
+        source=source,
+        latest_workflow=latest_workflow,
+    )
+    if not admission.admitted:
+        return LeadStartResult(
+            lead_id=lead_id,
+            status=_admission_start_status(admission.outcome),
+            workflow_id=latest_workflow.workflow_id if latest_workflow is not None else None,
+            error=admission.reason,
+        )
+    normalized_reentry_reason = reentry_reason.strip() if reentry_reason else ""
+    if admission.requires_reentry_reason and not normalized_reentry_reason:
+        return LeadStartResult(
+            lead_id=lead_id,
+            status=LeadStartStatus.REENTRY_REASON_REQUIRED,
+            workflow_id=latest_workflow.workflow_id if latest_workflow is not None else None,
+            error="A reason is required for admin re-entry after a terminal workflow.",
         )
 
     campaign_enrollment_id = campaign_enrollment_id or uuid4()
@@ -129,6 +161,10 @@ async def start_single_campaign_enrollment(
         updated_at=now,
     )
 
+    transition_metadata = dict(metadata or {})
+    if normalized_reentry_reason:
+        transition_metadata["manual_reentry_reason"] = normalized_reentry_reason
+
     transition = WorkflowTransition(
         transition_id=transition_id,
         workspace_id=workspace_id,
@@ -141,12 +177,37 @@ async def start_single_campaign_enrollment(
         created_at=now,
         actor_user_id=actor_user_id,
         external_event_id=None,
-        metadata=metadata or {},
+        metadata=transition_metadata,
     )
 
     try:
-        await campaign_enrollment_repository.save(enrollment)
+        enrollment = await campaign_enrollment_repository.save(enrollment)
+        campaign_enrollment_id = enrollment.campaign_enrollment_id
+        if workflow.campaign_enrollment_id != campaign_enrollment_id:
+            workflow = replace(workflow, campaign_enrollment_id=campaign_enrollment_id)
         await lead_workflow_repository.save(workflow)
+    except Exception as error:
+        race_result = await _recover_enrollment_race(
+            error=error,
+            rollback=rollback,
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            campaign_id=campaign_id,
+            source=source,
+            lead_workflow_repository=lead_workflow_repository,
+        )
+        if race_result is not None:
+            return race_result
+        return LeadStartResult(
+            lead_id=lead_id,
+            status=LeadStartStatus.FAILED,
+            campaign_enrollment_id=campaign_enrollment_id,
+            workflow_id=workflow_id,
+            temporal_workflow_id=temporal_workflow_id,
+            error=str(error),
+        )
+
+    try:
         await workflow_transition_repository.append(transition)
         await _publish_enrollment_events(
             event_bus=event_bus,
@@ -158,6 +219,19 @@ async def start_single_campaign_enrollment(
         )
         if commit is not None:
             await commit()
+    except Exception as error:
+        if rollback is not None:
+            await rollback()
+        return LeadStartResult(
+            lead_id=lead_id,
+            status=LeadStartStatus.FAILED,
+            campaign_enrollment_id=campaign_enrollment_id,
+            workflow_id=workflow_id,
+            temporal_workflow_id=temporal_workflow_id,
+            error=str(error),
+        )
+
+    try:
         await temporal_workflow_starter.start_lead_nurture_workflow(
             workspace_id=workspace_id,
             lead_id=lead_id,
@@ -184,6 +258,49 @@ async def start_single_campaign_enrollment(
         workflow_id=workflow_id,
         temporal_workflow_id=temporal_workflow_id,
     )
+
+
+async def _recover_enrollment_race(
+    *,
+    error: Exception,
+    rollback: Callable[[], Awaitable[None]] | None,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    campaign_id: CampaignId,
+    source: CampaignEnrollmentSource,
+    lead_workflow_repository: LeadWorkflowRepository,
+) -> LeadStartResult | None:
+    if rollback is None:
+        return None
+    try:
+        await rollback()
+        latest_workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
+            workspace_id,
+            lead_id,
+        )
+    except Exception:
+        return None
+    admission = evaluate_lead_enrollment_admission(
+        campaign_id=campaign_id,
+        source=source,
+        latest_workflow=latest_workflow,
+    )
+    if latest_workflow is None or admission.admitted:
+        return None
+    return LeadStartResult(
+        lead_id=lead_id,
+        status=_admission_start_status(admission.outcome),
+        workflow_id=latest_workflow.workflow_id,
+        error=admission.reason or str(error),
+    )
+
+
+def _admission_start_status(outcome: EnrollmentAdmissionOutcome) -> LeadStartStatus:
+    if outcome == EnrollmentAdmissionOutcome.ALREADY_ACTIVE_IN_CAMPAIGN:
+        return LeadStartStatus.ALREADY_ENROLLED
+    if outcome == EnrollmentAdmissionOutcome.TERMINAL_REQUIRES_MANUAL_ENROLLMENT:
+        return LeadStartStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+    return LeadStartStatus.ALREADY_ACTIVE_ELSEWHERE
 
 
 def _default_temporal_workflow_id(lead_id: LeadId, campaign_enrollment_id: UUID) -> str:
