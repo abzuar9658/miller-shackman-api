@@ -9,6 +9,7 @@ from app.infrastructure.workflows.temporal.activities import (
     execute_paused_search_occurrence_activity,
     schedule_next_campaign_cadence_step_activity,
     schedule_next_paused_search_occurrence_activity,
+    timeout_uncertain_outbound_send_activity,
     timeout_uncertain_paused_search_occurrence_activity,
 )
 from app.infrastructure.workflows.temporal.lead_nurture import LeadNurtureWorkflow
@@ -80,6 +81,7 @@ def test_build_temporal_worker_registers_smoke_components(monkeypatch: pytest.Mo
             schedule_next_paused_search_occurrence_activity,
             execute_paused_search_occurrence_activity,
             timeout_uncertain_paused_search_occurrence_activity,
+            timeout_uncertain_outbound_send_activity,
         ],
     }
 

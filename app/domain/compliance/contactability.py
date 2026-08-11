@@ -92,6 +92,8 @@ def evaluate_contactability(
     facts: LeadContactabilityFacts,
     policy: WorkspaceContactPolicy,
     channel: ContactChannel,
+    *,
+    require_explicit_automated_permission: bool = False,
 ) -> ContactabilityDecision:
     if facts.do_not_contact is True:
         return ContactabilityDecision(
@@ -103,9 +105,20 @@ def evaluate_contactability(
     reasons: list[ContactabilityReasonCode] = []
 
     if channel == ContactChannel.SMS:
-        reasons.extend(_evaluate_sms_reasons(facts, policy))
+        reasons.extend(
+            _evaluate_sms_reasons(
+                facts,
+                policy,
+                require_explicit_automated_permission=require_explicit_automated_permission,
+            )
+        )
     else:
-        reasons.extend(_evaluate_email_reasons(facts))
+        reasons.extend(
+            _evaluate_email_reasons(
+                facts,
+                require_explicit_automated_permission=require_explicit_automated_permission,
+            )
+        )
 
     if facts.do_not_contact is None:
         reasons.append(ContactabilityReasonCode.INSUFFICIENT_DATA)
@@ -120,13 +133,24 @@ def evaluate_contactability(
 def _evaluate_sms_reasons(
     facts: LeadContactabilityFacts,
     policy: WorkspaceContactPolicy,
+    *,
+    require_explicit_automated_permission: bool,
 ) -> list[ContactabilityReasonCode]:
     reasons: list[ContactabilityReasonCode] = []
 
     if SuppressionType.SMS_OPT_OUT in facts.suppressions:
         reasons.append(ContactabilityReasonCode.SMS_OPTED_OUT)
 
-    if not facts.has_sms_destination:
+    if require_explicit_automated_permission:
+        if policy.sms_compliance_state != SmsComplianceState.APPROVED:
+            reasons.append(ContactabilityReasonCode.SMS_COMPLIANCE_NOT_APPROVED)
+        if facts.sms_consent_status == ContactPermissionStatus.DENIED:
+            reasons.append(ContactabilityReasonCode.SMS_PERMISSION_DENIED)
+
+    if (
+        not facts.has_sms_destination
+        and ContactabilityReasonCode.MISSING_SMS_CONSENT not in reasons
+    ):
         reasons.append(ContactabilityReasonCode.MISSING_SMS_CONSENT)
 
     return reasons
@@ -134,13 +158,24 @@ def _evaluate_sms_reasons(
 
 def _evaluate_email_reasons(
     facts: LeadContactabilityFacts,
+    *,
+    require_explicit_automated_permission: bool,
 ) -> list[ContactabilityReasonCode]:
     reasons: list[ContactabilityReasonCode] = []
 
     if SuppressionType.EMAIL_UNSUBSCRIBED in facts.suppressions:
         reasons.append(ContactabilityReasonCode.EMAIL_UNSUBSCRIBED)
 
-    if not facts.has_email_destination:
+    if require_explicit_automated_permission:
+        if facts.email_permission_status in {None, ContactPermissionStatus.UNKNOWN}:
+            reasons.append(ContactabilityReasonCode.MISSING_EMAIL_PERMISSION)
+        elif facts.email_permission_status == ContactPermissionStatus.DENIED:
+            reasons.append(ContactabilityReasonCode.EMAIL_PERMISSION_DENIED)
+
+    if (
+        not facts.has_email_destination
+        and ContactabilityReasonCode.MISSING_EMAIL_PERMISSION not in reasons
+    ):
         reasons.append(ContactabilityReasonCode.MISSING_EMAIL_PERMISSION)
 
     return reasons

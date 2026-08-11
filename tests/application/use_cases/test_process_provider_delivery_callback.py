@@ -19,6 +19,10 @@ from app.domain.campaigns.outbound_message import (
     ProviderDeliveryStatus,
     ProviderMessageEvent,
 )
+from app.domain.campaigns.outbound_send_reconciliation import (
+    OutboundSendReconciliation,
+    OutboundSendReconciliationStatus,
+)
 from app.domain.campaigns.paused_search_occurrences import (
     RecurringOccurrence,
     RecurringOccurrenceStatus,
@@ -45,6 +49,13 @@ class FakeOutboundMessageRepository:
 
     async def get_by_id(
         self, workspace_id: WorkspaceId, message_id: UUID
+    ) -> OutboundMessage | None:
+        return self.message
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        message_id: UUID,
     ) -> OutboundMessage | None:
         return self.message
 
@@ -98,6 +109,60 @@ class FakeProviderMessageEventRepository:
         self.events[(event.provider, event.external_provider_event_id)] = event
         self.saved.append(event)
         return event
+
+
+class FakeOutboundSendReconciliationRepository:
+    def __init__(self, reconciliation: OutboundSendReconciliation) -> None:
+        self.reconciliation = reconciliation
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        reconciliation_id: UUID,
+    ) -> OutboundSendReconciliation | None:
+        return self.reconciliation
+
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        reconciliation_id: UUID,
+    ) -> OutboundSendReconciliation | None:
+        return self.reconciliation
+
+    async def get_by_outbound_message_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        outbound_message_id: UUID,
+    ) -> OutboundSendReconciliation | None:
+        return self.reconciliation
+
+    async def get_by_idempotency_key_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
+    ) -> OutboundSendReconciliation | None:
+        return self.reconciliation
+
+    async def create_or_get(
+        self,
+        reconciliation: OutboundSendReconciliation,
+    ) -> OutboundSendReconciliation:
+        self.reconciliation = reconciliation
+        return reconciliation
+
+    async def resolve(self, **kwargs: object) -> OutboundSendReconciliation | None:
+        self.reconciliation = replace(
+            self.reconciliation,
+            status=cast(OutboundSendReconciliationStatus, kwargs["status"]),
+            provider_message_id=cast(str | None, kwargs.get("provider_message_id")),
+            provider_delivery_status=cast(
+                ProviderDeliveryStatus | None,
+                kwargs.get("provider_delivery_status"),
+            ),
+            resolved_at=cast(datetime, kwargs["now"]),
+            updated_at=cast(datetime, kwargs["now"]),
+        )
+        return self.reconciliation
 
 
 class FakeEventBus:
@@ -290,6 +355,7 @@ def _callback(
     status: ProviderDeliveryStatus = ProviderDeliveryStatus.ACCEPTED,
     occurred_at: datetime = NOW,
     failure_reason: str | None = None,
+    idempotency_key: str | None = None,
 ) -> ProviderDeliveryCallback:
     return ProviderDeliveryCallback(
         provider="sendgrid",
@@ -300,6 +366,7 @@ def _callback(
         occurred_at=occurred_at,
         failure_reason=failure_reason,
         payload_redacted={"event": event_type},
+        idempotency_key=idempotency_key,
     )
 
 
@@ -371,6 +438,53 @@ async def test_records_delivery_event_and_updates_delivery_summary() -> None:
     assert len(events.saved) == 1
     assert len(event_bus.events) == 1
     assert event_bus.events[0].event_type == DomainEventType.MESSAGE_DELIVERED
+
+
+async def test_provider_callback_confirms_uncertain_outbound_send_and_wakes_workflow() -> None:
+    message = replace(
+        _message(provider_delivery_status=ProviderDeliveryStatus.UNKNOWN),
+        status=OutboundMessageStatus.UNCERTAIN,
+        provider_send_status=ProviderSendStatus.UNCERTAIN,
+    )
+    reconciliation = OutboundSendReconciliation(
+        reconciliation_id=UUID("55555555-5555-5555-5555-555555555555"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        workflow_id=UUID("77777777-7777-7777-7777-777777777777"),
+        temporal_workflow_id="lead-nurture/77777777",
+        outbound_message_id=MESSAGE_ID,
+        idempotency_key=message.idempotency_key,
+        status=OutboundSendReconciliationStatus.PENDING,
+        provider_name="sendgrid",
+        provider_message_id=None,
+        provider_delivery_status=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    messages = FakeOutboundMessageRepository(message)
+    reconciliations = FakeOutboundSendReconciliationRepository(reconciliation)
+    signals = FakeTemporalSignalOutboxRepository()
+
+    result = await process_provider_delivery_callback(
+        callback=_callback(
+            provider_message_id="callback-msg",
+            status=ProviderDeliveryStatus.DELIVERED,
+            idempotency_key=message.idempotency_key,
+        ),
+        message_repository=messages,
+        provider_message_event_repository=FakeProviderMessageEventRepository(),
+        reconciliation_repository=reconciliations,
+        temporal_signal_outbox_repository=cast(TemporalSignalOutboxRepository, signals),
+        workspace_id=WORKSPACE_ID,
+        now=NOW,
+    )
+
+    assert result.status == ProcessProviderDeliveryCallbackStatus.PROCESSED
+    assert messages.message is not None
+    assert messages.message.status is OutboundMessageStatus.SENT
+    assert reconciliations.reconciliation.status is OutboundSendReconciliationStatus.CONFIRMED
+    assert len(signals.entries) == 1
+    assert signals.entries[0].payload["reason"] == "provider_delivery_reconciled"
 
 
 async def test_provider_callback_updates_linked_occurrence_without_new_touch() -> None:

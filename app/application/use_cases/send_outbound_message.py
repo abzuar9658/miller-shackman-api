@@ -1,14 +1,11 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from secrets import token_hex
-from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from app.application.ports.crm import CRMActivity
-from app.application.ports.crm_sync import CanonicalLeadRefreshSource
 from app.application.ports.event_bus import EventBus
 from app.application.ports.messaging import (
     EmailMessage,
@@ -19,17 +16,12 @@ from app.application.ports.messaging import (
     SMSProvider,
 )
 from app.application.ports.repositories import (
-    CRMAgentRepository,
     InboundMessageRepository,
     LeadRepository,
-    LeadWorkflowRepository,
     OutboundMessageRepository,
-    TemporalSignalOutboxRepository,
-    UserRepository,
-    WorkflowTransitionRepository,
-    WorkspaceAgentCRMMappingRepository,
-    WorkspaceAgentMappingConfigRepository,
-    WorkspaceMembershipRepository,
+    OutboundProviderFailureRepository,
+    OutboundSendReconciliationRepository,
+    OutboundSendRequestRepository,
     WorkspaceOperationalControlRepository,
 )
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
@@ -37,17 +29,15 @@ from app.application.services.email_threading import (
     EmailThreadingHeaders,
     resolve_lead_email_threading_headers,
 )
-from app.application.services.lead_assignment_resolution import (
-    apply_lead_assignment_resolution,
-    load_workspace_lead_assignment_context,
+from app.application.services.pre_send_crm_refresh import (
+    PreSendCRMRefreshContext,
+    PreSendCRMRefreshStatus,
+    refresh_lead_for_pre_send,
 )
+from app.application.services.pre_send_facts import load_pre_send_history_facts
 from app.application.services.workspace_automation_control import (
     resolve_workspace_operational_control,
     workspace_automation_is_active,
-)
-from app.application.use_cases.reconcile_lead_assignment import (
-    LeadAssignmentMessageRepository,
-    reconcile_lead_assignment_change,
 )
 from app.domain.campaigns.outbound_message import (
     OutboundMessage,
@@ -56,6 +46,15 @@ from app.domain.campaigns.outbound_message import (
     build_outbound_email_message_id,
     build_outbound_reply_to_address,
 )
+from app.domain.campaigns.outbound_provider_failure import (
+    OutboundProviderFailure,
+    OutboundProviderFailureStatus,
+)
+from app.domain.campaigns.outbound_send_reconciliation import (
+    OutboundSendReconciliation,
+    OutboundSendReconciliationStatus,
+)
+from app.domain.campaigns.outbound_send_request import OutboundSendRequest
 from app.domain.campaigns.pre_send import (
     PreSendDecision,
     PreSendFacts,
@@ -73,15 +72,20 @@ from app.domain.compliance.contactability import (
     evaluate_contactability,
 )
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
-from app.domain.leads import CanonicalLeadRecord
 
 
 class SendOutboundMessageStatus(StrEnum):
     SENT = "sent"
     ALREADY_SENT = "already_sent"
+    DISPATCH_PENDING = "dispatch_pending"
     REJECTED = "rejected"
     FAILED = "failed"
     UNCERTAIN = "uncertain"
+
+
+MAX_PROVIDER_ATTEMPTS = 3
+PROVIDER_RETRY_BASE_DELAY = timedelta(milliseconds=100)
+PROVIDER_RETRY_MAX_DELAY = timedelta(seconds=1)
 
 
 class SendOutboundMessageReasonCode(StrEnum):
@@ -115,31 +119,6 @@ class OutboundSendContext:
     other_channel_sent_at: datetime | None = None
 
 
-class CRMActivitySource(Protocol):
-    async def get_recent_activity(
-        self,
-        workspace_id: WorkspaceId,
-        crm_lead_id: str,
-        limit: int = 50,
-    ) -> list[CRMActivity]:
-        raise NotImplementedError
-
-
-@dataclass(frozen=True)
-class PreSendCRMRefreshContext:
-    lead_refresh_source: CanonicalLeadRefreshSource
-    crm_activity_source: CRMActivitySource
-    crm_agent_repository: CRMAgentRepository
-    workspace_agent_crm_mapping_repository: WorkspaceAgentCRMMappingRepository
-    workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository
-    workspace_membership_repository: WorkspaceMembershipRepository
-    user_repository: UserRepository
-    lead_workflow_repository: LeadWorkflowRepository | None = None
-    workflow_transition_repository: WorkflowTransitionRepository | None = None
-    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None
-    activity_limit: int = 20
-
-
 @dataclass(frozen=True)
 class SendOutboundMessageResult:
     status: SendOutboundMessageStatus
@@ -147,20 +126,9 @@ class SendOutboundMessageResult:
     pre_send_decision: PreSendDecision | None = None
     reasons: tuple[SendOutboundMessageReasonCode, ...] = ()
     failure_kind: ProviderFailureKind | None = None
-
-
-class _PreSendCRMRefreshStatus(StrEnum):
-    REFRESHED = "refreshed"
-    FAILED = "failed"
-    LEAD_NOT_FOUND = "lead_not_found"
-
-
-@dataclass(frozen=True)
-class _PreSendCRMRefreshResult:
-    status: _PreSendCRMRefreshStatus
-    lead: CanonicalLeadRecord | None = None
-    recent_human_activity: bool = False
-    failure_reason: str | None = None
+    reconciliation_id: UUID | None = None
+    provider_failure_id: UUID | None = None
+    request_id: UUID | None = None
 
 
 async def send_outbound_message(
@@ -179,6 +147,11 @@ async def send_outbound_message(
     email_in_reply_to_message_id: str | None = None,
     email_reference_message_ids: tuple[str, ...] = (),
     inbound_message_repository: InboundMessageRepository | None = None,
+    outbound_send_reconciliation_repository: OutboundSendReconciliationRepository | None = None,
+    outbound_send_request_repository: OutboundSendRequestRepository | None = None,
+    outbound_provider_failure_repository: OutboundProviderFailureRepository | None = None,
+    workflow_id: UUID | None = None,
+    temporal_workflow_id: str | None = None,
     email_thread_anchor_inbound_message_id: UUID | None = None,
     before_provider_dispatch: Callable[[], Awaitable[None]] | None = None,
 ) -> SendOutboundMessageResult:
@@ -208,6 +181,11 @@ async def send_outbound_message(
         return SendOutboundMessageResult(
             status=SendOutboundMessageStatus.UNCERTAIN,
             message=message,
+            reconciliation_id=await _existing_reconciliation_id(
+                workspace_id=workspace_id,
+                message=message,
+                reconciliation_repository=outbound_send_reconciliation_repository,
+            ),
         )
 
     operational_control = await resolve_workspace_operational_control(
@@ -258,11 +236,16 @@ async def send_outbound_message(
         return SendOutboundMessageResult(
             status=SendOutboundMessageStatus.UNCERTAIN,
             message=message,
+            reconciliation_id=await _existing_reconciliation_id(
+                workspace_id=workspace_id,
+                message=message,
+                reconciliation_repository=outbound_send_reconciliation_repository,
+            ),
         )
 
     effective_context = context
     if crm_refresh_context is not None:
-        refresh_result = await _refresh_lead_for_pre_send(
+        refresh_result = await refresh_lead_for_pre_send(
             lead=lead,
             message=message,
             lead_repository=lead_repository,
@@ -271,13 +254,13 @@ async def send_outbound_message(
             event_bus=event_bus,
             now=now,
         )
-        if refresh_result.status == _PreSendCRMRefreshStatus.FAILED:
+        if refresh_result.status == PreSendCRMRefreshStatus.FAILED:
             return SendOutboundMessageResult(
                 status=SendOutboundMessageStatus.FAILED,
                 message=message,
                 reasons=(SendOutboundMessageReasonCode.CRM_REFRESH_FAILED,),
             )
-        if refresh_result.status == _PreSendCRMRefreshStatus.LEAD_NOT_FOUND:
+        if refresh_result.status == PreSendCRMRefreshStatus.LEAD_NOT_FOUND:
             return SendOutboundMessageResult(
                 status=SendOutboundMessageStatus.REJECTED,
                 message=message,
@@ -305,6 +288,14 @@ async def send_outbound_message(
         effective_context.workspace_contact_policy,
         message.channel,
     )
+    history_facts = await load_pre_send_history_facts(
+        workspace_id=workspace_id,
+        lead_id=message.lead_id,
+        campaign_id=message.campaign_id,
+        message=message,
+        message_repository=message_repository,
+        inbound_message_repository=inbound_message_repository,
+    )
     pre_send_decision = evaluate_pre_send_safety(
         PreSendFacts(
             channel=message.channel,
@@ -318,14 +309,44 @@ async def send_outbound_message(
             channel_enabled=message.channel in effective_context.enabled_channels,
             contactability_decision=contactability_decision,
             preflight_vetoed=effective_context.preflight_vetoed,
-            handoff_active=effective_context.handoff_active,
-            human_owned=effective_context.human_owned,
-            lead_replied_since_scheduled=effective_context.lead_replied_since_scheduled,
+            handoff_active=(
+                effective_context.handoff_active
+                or (
+                    effective_context.workflow_state == WorkflowState.HUMAN_HANDOFF
+                    and WorkflowState.HUMAN_HANDOFF
+                    not in effective_context.pre_send_policy.sendable_workflow_states
+                )
+            ),
+            human_owned=(
+                effective_context.human_owned
+                or effective_context.workflow_state == WorkflowState.HUMAN_OWNED
+            ),
+            lead_replied_since_scheduled=(
+                effective_context.lead_replied_since_scheduled
+                or (history_facts.lead_replied_since_scheduled if history_facts else False)
+            ),
             recent_human_activity=effective_context.recent_human_activity,
-            last_global_outreach_at=effective_context.last_global_outreach_at,
-            last_campaign_outreach_at=effective_context.last_campaign_outreach_at,
-            last_channel_outreach_at=effective_context.last_channel_outreach_at,
-            other_channel_sent_at=effective_context.other_channel_sent_at,
+            last_global_outreach_at=(
+                history_facts.last_global_outreach_at
+                if history_facts is not None
+                else effective_context.last_global_outreach_at
+            ),
+            last_campaign_outreach_at=(
+                history_facts.last_campaign_outreach_at
+                if history_facts is not None
+                else effective_context.last_campaign_outreach_at
+            ),
+            last_channel_outreach_at=(
+                history_facts.last_channel_outreach_at
+                if history_facts is not None
+                else effective_context.last_channel_outreach_at
+            ),
+            other_channel_sent_at=(
+                history_facts.other_channel_sent_at
+                if history_facts is not None
+                else effective_context.other_channel_sent_at
+            ),
+            history_facts_available=history_facts is not None,
         ),
         effective_context.pre_send_policy,
         now,
@@ -338,9 +359,6 @@ async def send_outbound_message(
             reasons=(SendOutboundMessageReasonCode.PRE_SEND_BLOCKED,),
         )
 
-    if before_provider_dispatch is not None:
-        await before_provider_dispatch()
-
     if message.channel == ContactChannel.SMS:
         provider_name = _provider_name(sms_provider, default="sms")
         destination = lead.primary_phone if lead.has_sms_capable_phone else None
@@ -351,15 +369,54 @@ async def send_outbound_message(
                 pre_send_decision=pre_send_decision,
                 reasons=(SendOutboundMessageReasonCode.CHANNEL_DESTINATION_MISSING,),
             )
+        sms_payload = SMSMessage(
+            to_phone=destination,
+            body=message.body,
+            idempotency_key=message.idempotency_key,
+        )
+        durable_result = await _enqueue_durable_send_if_configured(
+            message=message,
+            provider_name=provider_name,
+            provider_payload=sms_payload.model_dump(mode="json"),
+            pre_send_decision=pre_send_decision,
+            outbound_send_reconciliation_repository=outbound_send_reconciliation_repository,
+            outbound_send_request_repository=outbound_send_request_repository,
+            workflow_id=workflow_id,
+            temporal_workflow_id=temporal_workflow_id,
+            before_provider_dispatch=before_provider_dispatch,
+            now=now,
+        )
+        if durable_result is not None:
+            return durable_result
+        if before_provider_dispatch is not None:
+            await before_provider_dispatch()
         try:
-            provider_message_id = await _send_sms(
+            dispatch = await _send_sms(
                 provider=sms_provider,
                 message=message,
                 to_phone=destination,
+                message_repository=message_repository,
+                now=now,
             )
+            message = dispatch.message
+            provider_message_id = dispatch.provider_message_id
         except _ProviderSendFailed as exc:
+            if exc.reconcile_as_uncertain:
+                return await _uncertain_send_result(
+                    message=exc.message,
+                    message_repository=message_repository,
+                    pre_send_decision=pre_send_decision,
+                    provider_name=provider_name,
+                    failure_reason=str(exc),
+                    outbound_send_reconciliation_repository=(
+                        outbound_send_reconciliation_repository
+                    ),
+                    workflow_id=workflow_id,
+                    temporal_workflow_id=temporal_workflow_id,
+                    now=now,
+                )
             return await _failed_send_result(
-                message=message,
+                message=exc.message,
                 message_repository=message_repository,
                 pre_send_decision=pre_send_decision,
                 failure_reason=str(exc),
@@ -367,6 +424,8 @@ async def send_outbound_message(
                 provider_name=provider_name,
                 event_bus=event_bus,
                 now=now,
+                outbound_provider_failure_repository=outbound_provider_failure_repository,
+                workflow_id=workflow_id,
             )
     else:
         provider_name = _provider_name(email_provider, default="email")
@@ -403,8 +462,38 @@ async def send_outbound_message(
             explicit_in_reply_to_message_id=email_in_reply_to_message_id,
             explicit_reference_message_ids=email_reference_message_ids,
         )
+        email_payload = EmailMessage(
+            to_email=destination,
+            subject=message.subject,
+            body=message.body,
+            html_body=message.html_body,
+            idempotency_key=message.idempotency_key,
+            message_id=build_outbound_email_message_id(message.message_id),
+            reply_to=build_outbound_reply_to_address(
+                effective_context.workspace_contact_policy.inbound_email_address or "",
+                message.reply_routing_token or "",
+            ),
+            in_reply_to_message_id=email_threading_headers.in_reply_to_message_id,
+            reference_message_ids=email_threading_headers.reference_message_ids,
+        )
+        durable_result = await _enqueue_durable_send_if_configured(
+            message=message,
+            provider_name=provider_name,
+            provider_payload=email_payload.model_dump(mode="json"),
+            pre_send_decision=pre_send_decision,
+            outbound_send_reconciliation_repository=outbound_send_reconciliation_repository,
+            outbound_send_request_repository=outbound_send_request_repository,
+            workflow_id=workflow_id,
+            temporal_workflow_id=temporal_workflow_id,
+            before_provider_dispatch=before_provider_dispatch,
+            now=now,
+        )
+        if durable_result is not None:
+            return durable_result
+        if before_provider_dispatch is not None:
+            await before_provider_dispatch()
         try:
-            provider_message_id = await _send_email(
+            dispatch = await _send_email(
                 provider=email_provider,
                 message=message,
                 to_email=destination,
@@ -414,10 +503,28 @@ async def send_outbound_message(
                 ),
                 in_reply_to_message_id=email_threading_headers.in_reply_to_message_id,
                 reference_message_ids=email_threading_headers.reference_message_ids,
+                message_repository=message_repository,
+                now=now,
             )
+            message = dispatch.message
+            provider_message_id = dispatch.provider_message_id
         except _ProviderSendFailed as exc:
+            if exc.reconcile_as_uncertain:
+                return await _uncertain_send_result(
+                    message=exc.message,
+                    message_repository=message_repository,
+                    pre_send_decision=pre_send_decision,
+                    provider_name=provider_name,
+                    failure_reason=str(exc),
+                    outbound_send_reconciliation_repository=(
+                        outbound_send_reconciliation_repository
+                    ),
+                    workflow_id=workflow_id,
+                    temporal_workflow_id=temporal_workflow_id,
+                    now=now,
+                )
             return await _failed_send_result(
-                message=message,
+                message=exc.message,
                 message_repository=message_repository,
                 pre_send_decision=pre_send_decision,
                 failure_reason=str(exc),
@@ -425,6 +532,8 @@ async def send_outbound_message(
                 provider_name=provider_name,
                 event_bus=event_bus,
                 now=now,
+                outbound_provider_failure_repository=outbound_provider_failure_repository,
+                workflow_id=workflow_id,
             )
 
     if provider_message_id:
@@ -436,6 +545,8 @@ async def send_outbound_message(
             provider_message_id=provider_message_id,
             provider_delivery_status=ProviderDeliveryStatus.ACCEPTED,
             failure_reason=None,
+            provider_next_retry_at=None,
+            provider_last_failure_kind=None,
             sent_at=now,
             updated_at=now,
         )
@@ -452,6 +563,112 @@ async def send_outbound_message(
             pre_send_decision=pre_send_decision,
         )
 
+    return await _uncertain_send_result(
+        message=message,
+        message_repository=message_repository,
+        pre_send_decision=pre_send_decision,
+        provider_name=provider_name,
+        failure_reason="provider_message_id_missing",
+        outbound_send_reconciliation_repository=outbound_send_reconciliation_repository,
+        workflow_id=workflow_id,
+        temporal_workflow_id=temporal_workflow_id,
+        now=now,
+    )
+
+
+async def _enqueue_durable_send_if_configured(
+    *,
+    message: OutboundMessage,
+    provider_name: str,
+    provider_payload: dict[str, object],
+    pre_send_decision: PreSendDecision,
+    outbound_send_reconciliation_repository: OutboundSendReconciliationRepository | None,
+    outbound_send_request_repository: OutboundSendRequestRepository | None,
+    workflow_id: UUID | None,
+    temporal_workflow_id: str | None,
+    before_provider_dispatch: Callable[[], Awaitable[None]] | None,
+    now: datetime,
+) -> SendOutboundMessageResult | None:
+    if (
+        outbound_send_reconciliation_repository is None
+        or outbound_send_request_repository is None
+        or workflow_id is None
+        or temporal_workflow_id is None
+    ):
+        return None
+    reconciliation = await outbound_send_reconciliation_repository.create_or_get(
+        OutboundSendReconciliation(
+            reconciliation_id=uuid4(),
+            workspace_id=message.workspace_id,
+            lead_id=message.lead_id,
+            workflow_id=workflow_id,
+            temporal_workflow_id=temporal_workflow_id,
+            outbound_message_id=message.message_id,
+            idempotency_key=message.idempotency_key,
+            status=OutboundSendReconciliationStatus.PENDING,
+            provider_name=provider_name,
+            provider_message_id=None,
+            provider_delivery_status=None,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    request = await outbound_send_request_repository.create_or_get(
+        OutboundSendRequest(
+            request_id=uuid4(),
+            workspace_id=message.workspace_id,
+            lead_id=message.lead_id,
+            workflow_id=workflow_id,
+            temporal_workflow_id=temporal_workflow_id,
+            outbound_message_id=message.message_id,
+            reconciliation_id=reconciliation.reconciliation_id,
+            idempotency_key=message.idempotency_key,
+            channel=message.channel,
+            provider_name=provider_name,
+            provider_payload=provider_payload,
+            available_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    if before_provider_dispatch is not None:
+        await before_provider_dispatch()
+    return SendOutboundMessageResult(
+        status=SendOutboundMessageStatus.DISPATCH_PENDING,
+        message=message,
+        pre_send_decision=pre_send_decision,
+        reconciliation_id=reconciliation.reconciliation_id,
+        request_id=request.request_id,
+    )
+
+
+async def _existing_reconciliation_id(
+    *,
+    workspace_id: WorkspaceId,
+    message: OutboundMessage,
+    reconciliation_repository: OutboundSendReconciliationRepository | None,
+) -> UUID | None:
+    if reconciliation_repository is None:
+        return None
+    reconciliation = await reconciliation_repository.get_by_outbound_message_id_for_update(
+        workspace_id,
+        message.message_id,
+    )
+    return reconciliation.reconciliation_id if reconciliation is not None else None
+
+
+async def _uncertain_send_result(
+    *,
+    message: OutboundMessage,
+    message_repository: OutboundMessageRepository,
+    pre_send_decision: PreSendDecision,
+    provider_name: str,
+    failure_reason: str,
+    outbound_send_reconciliation_repository: OutboundSendReconciliationRepository | None,
+    workflow_id: UUID | None,
+    temporal_workflow_id: str | None,
+    now: datetime,
+) -> SendOutboundMessageResult:
     uncertain_message = replace(
         message,
         status=OutboundMessageStatus.UNCERTAIN,
@@ -459,105 +676,47 @@ async def send_outbound_message(
         provider_delivery_status=ProviderDeliveryStatus.UNKNOWN,
         provider_name=provider_name,
         provider_message_id=None,
-        failure_reason="provider_message_id_missing",
+        failure_reason=failure_reason,
         updated_at=now,
     )
     saved = await message_repository.save(uncertain_message)
+    reconciliation_id: UUID | None = None
+    if (
+        outbound_send_reconciliation_repository is not None
+        and workflow_id is not None
+        and temporal_workflow_id is not None
+    ):
+        reconciliation = await outbound_send_reconciliation_repository.create_or_get(
+            OutboundSendReconciliation(
+                reconciliation_id=uuid4(),
+                workspace_id=saved.workspace_id,
+                lead_id=saved.lead_id,
+                workflow_id=workflow_id,
+                temporal_workflow_id=temporal_workflow_id,
+                outbound_message_id=saved.message_id,
+                idempotency_key=saved.idempotency_key,
+                status=OutboundSendReconciliationStatus.PENDING,
+                provider_name=provider_name,
+                provider_message_id=saved.provider_message_id,
+                provider_delivery_status=saved.provider_delivery_status,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        reconciliation_id = reconciliation.reconciliation_id
     return SendOutboundMessageResult(
         status=SendOutboundMessageStatus.UNCERTAIN,
         message=saved,
         failure_kind=ProviderFailureKind.UNCERTAIN,
         pre_send_decision=pre_send_decision,
+        reconciliation_id=reconciliation_id,
     )
 
 
-async def _refresh_lead_for_pre_send(
-    *,
-    lead: CanonicalLeadRecord,
-    message: OutboundMessage,
-    lead_repository: LeadRepository,
-    message_repository: LeadAssignmentMessageRepository,
-    crm_refresh_context: PreSendCRMRefreshContext,
-    event_bus: EventBus | None,
-    now: datetime,
-) -> _PreSendCRMRefreshResult:
-    try:
-        refreshed_lead = await crm_refresh_context.lead_refresh_source.get_lead_snapshot(
-            workspace_id=lead.workspace_id,
-            crm_lead_id=lead.crm_lead_id,
-            mapped_custom_field_keys=tuple(lead.mapped_custom_fields.keys()),
-        )
-        activities = await crm_refresh_context.crm_activity_source.get_recent_activity(
-            lead.workspace_id,
-            lead.crm_lead_id,
-            limit=crm_refresh_context.activity_limit,
-        )
-    except Exception as exc:
-        return _PreSendCRMRefreshResult(
-            status=_PreSendCRMRefreshStatus.FAILED,
-            failure_reason=str(exc) or exc.__class__.__name__,
-        )
-
-    if refreshed_lead is None:
-        return _PreSendCRMRefreshResult(status=_PreSendCRMRefreshStatus.LEAD_NOT_FOUND)
-
-    assignment_context = await load_workspace_lead_assignment_context(
-        workspace_id=lead.workspace_id,
-        crm_agent_repository=crm_refresh_context.crm_agent_repository,
-        workspace_agent_crm_mapping_repository=(
-            crm_refresh_context.workspace_agent_crm_mapping_repository
-        ),
-        workspace_agent_mapping_config_repository=(
-            crm_refresh_context.workspace_agent_mapping_config_repository
-        ),
-        workspace_membership_repository=crm_refresh_context.workspace_membership_repository,
-        user_repository=crm_refresh_context.user_repository,
-    )
-    resolved_lead = apply_lead_assignment_resolution(
-        refreshed_lead,
-        context=assignment_context,
-        now=now,
-    )
-    saved_lead = await lead_repository.upsert(resolved_lead)
-    await reconcile_lead_assignment_change(
-        previous_lead=lead,
-        current_lead=saved_lead,
-        lead_workflow_repository=crm_refresh_context.lead_workflow_repository,
-        workflow_transition_repository=crm_refresh_context.workflow_transition_repository,
-        temporal_signal_outbox_repository=crm_refresh_context.temporal_signal_outbox_repository,
-        outbound_message_repository=message_repository,
-        event_bus=event_bus,
-        now=now,
-    )
-    return _PreSendCRMRefreshResult(
-        status=_PreSendCRMRefreshStatus.REFRESHED,
-        lead=saved_lead,
-        recent_human_activity=_recent_human_activity_detected(
-            lead=lead,
-            refreshed_lead=saved_lead,
-            activities=activities,
-            message=message,
-        ),
-    )
-
-
-def _recent_human_activity_detected(
-    *,
-    lead: CanonicalLeadRecord,
-    refreshed_lead: CanonicalLeadRecord,
-    activities: list[CRMActivity],
-    message: OutboundMessage,
-) -> bool:
-    if (
-        refreshed_lead.last_agent_activity_at is not None
-        and refreshed_lead.last_agent_activity_at > message.created_at
-        and refreshed_lead.last_agent_activity_at != lead.last_agent_activity_at
-    ):
-        return True
-    return any(
-        activity.agent_id is not None and activity.timestamp > message.created_at
-        for activity in activities
-    )
+@dataclass(frozen=True)
+class _ProviderDispatchResult:
+    provider_message_id: str
+    message: OutboundMessage
 
 
 async def _send_sms(
@@ -565,26 +724,21 @@ async def _send_sms(
     provider: SMSProvider,
     message: OutboundMessage,
     to_phone: str,
-) -> str:
-    for attempt in range(2):
-        try:
-            return (
-                await provider.send(
-                    SMSMessage(
-                        to_phone=to_phone,
-                        body=message.body,
-                        idempotency_key=message.idempotency_key,
-                    ),
-                )
-            ).strip()
-        except ProviderSendFailure as exc:
-            if exc.kind is ProviderFailureKind.TEMPORARY and attempt == 0:
-                await asyncio.sleep(0.1)
-                continue
-            raise _ProviderSendFailed(exc.kind, str(exc)) from exc
-        except Exception as exc:
-            raise _ProviderSendFailed(ProviderFailureKind.UNCERTAIN, str(exc)) from exc
-    raise AssertionError("temporary provider retry loop did not return or raise")
+    message_repository: OutboundMessageRepository,
+    now: datetime,
+) -> _ProviderDispatchResult:
+    return await _dispatch_with_retry(
+        message=message,
+        message_repository=message_repository,
+        now=now,
+        send=lambda current: provider.send(
+            SMSMessage(
+                to_phone=to_phone,
+                body=current.body,
+                idempotency_key=current.idempotency_key,
+            )
+        ),
+    )
 
 
 async def _send_email(
@@ -595,33 +749,107 @@ async def _send_email(
     reply_to_address: str | None,
     in_reply_to_message_id: str | None,
     reference_message_ids: tuple[str, ...],
-) -> str:
-    assert message.subject is not None
-    for attempt in range(2):
+    message_repository: OutboundMessageRepository,
+    now: datetime,
+) -> _ProviderDispatchResult:
+    return await _dispatch_with_retry(
+        message=message,
+        message_repository=message_repository,
+        now=now,
+        send=lambda current: provider.send(
+            EmailMessage(
+                to_email=to_email,
+                subject=current.subject or "",
+                body=current.body,
+                html_body=current.html_body,
+                idempotency_key=current.idempotency_key,
+                message_id=build_outbound_email_message_id(current.message_id),
+                reply_to=reply_to_address,
+                in_reply_to_message_id=in_reply_to_message_id,
+                reference_message_ids=reference_message_ids,
+            )
+        ),
+    )
+
+
+async def _dispatch_with_retry(
+    *,
+    message: OutboundMessage,
+    message_repository: OutboundMessageRepository,
+    now: datetime,
+    send: Callable[[OutboundMessage], Awaitable[str]],
+) -> _ProviderDispatchResult:
+    current = message
+    while current.provider_attempt_count < MAX_PROVIDER_ATTEMPTS:
+        if current.provider_next_retry_at is not None:
+            remaining = (current.provider_next_retry_at - now).total_seconds()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+        attempt = current.provider_attempt_count + 1
+        current = await message_repository.save(
+            replace(
+                current,
+                provider_attempt_count=attempt,
+                provider_last_attempt_at=now,
+                provider_next_retry_at=None,
+                updated_at=now,
+            )
+        )
         try:
-            return (
-                await provider.send(
-                    EmailMessage(
-                        to_email=to_email,
-                        subject=message.subject,
-                        body=message.body,
-                        html_body=message.html_body,
-                        idempotency_key=message.idempotency_key,
-                        message_id=build_outbound_email_message_id(message.message_id),
-                        reply_to=reply_to_address,
-                        in_reply_to_message_id=in_reply_to_message_id,
-                        reference_message_ids=reference_message_ids,
-                    ),
-                )
-            ).strip()
+            provider_message_id = (await send(current)).strip()
+            return _ProviderDispatchResult(
+                provider_message_id=provider_message_id,
+                message=current,
+            )
         except ProviderSendFailure as exc:
-            if exc.kind is ProviderFailureKind.TEMPORARY and attempt == 0:
-                await asyncio.sleep(0.1)
+            retryable = exc.kind is ProviderFailureKind.TEMPORARY
+            has_attempts_left = attempt < MAX_PROVIDER_ATTEMPTS
+            next_retry_at = (
+                now + _provider_retry_delay(attempt) if retryable and has_attempts_left else None
+            )
+            current = await message_repository.save(
+                replace(
+                    current,
+                    provider_next_retry_at=next_retry_at,
+                    provider_last_failure_kind=exc.kind.value,
+                    failure_reason=str(exc),
+                    updated_at=now,
+                )
+            )
+            if retryable and has_attempts_left:
+                await asyncio.sleep(_provider_retry_delay(attempt).total_seconds())
                 continue
-            raise _ProviderSendFailed(exc.kind, str(exc)) from exc
+            raise _ProviderSendFailed(
+                exc.kind,
+                str(exc),
+                current,
+                reconcile_as_uncertain=exc.kind is ProviderFailureKind.UNCERTAIN,
+            ) from exc
         except Exception as exc:
-            raise _ProviderSendFailed(ProviderFailureKind.UNCERTAIN, str(exc)) from exc
-    raise AssertionError("temporary provider retry loop did not return or raise")
+            current = await message_repository.save(
+                replace(
+                    current,
+                    provider_last_failure_kind=ProviderFailureKind.UNCERTAIN.value,
+                    failure_reason=str(exc),
+                    updated_at=now,
+                )
+            )
+            raise _ProviderSendFailed(
+                ProviderFailureKind.UNCERTAIN,
+                str(exc),
+                current,
+                reconcile_as_uncertain=False,
+            ) from exc
+    raise _ProviderSendFailed(
+        ProviderFailureKind.TEMPORARY,
+        "provider retry attempt limit exhausted",
+        current,
+    )
+
+
+def _provider_retry_delay(attempt: int) -> timedelta:
+    delay = PROVIDER_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+    return PROVIDER_RETRY_MAX_DELAY if delay > PROVIDER_RETRY_MAX_DELAY else delay
 
 
 async def _resolve_email_threading_headers(
@@ -668,6 +896,8 @@ async def _failed_send_result(
     provider_name: str,
     event_bus: EventBus | None,
     now: datetime,
+    outbound_provider_failure_repository: OutboundProviderFailureRepository | None,
+    workflow_id: UUID | None,
 ) -> SendOutboundMessageResult:
     failed_message = replace(
         message,
@@ -677,6 +907,27 @@ async def _failed_send_result(
         updated_at=now,
     )
     saved = await message_repository.save(failed_message)
+    provider_failure_id: UUID | None = None
+    if outbound_provider_failure_repository is not None:
+        failure = await outbound_provider_failure_repository.create_or_get(
+            OutboundProviderFailure(
+                failure_id=uuid4(),
+                workspace_id=saved.workspace_id,
+                lead_id=saved.lead_id,
+                outbound_message_id=saved.message_id,
+                workflow_id=workflow_id,
+                channel=saved.channel,
+                provider_name=provider_name,
+                failure_kind=failure_kind.value,
+                failure_reason=failure_reason,
+                attempt_count=saved.provider_attempt_count,
+                status=OutboundProviderFailureStatus.OPEN,
+                first_failed_at=saved.provider_last_attempt_at or now,
+                last_failed_at=now,
+                created_at=now,
+            )
+        )
+        provider_failure_id = failure.failure_id
     await _publish_message_event(
         event_bus=event_bus,
         event_type=DomainEventType.MESSAGE_FAILED,
@@ -688,13 +939,22 @@ async def _failed_send_result(
         message=saved,
         pre_send_decision=pre_send_decision,
         failure_kind=failure_kind,
+        provider_failure_id=provider_failure_id,
     )
 
 
 class _ProviderSendFailed(Exception):
-    def __init__(self, kind: ProviderFailureKind, message: str) -> None:
+    def __init__(
+        self,
+        kind: ProviderFailureKind,
+        message: str,
+        outbound_message: OutboundMessage,
+        reconcile_as_uncertain: bool = False,
+    ) -> None:
         super().__init__(message)
         self.kind = kind
+        self.message = outbound_message
+        self.reconcile_as_uncertain = reconcile_as_uncertain
 
 
 def _provider_name(provider: object, *, default: str) -> str:

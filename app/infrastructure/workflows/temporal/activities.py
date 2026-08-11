@@ -10,6 +10,9 @@ from app.application.use_cases.campaign_cadence_execution import (
     execute_campaign_cadence_step,
     schedule_next_campaign_cadence_step,
 )
+from app.application.use_cases.timeout_uncertain_outbound_send import (
+    timeout_uncertain_outbound_send,
+)
 from app.application.use_cases.timeout_uncertain_paused_search_occurrence import (
     timeout_uncertain_paused_search_occurrence,
 )
@@ -20,6 +23,7 @@ from app.infrastructure.persistence.postgres.campaign_execution_repository impor
 )
 from app.infrastructure.persistence.postgres.conversation_repository import (
     PostgresCrmConversationEventRepository,
+    PostgresInboundMessageRepository,
 )
 from app.infrastructure.persistence.postgres.crm_agent_mapping_repository import (
     PostgresCRMAgentRepository,
@@ -42,6 +46,15 @@ from app.infrastructure.persistence.postgres.listing_source_repository import (
 from app.infrastructure.persistence.postgres.outbound_message_repository import (
     PostgresOutboundMessageCRMCompletionRepository,
     PostgresOutboundMessageRepository,
+)
+from app.infrastructure.persistence.postgres.outbound_provider_failure_repository import (
+    PostgresOutboundProviderFailureRepository,
+)
+from app.infrastructure.persistence.postgres.outbound_send_reconciliation_repository import (
+    PostgresOutboundSendReconciliationRepository,
+)
+from app.infrastructure.persistence.postgres.outbound_send_request_repository import (
+    PostgresOutboundSendRequestRepository,
 )
 from app.infrastructure.persistence.postgres.paused_search_agent_reminder_repository import (
     PostgresPausedSearchAgentReminderRepository,
@@ -100,6 +113,7 @@ from app.infrastructure.workflows.temporal.lead_nurture import (
     ScheduleNextCadenceStepInput,
     ScheduleNextCadenceStepResult,
     TimeoutUncertainOccurrenceInput,
+    TimeoutUncertainReconciliationInput,
 )
 
 logger = structlog.get_logger(__name__)
@@ -178,6 +192,12 @@ async def execute_campaign_cadence_step_activity(
             lead_workflow_repository=PostgresLeadWorkflowRepository(session),
             workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
             message_repository=PostgresOutboundMessageRepository(session),
+            outbound_send_reconciliation_repository=(
+                PostgresOutboundSendReconciliationRepository(session)
+            ),
+            outbound_provider_failure_repository=PostgresOutboundProviderFailureRepository(session),
+            outbound_send_request_repository=PostgresOutboundSendRequestRepository(session),
+            inbound_message_repository=PostgresInboundMessageRepository(session),
             rejected_draft_review_repository=PostgresRejectedDraftReviewRepository(session),
             lead_activity_repository=PostgresLeadActivityRepository(session),
             crm_conversation_event_repository=PostgresCrmConversationEventRepository(session),
@@ -269,6 +289,21 @@ async def timeout_uncertain_paused_search_occurrence_activity(
         await session.commit()
 
 
+@activity.defn(name="timeout-uncertain-outbound-send")
+async def timeout_uncertain_outbound_send_activity(
+    input_: TimeoutUncertainReconciliationInput,
+) -> None:
+    async with async_session_factory() as session:
+        await enable_postgres_service_access(session)
+        await timeout_uncertain_outbound_send(
+            workspace_id=input_.workspace_id,
+            reconciliation_id=input_.reconciliation_id,
+            now=input_.occurred_at,
+            reconciliation_repository=PostgresOutboundSendReconciliationRepository(session),
+        )
+        await session.commit()
+
+
 def _reason_metadata(reason: str) -> Mapping[str, object]:
     return {"reason": reason}
 
@@ -304,4 +339,7 @@ def _execution_outcome_to_result(
         has_more_steps=outcome.has_more_steps,
         occurrence_id=outcome.occurrence_id,
         fallback_used=outcome.fallback_used,
+        reconciliation_id=outcome.reconciliation_id,
+        provider_failure_id=outcome.provider_failure_id,
+        request_id=outcome.request_id,
     )

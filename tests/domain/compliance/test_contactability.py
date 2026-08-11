@@ -141,6 +141,61 @@ def test_sms_contactability_does_not_block_sms_when_workspace_not_approved_in_v1
     assert decision.reasons == ()
 
 
+def test_dispatch_strict_mode_requires_sms_approval() -> None:
+    decision = evaluate_contactability(
+        replace(_base_facts(), sms_consent_status=ContactPermissionStatus.UNKNOWN),
+        WorkspaceContactPolicy(
+            workspace_id=WORKSPACE_ID,
+            sms_compliance_state=SmsComplianceState.NOT_APPROVED,
+        ),
+        ContactChannel.SMS,
+        require_explicit_automated_permission=True,
+    )
+
+    assert decision.allowed is False
+    assert decision.reasons == (ContactabilityReasonCode.SMS_COMPLIANCE_NOT_APPROVED,)
+
+
+def test_dispatch_strict_mode_allows_unknown_sms_consent_with_destination() -> None:
+    decision = evaluate_contactability(
+        replace(_base_facts(), sms_consent_status=ContactPermissionStatus.UNKNOWN),
+        _approved_policy(),
+        ContactChannel.SMS,
+        require_explicit_automated_permission=True,
+    )
+
+    assert decision.allowed is True
+    assert decision.reasons == ()
+
+
+def test_dispatch_strict_mode_blocks_denied_sms_consent() -> None:
+    decision = evaluate_contactability(
+        replace(_base_facts(), sms_consent_status=ContactPermissionStatus.DENIED),
+        _approved_policy(),
+        ContactChannel.SMS,
+        require_explicit_automated_permission=True,
+    )
+
+    assert decision.allowed is False
+    assert decision.reasons == (ContactabilityReasonCode.SMS_PERMISSION_DENIED,)
+
+
+def test_dispatch_strict_mode_blocks_sms_without_destination() -> None:
+    decision = evaluate_contactability(
+        replace(
+            _base_facts(),
+            sms_consent_status=ContactPermissionStatus.UNKNOWN,
+            has_sms_destination=False,
+        ),
+        _approved_policy(),
+        ContactChannel.SMS,
+        require_explicit_automated_permission=True,
+    )
+
+    assert decision.allowed is False
+    assert decision.reasons == (ContactabilityReasonCode.MISSING_SMS_CONSENT,)
+
+
 def test_sms_destination_allows_sms_in_v1() -> None:
     decision = evaluate_contactability(_base_facts(), _approved_policy(), ContactChannel.SMS)
 

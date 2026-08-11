@@ -71,6 +71,11 @@ class FakeOutboundMessageRepository:
     ) -> OutboundMessage | None:
         return self.message
 
+    async def get_by_id_for_update(
+        self, workspace_id: WorkspaceId, message_id: UUID
+    ) -> OutboundMessage | None:
+        return self.message
+
     async def get_by_idempotency_key(
         self,
         workspace_id: WorkspaceId,

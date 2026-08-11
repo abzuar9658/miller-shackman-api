@@ -17,17 +17,34 @@ from app.application.ports.repositories import (
     WorkspaceAgentMappingConfigRepository,
     WorkspaceMembershipRepository,
 )
+from app.application.services.pre_send_crm_refresh import PreSendCRMRefreshContext
+from app.application.services.pre_send_policy import build_pre_send_policy
 from app.application.use_cases.send_outbound_message import (
     OutboundSendContext,
-    PreSendCRMRefreshContext,
     SendOutboundMessageReasonCode,
+    SendOutboundMessageResult,
     SendOutboundMessageStatus,
     send_outbound_message,
+)
+from app.application.use_cases.timeout_uncertain_outbound_send import (
+    timeout_uncertain_outbound_send,
 )
 from app.domain.campaigns.outbound_message import (
     OutboundMessage,
     OutboundMessageStatus,
     build_outbound_email_message_id,
+)
+from app.domain.campaigns.outbound_provider_failure import (
+    OutboundProviderFailure,
+    OutboundProviderFailureStatus,
+)
+from app.domain.campaigns.outbound_send_reconciliation import (
+    OutboundSendReconciliation,
+    OutboundSendReconciliationStatus,
+)
+from app.domain.campaigns.outbound_send_request import (
+    OutboundSendRequest,
+    OutboundSendRequestStatus,
 )
 from app.domain.campaigns.pre_send import PreSendReasonCode, ProviderSendStatus, WorkflowState
 from app.domain.campaigns.start_queue import CampaignStatus
@@ -36,6 +53,7 @@ from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
     SmsComplianceState,
+    SuppressionType,
     WorkspaceContactPolicy,
 )
 from app.domain.events import DomainEvent, DomainEventType
@@ -151,8 +169,10 @@ class FakeOutboundMessageRepository:
         self,
         message: OutboundMessage | None,
         call_order: list[str] | None = None,
+        history: tuple[OutboundMessage, ...] = (),
     ) -> None:
         self.message = message
+        self.history = history
         self.saved: list[OutboundMessage] = []
         self.locked_idempotency_keys: list[str] = []
         self.call_order = call_order
@@ -200,6 +220,7 @@ class FakeOutboundMessageRepository:
         self.saved.append(message)
         return message
 
+
     async def get_by_provider_message_id_for_workspace(
         self,
         workspace_id: WorkspaceId,
@@ -235,13 +256,247 @@ class FakeOutboundMessageRepository:
         *,
         limit: int = 100,
     ) -> tuple[OutboundMessage, ...]:
-        if (
-            self.message
-            and self.message.workspace_id == workspace_id
-            and self.message.lead_id == lead_id
-        ):
-            return (self.message,)
+        return tuple(
+            message
+            for message in (*self.history, self.message)
+            if message is not None
+            and message.workspace_id == workspace_id
+            and message.lead_id == lead_id
+        )[:limit]
+
+    async def get_latest_sent_at_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        campaign_id: UUID | None = None,
+        channel: ContactChannel | None = None,
+    ) -> datetime | None:
+        messages = await self.list_for_lead(workspace_id, lead_id)
+        return max(
+            (
+                message.sent_at
+                for message in messages
+                if message.status == OutboundMessageStatus.SENT
+                and message.sent_at is not None
+                and (campaign_id is None or message.campaign_id == campaign_id)
+                and (channel is None or message.channel == channel)
+            ),
+            default=None,
+        )
+
+
+class FakeOutboundSendReconciliationRepository:
+    def __init__(self) -> None:
+        self.reconciliations: dict[str, OutboundSendReconciliation] = {}
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        reconciliation_id: UUID,
+    ) -> OutboundSendReconciliation | None:
+        return next(
+            (
+                item
+                for item in self.reconciliations.values()
+                if item.workspace_id == workspace_id and item.reconciliation_id == reconciliation_id
+            ),
+            None,
+        )
+
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        reconciliation_id: UUID,
+    ) -> OutboundSendReconciliation | None:
+        return await self.get_by_id_for_update(workspace_id, reconciliation_id)
+
+    async def get_by_outbound_message_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        outbound_message_id: UUID,
+    ) -> OutboundSendReconciliation | None:
+        return next(
+            (
+                item
+                for item in self.reconciliations.values()
+                if (
+                    item.workspace_id == workspace_id
+                    and item.outbound_message_id == outbound_message_id
+                )
+            ),
+            None,
+        )
+
+    async def get_by_idempotency_key_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
+    ) -> OutboundSendReconciliation | None:
+        item = self.reconciliations.get(idempotency_key)
+        return item if item is not None and item.workspace_id == workspace_id else None
+
+    async def create_or_get(
+        self,
+        reconciliation: OutboundSendReconciliation,
+    ) -> OutboundSendReconciliation:
+        return self.reconciliations.setdefault(reconciliation.idempotency_key, reconciliation)
+
+    async def resolve(self, **kwargs: object) -> OutboundSendReconciliation | None:
+        reconciliation_id = cast(UUID, kwargs["reconciliation_id"])
+        workspace_id = cast(WorkspaceId, kwargs["workspace_id"])
+        existing = await self.get_by_id_for_update(workspace_id, reconciliation_id)
+        if existing is None:
+            return None
+        if existing.status is not OutboundSendReconciliationStatus.PENDING:
+            return existing
+        resolved = replace(
+            existing,
+            status=cast(OutboundSendReconciliationStatus, kwargs["status"]),
+            updated_at=cast(datetime, kwargs["now"]),
+            resolved_at=cast(datetime, kwargs["now"]),
+            failure_reason=cast(str | None, kwargs.get("failure_reason")),
+        )
+        self.reconciliations[existing.idempotency_key] = resolved
+        return resolved
+
+class FakeOutboundProviderFailureRepository:
+    def __init__(self) -> None:
+        self.failures: dict[UUID, OutboundProviderFailure] = {}
+
+    async def create_or_get(
+        self,
+        failure: OutboundProviderFailure,
+    ) -> OutboundProviderFailure:
+        existing = next(
+            (
+                item
+                for item in self.failures.values()
+                if item.workspace_id == failure.workspace_id
+                and item.outbound_message_id == failure.outbound_message_id
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+        self.failures[failure.failure_id] = failure
+        return failure
+
+    async def list_open(
+        self,
+        workspace_id: WorkspaceId,
+        limit: int = 100,
+    ) -> list[OutboundProviderFailure]:
+        return [
+            item
+            for item in self.failures.values()
+            if item.workspace_id == workspace_id
+            and item.status is OutboundProviderFailureStatus.OPEN
+        ][:limit]
+
+    async def get_by_outbound_message_id(
+        self,
+        workspace_id: WorkspaceId,
+        outbound_message_id: UUID,
+    ) -> OutboundProviderFailure | None:
+        return next(
+            (
+                item
+                for item in self.failures.values()
+                if item.workspace_id == workspace_id
+                and item.outbound_message_id == outbound_message_id
+            ),
+            None,
+        )
+
+
+class FakeOutboundSendRequestRepository:
+    def __init__(self) -> None:
+        self.requests: dict[str, OutboundSendRequest] = {}
+
+    async def get_by_idempotency_key(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
+    ) -> OutboundSendRequest | None:
+        request = self.requests.get(idempotency_key)
+        if request is not None and request.workspace_id == workspace_id:
+            return request
+        return None
+
+    async def create_or_get(self, request: OutboundSendRequest) -> OutboundSendRequest:
+        return self.requests.setdefault(request.idempotency_key, request)
+
+    async def get_by_outbound_message_id(
+        self,
+        workspace_id: WorkspaceId,
+        outbound_message_id: UUID,
+    ) -> OutboundSendRequest | None:
+        return next(
+            (
+                request
+                for request in self.requests.values()
+                if request.workspace_id == workspace_id
+                and request.outbound_message_id == outbound_message_id
+            ),
+            None,
+        )
+
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        request_id: UUID,
+    ) -> OutboundSendRequest | None:
+        return next(
+            (
+                request
+                for request in self.requests.values()
+                if request.workspace_id == workspace_id and request.request_id == request_id
+            ),
+            None,
+        )
+
+    async def list_exceptions(self, **_: object) -> tuple[OutboundSendRequest, ...]:
+        return tuple(self.requests.values())
+
+    async def save(self, request: OutboundSendRequest) -> OutboundSendRequest:
+        self.requests[request.idempotency_key] = request
+        return request
+
+    async def claim_due_pending(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> tuple[OutboundSendRequest, ...]:
+        _ = (now, limit)
         return ()
+
+    async def recover_stale_dispatching(
+        self,
+        *,
+        stale_before: datetime,
+        now: datetime,
+        limit: int,
+    ) -> tuple[OutboundSendRequest, ...]:
+        _ = (stale_before, now, limit)
+        return ()
+
+    async def get_due_pending_summary(
+        self,
+        *,
+        now: datetime,
+    ) -> tuple[int, datetime | None]:
+        pending = [
+            request
+            for request in self.requests.values()
+            if (
+                request.status is OutboundSendRequestStatus.PENDING
+                and request.available_at <= now
+            )
+        ]
+        oldest = min((request.available_at for request in pending), default=None)
+        return len(pending), oldest
 
 
 class FakeSMSProvider:
@@ -288,7 +543,7 @@ class FakeEventBus:
 
 
 class FakeLeadRefreshSource:
-    def __init__(self, lead: CanonicalLeadRecord | None) -> None:
+    def __init__(self, lead: CanonicalLeadRecord | Exception | None) -> None:
         self.lead = lead
 
     async def get_lead_snapshot(
@@ -299,6 +554,8 @@ class FakeLeadRefreshSource:
         mapped_custom_field_keys: tuple[str, ...] = (),
     ) -> CanonicalLeadRecord | None:
         _ = (workspace_id, crm_lead_id, mapped_custom_field_keys)
+        if isinstance(self.lead, Exception):
+            raise self.lead
         return self.lead
 
 
@@ -371,6 +628,7 @@ def _lead(
     has_sms_capable_phone: bool = True,
     sms_permission_status: ContactPermissionStatus = ContactPermissionStatus.CONFIRMED,
     email_permission_status: ContactPermissionStatus = ContactPermissionStatus.CONFIRMED,
+    suppression_types: frozenset[SuppressionType] = frozenset(),
 ) -> CanonicalLeadRecord:
     return CanonicalLeadRecord(
         workspace_id=WORKSPACE_ID,
@@ -386,6 +644,7 @@ def _lead(
         sms_permission_status=sms_permission_status,
         email_permission_status=email_permission_status,
         do_not_contact=False,
+        suppression_types=suppression_types,
         last_meaningful_communication_at=NOW - timedelta(days=90),
     )
 
@@ -438,7 +697,7 @@ def _send_context(
 
 def _crm_refresh_context(
     *,
-    lead: CanonicalLeadRecord | None,
+    lead: CanonicalLeadRecord | Exception | None,
     activities: list[CRMActivity] | None = None,
 ) -> PreSendCRMRefreshContext:
     return PreSendCRMRefreshContext(
@@ -490,6 +749,176 @@ async def test_sends_pending_sms_message_and_persists_sent_state() -> None:
     assert lead_repository.locked_ids == [LEAD_ID]
     assert message_repository.locked_idempotency_keys == [result.message.idempotency_key]
     assert len(email_provider.messages) == 0
+
+
+async def test_enqueues_durable_send_before_commit_without_calling_provider() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    reconciliation_repository = FakeOutboundSendReconciliationRepository()
+    request_repository = FakeOutboundSendRequestRepository()
+    sms_provider = FakeSMSProvider()
+    commit_count = 0
+
+    async def commit() -> None:
+        nonlocal commit_count
+        assert request_repository.requests
+        commit_count += 1
+
+    assert message_repository.message is not None
+
+    async def send() -> SendOutboundMessageResult:
+        assert message_repository.message is not None
+        return await send_outbound_message(
+            workspace_id=WORKSPACE_ID,
+            idempotency_key=message_repository.message.idempotency_key,
+            context=_send_context(),
+            lead_repository=FakeLeadRepository(_lead()),
+            message_repository=message_repository,
+            sms_provider=sms_provider,
+            email_provider=FakeEmailProvider(),
+            outbound_send_reconciliation_repository=reconciliation_repository,
+            outbound_send_request_repository=request_repository,
+            workflow_id=UUID("77777777-7777-7777-7777-777777777777"),
+            temporal_workflow_id="lead-nurture-777",
+            before_provider_dispatch=commit,
+            now=NOW,
+        )
+
+    first = await send()
+    second = await send()
+
+    assert first.status is SendOutboundMessageStatus.DISPATCH_PENDING
+    assert second.status is SendOutboundMessageStatus.DISPATCH_PENDING
+    assert first.request_id == second.request_id
+    assert first.reconciliation_id == second.reconciliation_id
+    assert commit_count == 2
+    assert sms_provider.messages == []
+    assert len(request_repository.requests) == 1
+    request = next(iter(request_repository.requests.values()))
+    assert request.provider_payload["to_phone"] == "+15551234567"
+    assert request.provider_payload["body"] == message_repository.message.body
+
+
+async def test_blocks_when_global_frequency_limit_is_found_in_history() -> None:
+    pending = _message()
+    previous = replace(
+        _message(),
+        message_id=UUID("55555555-5555-5555-5555-555555555555"),
+        idempotency_key="previous-message",
+        status=OutboundMessageStatus.SENT,
+        sent_at=NOW - timedelta(hours=1),
+    )
+    message_repository = FakeOutboundMessageRepository(pending, history=(previous,))
+
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=pending.idempotency_key,
+        context=_send_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=FakeSMSProvider(),
+        email_provider=FakeEmailProvider(),
+        now=NOW,
+    )
+
+    assert result.status is SendOutboundMessageStatus.REJECTED
+    assert result.pre_send_decision is not None
+    assert result.pre_send_decision.reasons == (PreSendReasonCode.FREQUENCY_LIMIT_REACHED,)
+
+
+async def test_workspace_policy_allows_sms_after_recent_email() -> None:
+    pending = _message()
+    previous_email = replace(
+        _message(channel=ContactChannel.EMAIL, subject="Checking in"),
+        message_id=UUID("55555555-5555-5555-5555-555555555555"),
+        idempotency_key="previous-email",
+        status=OutboundMessageStatus.SENT,
+        sent_at=NOW - timedelta(hours=1),
+    )
+    message_repository = FakeOutboundMessageRepository(pending, history=(previous_email,))
+    context = _send_context()
+    context = replace(
+        context,
+        pre_send_policy=build_pre_send_policy(context.workspace_contact_policy, "UTC"),
+    )
+
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=pending.idempotency_key,
+        context=context,
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=FakeSMSProvider("SM123"),
+        email_provider=FakeEmailProvider(),
+        now=NOW,
+    )
+
+    assert result.status is SendOutboundMessageStatus.SENT
+    assert result.message is not None
+    assert result.message.status == OutboundMessageStatus.SENT
+
+
+async def test_workspace_policy_blocks_repeat_send_on_same_channel() -> None:
+    pending = _message()
+    previous_sms = replace(
+        _message(),
+        message_id=UUID("55555555-5555-5555-5555-555555555555"),
+        idempotency_key="previous-sms",
+        status=OutboundMessageStatus.SENT,
+        sent_at=NOW - timedelta(hours=1),
+    )
+    message_repository = FakeOutboundMessageRepository(pending, history=(previous_sms,))
+    context = _send_context()
+    context = replace(
+        context,
+        pre_send_policy=build_pre_send_policy(context.workspace_contact_policy, "UTC"),
+    )
+
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=pending.idempotency_key,
+        context=context,
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=FakeSMSProvider(),
+        email_provider=FakeEmailProvider(),
+        now=NOW,
+    )
+
+    assert result.status is SendOutboundMessageStatus.REJECTED
+    assert result.pre_send_decision is not None
+    assert result.pre_send_decision.reasons == (PreSendReasonCode.FREQUENCY_LIMIT_REACHED,)
+
+
+class FailingHistoryRepository(FakeOutboundMessageRepository):
+    async def get_latest_sent_at_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        campaign_id: UUID | None = None,
+        channel: ContactChannel | None = None,
+    ) -> datetime | None:
+        raise RuntimeError("history lookup failed")
+
+
+async def test_blocks_when_pre_send_history_lookup_fails() -> None:
+    message_repository = FailingHistoryRepository(_message())
+    assert message_repository.message is not None
+
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=FakeSMSProvider(),
+        email_provider=FakeEmailProvider(),
+        now=NOW,
+    )
+
+    assert result.status is SendOutboundMessageStatus.REJECTED
+    assert result.pre_send_decision is not None
+    assert result.pre_send_decision.reasons == (PreSendReasonCode.MISSING_REQUIRED_DATA,)
 
 
 async def test_commits_prepared_message_before_provider_dispatch() -> None:
@@ -560,6 +989,81 @@ async def test_sends_message_after_successful_pre_send_crm_refresh() -> None:
 
     assert result.status == SendOutboundMessageStatus.SENT
     assert sms_provider.messages
+
+
+async def test_pre_send_crm_refresh_detects_recent_agent_activity_before_provider() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    sms_provider = FakeSMSProvider("must-not-be-used")
+    activity = CRMActivity(
+        crm_activity_id="activity-after-enqueue",
+        activity_type="note",
+        timestamp=NOW + timedelta(seconds=1),
+        agent_id="agent-1",
+    )
+
+    assert message_repository.message is not None
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=sms_provider,
+        email_provider=FakeEmailProvider(),
+        crm_refresh_context=_crm_refresh_context(lead=_lead(), activities=[activity]),
+        now=NOW,
+    )
+
+    assert result.status is SendOutboundMessageStatus.REJECTED
+    assert result.pre_send_decision is not None
+    assert PreSendReasonCode.RECENT_HUMAN_ACTIVITY in result.pre_send_decision.reasons
+    assert sms_provider.messages == []
+
+
+async def test_pre_send_crm_refresh_detects_new_opt_out_before_provider() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    sms_provider = FakeSMSProvider("must-not-be-used")
+    refreshed_lead = _lead(suppression_types=frozenset({SuppressionType.SMS_OPT_OUT}))
+
+    assert message_repository.message is not None
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=sms_provider,
+        email_provider=FakeEmailProvider(),
+        crm_refresh_context=_crm_refresh_context(lead=refreshed_lead),
+        now=NOW,
+    )
+
+    assert result.status is SendOutboundMessageStatus.REJECTED
+    assert result.pre_send_decision is not None
+    assert PreSendReasonCode.CHANNEL_NOT_CONTACTABLE in result.pre_send_decision.reasons
+    assert sms_provider.messages == []
+
+
+async def test_pre_send_crm_refresh_failure_fails_closed_before_provider() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    sms_provider = FakeSMSProvider("must-not-be-used")
+
+    assert message_repository.message is not None
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=sms_provider,
+        email_provider=FakeEmailProvider(),
+        crm_refresh_context=_crm_refresh_context(lead=RuntimeError("crm unavailable")),
+        now=NOW,
+    )
+
+    assert result.status is SendOutboundMessageStatus.FAILED
+    assert result.reasons == (SendOutboundMessageReasonCode.CRM_REFRESH_FAILED,)
+    assert sms_provider.messages == []
 
 
 async def test_sends_message_after_pre_send_crm_refresh_detects_ownership_change() -> None:
@@ -820,6 +1324,7 @@ async def test_email_send_is_not_blocked_by_workspace_sms_compliance() -> None:
 
 async def test_marks_message_uncertain_when_provider_returns_empty_identifier() -> None:
     message_repository = FakeOutboundMessageRepository(_message())
+    reconciliation_repository = FakeOutboundSendReconciliationRepository()
 
     assert message_repository.message is not None
     result = await send_outbound_message(
@@ -830,6 +1335,9 @@ async def test_marks_message_uncertain_when_provider_returns_empty_identifier() 
         message_repository=message_repository,
         sms_provider=FakeSMSProvider(""),
         email_provider=FakeEmailProvider(),
+        outbound_send_reconciliation_repository=reconciliation_repository,
+        workflow_id=UUID("55555555-5555-5555-5555-555555555555"),
+        temporal_workflow_id="lead-nurture/55555555",
         now=NOW,
     )
 
@@ -839,6 +1347,27 @@ async def test_marks_message_uncertain_when_provider_returns_empty_identifier() 
     assert result.message.provider_send_status == ProviderSendStatus.UNCERTAIN
     assert result.message.provider_name == "twilio"
     assert result.message.failure_reason == "provider_message_id_missing"
+    assert result.reconciliation_id is not None
+    assert len(reconciliation_repository.reconciliations) == 1
+    reconciliation = next(iter(reconciliation_repository.reconciliations.values()))
+    assert reconciliation.status is OutboundSendReconciliationStatus.PENDING
+    assert reconciliation.outbound_message_id == result.message.message_id
+
+    retry = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=result.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=FakeSMSProvider("unexpected-retry"),
+        email_provider=FakeEmailProvider(),
+        outbound_send_reconciliation_repository=reconciliation_repository,
+        workflow_id=UUID("55555555-5555-5555-5555-555555555555"),
+        temporal_workflow_id="lead-nurture/55555555",
+        now=NOW,
+    )
+    assert retry.status is SendOutboundMessageStatus.UNCERTAIN
+    assert retry.reconciliation_id == result.reconciliation_id
 
 
 async def test_marks_message_failed_when_provider_raises() -> None:
@@ -862,6 +1391,46 @@ async def test_marks_message_failed_when_provider_raises() -> None:
     assert result.message.provider_name == "twilio"
     assert result.message.failure_reason == "twilio unavailable"
     assert result.message.provider_send_status == ProviderSendStatus.NOT_ATTEMPTED
+
+
+async def test_uncertain_outbound_send_timeout_is_durable_and_not_repeated() -> None:
+    reconciliation_repository = FakeOutboundSendReconciliationRepository()
+    reconciliation = OutboundSendReconciliation(
+        reconciliation_id=UUID("66666666-6666-6666-6666-666666666666"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        workflow_id=UUID("55555555-5555-5555-5555-555555555555"),
+        temporal_workflow_id="lead-nurture/55555555",
+        outbound_message_id=MESSAGE_ID,
+        idempotency_key="uncertain-timeout-key",
+        status=OutboundSendReconciliationStatus.PENDING,
+        provider_name="twilio",
+        provider_message_id=None,
+        provider_delivery_status=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    await reconciliation_repository.create_or_get(reconciliation)
+
+    first = await timeout_uncertain_outbound_send(
+        workspace_id=WORKSPACE_ID,
+        reconciliation_id=reconciliation.reconciliation_id,
+        now=NOW + timedelta(minutes=30),
+        reconciliation_repository=reconciliation_repository,
+    )
+    second = await timeout_uncertain_outbound_send(
+        workspace_id=WORKSPACE_ID,
+        reconciliation_id=reconciliation.reconciliation_id,
+        now=NOW + timedelta(minutes=60),
+        reconciliation_repository=reconciliation_repository,
+    )
+
+    assert first.timed_out is True
+    assert first.reconciliation is not None
+    assert first.reconciliation.status is OutboundSendReconciliationStatus.TIMED_OUT
+    assert first.reconciliation.failure_reason == "provider_confirmation_timeout"
+    assert second.timed_out is False
+    assert second.reconciliation == first.reconciliation
 
 
 async def test_rejects_when_channel_destination_is_missing() -> None:
@@ -971,6 +1540,7 @@ async def test_sends_pending_email_message_via_sink_provider() -> None:
 
 async def test_typed_permanent_provider_failure_is_returned_for_fallback_decision() -> None:
     message_repository = FakeOutboundMessageRepository(_message())
+    failure_repository = FakeOutboundProviderFailureRepository()
     assert message_repository.message is not None
     result = await send_outbound_message(
         workspace_id=WORKSPACE_ID,
@@ -982,11 +1552,15 @@ async def test_typed_permanent_provider_failure_is_returned_for_fallback_decisio
             ProviderSendFailure(ProviderFailureKind.PERMANENT, "invalid destination")
         ),
         email_provider=FakeEmailProvider(),
+        outbound_provider_failure_repository=failure_repository,
+        workflow_id=UUID("77777777-7777-7777-7777-777777777777"),
         now=NOW,
     )
 
     assert result.status is SendOutboundMessageStatus.FAILED
     assert result.failure_kind is ProviderFailureKind.PERMANENT
+    assert result.provider_failure_id is not None
+    assert len(await failure_repository.list_open(WORKSPACE_ID)) == 1
 
 
 async def test_temporary_provider_failure_retries_once_with_same_idempotency_key() -> None:
@@ -1008,6 +1582,7 @@ async def test_temporary_provider_failure_retries_once_with_same_idempotency_key
     assert result.status is SendOutboundMessageStatus.SENT
     assert provider.calls == 2
     assert provider.idempotency_keys == [message_repository.message.idempotency_key] * 2
+    assert message_repository.message.provider_attempt_count == 2
 
 
 class _TemporaryThenSuccessSMSProvider:
@@ -1023,3 +1598,56 @@ class _TemporaryThenSuccessSMSProvider:
         if self.calls == 1:
             raise ProviderSendFailure(ProviderFailureKind.TEMPORARY, "provider busy")
         return "provider-message-2"
+
+
+class _AlwaysTemporaryFailureSMSProvider:
+    provider_name = "test"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def send(self, message: SMSMessage) -> str:
+        self.calls += 1
+        raise ProviderSendFailure(ProviderFailureKind.TEMPORARY, "provider busy")
+
+
+async def test_exhausted_temporary_provider_failure_is_distinct_and_restart_safe() -> None:
+    message_repository = FakeOutboundMessageRepository(_message())
+    failure_repository = FakeOutboundProviderFailureRepository()
+    provider = _AlwaysTemporaryFailureSMSProvider()
+    assert message_repository.message is not None
+
+    result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=provider,
+        email_provider=FakeEmailProvider(),
+        outbound_provider_failure_repository=failure_repository,
+        workflow_id=UUID("77777777-7777-7777-7777-777777777777"),
+        now=NOW,
+    )
+
+    assert result.status is SendOutboundMessageStatus.FAILED
+    assert result.failure_kind is ProviderFailureKind.TEMPORARY
+    assert provider.calls == 3
+    assert message_repository.message.status is OutboundMessageStatus.FAILED
+    assert message_repository.message.provider_attempt_count == 3
+    assert result.provider_failure_id is not None
+
+    restart_result = await send_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        idempotency_key=message_repository.message.idempotency_key,
+        context=_send_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=message_repository,
+        sms_provider=provider,
+        email_provider=FakeEmailProvider(),
+        outbound_provider_failure_repository=failure_repository,
+        now=NOW,
+    )
+
+    assert restart_result.status is SendOutboundMessageStatus.FAILED
+    assert provider.calls == 3

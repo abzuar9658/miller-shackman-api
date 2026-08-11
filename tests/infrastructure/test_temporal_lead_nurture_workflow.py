@@ -200,6 +200,98 @@ async def test_lead_nurture_workflow_loops_through_all_steps(
     assert snapshot.scheduled_for is None
 
 
+async def test_lead_nurture_waits_for_dispatch_then_reruns_to_already_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_instance = LeadNurtureWorkflow()
+    activity_calls: list[str] = []
+    schedule_results = [
+        ScheduleNextCadenceStepResult(
+            status="scheduled",
+            workflow_id=WORKFLOW_ID,
+            cadence_step_id=STEP_ONE_ID,
+            scheduled_for=NOW,
+        ),
+        ScheduleNextCadenceStepResult(
+            status="scheduled",
+            workflow_id=WORKFLOW_ID,
+            cadence_step_id=STEP_ONE_ID,
+            scheduled_for=NOW,
+        ),
+    ]
+    execute_results = [
+        ExecuteCadenceStepResult(
+            status="dispatch_pending",
+            workflow_id=WORKFLOW_ID,
+            cadence_step_id=STEP_ONE_ID,
+            outbound_message_id=MESSAGE_ID,
+            request_id=uuid4(),
+            has_more_steps=True,
+        ),
+        ExecuteCadenceStepResult(
+            status="already_sent",
+            workflow_id=WORKFLOW_ID,
+            cadence_step_id=STEP_ONE_ID,
+            outbound_message_id=MESSAGE_ID,
+            has_more_steps=False,
+        ),
+    ]
+
+    async def fake_execute_activity(name: str, _arg: object, **_: object) -> object:
+        activity_calls.append(name)
+        if name == "schedule-next-campaign-cadence-step":
+            return schedule_results.pop(0)
+        if name == "execute-campaign-cadence-step":
+            return execute_results.pop(0)
+        raise AssertionError(f"unexpected activity {name}")
+
+    wait_count = 0
+
+    async def fake_wait_condition(predicate: object, **kwargs: object) -> None:
+        nonlocal wait_count
+        _ = (predicate, kwargs)
+        wait_count += 1
+        if wait_count == 1:
+            workflow_instance.reschedule_requested(
+                RescheduleWorkflowSignal(
+                    workspace_id=WORKSPACE_ID,
+                    lead_id=LEAD_ID,
+                    occurred_at=NOW.isoformat(),
+                    reason="outbound_dispatch_sent",
+                )
+            )
+        else:
+            workflow_instance.close()
+
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.execute_activity",
+        fake_execute_activity,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.wait_condition",
+        fake_wait_condition,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.now", lambda: NOW
+    )
+
+    result = await workflow_instance.run(
+        LeadNurtureWorkflowInput(
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            campaign_version_id=CAMPAIGN_VERSION_ID,
+        )
+    )
+
+    assert result.last_activity_status == "already_sent"
+    assert activity_calls == [
+        "schedule-next-campaign-cadence-step",
+        "execute-campaign-cadence-step",
+        "schedule-next-campaign-cadence-step",
+        "execute-campaign-cadence-step",
+    ]
+
+
 async def test_lead_nurture_workflow_retries_after_blocked_step_resume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

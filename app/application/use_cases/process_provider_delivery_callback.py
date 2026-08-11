@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from app.application.ports.event_bus import EventBus
 from app.application.ports.repositories import (
     LeadWorkflowRepository,
+    OutboundSendReconciliationRepository,
     PausedSearchOccurrenceRepository,
     ProviderDeliveryMessageRepository,
     ProviderMessageEventRepository,
@@ -14,10 +15,16 @@ from app.application.ports.repositories import (
 )
 from app.domain.campaigns.outbound_message import (
     OutboundMessage,
+    OutboundMessageStatus,
     ProviderDeliveryStatus,
     ProviderMessageEvent,
 )
+from app.domain.campaigns.outbound_send_reconciliation import (
+    OutboundSendReconciliationStatus,
+)
 from app.domain.campaigns.paused_search_occurrences import RecurringOccurrenceStatus
+from app.domain.campaigns.pre_send import ProviderSendStatus
+from app.domain.common.ids import WorkspaceId
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
 from app.domain.workflows import TemporalSignalName, TemporalSignalOutboxEntry
 
@@ -56,6 +63,7 @@ class ProviderDeliveryCallback:
     occurred_at: datetime
     failure_reason: str | None = None
     payload_redacted: Mapping[str, object] = field(default_factory=_empty_payload)
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -73,11 +81,13 @@ async def process_provider_delivery_callback(
     message_repository: ProviderDeliveryMessageRepository,
     provider_message_event_repository: ProviderMessageEventRepository,
     occurrence_repository: PausedSearchOccurrenceRepository | None = None,
+    reconciliation_repository: OutboundSendReconciliationRepository | None = None,
     lead_workflow_repository: LeadWorkflowRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     now: datetime,
     event_bus: EventBus | None = None,
     provider_message_event_id_factory: Callable[[], UUID] | None = None,
+    workspace_id: WorkspaceId | None = None,
 ) -> ProcessProviderDeliveryCallbackResult:
     existing = await provider_message_event_repository.get_by_external_provider_event_id(
         callback.provider,
@@ -96,6 +106,22 @@ async def process_provider_delivery_callback(
         callback.provider,
         callback.provider_message_id,
     )
+    reconciliation = None
+    if (
+        message is None
+        and callback.idempotency_key is not None
+        and reconciliation_repository is not None
+        and workspace_id is not None
+    ):
+        reconciliation = await reconciliation_repository.get_by_idempotency_key_for_update(
+            workspace_id,
+            callback.idempotency_key,
+        )
+        if reconciliation is not None:
+            message = await message_repository.get_by_id_for_update(
+                reconciliation.workspace_id,
+                reconciliation.outbound_message_id,
+            )
     if message is None:
         return ProcessProviderDeliveryCallbackResult(
             status=ProcessProviderDeliveryCallbackStatus.IGNORED,
@@ -118,6 +144,82 @@ async def process_provider_delivery_callback(
         ),
     )
     updated_message = _reconcile_message(message=message, callback=callback, now=now)
+    reconciliation_status: OutboundSendReconciliationStatus | None = None
+    reconciliation_resolved = None
+    if reconciliation_repository is not None:
+        if reconciliation is None:
+            reconciliation = (
+                await reconciliation_repository.get_by_outbound_message_id_for_update(
+                    message.workspace_id,
+                    message.message_id,
+                )
+            )
+        if (
+            reconciliation is not None
+            and reconciliation.status is OutboundSendReconciliationStatus.PENDING
+        ):
+            reconciliation_status = _reconciliation_status_after_delivery(callback.status)
+            if reconciliation_status is not None:
+                reconciliation_resolved = await reconciliation_repository.resolve(
+                    workspace_id=message.workspace_id,
+                    reconciliation_id=reconciliation.reconciliation_id,
+                    status=reconciliation_status,
+                    now=now,
+                    provider_message_id=callback.provider_message_id,
+                    provider_delivery_status=callback.status,
+                    failure_reason=callback.failure_reason,
+                )
+                if reconciliation_status is OutboundSendReconciliationStatus.CONFIRMED:
+                    updated_message = replace(
+                        updated_message,
+                        status=OutboundMessageStatus.SENT,
+                        provider_send_status=ProviderSendStatus.ACCEPTED,
+                        provider_name=callback.provider,
+                        provider_message_id=callback.provider_message_id,
+                        sent_at=updated_message.sent_at or callback.occurred_at,
+                        failure_reason=None,
+                        updated_at=now,
+                    )
+                elif reconciliation_status is OutboundSendReconciliationStatus.FAILED:
+                    updated_message = replace(
+                        updated_message,
+                        status=OutboundMessageStatus.FAILED,
+                        provider_name=callback.provider,
+                        provider_message_id=callback.provider_message_id,
+                        failure_reason=callback.failure_reason,
+                        updated_at=now,
+                    )
+    if (
+        reconciliation_resolved is not None
+        and reconciliation_status is OutboundSendReconciliationStatus.CONFIRMED
+        and temporal_signal_outbox_repository is not None
+    ):
+        await temporal_signal_outbox_repository.append(
+            TemporalSignalOutboxEntry(
+                temporal_signal_id=uuid4(),
+                workspace_id=message.workspace_id,
+                workflow_id=reconciliation_resolved.workflow_id,
+                temporal_workflow_id=reconciliation_resolved.temporal_workflow_id,
+                signal_name=TemporalSignalName.BLOCKED_REVIEW_COMPLETED,
+                payload={
+                    "lead_id": str(message.lead_id),
+                    "outbound_message_id": str(message.message_id),
+                    "reconciliation_id": str(reconciliation_resolved.reconciliation_id),
+                    "provider_message_id": callback.provider_message_id,
+                    "status": reconciliation_status.value,
+                    "occurred_at": callback.occurred_at.isoformat(),
+                    "reason": "provider_delivery_reconciled",
+                },
+                idempotency_key=(
+                    "provider-delivery-reconciled:"
+                    f"{message.workspace_id}:{reconciliation_resolved.reconciliation_id}:"
+                    f"{callback.provider_event_id}"
+                ),
+                available_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
     if updated_message != message:
         updated_message = await message_repository.save(updated_message)
         await _publish_delivery_event(
@@ -207,6 +309,19 @@ async def process_provider_delivery_callback(
         message_id=updated_message.message_id,
         provider_delivery_status=updated_message.provider_delivery_status,
     )
+
+
+def _reconciliation_status_after_delivery(
+    delivery_status: ProviderDeliveryStatus,
+) -> OutboundSendReconciliationStatus | None:
+    if delivery_status in {
+        ProviderDeliveryStatus.ACCEPTED,
+        ProviderDeliveryStatus.DELIVERED,
+    }:
+        return OutboundSendReconciliationStatus.CONFIRMED
+    if delivery_status in _FAILURE_STATUSES:
+        return OutboundSendReconciliationStatus.FAILED
+    return None
 
 
 def _occurrence_status_after_delivery(

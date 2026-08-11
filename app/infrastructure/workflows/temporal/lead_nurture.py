@@ -85,12 +85,22 @@ class ExecuteCadenceStepResult:
     next_cursor_decision: str | None = None
     notification_events: tuple[str, ...] = ()
     fallback_used: bool = False
+    reconciliation_id: UUID | None = None
+    provider_failure_id: UUID | None = None
+    request_id: UUID | None = None
 
 
 @dataclass(frozen=True)
 class TimeoutUncertainOccurrenceInput:
     workspace_id: UUID
     occurrence_id: UUID
+    occurred_at: datetime
+
+
+@dataclass(frozen=True)
+class TimeoutUncertainReconciliationInput:
+    workspace_id: UUID
+    reconciliation_id: UUID
     occurred_at: datetime
 
 
@@ -294,6 +304,15 @@ class LeadNurtureWorkflow:
                 )
             )
             self._record_execution_result(execute_result)
+
+            if execute_result.status == "dispatch_pending":
+                await workflow.wait_condition(
+                    lambda: self._closed or self._reschedule_requested
+                )
+                if self._closed:
+                    return self._snapshot
+                self._consume_reschedule_request()
+                continue
 
             if execute_result.status == "uncertain":
                 await self._wait_for_uncertain_resolution(execute_result)
@@ -507,7 +526,7 @@ class LeadNurtureWorkflow:
         self,
         result: ExecuteCadenceStepResult,
     ) -> None:
-        if result.occurrence_id is None:
+        if result.occurrence_id is None and result.reconciliation_id is None:
             self._send_blocked = True
             await workflow.wait_condition(lambda: self._closed or not self._send_blocked)
             return
@@ -520,16 +539,29 @@ class LeadNurtureWorkflow:
             )
         except TimeoutError:
             assert self._snapshot is not None
-            await workflow.execute_activity(
-                "timeout-uncertain-paused-search-occurrence",
-                TimeoutUncertainOccurrenceInput(
-                    workspace_id=self._snapshot.workspace_id,
-                    occurrence_id=result.occurrence_id,
-                    occurred_at=workflow.now(),
-                ),
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
+            if result.occurrence_id is not None:
+                await workflow.execute_activity(
+                    "timeout-uncertain-paused-search-occurrence",
+                    TimeoutUncertainOccurrenceInput(
+                        workspace_id=self._snapshot.workspace_id,
+                        occurrence_id=result.occurrence_id,
+                        occurred_at=workflow.now(),
+                    ),
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            else:
+                assert result.reconciliation_id is not None
+                await workflow.execute_activity(
+                    "timeout-uncertain-outbound-send",
+                    TimeoutUncertainReconciliationInput(
+                        workspace_id=self._snapshot.workspace_id,
+                        reconciliation_id=result.reconciliation_id,
+                        occurred_at=workflow.now(),
+                    ),
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
             if not self._closed:
                 await workflow.wait_condition(lambda: self._closed or not self._send_blocked)
 
@@ -610,6 +642,9 @@ def _coerce_execution_result(value: object) -> ExecuteCadenceStepResult:
             next_cursor_decision=_coerce_optional_str(value.get("next_cursor_decision")),
             notification_events=tuple(str(item) for item in value.get("notification_events", ())),
             fallback_used=bool(value.get("fallback_used", False)),
+            reconciliation_id=_coerce_uuid(value.get("reconciliation_id")),
+            provider_failure_id=_coerce_uuid(value.get("provider_failure_id")),
+            request_id=_coerce_uuid(value.get("request_id")),
         )
     raise TypeError(f"Unsupported execution result payload: {type(value)!r}")
 
@@ -646,7 +681,12 @@ def _schedule_retry_policy() -> RetryPolicy:
 
 
 def _execution_retry_policy() -> RetryPolicy:
-    # The activity owns an external provider side effect. Until dispatch is
-    # separated behind a committed outbox boundary, replaying it could create
-    # a duplicate send after an uncertain database failure.
-    return RetryPolicy(maximum_attempts=1)
+    # Provider dispatch is owned by the durable send-request worker. Activity
+    # replay only creates-or-gets the same idempotent request, so a crash after
+    # commit but before the Temporal acknowledgement is safe to retry.
+    return RetryPolicy(
+        initial_interval=timedelta(seconds=2),
+        backoff_coefficient=2.0,
+        maximum_interval=timedelta(seconds=30),
+        maximum_attempts=3,
+    )

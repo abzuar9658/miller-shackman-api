@@ -11,6 +11,7 @@ from app.infrastructure.workflows.temporal.activities import (
     execute_paused_search_occurrence_activity,
     schedule_next_campaign_cadence_step_activity,
     schedule_next_paused_search_occurrence_activity,
+    timeout_uncertain_outbound_send_activity,
     timeout_uncertain_paused_search_occurrence_activity,
 )
 from app.infrastructure.workflows.temporal.lead_nurture import LeadNurtureWorkflow
@@ -31,6 +32,7 @@ def _registered_activities() -> Sequence[Any]:
         schedule_next_paused_search_occurrence_activity,
         execute_paused_search_occurrence_activity,
         timeout_uncertain_paused_search_occurrence_activity,
+        timeout_uncertain_outbound_send_activity,
     ]
 
 
