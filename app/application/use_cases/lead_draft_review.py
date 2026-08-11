@@ -31,9 +31,10 @@ from app.application.ports.repositories import (
     WorkspaceRepository,
 )
 from app.application.services.internal_external_events import create_internal_external_event
+from app.application.services.pre_send_crm_refresh import PreSendCRMRefreshContext
+from app.application.services.pre_send_policy import build_pre_send_policy
 from app.application.use_cases.campaign_cadence_execution import (
     _latest_inbound_conversation_text,
-    _pre_send_policy,
     _summary_text_for_outbound_conversation,
     advance_workflow_after_outbound_send,
 )
@@ -44,7 +45,6 @@ from app.application.use_cases.lead_resume import _resume_permission
 from app.application.use_cases.plan_outbound_message import outbound_message_idempotency_key
 from app.application.use_cases.send_outbound_message import (
     OutboundSendContext,
-    PreSendCRMRefreshContext,
     SendOutboundMessageStatus,
     send_outbound_message,
 )
@@ -214,7 +214,10 @@ async def approve_rejected_draft_review_and_send(
             enabled_channels=(review.channel,),
             workspace_contact_policy=workspace_contact_policy,
             current_message_version=message.message_version,
-            pre_send_policy=_pre_send_policy(workspace_contact_policy, workspace.default_timezone),
+            pre_send_policy=build_pre_send_policy(
+                workspace_contact_policy,
+                workspace.default_timezone,
+            ),
         ),
         lead_repository=lead_repository,
         message_repository=message_repository,

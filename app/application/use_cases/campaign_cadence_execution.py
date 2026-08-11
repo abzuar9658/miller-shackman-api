@@ -20,10 +20,14 @@ from app.application.ports.repositories import (
     CampaignExecutionRepository,
     CRMAgentRepository,
     CrmConversationEventRepository,
+    InboundMessageRepository,
     LeadRepository,
     LeadWorkflowRepository,
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
+    OutboundProviderFailureRepository,
+    OutboundSendReconciliationRepository,
+    OutboundSendRequestRepository,
     PausedSearchAgentReminderRepository,
     PausedSearchOccurrenceRepository,
     PausedSearchReviewRepository,
@@ -43,6 +47,8 @@ from app.application.ports.repositories import (
     WorkspaceRepository,
 )
 from app.application.services.canonical_lead_inputs import lead_has_destination_for_channel
+from app.application.services.pre_send_crm_refresh import PreSendCRMRefreshContext
+from app.application.services.pre_send_policy import build_pre_send_policy
 from app.application.services.provider_fallback import provider_fallback_allowed
 from app.application.services.workspace_automation_control import (
     recurring_paused_search_block_reason,
@@ -79,7 +85,6 @@ from app.application.use_cases.schedule_next_paused_search_action import (
 )
 from app.application.use_cases.send_outbound_message import (
     OutboundSendContext,
-    PreSendCRMRefreshContext,
     SendOutboundMessageResult,
     SendOutboundMessageStatus,
     send_outbound_message,
@@ -98,7 +103,6 @@ from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrackStep,
     effective_paused_search_step_action,
 )
-from app.domain.campaigns.pre_send import PreSendPolicy
 from app.domain.campaigns.rejected_draft_review import (
     RejectedDraftReview,
     RejectedDraftReviewStatus,
@@ -107,7 +111,6 @@ from app.domain.campaigns.template_registry import TemplateVersion
 from app.domain.common.ids import CampaignVersionId, LeadId, WorkspaceId
 from app.domain.compliance.contactability import (
     ContactChannel,
-    WorkspaceContactPolicy,
     default_workspace_contact_policy,
 )
 from app.domain.conversations import CrmConversationEventDirection, WorkspaceHandoffConfig
@@ -134,6 +137,7 @@ class CadenceStepExecutionStatus(StrEnum):
     SENT = "sent"
     ALREADY_SENT = "already_sent"
     ALREADY_WAITING_FOR_RESPONSE = "already_waiting_for_response"
+    DISPATCH_PENDING = "dispatch_pending"
     DEFERRED = "deferred"
     REJECTED = "rejected"
     FAILED = "failed"
@@ -168,6 +172,9 @@ class CadenceStepExecutionResult:
     has_more_steps: bool = False
     occurrence_id: UUID | None = None
     fallback_used: bool = False
+    reconciliation_id: UUID | None = None
+    provider_failure_id: UUID | None = None
+    request_id: UUID | None = None
 
 
 async def schedule_next_campaign_cadence_step(
@@ -210,11 +217,30 @@ async def schedule_next_campaign_cadence_step(
         )
 
     if _workflow_has_no_remaining_cadence_steps(workflow):
-        return CadenceStepScheduleResult(
-            status=CadenceStepScheduleStatus.NO_CADENCE_STEP,
-            workflow=workflow,
-            skip_reason="Workflow has no remaining cadence steps.",
+        if workflow.paused_search_track_version_id is None:
+            return CadenceStepScheduleResult(
+                status=CadenceStepScheduleStatus.NO_CADENCE_STEP,
+                workflow=workflow,
+                skip_reason="Workflow has no remaining cadence steps.",
+            )
+        if paused_search_track_repository is None:
+            return CadenceStepScheduleResult(
+                status=CadenceStepScheduleStatus.NO_CADENCE_STEP,
+                workflow=workflow,
+                skip_reason="Paused-search schedule dependencies are unavailable.",
+            )
+        paused_version = await paused_search_track_repository.get_version(
+            workspace_id,
+            workflow.paused_search_track_version_id,
         )
+        if paused_version is None or (
+            workflow.logical_touch_count >= paused_version.max_total_touches
+        ):
+            return CadenceStepScheduleResult(
+                status=CadenceStepScheduleStatus.NO_CADENCE_STEP,
+                workflow=workflow,
+                skip_reason="Workflow has no remaining cadence steps.",
+            )
 
     lead = None
     if lead_repository is not None:
@@ -292,6 +318,8 @@ async def execute_campaign_cadence_step(
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
     message_repository: OutboundMessageRepository,
+    inbound_message_repository: InboundMessageRepository | None = None,
+    outbound_send_reconciliation_repository: OutboundSendReconciliationRepository | None = None,
     rejected_draft_review_repository: RejectedDraftReviewRepository | None = None,
     lead_activity_repository: LeadActivityRepository | None = None,
     crm_conversation_event_repository: CrmConversationEventRepository | None = None,
@@ -314,6 +342,8 @@ async def execute_campaign_cadence_step(
     outbound_message_crm_completion_repository: (
         OutboundMessageCRMCompletionRepository | None
     ) = None,
+    outbound_provider_failure_repository: OutboundProviderFailureRepository | None = None,
+    outbound_send_request_repository: OutboundSendRequestRepository | None = None,
     workspace_handoff_config_repository: WorkspaceHandoffConfigRepository | None = None,
     now: datetime,
     default_openrouter_model: str = "openai/gpt-4o-mini",
@@ -356,6 +386,7 @@ async def execute_campaign_cadence_step(
     is_paused_search_step = workflow.paused_search_track_version_id is not None
     paused_search_occurrence: RecurringOccurrence | None = None
     paused_search_step: PausedSearchTrackStep | None = None
+    paused_search_writing_purpose: str | None = None
     if is_paused_search_step:
         if paused_search_track_repository is None:
             return CadenceStepExecutionResult(
@@ -387,6 +418,17 @@ async def execute_campaign_cadence_step(
             return paused_search_gate_result
         paused_search_track_version_id = workflow.paused_search_track_version_id
         assert paused_search_track_version_id is not None
+        paused_search_track_version = await paused_search_track_repository.get_version(
+            workspace_id,
+            paused_search_track_version_id,
+        )
+        if paused_search_track_version is None:
+            return CadenceStepExecutionResult(
+                status=CadenceStepExecutionStatus.NO_CADENCE_STEP,
+                workflow=workflow,
+                cadence_step_id=cadence_step_id,
+                skip_reason="Pinned paused-search track version is unavailable.",
+            )
         paused_steps = await paused_search_track_repository.get_steps(
             workspace_id,
             paused_search_track_version_id,
@@ -395,6 +437,10 @@ async def execute_campaign_cadence_step(
             (candidate for candidate in paused_steps if candidate.step_id == cadence_step_id),
             None,
         )
+        # Step-level message_goal already contains the phase-specific purpose
+        # (e.g., "Maintenance SMS purpose: ..." or "Reactivation email purpose: ..."),
+        # so we no longer need to populate paused_search_writing_purpose from the
+        # track-level fallback email_writing_purpose/sms_writing_purpose.
         cadence_steps = _paused_search_steps_as_cadence_steps(
             paused_steps,
             campaign_version_id=campaign_version_id,
@@ -608,7 +654,7 @@ async def execute_campaign_cadence_step(
     if workspace_contact_policy is None:
         workspace_contact_policy = default_workspace_contact_policy(workspace_id)
 
-    pre_send_policy = _pre_send_policy(
+    pre_send_policy = build_pre_send_policy(
         workspace_contact_policy,
         workspace.default_timezone,
     )
@@ -686,6 +732,7 @@ async def execute_campaign_cadence_step(
         journey_kind=journey_kind,
         drafting_config=drafting_config,
         template_profile=step.template_profile,
+        paused_search_writing_purpose=paused_search_writing_purpose,
     )
     plan_result = await plan_next_outbound_message_for_lead(
         workspace_id=workspace_id,
@@ -801,6 +848,18 @@ async def execute_campaign_cadence_step(
         message_repository=message_repository,
         sms_provider=sms_provider,
         email_provider=email_provider,
+        inbound_message_repository=inbound_message_repository,
+        outbound_send_reconciliation_repository=(
+            outbound_send_reconciliation_repository if not is_paused_search_step else None
+        ),
+        outbound_provider_failure_repository=(
+            outbound_provider_failure_repository if not is_paused_search_step else None
+        ),
+        outbound_send_request_repository=(
+            outbound_send_request_repository if not is_paused_search_step else None
+        ),
+        workflow_id=workflow.workflow_id if not is_paused_search_step else None,
+        temporal_workflow_id=workflow.temporal_workflow_id if not is_paused_search_step else None,
         workspace_operational_control_repository=workspace_operational_control_repository,
         crm_refresh_context=_pre_send_crm_refresh_context(
             crm_client=crm_client,
@@ -863,6 +922,20 @@ async def execute_campaign_cadence_step(
                 context=replace(send_context, enabled_channels=(fallback_channel,)),
                 lead_repository=lead_repository,
                 message_repository=message_repository,
+                inbound_message_repository=inbound_message_repository,
+                outbound_send_reconciliation_repository=(
+                    outbound_send_reconciliation_repository if not is_paused_search_step else None
+                ),
+                outbound_send_request_repository=(
+                    outbound_send_request_repository if not is_paused_search_step else None
+                ),
+                outbound_provider_failure_repository=(
+                    outbound_provider_failure_repository if not is_paused_search_step else None
+                ),
+                workflow_id=workflow.workflow_id if not is_paused_search_step else None,
+                temporal_workflow_id=(
+                    workflow.temporal_workflow_id if not is_paused_search_step else None
+                ),
                 sms_provider=sms_provider,
                 email_provider=email_provider,
                 workspace_operational_control_repository=workspace_operational_control_repository,
@@ -881,6 +954,16 @@ async def execute_campaign_cadence_step(
                 before_provider_dispatch=before_provider_dispatch,
             )
             fallback_used = True
+    if send_result.status is SendOutboundMessageStatus.DISPATCH_PENDING:
+        return CadenceStepExecutionResult(
+            status=CadenceStepExecutionStatus.DISPATCH_PENDING,
+            workflow=workflow,
+            cadence_step_id=step.cadence_step_id,
+            outbound_message_id=(send_result.message.message_id if send_result.message else None),
+            reconciliation_id=send_result.reconciliation_id,
+            request_id=send_result.request_id,
+            has_more_steps=True,
+        )
     if is_paused_search_step and paused_search_occurrence is not None:
         workflow = await _record_paused_search_occurrence_outcome(
             workspace_id=workspace_id,
@@ -973,11 +1056,18 @@ async def execute_campaign_cadence_step(
         ),
         skip_reason=str(block_metadata.get("explanation", _reason_values(send_result.reasons))),
         metadata=block_metadata,
+        pause_reason=(
+            "provider_failure_exhausted"
+            if send_result.provider_failure_id is not None
+            else "cadence_step_blocked"
+        ),
         status={
             SendOutboundMessageStatus.REJECTED: CadenceStepExecutionStatus.REJECTED,
             SendOutboundMessageStatus.FAILED: CadenceStepExecutionStatus.FAILED,
             SendOutboundMessageStatus.UNCERTAIN: CadenceStepExecutionStatus.UNCERTAIN,
         }.get(send_result.status, CadenceStepExecutionStatus.FAILED),
+        reconciliation_id=send_result.reconciliation_id,
+        provider_failure_id=send_result.provider_failure_id,
     )
     return replace(
         result,
@@ -999,6 +1089,9 @@ async def _pause_after_block(
     skip_reason: str,
     metadata: Mapping[str, object] | None = None,
     status: CadenceStepExecutionStatus,
+    reconciliation_id: UUID | None = None,
+    provider_failure_id: UUID | None = None,
+    pause_reason: str = "cadence_step_blocked",
 ) -> CadenceStepExecutionResult:
     transition_metadata: dict[str, object] = {
         "cadence_step_id": str(cadence_step_id),
@@ -1016,7 +1109,7 @@ async def _pause_after_block(
         workflow_transition_repository=workflow_transition_repository,
         now=now,
         metadata=transition_metadata,
-        pause_reason="cadence_step_blocked",
+        pause_reason=pause_reason,
     )
     return CadenceStepExecutionResult(
         status=status,
@@ -1024,6 +1117,8 @@ async def _pause_after_block(
         transition_id=outcome.transition_id,
         cadence_step_id=cadence_step_id,
         skip_reason=skip_reason or outcome.skip_reason,
+        reconciliation_id=reconciliation_id,
+        provider_failure_id=provider_failure_id,
     )
 
 
@@ -1602,26 +1697,6 @@ def _next_step(
     return None
 
 
-def _pre_send_policy(
-    workspace_contact_policy: WorkspaceContactPolicy,
-    timezone: str,
-) -> PreSendPolicy:
-    if not workspace_contact_policy.quiet_hours_enabled:
-        return PreSendPolicy(
-            allowed_send_start_hour=0,
-            allowed_send_end_hour=24,
-            timezone=timezone,
-        )
-
-    quiet_hours_start = workspace_contact_policy.quiet_hours_start
-    quiet_hours_end = workspace_contact_policy.quiet_hours_end
-    return PreSendPolicy(
-        allowed_send_start_hour=quiet_hours_start.hour if quiet_hours_start else 10,
-        allowed_send_end_hour=quiet_hours_end.hour if quiet_hours_end else 17,
-        timezone=timezone,
-    )
-
-
 def _reason_values(reasons: tuple[StrEnum, ...]) -> str:
     return ", ".join(reason.value for reason in reasons)
 
@@ -1693,6 +1768,9 @@ def _send_block_metadata(
         metadata["selected_channel"] = send_result.message.channel.value
         metadata["message_status"] = send_result.message.status.value
         metadata["provider_send_status"] = send_result.message.provider_send_status.value
+    if send_result.provider_failure_id is not None:
+        metadata["provider_failure_id"] = str(send_result.provider_failure_id)
+        metadata["provider_failure_surface"] = "operator_review_required"
     if send_result.pre_send_decision is not None:
         metadata["pre_send_reasons"] = _reason_value_list(send_result.pre_send_decision.reasons)
         if send_result.pre_send_decision.next_allowed_at is not None:

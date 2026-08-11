@@ -402,7 +402,11 @@ async def continue_ai_conversation_after_inbound(
         enabled_channels=(inbound_channel,),
         workspace_contact_policy=workspace_contact_policy,
         current_message_version=message.message_version,
-        pre_send_policy=_pre_send_policy(workspace_contact_policy, workspace.default_timezone),
+        pre_send_policy=_pre_send_policy(
+            workspace_contact_policy,
+            workspace.default_timezone,
+            global_frequency_limit_hours=None,
+        ),
     )
     send_result = await send_outbound_message(
         workspace_id=workspace_id,
@@ -649,11 +653,14 @@ def _resolve_continuation_step(
 def _pre_send_policy(
     workspace_contact_policy: WorkspaceContactPolicy,
     timezone: str,
+    *,
+    global_frequency_limit_hours: int | None = 24,
 ) -> PreSendPolicy:
     if not workspace_contact_policy.quiet_hours_enabled:
         return PreSendPolicy(
             allowed_send_start_hour=0,
             allowed_send_end_hour=24,
+            global_frequency_limit_hours=global_frequency_limit_hours,
             timezone=timezone,
         )
     quiet_hours_start = workspace_contact_policy.quiet_hours_start
@@ -661,6 +668,7 @@ def _pre_send_policy(
     return PreSendPolicy(
         allowed_send_start_hour=quiet_hours_start.hour if quiet_hours_start else 10,
         allowed_send_end_hour=quiet_hours_end.hour if quiet_hours_end else 17,
+        global_frequency_limit_hours=global_frequency_limit_hours,
         timezone=timezone,
     )
 

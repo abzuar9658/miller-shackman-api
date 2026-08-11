@@ -1636,7 +1636,7 @@ async def test_execute_campaign_cadence_step_persists_rich_draft_rejection_detai
     ]
     assert last_transition.metadata["draft_confidence"] == 0.91
     assert last_transition.metadata["draft_model"] == "openai/gpt-4o-mini"
-    assert last_transition.metadata["draft_prompt_version"] == "outbound_message_draft:v10:r3"
+    assert last_transition.metadata["draft_prompt_version"] == "outbound_message_draft:v12:r3"
     assert last_transition.metadata["selected_channel"] == "email"
     explanation = cast(str, last_transition.metadata["explanation"])
     assert "Draft validation failed: safety flags present." in explanation

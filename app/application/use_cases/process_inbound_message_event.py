@@ -1733,6 +1733,7 @@ async def _send_lead_handoff_acknowledgments_if_configured(
             email_provider=cast(EmailProvider, email_provider),
             event_bus=event_bus,
             workspace_operational_control_repository=workspace_operational_control_repository,
+            inbound_message_repository=inbound_message_repository,
             now=now,
             email_in_reply_to_message_id=(
                 email_threading_headers.in_reply_to_message_id
@@ -1919,6 +1920,7 @@ def _handoff_acknowledgment_pre_send_policy(
             sendable_workflow_states=frozenset({WorkflowState.HUMAN_HANDOFF}),
             allowed_send_start_hour=0,
             allowed_send_end_hour=24,
+            global_frequency_limit_hours=None,
             allow_simultaneous_channels=True,
             timezone=timezone,
         )
@@ -1926,6 +1928,7 @@ def _handoff_acknowledgment_pre_send_policy(
         sendable_workflow_states=frozenset({WorkflowState.HUMAN_HANDOFF}),
         allowed_send_start_hour=(policy.quiet_hours_start.hour if policy.quiet_hours_start else 10),
         allowed_send_end_hour=(policy.quiet_hours_end.hour if policy.quiet_hours_end else 17),
+        global_frequency_limit_hours=None,
         allow_simultaneous_channels=True,
         timezone=timezone,
     )

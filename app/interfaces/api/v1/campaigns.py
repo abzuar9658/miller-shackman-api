@@ -608,6 +608,7 @@ async def run_dormant_selector_route(
         workflow_transition_repository=bundle.workflow_transition_repository,
         temporal_workflow_starter=bundle.temporal_workflow_starter,
         commit=bundle.session.commit,
+        rollback=bundle.rollback,
         preflight_digest_repository=bundle.preflight_digest_repository,
         notification_provider=bundle.notification_provider,
         crm_client=bundle.crm_client,

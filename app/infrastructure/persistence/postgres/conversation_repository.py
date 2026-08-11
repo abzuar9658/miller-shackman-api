@@ -165,6 +165,18 @@ class PostgresInboundMessageRepository:
         )
         return tuple(_model_to_inbound_message(model) for model in result.scalars().all())
 
+    async def get_latest_received_at_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+    ) -> datetime | None:
+        result = await self._session.execute(
+            select(func.max(InboundMessageModel.received_at))
+            .where(InboundMessageModel.workspace_id == workspace_id)
+            .where(InboundMessageModel.lead_id == lead_id)
+        )
+        return result.scalar_one_or_none()
+
     async def save(self, message: InboundMessage) -> InboundMessage:
         values = _inbound_message_to_values(message)
         update_values = {
