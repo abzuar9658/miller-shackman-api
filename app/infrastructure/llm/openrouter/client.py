@@ -33,3 +33,6 @@ class OpenRouterLLMClient:
             latency_ms=latency_ms,
             usage_tokens=usage_tokens,
         )
+
+    async def aclose(self) -> None:
+        await self._client.close()

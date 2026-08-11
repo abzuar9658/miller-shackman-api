@@ -1,7 +1,7 @@
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 
@@ -24,6 +24,7 @@ from app.domain.leads import (
     PausedSearchTrackSelectionStatus,
     PropertyEventType,
 )
+from scripts.seed_paused_search_tracks import TRACK_DEFINITIONS
 
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 LEAD_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -131,6 +132,91 @@ def _catalog() -> tuple[PausedSearchTrackCatalogEntry, ...]:
             track_version_id=UUID("00000000-0000-0000-0000-000000000004"),
         ),
     )
+
+
+def _seeded_track_catalog() -> tuple[PausedSearchTrackCatalogEntry, ...]:
+    namespace = UUID("00000000-0000-0000-0000-000000000100")
+    return tuple(
+        PausedSearchTrackCatalogEntry(
+            track_key=definition.key,
+            display_name=definition.display_name,
+            selection_guidance=definition.selection_guidance,
+            track_id=uuid5(namespace, f"track:{definition.key}"),
+            track_version_id=uuid5(namespace, f"version:{definition.key}"),
+        )
+        for definition in TRACK_DEFINITIONS
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("track_key", "conversation"),
+    (
+        (
+            "specific_property_only",
+            "We still only want that specific home, but we are not ready for a showing "
+            "or agent call; please do not send alternatives.",
+        ),
+        (
+            "waiting_for_inventory",
+            "Nothing available fits, so please check back when more inventory appears.",
+        ),
+        (
+            "renter_now_future_buyer",
+            "We are renting for now but may buy after our rental timeline changes.",
+        ),
+        (
+            "lease_expiration",
+            "We want to revisit buying when our lease expires and we move out.",
+        ),
+        (
+            "recently_renewed_lease",
+            "We just renewed our lease, so buying needs to wait until the new timing.",
+        ),
+        (
+            "search_fit_reassessment",
+            "Our criteria and timing no longer fit, and we need to reassess the search.",
+        ),
+    ),
+)
+async def test_seeded_track_keys_resolve_against_the_full_catalog(
+    track_key: str,
+    conversation: str,
+) -> None:
+    catalog = _seeded_track_catalog()
+    client = _StubLLMClient(
+        _classification_json(
+            outcome="paused_search",
+            selected_track_key=track_key,
+            confidence=0.93,
+            evidence=[conversation],
+            summary=f"Paused-search classification for {track_key}.",
+        )
+    )
+
+    result = await classify_lead_from_conversation(
+        lead=_lead(),
+        now=NOW,
+        crm_conversation_events=(_event(conversation),),
+        llm_client=client,
+        paused_search_catalog=catalog,
+    )
+
+    expected = next(entry for entry in catalog if entry.track_key == track_key)
+    assert result.status is LeadStateClassificationStatus.CLASSIFIED
+    assert result.outcome is LeadStateClassificationOutcome.PAUSED_SEARCH
+    assert result.selected_track_key == track_key
+    assert result.track_selection_status is PausedSearchTrackSelectionStatus.SELECTED
+    assert result.track_version_id == expected.track_version_id
+    assert result.evidence == (conversation,)
+    recent_messages = result.input_context["recent_messages"]
+    assert isinstance(recent_messages, list)
+    assert recent_messages
+    first_message = recent_messages[0]
+    assert isinstance(first_message, dict)
+    assert first_message["content"] == conversation
+    assert all(entry.track_key in client.requests[0].prompt for entry in catalog)
+    assert all(entry.selection_guidance in client.requests[0].prompt for entry in catalog)
 
 
 async def test_classifies_paused_search_with_reason_and_timing() -> None:
@@ -313,6 +399,33 @@ async def test_rejects_unknown_selected_track_key() -> None:
     )
     assert result.status == LeadStateClassificationStatus.REJECTED
     assert LeadStateClassificationReasonCode.INVALID_TRACK_SELECTION in result.reasons
+
+
+async def test_prompt_requires_exact_catalog_keys_for_paused_search() -> None:
+    catalog = _catalog()
+    client = _StubLLMClient(
+        _classification_json(
+            outcome="paused_search",
+            selected_track_key="waiting-for-rates",
+            confidence=0.95,
+            evidence=["Lead is waiting for rates."],
+            summary="The lead is waiting for rates.",
+        )
+    )
+
+    result = await classify_lead_from_conversation(
+        lead=_lead(),
+        now=NOW,
+        crm_conversation_events=(),
+        llm_client=client,
+        paused_search_catalog=catalog,
+    )
+
+    assert result.status is LeadStateClassificationStatus.CLASSIFIED
+    assert "The catalog is a closed set" in client.requests[0].prompt
+    assert "selected_track_key must be null unless it exactly equals" in (
+        client.requests[0].prompt
+    )
 
 
 async def test_includes_freshness_context_for_stale_property_interest_without_reply() -> None:

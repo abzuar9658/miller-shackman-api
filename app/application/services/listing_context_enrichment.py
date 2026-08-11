@@ -1,3 +1,4 @@
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import replace
@@ -10,7 +11,10 @@ from app.application.ports.listing_search import (
     ListingSearchQuery,
     ListingSearchType,
 )
-from app.application.ports.listing_sources import ListingSnapshotRepository, ListingSourceRepository
+from app.application.ports.listing_sources import (
+    ListingSnapshotRepository,
+    ListingSourceRepository,
+)
 from app.application.services.listing_snapshot_matching import select_matching_snapshots
 from app.application.services.llm.outbound_message_drafting import (
     ApprovedOutboundLeadContext,
@@ -23,6 +27,8 @@ from app.domain.listing_sources import (
     CanonicalListingSnapshot,
     ListingSource,
 )
+
+logger = logging.getLogger(__name__)
 
 STREETEASY_HOST = "streeteasy.com"
 MAX_CACHE_CANDIDATES = 200
@@ -50,10 +56,28 @@ async def maybe_enrich_outbound_lead_context(
         or snapshot_repository is None
         or max_results <= 0
     ):
+        logger.info(
+            "Listing enrichment skipped: disabled or missing infrastructure",
+            extra={
+                "workspace_id": str(lead.workspace_id),
+                "lead_id": str(lead.lead_id),
+                "enrichment_enabled": enrichment_enabled,
+                "source_repository_present": source_repository is not None,
+                "snapshot_repository_present": snapshot_repository is not None,
+                "max_results": max_results,
+            },
+        )
         return lead_context
 
     source = await _find_streeteasy_source(source_repository, lead.workspace_id)
     if source is None:
+        logger.info(
+            "Listing enrichment skipped: no approved StreetEasy source",
+            extra={
+                "workspace_id": str(lead.workspace_id),
+                "lead_id": str(lead.lead_id),
+            },
+        )
         return lead_context
 
     query = _build_listing_search_query(
@@ -62,7 +86,34 @@ async def maybe_enrich_outbound_lead_context(
         max_results=max_results,
     )
     if query is None:
+        logger.info(
+            "Listing enrichment skipped: no valid search query could be built",
+            extra={
+                "workspace_id": str(lead.workspace_id),
+                "lead_id": str(lead.lead_id),
+                "extracted_preferences": dict(lead_context.extracted_preferences),
+                "reason": "No locations, addresses, or keywords found in extracted preferences",
+            },
+        )
         return lead_context
+
+    logger.info(
+        "Listing search query built successfully",
+        extra={
+            "workspace_id": str(lead.workspace_id),
+            "lead_id": str(lead.lead_id),
+            "search_query": {
+                "search_type": query.search_type.value,
+                "locations": query.locations,
+                "addresses": query.addresses,
+                "keywords": query.keywords,
+                "min_beds": str(query.min_beds) if query.min_beds else None,
+                "min_price": str(query.min_price) if query.min_price else None,
+                "max_price": str(query.max_price) if query.max_price else None,
+                "limit": query.limit,
+            },
+        },
+    )
 
     live_matches = await _try_live_search(
         query=query,

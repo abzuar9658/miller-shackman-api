@@ -6,6 +6,10 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.application.ports.llm import LLMClient, LLMCompletionRequest, LLMResult
+from app.application.services.llm.lead_state_classification import (
+    LeadStateClassificationResult,
+    LeadStateClassificationStatus,
+)
 from app.application.use_cases.apply_lead_state_classification import (
     ApplyLeadStateClassificationStatus,
     apply_lead_state_classification,
@@ -17,6 +21,7 @@ from app.domain.leads import (
     LeadClassificationAppliedStatus,
     LeadStateClassificationOutcome,
     PausedSearchSource,
+    PausedSearchTrackSelectionStatus,
     lead_paused_search_profile,
 )
 from app.domain.llm import WorkspaceLLMConfig
@@ -321,6 +326,52 @@ async def test_uncertain_catalog_selection_creates_review_hold(
 
     assert result.status is ApplyLeadStateClassificationStatus.REVIEW
     assert result.reasons == (f"paused_search_track_{selection_status}",)
+    assert result.artifact is not None
+    assert result.artifact.applied_status is LeadClassificationAppliedStatus.REVIEW
+    assert lead_repo.lead is not None
+    assert lead_paused_search_profile(lead_repo.lead) is None
+
+
+@pytest.mark.asyncio
+async def test_stale_pinned_track_version_creates_review_hold() -> None:
+    lead_repo = FakeLeadRepository(_lead())
+    artifact_repo = FakeLeadClassificationArtifactRepository()
+    result = await apply_lead_state_classification(
+        actor=None,
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        lead_repository=lead_repo,
+        paused_search_history_repository=lead_repo,
+        artifact_repository=artifact_repo,
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(),
+        workspace_llm_config_repository=FakeWorkspaceLLMConfigRepository(
+            _workspace_llm_config()
+        ),
+        paused_search_track_repository=_track_repository(),
+        llm_client=_StubLLMClient(
+            _classification_json(
+                outcome="review_hold",
+                confidence=0.95,
+                evidence=["The selected version is stale."],
+                summary="The classification requires review.",
+            )
+        ),
+        now=NOW,
+        precomputed_classification_result=LeadStateClassificationResult(
+            status=LeadStateClassificationStatus.CLASSIFIED,
+            prompt_version="test:v1",
+            outcome=LeadStateClassificationOutcome.PAUSED_SEARCH,
+            selected_track_key="waiting-for-rates",
+            track_selection_status=PausedSearchTrackSelectionStatus.SELECTED,
+            track_version_id=UUID("00000000-0000-0000-0000-000000000099"),
+            confidence=0.95,
+            evidence=("The selected version is stale.",),
+            summary="The classification requires review.",
+        ),
+    )
+
+    assert result.status is ApplyLeadStateClassificationStatus.REVIEW
+    assert result.reasons == ("paused_search_track_selection_invalid",)
     assert result.artifact is not None
     assert result.artifact.applied_status is LeadClassificationAppliedStatus.REVIEW
     assert lead_repo.lead is not None
