@@ -17,6 +17,7 @@ class PermissionCapability(StrEnum):
     MANAGE_EXTENSION_DEVICES = "manage_extension_devices"
     EXPORT_CRM_HISTORY_FROM_EXTENSION = "export_crm_history_from_extension"
     VIEW_WORKSPACE_REPORTING = "view_workspace_reporting"
+    VIEW_OUTBOUND_SEND_EXCEPTIONS = "view_outbound_send_exceptions"
     MANAGE_LISTING_SOURCES = "manage_listing_sources"
     IMPORT_CRM_HISTORY = "import_crm_history"
     VIEW_OWN_ASSIGNED_LEAD = "view_own_assigned_lead"
@@ -157,6 +158,7 @@ def _role_allows(
         return capability in {
             PermissionCapability.EXPORT_CRM_HISTORY_FROM_EXTENSION,
             PermissionCapability.VIEW_WORKSPACE_REPORTING,
+            PermissionCapability.VIEW_OUTBOUND_SEND_EXCEPTIONS,
             PermissionCapability.IMPORT_CRM_HISTORY,
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
             PermissionCapability.ENROLL_OWN_LEAD_WHEN_CAMPAIGN_ALLOWS,
@@ -179,6 +181,7 @@ def _role_allows(
             PermissionCapability.MANAGE_CRM_AGENT_MAPPINGS,
             PermissionCapability.MANAGE_EXTENSION_DEVICES,
             PermissionCapability.VIEW_WORKSPACE_REPORTING,
+            PermissionCapability.VIEW_OUTBOUND_SEND_EXCEPTIONS,
             PermissionCapability.MANAGE_LISTING_SOURCES,
             PermissionCapability.IMPORT_CRM_HISTORY,
             PermissionCapability.VIEW_OWN_ASSIGNED_LEAD,
