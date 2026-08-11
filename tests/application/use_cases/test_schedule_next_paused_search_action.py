@@ -11,6 +11,7 @@ from app.application.use_cases.schedule_next_paused_search_action import (
 from app.domain.campaigns import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchTerminalBehavior,
+    PausedSearchTimingBasis,
     PausedSearchTimingReasonCode,
     PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
@@ -229,6 +230,53 @@ async def test_recurring_schedule_is_idempotent_and_stops_at_limit() -> None:
     terminal = await schedule_next_paused_search_action(**kwargs)
     assert terminal.status == PausedSearchScheduleStatus.TERMINAL
     assert terminal.reason_code == PausedSearchTimingReasonCode.OCCURRENCE_LIMIT_REACHED
+
+
+async def test_derived_maintenance_recurrence_switches_to_reactivation() -> None:
+    workflow_repo = FakeLeadWorkflowRepository()
+    await workflow_repo.save(_workflow())
+    occurrence_repo = _FakeOccurrenceRepository()
+    reactivation_step = replace(
+        _step(),
+        step_id=uuid4(),
+        step_order=2,
+        phase=PausedSearchTrackStepPhase.REACTIVATION,
+        delay_hours=0,
+        timing_basis=PausedSearchTimingBasis.CUSTOMER_REENGAGEMENT_DATE,
+        interval_days=None,
+        max_occurrences=1,
+    )
+    kwargs: dict[str, Any] = {
+        "workspace_id": WORKSPACE_ID,
+        "lead_id": LEAD_ID,
+        "lead_repository": FakeLeadRepository(_lead()),
+        "paused_search_track_repository": FakePausedSearchTrackAdminRepository(
+            versions=(_track_version(),),
+            steps=(
+                replace(_step(), delay_hours=0, interval_days=30, max_occurrences=1),
+                reactivation_step,
+            ),
+        ),
+        "lead_workflow_repository": workflow_repo,
+        "timezone": TIMEZONE,
+        "now": NOW,
+        "occurrence_repository": occurrence_repo,
+    }
+
+    for _ in range(3):
+        result = await schedule_next_paused_search_action(**kwargs)
+        assert result.occurrence is not None
+        occurrence_repo.saved[-1] = replace(
+            occurrence_repo.saved[-1], status=RecurringOccurrenceStatus.SENT
+        )
+
+    switched = await schedule_next_paused_search_action(**kwargs)
+
+    assert switched.occurrence is None
+    assert switched.status == PausedSearchScheduleStatus.SCHEDULED
+    assert switched.phase == PausedSearchTrackStepPhase.REACTIVATION
+    assert switched.step_id == reactivation_step.step_id
+    assert len(occurrence_repo.saved) == 3
 
 
 async def test_recurring_schedule_holds_when_flag_is_disabled() -> None:

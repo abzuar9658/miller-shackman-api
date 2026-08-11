@@ -381,6 +381,70 @@ def test_recurring_occurrence_uses_calendar_days_and_is_bounded() -> None:
     assert terminal.outcome is RecurringOccurrenceOutcome.TERMINALIZE
 
 
+def test_maintenance_recurrence_is_derived_until_reactivation_boundary() -> None:
+    step = replace(_steps()[0], delay_hours=0, interval_days=30, max_occurrences=1)
+    profile = _profile(reengagement_not_before=NOW + timedelta(days=120))
+    workflow = _workflow(paused_search_track_step_id=STEP_ONE_ID)
+    track_version = _track_version(reactivation_window_days=30)
+
+    first = plan_next_paused_search_occurrence(
+        profile=profile,
+        track_version=track_version,
+        step=step,
+        steps=(step,),
+        workflow=workflow,
+        timezone=TIMEZONE,
+        now=NOW,
+        occurrence_number=1,
+        previous_due_at=None,
+    )
+    second = plan_next_paused_search_occurrence(
+        profile=profile,
+        track_version=track_version,
+        step=step,
+        steps=(step,),
+        workflow=workflow,
+        timezone=TIMEZONE,
+        now=NOW,
+        occurrence_number=2,
+        previous_due_at=first.due_at,
+    )
+    third = plan_next_paused_search_occurrence(
+        profile=profile,
+        track_version=track_version,
+        step=step,
+        steps=(step,),
+        workflow=workflow,
+        timezone=TIMEZONE,
+        now=NOW,
+        occurrence_number=3,
+        previous_due_at=second.due_at,
+    )
+    fourth = plan_next_paused_search_occurrence(
+        profile=profile,
+        track_version=track_version,
+        step=step,
+        steps=(step,),
+        workflow=workflow,
+        timezone=TIMEZONE,
+        now=NOW,
+        occurrence_number=4,
+        previous_due_at=third.due_at,
+    )
+
+    assert [plan.reason_code for plan in (first, second, third)] == [
+        PausedSearchTimingReasonCode.SCHEDULED,
+        PausedSearchTimingReasonCode.SCHEDULED,
+        PausedSearchTimingReasonCode.SCHEDULED,
+    ]
+    assert [plan.due_at for plan in (first, second, third)] == [
+        NOW.replace(hour=15),
+        NOW.replace(hour=15) + timedelta(days=30),
+        NOW.replace(hour=15) + timedelta(days=60),
+    ]
+    assert fourth.reason_code == PausedSearchTimingReasonCode.MAINTENANCE_WINDOW_ENDED
+
+
 def test_recurring_occurrence_preserves_local_calendar_time_across_dst() -> None:
     step = replace(_steps()[0], delay_hours=0, interval_days=30, max_occurrences=2)
     march_first_ten_am_cst = datetime(2026, 3, 1, 16, 0, tzinfo=UTC)

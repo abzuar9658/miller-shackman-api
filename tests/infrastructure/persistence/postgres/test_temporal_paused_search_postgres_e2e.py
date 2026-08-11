@@ -2,6 +2,7 @@ from app.application.use_cases.apply_lead_state_classification import (
     ApplyLeadStateClassificationStatus,
     apply_lead_state_classification,
 )
+from app.domain.campaigns import PausedSearchTrackAssignmentSource
 from app.domain.leads import LeadClassificationAppliedStatus
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCrmConversationEventRepository,
@@ -71,6 +72,11 @@ async def test_classification_persists_assignment_and_pins_workflow_version() ->
     assert result.classification_result is not None
     assignment = await assignment_repository.get_active_for_lead(WORKSPACE_ID, LEAD_ID)
     assert assignment is not None
+    assert assignment.track_key_snapshot == "waiting-for-rates"
+    assert assignment.track_version_snapshot == 1
+    assert assignment.source is PausedSearchTrackAssignmentSource.CLASSIFICATION
     assert assignment.track_version_id == result.classification_result.track_version_id
+    assert result.artifact.selected_track_key == assignment.track_key_snapshot
+    assert result.artifact.track_version_id == assignment.track_version_id
     workflow = workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     assert workflow.paused_search_track_version_id == assignment.track_version_id

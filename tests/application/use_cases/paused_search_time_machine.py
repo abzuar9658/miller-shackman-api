@@ -19,11 +19,13 @@ from app.domain.campaigns import (
 from app.domain.campaigns.execution import CampaignExecutionConfig
 from app.domain.campaigns.outbound_message import ProviderDeliveryStatus
 from app.domain.compliance.contactability import WorkspaceContactPolicy
+from app.domain.conversations import CrmConversationEvent
 from app.domain.identity import Workspace, WorkspaceStatus
 from app.domain.leads import CanonicalLeadRecord
 from app.domain.workflows import LeadWorkflow
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCampaignExecutionRepository,
+    FakeCrmConversationEventRepository,
     FakeEmailProvider,
     FakeLeadRepository,
     FakeLeadWorkflowRepository,
@@ -218,6 +220,7 @@ class PausedSearchTimeMachine:
         email_result: str | Exception = "time-machine-email",
         sms_result: str | Exception = "time-machine-sms",
         contact_policy: WorkspaceContactPolicy | None = None,
+        conversation_events: tuple[CrmConversationEvent, ...] = (),
     ) -> None:
         self.now = now
         self.timezone = timezone
@@ -233,6 +236,9 @@ class PausedSearchTimeMachine:
         self.occurrence_repository = PausedSearchTimeMachineOccurrenceRepository()
         self.transition_repository = FakeWorkflowTransitionRepository()
         self.message_repository = FakeOutboundMessageRepository()
+        self.crm_conversation_event_repository = FakeCrmConversationEventRepository(
+            conversation_events
+        )
         self.reminder_repository = FakePausedSearchAgentReminderRepository()
         self.email_provider = FakeEmailProvider(email_result)
         self.sms_provider = FakeSMSProvider(sms_result)
@@ -299,6 +305,7 @@ class PausedSearchTimeMachine:
             lead_workflow_repository=self.workflow_repository,
             workflow_transition_repository=self.transition_repository,
             message_repository=self.message_repository,
+            crm_conversation_event_repository=self.crm_conversation_event_repository,
             llm_client=self.llm_client,
             sms_provider=self.sms_provider,
             email_provider=self.email_provider,

@@ -31,6 +31,7 @@ from app.domain.campaigns.paused_search_timing import (
     PausedSearchNextActionPlan,
     PausedSearchOccurrencePlan,
     PausedSearchTimingReasonCode,
+    paused_search_maintenance_boundary,
     plan_next_paused_search_occurrence,
     plan_paused_search_next_action,
 )
@@ -235,6 +236,46 @@ async def schedule_next_paused_search_action(
                 quiet_hours_end=contact_policy.quiet_hours_end,
             )
             if occurrence_plan.reason_code != PausedSearchTimingReasonCode.SCHEDULED:
+                if (
+                    occurrence_plan.reason_code
+                    is PausedSearchTimingReasonCode.MAINTENANCE_WINDOW_ENDED
+                ):
+                    maintenance_boundary = paused_search_maintenance_boundary(
+                        profile=profile,
+                        track_version=track_version,
+                        workflow=workflow,
+                        timezone=timezone,
+                    )
+                    if maintenance_boundary is not None:
+                        reactivation_plan = plan_paused_search_next_action(
+                            profile=profile,
+                            track_version=track_version,
+                            steps=steps,
+                            workflow=workflow,
+                            timezone=timezone,
+                            now=maintenance_boundary,
+                            quiet_hours_enabled=contact_policy.quiet_hours_enabled,
+                            quiet_hours_start=contact_policy.quiet_hours_start,
+                            quiet_hours_end=contact_policy.quiet_hours_end,
+                        )
+                        if (
+                            reactivation_plan.reason_code
+                            is PausedSearchTimingReasonCode.SCHEDULED
+                        ):
+                            workflow = await _save_schedule(
+                                workflow,
+                                lead_workflow_repository,
+                                reactivation_plan,
+                                now,
+                            )
+                            return PausedSearchNextActionScheduleResult(
+                                status=PausedSearchScheduleStatus.SCHEDULED,
+                                workflow=workflow,
+                                next_action_at=reactivation_plan.next_action_at,
+                                phase=reactivation_plan.phase,
+                                step_id=reactivation_plan.step_id,
+                                reason_code=reactivation_plan.reason_code,
+                            )
                 workflow = await _save_terminal_or_hold(
                     workflow=workflow,
                     track_version=track_version,

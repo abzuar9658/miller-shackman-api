@@ -27,6 +27,7 @@ class PausedSearchTimingReasonCode(StrEnum):
     NO_STEP_IN_PHASE = "no_step_in_phase"
     SCHEDULED = "scheduled"
     OCCURRENCE_LIMIT_REACHED = "occurrence_limit_reached"
+    MAINTENANCE_WINDOW_ENDED = "maintenance_window_ended"
     TOUCH_LIMIT_REACHED = "touch_limit_reached"
     DURATION_EXPIRED = "duration_expired"
 
@@ -67,7 +68,7 @@ def plan_next_paused_search_occurrence(
     quiet_hours_start: time | None = time(10, 0),
     quiet_hours_end: time | None = time(17, 0),
 ) -> PausedSearchOccurrencePlan:
-    if occurrence_number > step.max_occurrences:
+    if occurrence_number > paused_search_step_occurrence_cap(step, track_version):
         return PausedSearchOccurrencePlan(
             next_action_at=None,
             due_at=None,
@@ -133,6 +134,26 @@ def plan_next_paused_search_occurrence(
             reason_code=PausedSearchTimingReasonCode.DURATION_EXPIRED,
         )
 
+    maintenance_boundary = paused_search_maintenance_boundary(
+        profile=profile,
+        track_version=track_version,
+        workflow=workflow,
+        timezone=timezone,
+    )
+    if step.phase is PausedSearchTrackStepPhase.MAINTENANCE and (
+        maintenance_boundary is not None and due_at >= maintenance_boundary
+    ):
+        return PausedSearchOccurrencePlan(
+            next_action_at=None,
+            due_at=due_at,
+            phase=step.phase,
+            step_id=step.step_id,
+            occurrence_number=occurrence_number,
+            outcome=RecurringOccurrenceOutcome.HOLD,
+            reason_code=PausedSearchTimingReasonCode.MAINTENANCE_WINDOW_ENDED,
+            reason_detail="maintenance recurrence stops when the reactivation window begins",
+        )
+
     return PausedSearchOccurrencePlan(
         next_action_at=_roll_forward_to_allowed_window(
             due_at,
@@ -147,6 +168,55 @@ def plan_next_paused_search_occurrence(
         occurrence_number=occurrence_number,
         outcome=RecurringOccurrenceOutcome.SEND,
         reason_code=PausedSearchTimingReasonCode.SCHEDULED,
+    )
+
+
+def paused_search_step_occurrence_cap(
+    step: PausedSearchTrackStep,
+    track_version: PausedSearchTrackVersion,
+) -> int:
+    """Return the defensive occurrence cap for a step.
+
+    A maintenance step with an interval uses ``max_occurrences=1`` as the
+    legacy/default value meaning "derive the count from the phase boundary".
+    The track touch cap remains the hard upper bound. Explicit caps greater
+    than one remain respected for backwards compatibility.
+    """
+
+    if (
+        step.phase is PausedSearchTrackStepPhase.MAINTENANCE
+        and step.interval_days is not None
+        and step.max_occurrences == 1
+    ):
+        return max(step.max_occurrences, track_version.max_total_touches)
+    return step.max_occurrences
+
+
+def paused_search_maintenance_boundary(
+    *,
+    profile: LeadPausedSearchProfile,
+    track_version: PausedSearchTrackVersion,
+    workflow: LeadWorkflow,
+    timezone: str,
+) -> datetime | None:
+    """Return when maintenance ends and the reactivation phase begins."""
+
+    reactivation_date = profile.reengagement_not_before or _fallback_reactivation_date(
+        profile=profile,
+        track_version=track_version,
+        workflow=workflow,
+        timezone=timezone,
+    )
+    if reactivation_date is None:
+        return paused_search_duration_end(
+            workflow=workflow,
+            track_version=track_version,
+            timezone=timezone,
+        )
+    return _add_calendar_days(
+        reactivation_date,
+        -track_version.reactivation_window_days,
+        timezone,
     )
 
 
