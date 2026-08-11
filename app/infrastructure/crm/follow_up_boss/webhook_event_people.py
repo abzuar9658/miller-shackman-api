@@ -102,6 +102,7 @@ async def handle_people_event(
                 notification_provider=bundle.notification_provider,
                 user_repository=bundle.user_repository,
                 commit=bundle.commit,
+                rollback=bundle.rollback,
                 default_openrouter_model=bundle.default_openrouter_model,
                 routing_review_repository=bundle.routing_review_repository,
             )

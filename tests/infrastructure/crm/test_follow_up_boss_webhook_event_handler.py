@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -6,6 +6,10 @@ from uuid import UUID
 
 import pytest
 
+from app.application.ports.crm import (
+    CRMResourceFetchError,
+    CRMResourceFetchFailureKind,
+)
 from app.application.ports.crm_webhook import FollowUpBossWebhookEventBundle
 from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
 from app.infrastructure.crm.follow_up_boss import webhook_event_handler
@@ -45,7 +49,17 @@ class _FakeExternalEventRepository:
 
     async def save(self, event: ExternalEvent) -> ExternalEvent:
         self.saved.append(event)
+        self.existing = event
         return event
+
+
+class _FailingCRMClient:
+    def __init__(self, kind: CRMResourceFetchFailureKind) -> None:
+        self.kind = kind
+
+    async def fetch_resource_by_uri(self, workspace_id: UUID, uri: str) -> dict[str, Any]:
+        _ = (workspace_id, uri)
+        raise CRMResourceFetchError(self.kind, "fetch_failed")
 
 
 def _existing_event() -> ExternalEvent:
@@ -145,3 +159,117 @@ async def test_logs_processed_people_webhook(monkeypatch: pytest.MonkeyPatch) ->
     assert result.status == "processed"
     assert fake_logger.records[0][1] == "follow_up_boss_webhook_processed"
     assert fake_logger.records[0][2]["processed_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_transient_resource_fetch_failure_is_retryable_and_scheduled() -> None:
+    repository = _FakeExternalEventRepository()
+    handler = FollowUpBossWebhookEventHandlerImpl(
+        bundle=cast(
+            FollowUpBossWebhookEventBundle,
+            SimpleNamespace(
+                external_event_repository=repository,
+                crm_client=_FailingCRMClient(CRMResourceFetchFailureKind.TRANSIENT),
+            ),
+        )
+    )
+
+    result = await handler.handle(WORKSPACE_ID, _payload("textMessagesCreated"), NOW)
+
+    assert result.status == "retryable_failure"
+    assert repository.saved[0].failure_kind is not None
+    assert repository.saved[0].failure_kind.value == "transient"
+    assert repository.saved[0].attempt_count == 1
+    assert repository.saved[0].next_retry_at == NOW.replace(second=1)
+
+
+@pytest.mark.asyncio
+async def test_permanent_resource_fetch_failure_is_terminal() -> None:
+    repository = _FakeExternalEventRepository()
+    handler = FollowUpBossWebhookEventHandlerImpl(
+        bundle=cast(
+            FollowUpBossWebhookEventBundle,
+            SimpleNamespace(
+                external_event_repository=repository,
+                crm_client=_FailingCRMClient(CRMResourceFetchFailureKind.PERMANENT),
+            ),
+        )
+    )
+
+    result = await handler.handle(WORKSPACE_ID, _payload("textMessagesCreated"), NOW)
+
+    assert result.status == "permanent_failure"
+    assert repository.saved[0].processed_at == NOW
+    assert repository.saved[0].next_retry_at is None
+
+
+@pytest.mark.asyncio
+async def test_replay_updates_retryable_event_without_returning_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _FakeExternalEventRepository(
+        replace(
+            _existing_event(),
+            status=ExternalEventStatus.RETRYABLE_FAILURE,
+            attempt_count=2,
+            next_retry_at=NOW,
+        )
+    )
+
+    async def fake_handle_text_messages_created(*args: object) -> tuple[int, int]:
+        _ = args
+        return 1, 0
+
+    monkeypatch.setattr(
+        webhook_event_handler,
+        "handle_text_messages_created",
+        fake_handle_text_messages_created,
+    )
+    handler = FollowUpBossWebhookEventHandlerImpl(
+        bundle=cast(
+            FollowUpBossWebhookEventBundle,
+            SimpleNamespace(external_event_repository=repository),
+        )
+    )
+
+    result = await handler.handle(
+        WORKSPACE_ID,
+        _payload("textMessagesCreated"),
+        NOW,
+        replay=True,
+    )
+
+    assert result.status == "processed"
+    assert repository.saved[-1].external_event_id == EXTERNAL_EVENT_ID
+    assert repository.saved[-1].status is ExternalEventStatus.PROCESSED
+
+
+@pytest.mark.asyncio
+async def test_third_transient_failure_becomes_exhausted() -> None:
+    repository = _FakeExternalEventRepository(
+        replace(
+            _existing_event(),
+            status=ExternalEventStatus.RETRYABLE_FAILURE,
+            attempt_count=3,
+            next_retry_at=NOW,
+        )
+    )
+    handler = FollowUpBossWebhookEventHandlerImpl(
+        bundle=cast(
+            FollowUpBossWebhookEventBundle,
+            SimpleNamespace(
+                external_event_repository=repository,
+                crm_client=_FailingCRMClient(CRMResourceFetchFailureKind.TRANSIENT),
+            ),
+        )
+    )
+
+    result = await handler.handle(
+        WORKSPACE_ID,
+        _payload("textMessagesCreated"),
+        NOW,
+        replay=True,
+    )
+
+    assert result.status == "exhausted"
+    assert repository.saved[-1].next_retry_at is None

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import cast
 from uuid import UUID
@@ -16,6 +17,7 @@ from app.domain.crm_sync import (
     CRMSyncType,
     CRMSyncWindowState,
     ExternalEvent,
+    ExternalEventFailureKind,
     ExternalEventStatus,
 )
 from app.infrastructure.persistence.postgres.models import (
@@ -265,6 +267,41 @@ class PostgresExternalEventRepository:
         result = await self._session.execute(statement)
         return _model_to_external_event(result.scalar_one())
 
+    async def claim_due_retryable(
+        self,
+        *,
+        provider_name: str,
+        now: datetime,
+        limit: int = 10,
+    ) -> tuple[ExternalEvent, ...]:
+        statement = (
+            select(ExternalEventModel)
+            .where(ExternalEventModel.provider == provider_name)
+            .where(ExternalEventModel.status == ExternalEventStatus.RETRYABLE_FAILURE.value)
+            .where(
+                (ExternalEventModel.next_retry_at.is_(None))
+                | (ExternalEventModel.next_retry_at <= now)
+            )
+            .order_by(ExternalEventModel.next_retry_at.asc(), ExternalEventModel.created_at.asc())
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        result = await self._session.execute(statement)
+        claimed: list[ExternalEvent] = []
+        for model in result.scalars().all():
+            event = _model_to_external_event(model)
+            claimed.append(
+                await self.save(
+                    replace(
+                        event,
+                        attempt_count=event.attempt_count + 1,
+                        next_retry_at=None,
+                        updated_at=now,
+                    )
+                )
+            )
+        return tuple(claimed)
+
 
 class PostgresCRMSyncWindowStateRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -415,6 +452,9 @@ def _external_event_to_values(event: ExternalEvent) -> dict[str, object]:
         "status": event.status.value,
         "payload_redacted": event.payload_redacted,
         "failure_reason": event.failure_reason,
+        "failure_kind": event.failure_kind.value if event.failure_kind is not None else None,
+        "attempt_count": event.attempt_count,
+        "next_retry_at": event.next_retry_at,
         "created_at": event.created_at,
         "updated_at": event.updated_at,
     }
@@ -436,4 +476,11 @@ def _model_to_external_event(model: ExternalEventModel) -> ExternalEvent:
         failure_reason=model.failure_reason,
         created_at=model.created_at,
         updated_at=model.updated_at,
+        failure_kind=(
+            ExternalEventFailureKind(model.failure_kind)
+            if model.failure_kind is not None
+            else None
+        ),
+        attempt_count=model.attempt_count or 0,
+        next_retry_at=model.next_retry_at,
     )

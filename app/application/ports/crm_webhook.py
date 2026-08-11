@@ -60,6 +60,7 @@ class FollowUpBossWebhookEventBundle:
     routing_review_repository: LeadRoutingReviewRepository | None = None
     default_openrouter_model: str = "openai/gpt-4o-mini"
     commit: Callable[[], Awaitable[None]] | None = None
+    rollback: Callable[[], Awaitable[None]] | None = None
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None
 
@@ -81,5 +82,6 @@ class FollowUpBossWebhookEventHandler(Protocol):
         workspace_id: UUID,
         payload: Mapping[str, Any],
         now: datetime,
+        replay: bool = False,
     ) -> FollowUpBossWebhookEventResult:
         raise NotImplementedError

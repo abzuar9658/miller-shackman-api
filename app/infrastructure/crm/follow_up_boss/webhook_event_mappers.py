@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from app.application.ports.crm import CRMResourceFetchError, CRMResourceFetchFailureKind
 from app.application.ports.crm_webhook import FollowUpBossWebhookEventBundle
 from app.application.use_cases.process_contact_suppression_event import (
     ContactSuppressionEvent,
@@ -31,7 +32,10 @@ async def handle_notes_created(
 ) -> tuple[int, int]:
     raw = await bundle.crm_client.fetch_resource_by_uri(workspace_id, uri)
     if raw is None:
-        return 0, 1
+        raise CRMResourceFetchError(
+            CRMResourceFetchFailureKind.PERMANENT,
+            "crm_resource_not_found",
+        )
     notes = extract_collection(raw, "notes", fallback_id_key="id")
     processed = 0
     for note in notes:
@@ -126,7 +130,10 @@ async def handle_em_events_unsubscribed(
 ) -> tuple[int, int]:
     raw = await bundle.crm_client.fetch_resource_by_uri(workspace_id, uri)
     if raw is None:
-        return 0, 1
+        raise CRMResourceFetchError(
+            CRMResourceFetchFailureKind.PERMANENT,
+            "crm_resource_not_found",
+        )
     events = extract_collection(raw, "emEvents")
     processed = 0
     for event in events:
@@ -175,7 +182,10 @@ async def _handle_communication_created(
 ) -> tuple[int, int]:
     raw = await bundle.crm_client.fetch_resource_by_uri(workspace_id, uri)
     if raw is None:
-        return 0, 1
+        raise CRMResourceFetchError(
+            CRMResourceFetchFailureKind.PERMANENT,
+            "crm_resource_not_found",
+        )
     resources = extract_collection(raw, collection_key, fallback_id_key="id")
     processed = 0
     for resource in resources:

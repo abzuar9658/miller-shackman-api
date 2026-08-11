@@ -31,6 +31,15 @@ class ExternalEventStatus(StrEnum):
     PROCESSED = "processed"
     FAILED = "failed"
     IGNORED = "ignored"
+    RETRYABLE_FAILURE = "retryable_failure"
+    PERMANENT_FAILURE = "permanent_failure"
+    EXHAUSTED = "exhausted"
+
+
+class ExternalEventFailureKind(StrEnum):
+    TRANSIENT = "transient"
+    PERMANENT = "permanent"
+    UNKNOWN = "unknown"
 
 
 DEFAULT_WORKSPACE_CRM_SYNC_INTERVAL_SECONDS = 300
@@ -116,3 +125,6 @@ class ExternalEvent:
     failure_reason: str | None
     created_at: datetime
     updated_at: datetime
+    failure_kind: ExternalEventFailureKind | None = None
+    attempt_count: int = 0
+    next_retry_at: datetime | None = None

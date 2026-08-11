@@ -49,12 +49,13 @@ def envelope_event(
         crm_lead_id=None,
         lead_id=None,
         received_at=occurred_at,
-        processed_at=now,
+        processed_at=now if status is not ExternalEventStatus.PENDING else None,
         status=status,
         payload_redacted=dict(payload),
         failure_reason=None,
         created_at=now,
         updated_at=now,
+        attempt_count=1,
     )
 
 

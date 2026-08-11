@@ -18,6 +18,12 @@ from app.interfaces.api.dependencies.inbound import (
 def get_follow_up_boss_webhook_event_handler(
     bundle: Annotated[InboundServiceBundle, Depends(get_inbound_service_bundle)],
 ) -> FollowUpBossWebhookEventHandler:
+    return build_follow_up_boss_webhook_event_handler(bundle)
+
+
+def build_follow_up_boss_webhook_event_handler(
+    bundle: InboundServiceBundle,
+) -> FollowUpBossWebhookEventHandler:
     return FollowUpBossWebhookEventHandlerImpl(
         bundle=FollowUpBossWebhookEventBundle(
             lead_repository=bundle.lead_repository,
@@ -49,5 +55,6 @@ def get_follow_up_boss_webhook_event_handler(
             user_repository=bundle.user_repository,
             default_openrouter_model=bundle.default_openrouter_model,
             commit=bundle.session.commit,
+            rollback=bundle.rollback,
         ),
     )
