@@ -10,7 +10,9 @@ from scripts.evaluate_lead_state_classification import (
     EvaluationScenario,
     ScenarioEvaluation,
     _aggregate_metrics,
+    _build_scenarios,
     _matches,
+    _scenario_catalog,
 )
 
 
@@ -95,4 +97,37 @@ def test_aggregate_metrics_reports_route_mismatch_and_safety_signals() -> None:
         "unexpected_human_handoffs": 0,
         "unexpected_blocked_routes": 0,
         "unstable_scenarios": [],
+    }
+
+
+def test_seeded_scenarios_use_all_six_competing_tracks() -> None:
+    expected_keys = {
+        "specific_property_only",
+        "waiting_for_inventory",
+        "renter_now_future_buyer",
+        "lease_expiration",
+        "recently_renewed_lease",
+        "search_fit_reassessment",
+    }
+    scenarios = {scenario.key: scenario for scenario in _build_scenarios()}
+
+    assert expected_keys <= scenarios.keys()
+    for track_key in expected_keys:
+        catalog = _scenario_catalog(scenarios[track_key])
+        assert {entry.track_key for entry in catalog} == expected_keys
+        assert all(entry.selection_guidance for entry in catalog)
+
+
+def test_legacy_renter_context_targets_the_current_seeded_track() -> None:
+    scenarios = {scenario.key: scenario for scenario in _build_scenarios()}
+    scenario = scenarios["renter_now_future_buyer_lease_context"]
+
+    assert scenario.expected_track_key == "renter_now_future_buyer"
+    assert {entry.track_key for entry in _scenario_catalog(scenario)} == {
+        "specific_property_only",
+        "waiting_for_inventory",
+        "renter_now_future_buyer",
+        "lease_expiration",
+        "recently_renewed_lease",
+        "search_fit_reassessment",
     }

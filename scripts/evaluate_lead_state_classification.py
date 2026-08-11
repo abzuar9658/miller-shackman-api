@@ -41,6 +41,7 @@ from app.domain.leads import (
     LeadType,
 )
 from app.infrastructure.providers import build_llm_client
+from scripts.seed_paused_search_tracks import TRACK_DEFINITIONS
 
 NOW = datetime(2026, 8, 4, 15, 0, tzinfo=UTC)
 DORMANT_THRESHOLD_DAYS = 60
@@ -178,6 +179,8 @@ def _paired_events(
 def _paused_scenario(
     track_key: str,
     anchor: str,
+    *,
+    expected_track_key: str | None = None,
 ) -> EvaluationScenario:
     key = track_key
     events = _paired_events(
@@ -195,10 +198,62 @@ def _paused_scenario(
         title=f"Paused-search: {key}",
         description=f"The lead gives a clear {key} reason and remains viable.",
         expected_outcome="paused_search",
-        expected_track_key=key,
+        expected_track_key=expected_track_key or key,
         events=events,
         lead_last_meaningful_communication_at=events[-1].occurred_at,
         enrollment_signal="agent_requested_ai_follow_up",
+    )
+
+
+def _seeded_track_catalog() -> tuple[PausedSearchTrackCatalogEntry, ...]:
+    return tuple(
+        PausedSearchTrackCatalogEntry(
+            track_key=definition.key,
+            display_name=definition.display_name,
+            selection_guidance=definition.selection_guidance,
+            track_id=_id(f"seeded-track:{definition.key}"),
+            track_version_id=_id(f"seeded-track-version:{definition.key}"),
+        )
+        for definition in TRACK_DEFINITIONS
+    )
+
+
+def _seeded_paused_scenarios() -> tuple[EvaluationScenario, ...]:
+    scenario_messages = {
+        "specific_property_only": (
+            "We still only want the home at 123 Main Street, but we are not ready to "
+            "schedule a showing or speak with an agent. Please do not send alternatives; "
+            "check back later.",
+        ),
+        "waiting_for_inventory": (
+            "Nothing available fits our criteria, so please check back when more "
+            "inventory appears.",
+        ),
+        "renter_now_future_buyer": (
+            "We are renting for now and may buy after our rental timeline changes.",
+        ),
+        "lease_expiration": (
+            "We want to revisit buying when our lease expires and we move out.",
+        ),
+        "recently_renewed_lease": (
+            "We just renewed our lease, so buying needs to wait until the new timing.",
+        ),
+        "search_fit_reassessment": (
+            "Our criteria and timing no longer fit, and we need to reassess the search.",
+        ),
+    }
+    return tuple(
+        EvaluationScenario(
+            key=track_key,
+            title=f"Seeded paused-search: {track_key}",
+            description=f"The lead gives evidence for the seeded {track_key} track.",
+            expected_outcome="paused_search",
+            expected_track_key=track_key,
+            events=_paired_events(track_key, messages),
+            lead_last_meaningful_communication_at=NOW,
+            enrollment_signal="agent_requested_ai_follow_up",
+        )
+        for track_key, messages in scenario_messages.items()
     )
 
 
@@ -486,7 +541,7 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
     )
 
     anchors = {
-        "rented_temporarily": (
+        "renter_now_future_buyer_lease_context": (
             "We renewed our lease through March, so we are renting temporarily."
         ),
         "timing_not_right": (
@@ -494,9 +549,6 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
         ),
         "waiting_for_rates": (
             "Mortgage rates are too high, so we are waiting for rates to improve."
-        ),
-        "waiting_for_inventory": (
-            "We have not found the right inventory, so we are waiting for more homes."
         ),
         "financial_prep": (
             "We need more time to save and get financially prepared for the purchase."
@@ -509,7 +561,19 @@ def _build_scenarios() -> tuple[EvaluationScenario, ...]:
             "renting, finances, or personal timing, so we need that resolved first."
         ),
     }
-    scenarios.extend(_paused_scenario(track_key, anchor) for track_key, anchor in anchors.items())
+    scenarios.extend(
+        _paused_scenario(
+            track_key,
+            anchor,
+            expected_track_key=(
+                "renter_now_future_buyer"
+                if track_key == "renter_now_future_buyer_lease_context"
+                else None
+            ),
+        )
+        for track_key, anchor in anchors.items()
+    )
+    scenarios.extend(_seeded_paused_scenarios())
     return tuple(scenarios)
 
 
@@ -591,6 +655,8 @@ def _scenario_catalog(
 ) -> tuple[PausedSearchTrackCatalogEntry, ...]:
     if scenario.expected_track_key is None:
         return ()
+    if scenario.expected_track_key in {definition.key for definition in TRACK_DEFINITIONS}:
+        return _seeded_track_catalog()
     track_key = scenario.expected_track_key
     return (
         PausedSearchTrackCatalogEntry(
