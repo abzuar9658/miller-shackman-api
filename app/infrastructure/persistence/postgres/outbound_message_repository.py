@@ -1,6 +1,7 @@
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,7 +12,7 @@ from app.domain.campaigns.outbound_message import (
     ProviderDeliveryStatus,
 )
 from app.domain.campaigns.pre_send import ProviderSendStatus
-from app.domain.common.ids import LeadId, WorkspaceId
+from app.domain.common.ids import CampaignId, LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.infrastructure.persistence.postgres.models import (
     OutboundMessageCRMCompletionModel,
@@ -39,6 +40,27 @@ class PostgresOutboundMessageRepository:
         )
         return tuple(_model_to_message(model) for model in result.scalars().all())
 
+    async def get_latest_sent_at_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        campaign_id: CampaignId | None = None,
+        channel: ContactChannel | None = None,
+    ) -> datetime | None:
+        statement = (
+            select(func.max(OutboundMessageModel.sent_at))
+            .where(OutboundMessageModel.workspace_id == workspace_id)
+            .where(OutboundMessageModel.lead_id == lead_id)
+            .where(OutboundMessageModel.status == OutboundMessageStatus.SENT.value)
+        )
+        if campaign_id is not None:
+            statement = statement.where(OutboundMessageModel.campaign_id == campaign_id)
+        if channel is not None:
+            statement = statement.where(OutboundMessageModel.channel == channel.value)
+        result = await self._session.execute(statement)
+        return result.scalar_one_or_none()
+
     async def get_by_id(
         self,
         workspace_id: WorkspaceId,
@@ -49,6 +71,20 @@ class PostgresOutboundMessageRepository:
                 OutboundMessageModel.workspace_id == workspace_id,
                 OutboundMessageModel.message_id == message_id,
             ),
+        )
+        model = result.scalar_one_or_none()
+        return _model_to_message(model) if model else None
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        message_id: UUID,
+    ) -> OutboundMessage | None:
+        result = await self._session.execute(
+            select(OutboundMessageModel)
+            .where(OutboundMessageModel.workspace_id == workspace_id)
+            .where(OutboundMessageModel.message_id == message_id)
+            .with_for_update(),
         )
         model = result.scalar_one_or_none()
         return _model_to_message(model) if model else None
@@ -216,6 +252,10 @@ def _message_to_values(message: OutboundMessage) -> dict[str, object]:
         "provider_status_updated_at": message.provider_status_updated_at,
         "delivered_at": message.delivered_at,
         "failure_reason": message.failure_reason,
+        "provider_attempt_count": message.provider_attempt_count,
+        "provider_last_attempt_at": message.provider_last_attempt_at,
+        "provider_next_retry_at": message.provider_next_retry_at,
+        "provider_last_failure_kind": message.provider_last_failure_kind,
         "draft_prompt_version": message.draft_prompt_version,
         "draft_model": message.draft_model,
         "draft_latency_ms": message.draft_latency_ms,
@@ -257,6 +297,10 @@ def _model_to_message(model: OutboundMessageModel) -> OutboundMessage:
         provider_status_updated_at=model.provider_status_updated_at,
         delivered_at=model.delivered_at,
         failure_reason=model.failure_reason,
+        provider_attempt_count=model.provider_attempt_count,
+        provider_last_attempt_at=model.provider_last_attempt_at,
+        provider_next_retry_at=model.provider_next_retry_at,
+        provider_last_failure_kind=model.provider_last_failure_kind,
         draft_prompt_version=model.draft_prompt_version,
         draft_model=model.draft_model,
         draft_latency_ms=model.draft_latency_ms,

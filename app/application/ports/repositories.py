@@ -8,6 +8,15 @@ from app.domain.campaigns.outbound_message import (
     OutboundMessageCRMCompletionRecord,
     ProviderDeliveryStatus,
 )
+from app.domain.campaigns.outbound_provider_failure import OutboundProviderFailure
+from app.domain.campaigns.outbound_send_reconciliation import (
+    OutboundSendReconciliation,
+    OutboundSendReconciliationStatus,
+)
+from app.domain.campaigns.outbound_send_request import (
+    OutboundSendRequest,
+    OutboundSendRequestStatus,
+)
 from app.domain.campaigns.paused_search_notifications import (
     PausedSearchNotification,
     PausedSearchNotificationPolicy,
@@ -38,6 +47,7 @@ from app.domain.common.ids import (
     WorkspaceMembershipId,
 )
 from app.domain.compliance import WorkspaceContactPolicy
+from app.domain.compliance.contactability import ContactChannel
 from app.domain.conversations import CrmConversationEvent, Handoff, WorkspaceHandoffConfig
 from app.domain.crm_agent_mapping import (
     CRMAgent,
@@ -378,6 +388,7 @@ class OutboundMessageRepository(Protocol):
     ) -> tuple[OutboundMessage, ...]:
         raise NotImplementedError
 
+
     async def get_by_provider_message_id_for_workspace(
         self,
         workspace_id: WorkspaceId,
@@ -409,6 +420,142 @@ class OutboundMessageCRMCompletionRepository(Protocol):
         self,
         record: OutboundMessageCRMCompletionRecord,
     ) -> OutboundMessageCRMCompletionRecord:
+        raise NotImplementedError
+
+
+class OutboundSendReconciliationRepository(Protocol):
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        reconciliation_id: UUID,
+    ) -> OutboundSendReconciliation | None:
+        raise NotImplementedError
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        reconciliation_id: UUID,
+    ) -> OutboundSendReconciliation | None:
+        raise NotImplementedError
+
+    async def get_by_outbound_message_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        outbound_message_id: UUID,
+    ) -> OutboundSendReconciliation | None:
+        raise NotImplementedError
+
+    async def get_by_idempotency_key_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
+    ) -> OutboundSendReconciliation | None:
+        raise NotImplementedError
+
+    async def create_or_get(
+        self,
+        reconciliation: OutboundSendReconciliation,
+    ) -> OutboundSendReconciliation:
+        raise NotImplementedError
+
+    async def resolve(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        reconciliation_id: UUID,
+        status: OutboundSendReconciliationStatus,
+        now: datetime,
+        provider_message_id: str | None = None,
+        provider_delivery_status: ProviderDeliveryStatus | None = None,
+        failure_reason: str | None = None,
+    ) -> OutboundSendReconciliation | None:
+        raise NotImplementedError
+
+class OutboundSendRequestRepository(Protocol):
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        request_id: UUID,
+    ) -> OutboundSendRequest | None:
+        raise NotImplementedError
+
+    async def get_by_idempotency_key(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
+    ) -> OutboundSendRequest | None:
+        raise NotImplementedError
+
+    async def get_by_outbound_message_id(
+        self,
+        workspace_id: WorkspaceId,
+        outbound_message_id: UUID,
+    ) -> OutboundSendRequest | None:
+        raise NotImplementedError
+
+    async def create_or_get(self, request: OutboundSendRequest) -> OutboundSendRequest:
+        raise NotImplementedError
+
+    async def save(self, request: OutboundSendRequest) -> OutboundSendRequest:
+        raise NotImplementedError
+
+    async def claim_due_pending(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> tuple[OutboundSendRequest, ...]:
+        raise NotImplementedError
+
+    async def recover_stale_dispatching(
+        self,
+        *,
+        stale_before: datetime,
+        now: datetime,
+        limit: int,
+    ) -> tuple[OutboundSendRequest, ...]:
+        raise NotImplementedError
+
+    async def get_due_pending_summary(
+        self,
+        *,
+        now: datetime,
+    ) -> tuple[int, datetime | None]:
+        raise NotImplementedError
+
+    async def list_exceptions(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        statuses: tuple[OutboundSendRequestStatus, ...],
+        stale_before: datetime,
+        older_than: datetime | None = None,
+        channel: ContactChannel | None = None,
+        provider_name: str | None = None,
+        limit: int = 100,
+    ) -> tuple[OutboundSendRequest, ...]:
+        raise NotImplementedError
+
+
+class OutboundProviderFailureRepository(Protocol):
+    async def create_or_get(
+        self,
+        failure: OutboundProviderFailure,
+    ) -> OutboundProviderFailure:
+        raise NotImplementedError
+
+    async def list_open(
+        self,
+        workspace_id: WorkspaceId,
+        limit: int = 100,
+    ) -> list[OutboundProviderFailure]:
+        raise NotImplementedError
+
+    async def get_by_outbound_message_id(
+        self,
+        workspace_id: WorkspaceId,
+        outbound_message_id: UUID,
+    ) -> OutboundProviderFailure | None:
         raise NotImplementedError
 
 
@@ -637,6 +784,7 @@ class InboundMessageRepository(Protocol):
     ) -> tuple[Any, ...]:
         raise NotImplementedError
 
+
     async def save(self, message: Any) -> Any:
         raise NotImplementedError
 
@@ -651,6 +799,17 @@ class ExternalEventRepository(Protocol):
         raise NotImplementedError
 
     async def save(self, event: ExternalEvent) -> ExternalEvent:
+        raise NotImplementedError
+
+
+class ExternalEventRetryRepository(Protocol):
+    async def claim_due_retryable(
+        self,
+        *,
+        provider_name: str,
+        now: datetime,
+        limit: int = 10,
+    ) -> tuple[ExternalEvent, ...]:
         raise NotImplementedError
 
 
@@ -1349,6 +1508,13 @@ class WorkspaceContactPolicyRepository(Protocol):
 
 
 class ProviderDeliveryMessageRepository(Protocol):
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        message_id: UUID,
+    ) -> Any | None:
+        raise NotImplementedError
+
     async def get_by_provider_message_id_for_update(
         self,
         provider_name: str,

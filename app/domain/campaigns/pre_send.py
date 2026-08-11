@@ -87,6 +87,7 @@ class PreSendFacts:
     last_campaign_outreach_at: datetime | None = None
     last_channel_outreach_at: datetime | None = None
     other_channel_sent_at: datetime | None = None
+    history_facts_available: bool = True
 
 
 @dataclass(frozen=True)
@@ -151,7 +152,8 @@ def evaluate_pre_send_safety(
 
 def _missing_required_data(facts: PreSendFacts) -> bool:
     return (
-        facts.contactability_decision is None
+        not facts.history_facts_available
+        or facts.contactability_decision is None
         or facts.contactability_decision.channel != facts.channel
     )
 

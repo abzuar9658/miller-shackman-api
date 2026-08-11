@@ -93,6 +93,10 @@ class OutboundMessage:
     provider_status_updated_at: datetime | None = None
     delivered_at: datetime | None = None
     failure_reason: str | None = None
+    provider_attempt_count: int = 0
+    provider_last_attempt_at: datetime | None = None
+    provider_next_retry_at: datetime | None = None
+    provider_last_failure_kind: str | None = None
     draft_prompt_version: str | None = None
     draft_model: str | None = None
     draft_latency_ms: int | None = None

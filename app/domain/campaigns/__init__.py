@@ -12,12 +12,29 @@ from app.domain.campaigns.enrollment import (
     CampaignEnrollmentStatus,
     build_enrollment_reason_codes,
 )
+from app.domain.campaigns.enrollment_admission import (
+    EnrollmentAdmissionDecision,
+    EnrollmentAdmissionOutcome,
+    evaluate_lead_enrollment_admission,
+)
 from app.domain.campaigns.execution import (
     CampaignCadenceStep,
     CampaignExecutionConfig,
     CampaignVersionStatus,
 )
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
+from app.domain.campaigns.outbound_provider_failure import (
+    OutboundProviderFailure,
+    OutboundProviderFailureStatus,
+)
+from app.domain.campaigns.outbound_send_reconciliation import (
+    OutboundSendReconciliation,
+    OutboundSendReconciliationStatus,
+)
+from app.domain.campaigns.outbound_send_request import (
+    OutboundSendRequest,
+    OutboundSendRequestStatus,
+)
 from app.domain.campaigns.paused_search_notifications import (
     DEFAULT_PAUSED_SEARCH_NOTIFICATION_EVENTS,
     PausedSearchNotification,
@@ -52,6 +69,8 @@ from app.domain.campaigns.paused_search_timing import (
     PausedSearchOccurrencePlan,
     PausedSearchTimingReasonCode,
     paused_search_duration_end,
+    paused_search_maintenance_boundary,
+    paused_search_step_occurrence_cap,
     plan_next_paused_search_occurrence,
     plan_paused_search_next_action,
 )
@@ -132,6 +151,9 @@ __all__ = [
     "CampaignEnrollment",
     "CampaignEnrollmentSource",
     "CampaignEnrollmentStatus",
+    "EnrollmentAdmissionDecision",
+    "EnrollmentAdmissionOutcome",
+    "evaluate_lead_enrollment_admission",
     "CampaignCadenceStep",
     "CampaignExecutionConfig",
     "CampaignStartBatchDecision",
@@ -159,6 +181,12 @@ __all__ = [
     "PausedSearchReviewStatus",
     "OutboundMessage",
     "OutboundMessageStatus",
+    "OutboundProviderFailure",
+    "OutboundProviderFailureStatus",
+    "OutboundSendReconciliation",
+    "OutboundSendReconciliationStatus",
+    "OutboundSendRequest",
+    "OutboundSendRequestStatus",
     "PausedSearchFallbackTimingPolicy",
     "PausedSearchChannelSequence",
     "PausedSearchInterimContactPolicy",
@@ -208,6 +236,8 @@ __all__ = [
     "evaluate_campaign_start_batch",
     "evaluate_pre_send_safety",
     "occurrence_idempotency_key",
+    "paused_search_maintenance_boundary",
+    "paused_search_step_occurrence_cap",
     "paused_search_duration_end",
     "plan_paused_search_next_action",
     "plan_next_paused_search_occurrence",

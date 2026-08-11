@@ -21,6 +21,10 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from app.domain.campaigns.paused_search_tracks import (
+    DEFAULT_PAUSED_SEARCH_EMAIL_WRITING_PURPOSE,
+    DEFAULT_PAUSED_SEARCH_SMS_WRITING_PURPOSE,
+)
 from app.domain.lead_assignment import AssignmentResolutionStatus
 from app.domain.outbound_drafting import (
     DEFAULT_EMAIL_PROMPT_TEXT,
@@ -709,6 +713,10 @@ class OutboundMessageModel(Base):
     provider_status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_reason: Mapped[str | None] = mapped_column(String(500))
+    provider_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    provider_last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provider_next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provider_last_failure_kind: Mapped[str | None] = mapped_column(String(50))
     draft_prompt_version: Mapped[str | None] = mapped_column(String(100))
     draft_model: Mapped[str | None] = mapped_column(String(100))
     draft_latency_ms: Mapped[int | None] = mapped_column(Integer)
@@ -722,6 +730,150 @@ class OutboundMessageModel(Base):
     draft_safety_flags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class OutboundSendReconciliationModel(Base):
+    __tablename__ = "outbound_send_reconciliations"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "idempotency_key",
+            name="uq_outbound_reconciliations_workspace_idempotency",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "outbound_message_id",
+            name="uq_outbound_reconciliations_workspace_message",
+        ),
+        Index(
+            "ix_outbound_reconciliations_workspace_status",
+            "workspace_id",
+            "status",
+        ),
+    )
+
+    reconciliation_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    lead_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    workflow_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    temporal_workflow_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    outbound_message_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("outbound_messages.message_id"),
+        nullable=False,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_name: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_message_id: Mapped[str | None] = mapped_column(String(255))
+    provider_delivery_status: Mapped[str | None] = mapped_column(String(50))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(500))
+
+
+class OutboundSendRequestModel(Base):
+    __tablename__ = "outbound_send_requests"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "idempotency_key",
+            name="uq_outbound_send_requests_workspace_idempotency",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "outbound_message_id",
+            name="uq_outbound_send_requests_workspace_message",
+        ),
+        Index(
+            "ix_outbound_send_requests_status_available_created",
+            "status",
+            "available_at",
+            "created_at",
+        ),
+        Index(
+            "ix_outbound_send_requests_workspace_status_created",
+            "workspace_id",
+            "status",
+            "created_at",
+        ),
+    )
+
+    request_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    lead_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    workflow_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    temporal_workflow_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    outbound_message_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("outbound_messages.message_id"), nullable=False
+    )
+    reconciliation_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("outbound_send_reconciliations.reconciliation_id"),
+        nullable=False,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    channel: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_name: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provider_message_id: Mapped[str | None] = mapped_column(String(255))
+    failure_kind: Mapped[str | None] = mapped_column(String(50))
+    failure_reason: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class OutboundProviderFailureModel(Base):
+    __tablename__ = "outbound_provider_failures"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "outbound_message_id",
+            name="uq_outbound_provider_failures_workspace_message",
+        ),
+        Index(
+            "ix_outbound_provider_failures_workspace_status_created",
+            "workspace_id",
+            "status",
+            "created_at",
+        ),
+    )
+
+    failure_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), nullable=False
+    )
+    lead_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    outbound_message_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("outbound_messages.message_id"),
+        nullable=False,
+    )
+    workflow_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    channel: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_name: Mapped[str] = mapped_column(String(50), nullable=False)
+    failure_kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    failure_reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    first_failed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_failed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class CampaignModel(Base):
@@ -981,6 +1133,16 @@ class PausedSearchTrackVersionModel(Base):
     max_cycles: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     max_ai_interactions: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     restart_delay_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    email_writing_purpose: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=DEFAULT_PAUSED_SEARCH_EMAIL_WRITING_PURPOSE,
+    )
+    sms_writing_purpose: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=DEFAULT_PAUSED_SEARCH_SMS_WRITING_PURPOSE,
+    )
     created_by_user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
     )
@@ -1437,6 +1599,9 @@ class ExternalEventModel(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False)
     payload_redacted: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
     failure_reason: Mapped[str | None] = mapped_column(String(255))
+    failure_kind: Mapped[str | None] = mapped_column(String(50))
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
