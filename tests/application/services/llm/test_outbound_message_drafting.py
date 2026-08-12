@@ -16,6 +16,7 @@ from app.application.services.llm.outbound_message_drafting import (
 )
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.llm import LLMProviderKind, LLMTaskKind
 from app.domain.outbound_drafting import OutboundJourneyKind, WorkspaceOutboundDraftingConfig
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
@@ -110,12 +111,19 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
     assert result.body == "Hi there,\n\nare you still thinking about making a move this year?"
     assert result.model == "openai/gpt-4o-mini"
     assert result.usage_tokens == 42
-    assert llm.requests[0].prompt_version == "outbound_message_draft:v12:r1"
+    assert llm.requests[0].prompt_version == "outbound_message_draft:v15:r1"
     assert "Austin" in llm.requests[0].prompt
-    assert "Journey: dormant" in llm.requests[0].prompt  # v12 structured format
+    assert "Journey: dormant" in llm.requests[0].prompt
     assert "lease-end timing changed" in llm.requests[0].prompt
-    assert "## Writing Objective" in llm.requests[0].prompt  # v12 structured format
+    assert "## Writing Objective" in llm.requests[0].prompt
     assert "Do not invent listings" in llm.requests[0].prompt
+    # v15: single-source prose prompt — no JSON payload duplication
+    assert "# Structured Request Payload" not in llm.requests[0].prompt
+    assert "# Writing Instructions" in llm.requests[0].prompt
+    assert "primary behavior brief" in llm.requests[0].prompt
+    assert "Lead type:" in llm.requests[0].prompt
+    assert "Lead source: website" in llm.requests[0].prompt
+    assert "Lead stage: long_term_nurture" in llm.requests[0].prompt
     assert "For dormant outreach, treat the lead as quiet for an unknown reason" in (
         llm.requests[0].prompt
     )
@@ -131,11 +139,31 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
         "You are an administrative follow-up assistant for a real estate brokerage."
         in llm.requests[0].prompt
     )
-    # v12 uses structured sections instead of JSON field names
     assert "Conversation summary:" in llm.requests[0].prompt
     assert "## Recent Conversation" in llm.requests[0].prompt
     assert "## Recent Outbound Messages" in llm.requests[0].prompt
     assert "Avoid repeating the same greeting" in llm.requests[0].prompt
+    assert llm.requests[0].task is LLMTaskKind.DRAFTING
+    assert llm.requests[0].provider is None
+
+
+async def test_threads_provider_through_draft_request() -> None:
+    llm = FakeLLMClient(_draft_json())
+
+    result = await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(),
+        llm_client=llm,
+        provider=LLMProviderKind.BEDROCK,
+    )
+
+    assert result.status == OutboundMessageDraftStatus.DRAFTED
+    assert llm.requests[0].provider is LLMProviderKind.BEDROCK
+    assert llm.requests[0].task is LLMTaskKind.DRAFTING
 
 
 async def test_uses_admin_configured_top_level_prompt_text() -> None:
@@ -381,6 +409,57 @@ async def test_rejects_invalid_confidence_string_outside_known_aliases() -> None
 
     assert result.status == OutboundMessageDraftStatus.REJECTED
     assert result.reasons == (OutboundMessageDraftReasonCode.INVALID_LLM_RESPONSE,)
+
+
+async def test_coerces_dict_shaped_list_fields_from_llm() -> None:
+    result = await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name="Alex Agent",
+        lead_context=ApprovedOutboundLeadContext(),
+        llm_client=FakeLLMClient(
+            json.dumps(
+                {
+                    "body": "Checking in to see if you still want to continue the conversation.",
+                    "subject": None,
+                    "confidence": 0.91,
+                    "personalization_notes": {},
+                    "safety_flags": {},
+                }
+            )
+        ),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.DRAFTED
+    assert result.personalization_notes == ()
+    assert result.safety_flags == ()
+
+
+async def test_dict_shaped_safety_flags_with_entries_still_reject() -> None:
+    result = await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name="Alex Agent",
+        lead_context=ApprovedOutboundLeadContext(),
+        llm_client=FakeLLMClient(
+            json.dumps(
+                {
+                    "body": "Checking in.",
+                    "subject": None,
+                    "confidence": 0.91,
+                    "personalization_notes": [],
+                    "safety_flags": {"specific_property_request": True},
+                }
+            )
+        ),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.REJECTED
+    assert result.reasons == (OutboundMessageDraftReasonCode.SAFETY_FLAGS_PRESENT,)
 
 
 async def test_rejects_safety_flags_but_keeps_reviewable_body() -> None:

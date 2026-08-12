@@ -59,9 +59,15 @@ def coerce_llm_confidence(value: object) -> object:
 
 
 def coerce_string_tuple(value: object) -> object:
+    if value is None:
+        return ()
     if isinstance(value, str):
         normalized = value.strip()
         if not normalized:
             return ()
         return (normalized,)
+    # Some models (e.g. gemini-2.5-flash) emit `{}` or `{"flag": "..."}` for
+    # list-typed fields; keep the keys so real flags still surface.
+    if isinstance(value, dict):
+        return tuple(str(key) for key in value)
     return value

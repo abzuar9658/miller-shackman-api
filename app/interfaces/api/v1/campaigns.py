@@ -1082,6 +1082,7 @@ def _outbound_drafting_preview_response(
                 "subject": result.sms_preview.subject,
                 "prompt_version": result.sms_preview.prompt_version,
                 "model": result.sms_preview.model,
+                "reasons": list(result.sms_preview.reasons),
             }
             if result.sms_preview is not None
             else None
@@ -1093,6 +1094,7 @@ def _outbound_drafting_preview_response(
                 "subject": result.email_preview.subject,
                 "prompt_version": result.email_preview.prompt_version,
                 "model": result.email_preview.model,
+                "reasons": list(result.email_preview.reasons),
             }
             if result.email_preview is not None
             else None

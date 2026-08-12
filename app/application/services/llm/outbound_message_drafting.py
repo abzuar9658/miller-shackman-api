@@ -1,9 +1,9 @@
-import json
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+import structlog
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.application.ports.llm import LLMClient, LLMCompletionRequest
@@ -14,8 +14,8 @@ from app.application.services.llm.structured_json import (
 )
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord
+from app.domain.llm import LLMProviderKind, LLMTaskKind
 from app.domain.outbound_drafting import (
-    SUPPORTED_TEMPLATE_PLACEHOLDERS,
     OutboundJourneyKind,
     WorkspaceOutboundDraftingConfig,
     default_workspace_outbound_drafting_config,
@@ -23,7 +23,9 @@ from app.domain.outbound_drafting import (
     render_outbound_template,
 )
 
-OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v12"
+logger = structlog.get_logger(__name__)
+
+OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v15"
 MIN_DRAFT_CONFIDENCE = 0.7
 MAX_SMS_BODY_LENGTH = 320
 MAX_EMAIL_BODY_LENGTH = 4000
@@ -189,6 +191,7 @@ async def draft_outbound_message(
     llm_client: LLMClient,
     drafting_config: WorkspaceOutboundDraftingConfig | None = None,
     model: str | None = None,
+    provider: LLMProviderKind | None = None,
     min_confidence: float = MIN_DRAFT_CONFIDENCE,
 ) -> OutboundMessageDraftResult:
     resolved_config = drafting_config or default_workspace_outbound_drafting_config(
@@ -197,21 +200,33 @@ async def draft_outbound_message(
     resolved_agent_name = _resolved_assigned_agent_name(assigned_agent_name)
     resolved_lead_first_name = _resolved_lead_first_name(lead)
     prompt_version = _prompt_version_for_config(resolved_config)
+    prompt = _build_prompt(
+        lead=lead,
+        channel=channel,
+        campaign_goal=campaign_goal,
+        brokerage_name=brokerage_name,
+        assigned_agent_name=resolved_agent_name,
+        lead_context=lead_context,
+        journey_kind=journey_kind,
+        message_purpose=message_purpose,
+        drafting_config=resolved_config,
+    )
+    logger.info(
+        "outbound_message_draft_prompt",
+        workspace_id=str(lead.workspace_id),
+        lead_id=str(lead.lead_id),
+        channel=channel.value,
+        prompt_version=prompt_version,
+        model=model,
+        prompt=prompt,
+    )
     llm_result = await llm_client.complete(
         LLMCompletionRequest(
-            prompt=_build_prompt(
-                lead=lead,
-                channel=channel,
-                campaign_goal=campaign_goal,
-                brokerage_name=brokerage_name,
-                assigned_agent_name=resolved_agent_name,
-                lead_context=lead_context,
-                journey_kind=journey_kind,
-                message_purpose=message_purpose,
-                drafting_config=resolved_config,
-            ),
+            prompt=prompt,
             prompt_version=prompt_version,
             model=model,
+            provider=provider,
+            task=LLMTaskKind.DRAFTING,
             temperature=0.4,
             max_tokens=700,
         ),
@@ -222,6 +237,16 @@ async def draft_outbound_message(
             normalize_llm_json_text(llm_result.text)
         )
     except ValidationError as exc:
+        logger.warning(
+            "outbound_message_draft_invalid_llm_response",
+            workspace_id=str(lead.workspace_id),
+            lead_id=str(lead.lead_id),
+            channel=channel.value,
+            prompt_version=llm_result.prompt_version,
+            model=llm_result.model,
+            validation_error=str(exc),
+            raw_llm_response_text=llm_result.text,
+        )
         return OutboundMessageDraftResult(
             status=OutboundMessageDraftStatus.REJECTED,
             prompt_version=llm_result.prompt_version,
@@ -336,67 +361,14 @@ def _build_prompt(
         drafting_config,
         channel=channel,
     )
-    payload = {
-        "task": "draft_outbound_real_estate_lead_follow_up",
-        "channel": channel.value,
-        "journey_kind": journey_kind.value if journey_kind is not None else None,
-        "paused_search_message_purpose": message_purpose,
-        "campaign_goal": campaign_goal,
-        "brokerage_name": brokerage_name,
-        "assigned_agent_name": assigned_agent_name,
-        "admin_drafting_config": {
-            "config_revision": drafting_config.revision,
-            "channel_prompt_text": channel_prompt_text,
-            "channel_template": channel_template,
-            "email_subject_template": drafting_config.email_subject_template,
-            "supported_template_placeholders": list(SUPPORTED_TEMPLATE_PLACEHOLDERS),
-            "message_body_placeholder": "{{message_body}}",
-            "message_subject_placeholder": "{{message_subject}}",
-            "enabled_extraction_fields": list(drafting_config.enabled_extraction_fields),
-        },
-        "known_lead_facts": {
-            "lead_type": lead.lead_type.value,
-            "lead_source": lead.lead_source,
-            "lead_stage": lead.lead_stage,
-            "latest_property_event_type": lead.latest_property_event_type.value
-            if lead.latest_property_event_type
-            else None,
-            "latest_property_price_band": lead.latest_property_price_band,
-            "latest_property_context_present": lead.latest_property_context_present,
-        },
-        "approved_lead_context": {
-            "conversation_summary": lead_context.conversation_summary,
-            "conversation_memory_summary": lead_context.conversation_memory_summary,
-            "latest_lead_request": lead_context.latest_lead_request,
-            "extracted_preferences": dict(lead_context.extracted_preferences),
-            "recent_conversation_items": [
-                {
-                    "occurred_at": item.occurred_at,
-                    "title": item.title,
-                    "content": item.content,
-                    "direction": item.direction,
-                    "channel": item.channel,
-                    "actor_name": item.actor_name,
-                }
-                for item in lead_context.recent_conversation_items
-            ],
-            "recent_outbound_messages": list(lead_context.recent_outbound_messages),
-        },
-        "approved_listing_context": _listing_context_payload(lead_context.listing_context),
-    }
-    # Build structured prompt
     sections = [
         f"{drafting_config.prompt_text}",
         "",
-        "# Structured Request Payload",
-        json.dumps(payload, indent=2, default=str),
+        "# Writing Instructions",
+        channel_prompt_text,
         "",
-        "# Instructions",
-        "Follow the admin-configured prompt_text as the top-level role and behavior brief "
-        "for all channels.",
-        "The admin-configured prompt_text and channel_prompt_text are instruction-only.",
-        "The admin-configured channel template is final layout-only. Do not copy either "
-        "instruction text or template scaffolding into your output.",
+        "These admin-configured writing instructions are the primary behavior brief for "
+        "this draft. Follow them closely unless they conflict with the safety rules below.",
         "",
         "# Your Task",
         f"Channel: {channel.value}",
@@ -414,52 +386,28 @@ def _build_prompt(
             "consent, suppression, handoff, or send rules.",
         ])
 
-    sections.extend([
-        "",
-        "# Output Requirements",
-        "Your job is to generate ONLY the natural-language message content that should be "
-        "inserted into or appended to the final template as the message body.",
-        "The application will deterministically render the final message afterward.",
-        "",
-        f"For {channel.value}, keep the generated body short enough that the final rendered "
-        f"{channel.value.upper()} remains under "
-        f"{MAX_SMS_BODY_LENGTH if channel == ContactChannel.SMS else MAX_EMAIL_BODY_LENGTH} "
-        "characters.",
-        "",
-        "If the channel template contains {{message_body}}, your generated body will replace "
-        "that placeholder.",
-        "Otherwise, the application will append your generated body after the template.",
-        "",
-        "If the channel template already contains a greeting, sign-off, hardcoded name, or "
-        "other fixed text, do not repeat that text in your generated body unless the context "
-        "truly requires it.",
-        "",
-        "For email, the application may also apply an admin-configured subject template after "
-        "you respond. Provide a concise, natural subject that works well when inserted into "
-        "that subject template.",
-        "",
-        "Return only JSON with keys: body, subject, confidence, personalization_notes, "
-        "safety_flags.",
-    ])
-
-    # Add channel-specific guidance
-    sections.extend([
-        "",
-        "# Channel Guidance",
-        channel_prompt_text,
-    ])
-
     # Add lead context
     sections.extend([
         "",
         "# Lead Context",
+        f"Lead type: {lead.lead_type.value}",
     ])
+
+    if lead.lead_source:
+        sections.append(f"Lead source: {lead.lead_source}")
+    if lead.lead_stage:
+        sections.append(f"Lead stage: {lead.lead_stage}")
 
     if lead_context.latest_lead_request:
         sections.append(f"Latest request: {lead_context.latest_lead_request}")
 
     if lead_context.conversation_memory_summary:
         sections.append(f"Conversation summary: {lead_context.conversation_memory_summary}")
+
+    if lead_context.conversation_summary and (
+        lead_context.conversation_summary != lead_context.conversation_memory_summary
+    ):
+        sections.append(f"Recent activity: {lead_context.conversation_summary}")
 
     if lead_context.extracted_preferences:
         sections.append("")
@@ -559,11 +507,43 @@ def _build_prompt(
         "",
         "# Template Context",
         f"Channel template: {channel_template}",
-        f"Brokerage: {brokerage_name}",
     ])
+
+    if channel == ContactChannel.EMAIL:
+        sections.append(f"Email subject template: {drafting_config.email_subject_template}")
+
+    sections.append(f"Brokerage: {brokerage_name}")
 
     if assigned_agent_name:
         sections.append(f"Assigned agent: {assigned_agent_name}")
+
+    sections.extend([
+        "",
+        "The channel template is final layout-only; the application renders it "
+        "deterministically after you respond. Do not copy template scaffolding, greetings, "
+        "sign-offs, or hardcoded names into your output unless the context truly requires it.",
+        "",
+        "# Output Requirements",
+        "Your job is to generate ONLY the natural-language message content that should be "
+        "inserted into or appended to the final template as the message body.",
+        "",
+        f"For {channel.value}, keep the generated body short enough that the final rendered "
+        f"{channel.value.upper()} remains under "
+        f"{MAX_SMS_BODY_LENGTH if channel == ContactChannel.SMS else MAX_EMAIL_BODY_LENGTH} "
+        "characters.",
+        "",
+        "If the channel template contains {{message_body}}, your generated body will replace "
+        "that placeholder.",
+        "Otherwise, the application will append your generated body after the template.",
+        "",
+        "For email, the application may also apply the admin-configured subject template "
+        "after you respond. Provide a concise, natural subject that works well when inserted "
+        "into that subject template.",
+        "",
+        "Return only JSON with keys: body (string), subject (string), confidence (a "
+        "number between 0.0 and 1.0), personalization_notes (an array of strings), "
+        "safety_flags (an array of strings; use an empty array [] when there are none).",
+    ])
 
     return "\n".join(sections)
 
@@ -644,21 +624,6 @@ def outbound_message_draft_prompt_version_for_revision(revision: int) -> str:
 
 def _prompt_version_for_config(config: WorkspaceOutboundDraftingConfig) -> str:
     return outbound_message_draft_prompt_version_for_revision(config.revision)
-
-
-def _listing_context_payload(
-    listing_context: ApprovedOutboundListingContext | None,
-) -> dict[str, object] | None:
-    if listing_context is None:
-        return None
-    relevance_brief = build_listing_relevance_brief(listing_context)
-    message_guidance = build_listing_message_guidance(listing_context)
-    return {
-        "source_name": listing_context.source_name,
-        "result_count": listing_context.result_count,
-        "listing_relevance_brief": _listing_relevance_brief_payload(relevance_brief),
-        "listing_message_guidance": _listing_message_guidance_payload(message_guidance),
-    }
 
 
 def build_listing_relevance_brief(
@@ -765,19 +730,6 @@ def _listing_relevance_brief_payload(
         "safe_cta": relevance_brief.safe_cta,
         "draft_directive": _listing_draft_directive(relevance_brief),
         "listing_context_source": relevance_brief.listing_context_source,
-    }
-
-
-def _listing_message_guidance_payload(
-    message_guidance: ApprovedListingMessageGuidance,
-) -> dict[str, object]:
-    return {
-        "must_acknowledge_current_matches": message_guidance.must_acknowledge_current_matches,
-        "mentionable_areas": list(message_guidance.mentionable_areas),
-        "mentionable_property_types": list(message_guidance.mentionable_property_types),
-        "safe_talking_point": message_guidance.safe_talking_point,
-        "safe_cta": message_guidance.safe_cta,
-        "draft_directive": message_guidance.draft_directive,
     }
 
 

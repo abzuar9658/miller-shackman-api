@@ -24,7 +24,7 @@ SUPPORTED_TEMPLATE_PLACEHOLDERS = (
 )
 DEFAULT_PROMPT_TEXT = (
     "You are an administrative follow-up assistant for a real estate brokerage.\n"
-    "Draft one compliant outbound message using only the approved JSON context below."
+    "Draft one compliant outbound message using only the approved context below."
 )
 DEFAULT_SMS_TEMPLATE = "Hi there,\n\n{{message_body}}"
 DEFAULT_EMAIL_TEMPLATE = "Hi there,\n\n{{message_body}}\n\nBest,\n{{brokerage_name}}"
