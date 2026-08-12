@@ -2,7 +2,9 @@ import pytest
 from pydantic import SecretStr
 
 from app.core.config import Settings
+from app.domain.llm import LLMProviderKind
 from app.infrastructure.listing_sources.streeteasy import StreetEasyListingSearchClient
+from app.infrastructure.llm.routing import RoutingLLMClient
 from app.infrastructure.messaging.mailgun import MailgunEmailProvider
 from app.infrastructure.messaging.mailpit import MailpitEmailProvider
 from app.infrastructure.messaging.sink import SinkEmailProvider, SinkSMSProvider
@@ -32,6 +34,53 @@ def test_build_crm_client_returns_adapter() -> None:
 def test_build_llm_client_requires_api_key() -> None:
     settings = Settings(openrouter_api_key=SecretStr(""))
     with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+        build_llm_client(settings)
+
+
+def test_build_llm_client_returns_router_with_openrouter_only() -> None:
+    settings = Settings(openrouter_api_key=SecretStr("key"))
+    client = build_llm_client(settings)
+    assert isinstance(client, RoutingLLMClient)
+    assert LLMProviderKind.OPENROUTER in client._clients
+    assert LLMProviderKind.BEDROCK not in client._clients
+
+
+def test_build_llm_client_includes_bedrock_when_enabled() -> None:
+    settings = Settings(
+        openrouter_api_key=SecretStr("key"),
+        bedrock_enabled=True,
+        bedrock_access_key_id=SecretStr("aws-key"),
+        bedrock_secret_access_key=SecretStr("aws-secret"),
+    )
+    client = build_llm_client(settings)
+    assert isinstance(client, RoutingLLMClient)
+    assert LLMProviderKind.OPENROUTER in client._clients
+    assert LLMProviderKind.BEDROCK in client._clients
+
+
+def test_build_llm_client_rejects_bedrock_default_when_disabled() -> None:
+    settings = Settings(llm_provider="bedrock", bedrock_enabled=False)
+    with pytest.raises(ValueError, match="BEDROCK_ENABLED"):
+        build_llm_client(settings)
+
+
+def test_build_llm_client_allows_bedrock_default_when_enabled() -> None:
+    settings = Settings(
+        llm_provider="bedrock",
+        bedrock_enabled=True,
+        openrouter_api_key=SecretStr(""),
+        bedrock_access_key_id=SecretStr("aws-key"),
+        bedrock_secret_access_key=SecretStr("aws-secret"),
+    )
+    client = build_llm_client(settings)
+    assert isinstance(client, RoutingLLMClient)
+    assert LLMProviderKind.BEDROCK in client._clients
+    assert LLMProviderKind.OPENROUTER not in client._clients
+
+
+def test_build_llm_client_rejects_unknown_provider() -> None:
+    settings = Settings(llm_provider="unknown")
+    with pytest.raises(ValueError, match="Unsupported LLM provider"):
         build_llm_client(settings)
 
 

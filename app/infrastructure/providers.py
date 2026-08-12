@@ -45,18 +45,45 @@ def build_crm_lead_snapshot_source(settings: Settings | None = None) -> Canonica
 
 def build_llm_client(settings: Settings | None = None) -> LLMClient:
     settings = settings or get_settings()
-    if settings.llm_provider == "openrouter":
+    from app.domain.llm import LLMProviderKind
+    from app.infrastructure.llm.routing import RoutingLLMClient
+
+    try:
+        default_provider = LLMProviderKind(settings.llm_provider)
+    except ValueError:
+        raise ValueError(f"Unsupported LLM provider: {settings.llm_provider}") from None
+    if default_provider is LLMProviderKind.BEDROCK and not settings.bedrock_enabled:
+        raise ValueError("LLM_PROVIDER is 'bedrock' but BEDROCK_ENABLED is false")
+
+    clients: dict[LLMProviderKind, LLMClient] = {}
+
+    api_key = _secret(settings.openrouter_api_key)
+    if not api_key and default_provider is LLMProviderKind.OPENROUTER:
+        raise ValueError("OPENROUTER_API_KEY is required")
+    if api_key:
         from app.infrastructure.llm.openrouter import OpenRouterLLMClient
 
-        api_key = _secret(settings.openrouter_api_key)
-        if not api_key:
-            raise ValueError("OPENROUTER_API_KEY is required")
-        return OpenRouterLLMClient(
+        clients[LLMProviderKind.OPENROUTER] = OpenRouterLLMClient(
             api_key=api_key,
             base_url=settings.openrouter_base_url,
             model=settings.openrouter_model,
+            drafting_model=settings.resolved_openrouter_drafting_model,
+            classification_model=settings.resolved_openrouter_classification_model,
         )
-    raise ValueError(f"Unsupported LLM provider: {settings.llm_provider}")
+
+    if settings.bedrock_enabled:
+        from app.infrastructure.llm.bedrock import BedrockLLMClient
+
+        clients[LLMProviderKind.BEDROCK] = BedrockLLMClient(
+            region=settings.bedrock_region,
+            drafting_model=settings.bedrock_drafting_model,
+            classification_model=settings.bedrock_classification_model,
+            aws_access_key_id=_secret(settings.bedrock_access_key_id),
+            aws_secret_access_key=_secret(settings.bedrock_secret_access_key),
+            aws_session_token=_secret(settings.bedrock_session_token),
+        )
+
+    return RoutingLLMClient(default_provider=default_provider, clients=clients)
 
 
 def build_sms_provider(settings: Settings | None = None) -> SMSProvider:
