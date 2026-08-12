@@ -38,7 +38,7 @@ def test_build_llm_client_requires_api_key() -> None:
 
 
 def test_build_llm_client_returns_router_with_openrouter_only() -> None:
-    settings = Settings(openrouter_api_key=SecretStr("key"))
+    settings = Settings(openrouter_api_key=SecretStr("key"), bedrock_enabled=False)
     client = build_llm_client(settings)
     assert isinstance(client, RoutingLLMClient)
     assert LLMProviderKind.OPENROUTER in client._clients

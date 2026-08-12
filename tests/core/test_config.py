@@ -5,7 +5,7 @@ from app.core.config import Settings
 
 
 def test_defaults_include_curated_allowed_models() -> None:
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
     assert "openai/gpt-4o-mini" in settings.openrouter_allowed_models
     assert len(settings.openrouter_allowed_models) >= 2
