@@ -42,7 +42,7 @@ from app.domain.identity import (
     WorkspaceMembershipStatus,
     WorkspaceStatus,
 )
-from app.domain.llm import default_workspace_llm_config
+from app.domain.llm import LLMProviderKind, default_workspace_llm_config
 from app.domain.outbound_drafting import default_workspace_outbound_drafting_config
 from app.domain.workflows import (
     LeadWorkflow,
@@ -404,7 +404,7 @@ def test_default_workspace_outbound_drafting_config_uses_polished_starter_values
     assert (
         config.prompt_text
         == "You are an administrative follow-up assistant for a real estate brokerage.\n"
-        "Draft one compliant outbound message using only the approved JSON context below."
+        "Draft one compliant outbound message using only the approved context below."
     )
     assert config.sms_template == "Hi there,\n\n{{message_body}}"
     assert config.email_template == "Hi there,\n\n{{message_body}}\n\nBest,\n{{brokerage_name}}"
@@ -747,6 +747,7 @@ def test_update_workspace_llm_config_persists_values() -> None:
     assert result.status == UpdateWorkspaceLLMConfigStatus.UPDATED
     assert result.llm_config is not None
     assert result.llm_config.openrouter_model == "openai/gpt-4.1-mini"
+    assert result.llm_config.openrouter_drafting_model == "openai/gpt-4.1-mini"
     assert deps.audit_log_repository.logs[-1].event_type == (
         AuthAuditEventType.WORKSPACE_LLM_CONFIG_UPDATED
     )
@@ -774,6 +775,126 @@ def test_update_workspace_llm_config_rejects_unapproved_model() -> None:
 
     assert result.status == UpdateWorkspaceLLMConfigStatus.REJECTED
     assert result.reasons == (AuthReasonCode.VALIDATION_ERROR,)
+
+
+def test_update_workspace_llm_config_persists_provider_and_task_models() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_llm_config(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            llm_provider=LLMProviderKind.BEDROCK,
+            openrouter_drafting_model="openai/gpt-4.1-mini",
+            openrouter_classification_model="openai/gpt-4o-mini",
+            bedrock_drafting_model="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            bedrock_classification_model="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            workspace_llm_config_repository=deps.workspace_llm_config_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+            allowed_openrouter_models=("openai/gpt-4o-mini", "openai/gpt-4.1-mini"),
+            allowed_bedrock_models=(
+                "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            ),
+            bedrock_enabled=True,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceLLMConfigStatus.UPDATED
+    assert result.llm_config is not None
+    assert result.llm_config.llm_provider is LLMProviderKind.BEDROCK
+    assert result.llm_config.openrouter_drafting_model == "openai/gpt-4.1-mini"
+    assert result.llm_config.openrouter_classification_model == "openai/gpt-4o-mini"
+    assert result.llm_config.openrouter_model == "openai/gpt-4.1-mini"
+    assert result.llm_config.bedrock_drafting_model == (
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    )
+    assert result.llm_config.bedrock_classification_model == (
+        "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    )
+    assert deps.audit_log_repository.logs[-1].event_details["llm_provider"] == "bedrock"
+
+
+def test_update_workspace_llm_config_rejects_bedrock_provider_when_gate_disabled() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_llm_config(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            llm_provider=LLMProviderKind.BEDROCK,
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            workspace_llm_config_repository=deps.workspace_llm_config_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+            allowed_openrouter_models=("openai/gpt-4o-mini",),
+            bedrock_enabled=False,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceLLMConfigStatus.REJECTED
+    assert result.reasons == (AuthReasonCode.VALIDATION_ERROR,)
+
+
+def test_update_workspace_llm_config_rejects_unapproved_classification_model() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_llm_config(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            openrouter_classification_model="anthropic/claude-3.5-sonnet",
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            workspace_llm_config_repository=deps.workspace_llm_config_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+            allowed_openrouter_models=("openai/gpt-4o-mini",),
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceLLMConfigStatus.REJECTED
+    assert result.reasons == (AuthReasonCode.VALIDATION_ERROR,)
+
+
+def test_update_workspace_llm_config_ignores_bedrock_models_when_gate_disabled() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.memberships[MEMBERSHIP_ID] = _membership(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    actor = _actor(role=WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    result = _run(
+        update_workspace_llm_config(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            openrouter_model="openai/gpt-4.1-mini",
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            workspace_llm_config_repository=deps.workspace_llm_config_repository,
+            audit_log_repository=deps.audit_log_repository,
+            now=NOW,
+            allowed_openrouter_models=("openai/gpt-4o-mini", "openai/gpt-4.1-mini"),
+            allowed_bedrock_models=(),
+            bedrock_enabled=False,
+        ),
+    )
+
+    assert result.status == UpdateWorkspaceLLMConfigStatus.UPDATED
+    assert result.llm_config is not None
+    assert result.llm_config.openrouter_model == "openai/gpt-4.1-mini"
 
 
 def test_update_workspace_outbound_drafting_config_persists_values() -> None:

@@ -48,7 +48,7 @@ from app.domain.identity import (
     WorkspaceStatus,
     evaluate_permission,
 )
-from app.domain.llm import WorkspaceLLMConfig, default_workspace_llm_config
+from app.domain.llm import LLMProviderKind, WorkspaceLLMConfig, default_workspace_llm_config
 from app.domain.outbound_drafting import (
     DEFAULT_EMAIL_PROMPT_TEXT,
     DEFAULT_SMS_PROMPT_TEXT,
@@ -1134,7 +1134,12 @@ async def update_workspace_llm_config(
     *,
     actor: AuthenticatedActor,
     workspace_id: UUID,
-    openrouter_model: str,
+    openrouter_model: str | None = None,
+    llm_provider: LLMProviderKind | None = None,
+    openrouter_drafting_model: str | None = None,
+    openrouter_classification_model: str | None = None,
+    bedrock_drafting_model: str | None = None,
+    bedrock_classification_model: str | None = None,
     workspace_repository: WorkspaceRepository,
     membership_repository: WorkspaceMembershipRepository,
     workspace_llm_config_repository: WorkspaceLLMConfigRepository,
@@ -1142,6 +1147,8 @@ async def update_workspace_llm_config(
     now: datetime,
     default_openrouter_model: str = "openai/gpt-4o-mini",
     allowed_openrouter_models: tuple[str, ...] = ("openai/gpt-4o-mini",),
+    allowed_bedrock_models: tuple[str, ...] = (),
+    bedrock_enabled: bool = False,
 ) -> UpdateWorkspaceLLMConfigResult:
     effective_actor = await _actor_for_workspace(
         actor=actor,
@@ -1172,38 +1179,86 @@ async def update_workspace_llm_config(
             reasons=(AuthReasonCode.WORKSPACE_NOT_FOUND,),
         )
 
-    normalized_model = openrouter_model.strip()
-    if normalized_model not in allowed_openrouter_models:
-        return UpdateWorkspaceLLMConfigResult(
-            status=UpdateWorkspaceLLMConfigStatus.REJECTED,
-            reasons=(AuthReasonCode.VALIDATION_ERROR,),
-        )
-
     current_config = await workspace_llm_config_repository.get_by_workspace_id(
         workspace_id,
     ) or default_workspace_llm_config(
         workspace_id,
         default_openrouter_model=default_openrouter_model,
     )
-    if current_config.openrouter_model == normalized_model:
+
+    # Legacy field: openrouter_model keeps setting the OpenRouter drafting
+    # model unless the caller supplies openrouter_drafting_model explicitly.
+    if openrouter_drafting_model is None:
+        openrouter_drafting_model = openrouter_model
+
+    def _normalized(value: str | None, current: str) -> str:
+        return value.strip() if value is not None and value.strip() else current
+
+    new_provider = llm_provider if llm_provider is not None else current_config.llm_provider
+    new_openrouter_drafting = _normalized(
+        openrouter_drafting_model, current_config.openrouter_drafting_model
+    )
+    new_openrouter_classification = _normalized(
+        openrouter_classification_model, current_config.openrouter_classification_model
+    )
+    new_bedrock_drafting = _normalized(
+        bedrock_drafting_model, current_config.bedrock_drafting_model
+    )
+    new_bedrock_classification = _normalized(
+        bedrock_classification_model, current_config.bedrock_classification_model
+    )
+
+    if new_provider is LLMProviderKind.BEDROCK and not bedrock_enabled:
+        return UpdateWorkspaceLLMConfigResult(
+            status=UpdateWorkspaceLLMConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.VALIDATION_ERROR,),
+        )
+    openrouter_models_valid = (
+        new_openrouter_drafting in allowed_openrouter_models
+        and new_openrouter_classification in allowed_openrouter_models
+    )
+    bedrock_models_valid = not bedrock_enabled or (
+        new_bedrock_drafting in allowed_bedrock_models
+        and new_bedrock_classification in allowed_bedrock_models
+    )
+    if not openrouter_models_valid or not bedrock_models_valid:
+        return UpdateWorkspaceLLMConfigResult(
+            status=UpdateWorkspaceLLMConfigStatus.REJECTED,
+            reasons=(AuthReasonCode.VALIDATION_ERROR,),
+        )
+
+    new_config = replace(
+        current_config,
+        llm_provider=new_provider,
+        openrouter_model=new_openrouter_drafting,
+        openrouter_drafting_model=new_openrouter_drafting,
+        openrouter_classification_model=new_openrouter_classification,
+        bedrock_drafting_model=new_bedrock_drafting,
+        bedrock_classification_model=new_bedrock_classification,
+    )
+    if new_config == current_config:
         return UpdateWorkspaceLLMConfigResult(
             status=UpdateWorkspaceLLMConfigStatus.UPDATED,
             llm_config=current_config,
         )
 
-    saved_config = await workspace_llm_config_repository.save(
-        WorkspaceLLMConfig(
-            workspace_id=workspace_id,
-            openrouter_model=normalized_model,
-        )
-    )
+    saved_config = await workspace_llm_config_repository.save(new_config)
     await audit_log_repository.append(
         _auth_audit_log(
             event_type=AuthAuditEventType.WORKSPACE_LLM_CONFIG_UPDATED,
             now=now,
             workspace_id=workspace_id,
             actor_user_id=actor.user_id,
-            event_details={"openrouter_model": saved_config.openrouter_model},
+            event_details={
+                "llm_provider": saved_config.llm_provider.value,
+                "openrouter_model": saved_config.openrouter_model,
+                "openrouter_drafting_model": saved_config.openrouter_drafting_model,
+                "openrouter_classification_model": (
+                    saved_config.openrouter_classification_model
+                ),
+                "bedrock_drafting_model": saved_config.bedrock_drafting_model,
+                "bedrock_classification_model": saved_config.bedrock_classification_model,
+            },
         ),
     )
     return UpdateWorkspaceLLMConfigResult(

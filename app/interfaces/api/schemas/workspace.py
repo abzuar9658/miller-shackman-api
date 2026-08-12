@@ -6,6 +6,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.domain.compliance import SmsComplianceState
 from app.domain.identity import UserStatus, WorkspaceMembershipRole, WorkspaceMembershipStatus
+from app.domain.llm import LLMProviderKind
 from app.domain.outbound_drafting import (
     DEFAULT_EMAIL_PROMPT_TEXT,
     DEFAULT_EMAIL_SUBJECT_TEMPLATE,
@@ -120,8 +121,16 @@ class WorkspaceCRMSyncConfigResponse(BaseModel):
 
 class WorkspaceLLMConfigResponse(BaseModel):
     workspace_id: UUID
+    # Deprecated: mirrors openrouter_drafting_model for API back-compat.
     openrouter_model: str
+    llm_provider: str
+    openrouter_drafting_model: str
+    openrouter_classification_model: str
+    bedrock_drafting_model: str
+    bedrock_classification_model: str
     allowed_openrouter_models: list[str]
+    allowed_bedrock_models: list[str]
+    bedrock_enabled: bool
 
 
 class WorkspaceOperationalControlResponse(BaseModel):
@@ -220,7 +229,16 @@ class UpdateWorkspaceCRMSyncConfigResponse(BaseModel):
 
 
 class UpdateWorkspaceLLMConfigRequest(BaseModel):
-    openrouter_model: str = Field(min_length=1, max_length=255)
+    # Deprecated: when provided without openrouter_drafting_model, keeps the
+    # legacy behavior of setting the OpenRouter drafting model.
+    openrouter_model: str | None = Field(default=None, min_length=1, max_length=255)
+    llm_provider: LLMProviderKind | None = None
+    openrouter_drafting_model: str | None = Field(default=None, min_length=1, max_length=255)
+    openrouter_classification_model: str | None = Field(
+        default=None, min_length=1, max_length=255
+    )
+    bedrock_drafting_model: str | None = Field(default=None, min_length=1, max_length=255)
+    bedrock_classification_model: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class UpdateWorkspaceLLMConfigResponse(BaseModel):
@@ -313,6 +331,7 @@ class OutboundDraftPreviewResponse(BaseModel):
     subject: str | None = None
     prompt_version: str | None = None
     model: str | None = None
+    reasons: list[str] = Field(default_factory=list)
 
 
 class ListingRelevanceBriefResponse(BaseModel):

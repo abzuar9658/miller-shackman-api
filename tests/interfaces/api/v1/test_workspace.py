@@ -105,6 +105,11 @@ def workspace_client() -> WorkspaceTestClient:
             default_crm_sync_interval_seconds=300,
             default_openrouter_model="openai/gpt-4o-mini",
             allowed_openrouter_models=("openai/gpt-4o-mini", "openai/gpt-4.1-mini"),
+            allowed_bedrock_models=(
+                "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            ),
+            bedrock_enabled=True,
         )
 
     app.dependency_overrides[get_workspace_settings_bundle] = override_get_workspace_settings_bundle
@@ -245,7 +250,17 @@ def test_get_workspace_settings_returns_crm_sync_defaults(
     assert body["llm_config"] == {
         "workspace_id": str(WORKSPACE_ID),
         "openrouter_model": "openai/gpt-4o-mini",
+        "llm_provider": "openrouter",
+        "openrouter_drafting_model": "openai/gpt-4o-mini",
+        "openrouter_classification_model": "openai/gpt-4o-mini",
+        "bedrock_drafting_model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "bedrock_classification_model": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
         "allowed_openrouter_models": ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"],
+        "allowed_bedrock_models": [
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        ],
+        "bedrock_enabled": True,
     }
     assert body["operational_control"] == {
         "workspace_id": str(WORKSPACE_ID),
@@ -348,8 +363,56 @@ def test_update_workspace_llm_config_returns_200(
     assert body["llm_config"] == {
         "workspace_id": str(WORKSPACE_ID),
         "openrouter_model": "openai/gpt-4.1-mini",
+        "llm_provider": "openrouter",
+        "openrouter_drafting_model": "openai/gpt-4.1-mini",
+        "openrouter_classification_model": "openai/gpt-4o-mini",
+        "bedrock_drafting_model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "bedrock_classification_model": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
         "allowed_openrouter_models": ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"],
+        "allowed_bedrock_models": [
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        ],
+        "bedrock_enabled": True,
     }
+
+
+def test_update_workspace_llm_config_switches_provider_and_task_models(
+    workspace_client: WorkspaceTestClient,
+) -> None:
+    response = workspace_client.client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/settings/llm",
+        json={
+            "llm_provider": "bedrock",
+            "openrouter_drafting_model": "openai/gpt-4.1-mini",
+            "openrouter_classification_model": "openai/gpt-4o-mini",
+            "bedrock_drafting_model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "bedrock_classification_model": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "updated"
+    assert body["llm_config"]["llm_provider"] == "bedrock"
+    assert body["llm_config"]["openrouter_drafting_model"] == "openai/gpt-4.1-mini"
+    assert body["llm_config"]["bedrock_classification_model"] == (
+        "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    )
+
+
+def test_update_workspace_llm_config_rejects_disallowed_bedrock_model(
+    workspace_client: WorkspaceTestClient,
+) -> None:
+    response = workspace_client.client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/settings/llm",
+        json={
+            "llm_provider": "bedrock",
+            "bedrock_drafting_model": "us.amazon.nova-pro-v1:0",
+        },
+    )
+
+    assert response.status_code == 400
 
 
 def test_update_workspace_outbound_drafting_config_returns_200(

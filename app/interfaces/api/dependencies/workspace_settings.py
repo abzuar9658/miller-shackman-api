@@ -88,6 +88,8 @@ class WorkspaceSettingsBundle:
     default_crm_sync_interval_seconds: int
     default_openrouter_model: str
     allowed_openrouter_models: tuple[str, ...]
+    allowed_bedrock_models: tuple[str, ...]
+    bedrock_enabled: bool
 
 
 @dataclass
@@ -130,6 +132,8 @@ async def get_workspace_settings_bundle(
         default_crm_sync_interval_seconds=settings.crm_sync_incremental_interval_seconds,
         default_openrouter_model=settings.openrouter_model,
         allowed_openrouter_models=tuple(settings.openrouter_allowed_models),
+        allowed_bedrock_models=tuple(settings.bedrock_allowed_models),
+        bedrock_enabled=settings.bedrock_enabled,
     )
 
 

@@ -211,11 +211,20 @@ def _llm_config_response(
     config: WorkspaceLLMConfig,
     *,
     allowed_openrouter_models: tuple[str, ...],
+    allowed_bedrock_models: tuple[str, ...],
+    bedrock_enabled: bool,
 ) -> WorkspaceLLMConfigResponse:
     return WorkspaceLLMConfigResponse(
         workspace_id=config.workspace_id,
         openrouter_model=config.openrouter_model,
+        llm_provider=config.llm_provider.value,
+        openrouter_drafting_model=config.openrouter_drafting_model,
+        openrouter_classification_model=config.openrouter_classification_model,
+        bedrock_drafting_model=config.bedrock_drafting_model,
+        bedrock_classification_model=config.bedrock_classification_model,
         allowed_openrouter_models=list(allowed_openrouter_models),
+        allowed_bedrock_models=list(allowed_bedrock_models),
+        bedrock_enabled=bedrock_enabled,
     )
 
 
@@ -321,6 +330,8 @@ async def get_workspace_settings_route(
             _llm_config_response(
                 result.view.llm_config,
                 allowed_openrouter_models=bundle.allowed_openrouter_models,
+                allowed_bedrock_models=bundle.allowed_bedrock_models,
+                bedrock_enabled=bundle.bedrock_enabled,
             )
             if result.view
             else None
@@ -432,6 +443,11 @@ async def update_workspace_llm_config_route(
         actor=actor,
         workspace_id=workspace_id,
         openrouter_model=request.openrouter_model,
+        llm_provider=request.llm_provider,
+        openrouter_drafting_model=request.openrouter_drafting_model,
+        openrouter_classification_model=request.openrouter_classification_model,
+        bedrock_drafting_model=request.bedrock_drafting_model,
+        bedrock_classification_model=request.bedrock_classification_model,
         workspace_repository=bundle.workspace_repository,
         membership_repository=bundle.membership_repository,
         workspace_llm_config_repository=bundle.workspace_llm_config_repository,
@@ -439,6 +455,8 @@ async def update_workspace_llm_config_route(
         now=datetime.now(UTC),
         default_openrouter_model=bundle.default_openrouter_model,
         allowed_openrouter_models=bundle.allowed_openrouter_models,
+        allowed_bedrock_models=bundle.allowed_bedrock_models,
+        bedrock_enabled=bundle.bedrock_enabled,
     )
     await bundle.session.commit()
     if result.status == UpdateWorkspaceLLMConfigStatus.REJECTED:
@@ -449,6 +467,8 @@ async def update_workspace_llm_config_route(
             _llm_config_response(
                 result.llm_config,
                 allowed_openrouter_models=bundle.allowed_openrouter_models,
+                allowed_bedrock_models=bundle.allowed_bedrock_models,
+                bedrock_enabled=bundle.bedrock_enabled,
             )
             if result.llm_config is not None
             else None
@@ -546,6 +566,7 @@ async def preview_workspace_outbound_drafting_route(
                 "subject": result.sms_preview.subject,
                 "prompt_version": result.sms_preview.prompt_version,
                 "model": result.sms_preview.model,
+                "reasons": list(result.sms_preview.reasons),
             }
             if result.sms_preview is not None
             else None
@@ -557,6 +578,7 @@ async def preview_workspace_outbound_drafting_route(
                 "subject": result.email_preview.subject,
                 "prompt_version": result.email_preview.prompt_version,
                 "model": result.email_preview.model,
+                "reasons": list(result.email_preview.reasons),
             }
             if result.email_preview is not None
             else None
