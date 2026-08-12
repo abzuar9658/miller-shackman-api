@@ -5,7 +5,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.llm import WorkspaceLLMConfig
+from app.domain.llm import LLMProviderKind, WorkspaceLLMConfig
 from app.infrastructure.persistence.postgres.models import WorkspaceLLMConfigModel
 from app.infrastructure.persistence.postgres.workspace_llm_config_repository import (
     PostgresWorkspaceLLMConfigRepository,
@@ -64,6 +64,11 @@ def _config_model() -> WorkspaceLLMConfigModel:
     return WorkspaceLLMConfigModel(
         workspace_id=WORKSPACE_ID,
         openrouter_model="openai/gpt-4.1-mini",
+        llm_provider="bedrock",
+        openrouter_drafting_model="openai/gpt-4.1-mini",
+        openrouter_classification_model="openai/gpt-4o-mini",
+        bedrock_drafting_model="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        bedrock_classification_model="us.anthropic.claude-haiku-4-5-20251001-v1:0",
         created_at=NOW,
         updated_at=NOW,
     )
@@ -73,6 +78,11 @@ def _config() -> WorkspaceLLMConfig:
     return WorkspaceLLMConfig(
         workspace_id=WORKSPACE_ID,
         openrouter_model="openai/gpt-4.1-mini",
+        llm_provider=LLMProviderKind.BEDROCK,
+        openrouter_drafting_model="openai/gpt-4.1-mini",
+        openrouter_classification_model="openai/gpt-4o-mini",
+        bedrock_drafting_model="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        bedrock_classification_model="us.anthropic.claude-haiku-4-5-20251001-v1:0",
     )
 
 

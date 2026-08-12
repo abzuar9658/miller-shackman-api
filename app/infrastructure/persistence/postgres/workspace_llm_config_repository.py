@@ -5,7 +5,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.common.ids import WorkspaceId
-from app.domain.llm import WorkspaceLLMConfig
+from app.domain.llm import LLMProviderKind, WorkspaceLLMConfig
 from app.infrastructure.persistence.postgres.models import WorkspaceLLMConfigModel
 
 
@@ -32,6 +32,11 @@ class PostgresWorkspaceLLMConfigRepository:
             .values(
                 workspace_id=config.workspace_id,
                 openrouter_model=config.openrouter_model,
+                llm_provider=config.llm_provider.value,
+                openrouter_drafting_model=config.openrouter_drafting_model,
+                openrouter_classification_model=config.openrouter_classification_model,
+                bedrock_drafting_model=config.bedrock_drafting_model,
+                bedrock_classification_model=config.bedrock_classification_model,
                 created_at=now,
                 updated_at=now,
             )
@@ -39,6 +44,11 @@ class PostgresWorkspaceLLMConfigRepository:
                 index_elements=["workspace_id"],
                 set_={
                     "openrouter_model": config.openrouter_model,
+                    "llm_provider": config.llm_provider.value,
+                    "openrouter_drafting_model": config.openrouter_drafting_model,
+                    "openrouter_classification_model": config.openrouter_classification_model,
+                    "bedrock_drafting_model": config.bedrock_drafting_model,
+                    "bedrock_classification_model": config.bedrock_classification_model,
                     "updated_at": now,
                 },
             )
@@ -52,4 +62,9 @@ def _config_from_model(model: WorkspaceLLMConfigModel) -> WorkspaceLLMConfig:
     return WorkspaceLLMConfig(
         workspace_id=model.workspace_id,
         openrouter_model=model.openrouter_model,
+        llm_provider=LLMProviderKind(model.llm_provider),
+        openrouter_drafting_model=model.openrouter_drafting_model,
+        openrouter_classification_model=model.openrouter_classification_model,
+        bedrock_drafting_model=model.bedrock_drafting_model,
+        bedrock_classification_model=model.bedrock_classification_model,
     )

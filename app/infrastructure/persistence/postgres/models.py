@@ -2332,6 +2332,11 @@ class WorkspaceLLMConfigModel(Base):
         PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), primary_key=True
     )
     openrouter_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    llm_provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    openrouter_drafting_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    openrouter_classification_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    bedrock_drafting_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    bedrock_classification_model: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
