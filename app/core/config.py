@@ -64,7 +64,35 @@ class Settings(BaseSettings):
     openrouter_api_key: SecretStr | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "openai/gpt-4o-mini"
-    openrouter_allowed_models: list[str] = ["openai/gpt-4o-mini"]
+    # Empty values fall back to openrouter_model.
+    openrouter_drafting_model: str = ""
+    openrouter_classification_model: str = ""
+    openrouter_allowed_models: list[str] = [
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o",
+        "openai/gpt-4.1-mini",
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-haiku-4.5",
+        "google/gemini-2.5-flash",
+    ]
+
+    bedrock_enabled: bool = False
+    bedrock_region: str = "us-east-1"
+    # Leave credentials unset to use the default AWS credential chain
+    # (IAM role in production). Kept separate from the S3 aws_* credentials
+    # because the two capabilities need different IAM policies.
+    bedrock_access_key_id: SecretStr | None = None
+    bedrock_secret_access_key: SecretStr | None = None
+    bedrock_session_token: SecretStr | None = None
+    bedrock_drafting_model: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    bedrock_classification_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    bedrock_allowed_models: list[str] = [
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "us.amazon.nova-pro-v1:0",
+        "us.amazon.nova-lite-v1:0",
+        "us.meta.llama3-3-70b-instruct-v1:0",
+    ]
 
     # Valid values: "twilio" or "sink" (dev-only, no external calls).
     sms_provider: str = "twilio"
@@ -115,12 +143,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    @field_validator("openrouter_allowed_models")
+    @field_validator("openrouter_allowed_models", "bedrock_allowed_models")
     @classmethod
-    def openrouter_allowed_models_must_be_non_empty(cls, value: list[str]) -> list[str]:
+    def allowed_models_must_be_non_empty(cls, value: list[str]) -> list[str]:
         normalized = tuple(dict.fromkeys(item.strip() for item in value if item.strip()))
         if not normalized:
-            raise ValueError("openrouter_allowed_models must contain at least one model")
+            raise ValueError("allowed models list must contain at least one model")
         return list(normalized)
 
     @model_validator(mode="after")
@@ -128,6 +156,31 @@ class Settings(BaseSettings):
         if self.openrouter_model not in self.openrouter_allowed_models:
             raise ValueError("openrouter_model must be included in openrouter_allowed_models")
         return self
+
+    @model_validator(mode="after")
+    def openrouter_task_models_must_be_allowed(self) -> "Settings":
+        for field_name in ("openrouter_drafting_model", "openrouter_classification_model"):
+            model = getattr(self, field_name).strip()
+            if model and model not in self.openrouter_allowed_models:
+                raise ValueError(
+                    f"{field_name} must be included in openrouter_allowed_models"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def bedrock_task_models_must_be_allowed(self) -> "Settings":
+        for field_name in ("bedrock_drafting_model", "bedrock_classification_model"):
+            if getattr(self, field_name) not in self.bedrock_allowed_models:
+                raise ValueError(f"{field_name} must be included in bedrock_allowed_models")
+        return self
+
+    @property
+    def resolved_openrouter_drafting_model(self) -> str:
+        return self.openrouter_drafting_model.strip() or self.openrouter_model
+
+    @property
+    def resolved_openrouter_classification_model(self) -> str:
+        return self.openrouter_classification_model.strip() or self.openrouter_model
 
 
 @lru_cache
