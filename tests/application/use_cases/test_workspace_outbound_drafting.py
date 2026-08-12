@@ -37,7 +37,7 @@ class _FakePreviewLLMClient:
                 '{"search_type":"rent","location":"Queens","max_price":"2000",'
                 '"confidence":0.92,"reasons":["Monthly rent language indicates rent."]}'
             )
-        elif '"channel": "sms"' in request.prompt:
+        elif "Channel: sms" in request.prompt:
             payload = (
                 '{"body":"SMS preview body","subject":null,'
                 '"confidence":0.91,"personalization_notes":[],"safety_flags":[]}'
@@ -209,7 +209,7 @@ def test_preview_workspace_outbound_drafting_uses_saved_config_and_live_search()
     assert result.email_preview.subject == "Preview subject | Taylor Brokerage"
     assert result.email_preview.body is not None
     assert result.email_preview.body == "Regards,\nTaylor Brokerage\n\nEmail preview body"
-    assert result.sms_preview.prompt_version == "outbound_message_draft:v12:r2"
+    assert result.sms_preview.prompt_version == "outbound_message_draft:v15:r2"
     assert len(llm_client.requests) == 3
     assert len(listing_search_client.search_calls) == 1
     assert listing_search_client.search_calls[0].search_type.value == "rent"
@@ -270,7 +270,7 @@ def test_preview_workspace_outbound_drafting_prefers_explicit_dormant_config() -
         "Use the saved dormant campaign prompt." in request.prompt
         for request in draft_requests
     )
-    assert all('"journey_kind": "dormant"' in request.prompt for request in draft_requests)
+    assert all("Journey: dormant" in request.prompt for request in draft_requests)
     assert all(
         "Workspace prompt must not be used." not in request.prompt
         for request in draft_requests

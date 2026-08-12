@@ -32,7 +32,8 @@ from app.application.services.llm.outbound_query_extraction import (
     build_outbound_context_with_query_extraction,
 )
 from app.application.services.llm.workspace_model_resolution import (
-    resolve_workspace_openrouter_model,
+    resolve_workspace_llm_config,
+    workspace_llm_selection_for_task,
 )
 from app.application.use_cases.authentication import AuthReasonCode
 from app.application.use_cases.workspace import _actor_for_workspace
@@ -40,6 +41,7 @@ from app.domain.common.ids import WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.identity import AuthenticatedActor, PermissionCapability, evaluate_permission
 from app.domain.leads import CanonicalLeadRecord, CRMProvider, LeadType
+from app.domain.llm import LLMTaskKind
 from app.domain.outbound_drafting import (
     DormantStepTemplateProfile,
     OutboundJourneyKind,
@@ -60,6 +62,7 @@ class OutboundDraftPreview:
     subject: str | None = None
     prompt_version: str | None = None
     model: str | None = None
+    reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -133,11 +136,15 @@ async def preview_workspace_outbound_drafting(
         drafting_config = (
             await workspace_outbound_drafting_config_repository.get_by_workspace_id(workspace_id)
         ) or default_workspace_outbound_drafting_config(workspace_id)
-    model = await resolve_workspace_openrouter_model(
+    llm_config = await resolve_workspace_llm_config(
         workspace_id=workspace_id,
         workspace_llm_config_repository=workspace_llm_config_repository,
         default_openrouter_model=default_openrouter_model,
     )
+    classification_selection = workspace_llm_selection_for_task(
+        llm_config, LLMTaskKind.CLASSIFICATION
+    )
+    drafting_selection = workspace_llm_selection_for_task(llm_config, LLMTaskKind.DRAFTING)
     lead = _preview_lead(workspace_id=workspace_id, query=query, now=now)
     extraction = await build_outbound_context_with_query_extraction(
         lead=lead,
@@ -158,7 +165,8 @@ async def preview_workspace_outbound_drafting(
         ),
         enabled_query_extraction_fields=drafting_config.enabled_extraction_fields,
         llm_client=llm_client,
-        model=model,
+        model=classification_selection.model,
+        provider=classification_selection.provider,
     )
     lead_context = extraction.lead_context
     lead_context = await maybe_enrich_outbound_lead_context(
@@ -193,7 +201,8 @@ async def preview_workspace_outbound_drafting(
                 journey_kind=journey_kind,
                 llm_client=llm_client,
                 drafting_config=drafting_config,
-                model=model,
+                model=drafting_selection.model,
+                provider=drafting_selection.provider,
             ),
             draft_outbound_message(
                 lead=lead,
@@ -205,7 +214,8 @@ async def preview_workspace_outbound_drafting(
                 journey_kind=journey_kind,
                 llm_client=llm_client,
                 drafting_config=drafting_config,
-                model=model,
+                model=drafting_selection.model,
+                provider=drafting_selection.provider,
             ),
         )
     elif template_channel == ContactChannel.SMS:
@@ -219,7 +229,8 @@ async def preview_workspace_outbound_drafting(
             journey_kind=journey_kind,
             llm_client=llm_client,
             drafting_config=drafting_config,
-            model=model,
+            model=drafting_selection.model,
+            provider=drafting_selection.provider,
         )
     else:
         email_result = await draft_outbound_message(
@@ -232,7 +243,8 @@ async def preview_workspace_outbound_drafting(
             journey_kind=journey_kind,
             llm_client=llm_client,
             drafting_config=drafting_config,
-            model=model,
+            model=drafting_selection.model,
+            provider=drafting_selection.provider,
         )
     listing_relevance_brief = build_listing_relevance_brief_payload(lead_context.listing_context)
     return OutboundDraftingPreviewResult(
@@ -259,6 +271,7 @@ def _preview_from_draft(
         subject=result.subject,
         prompt_version=result.prompt_version,
         model=result.model,
+        reasons=tuple(reason.value for reason in result.reasons),
     )
 
 

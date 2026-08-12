@@ -25,7 +25,7 @@ from app.application.services.llm.lead_state_classification import (
     classify_lead_from_conversation,
 )
 from app.application.services.llm.workspace_model_resolution import (
-    resolve_workspace_openrouter_model,
+    resolve_workspace_llm_selection,
 )
 from app.application.services.paused_search_track_assignment import (
     synchronize_paused_search_track_assignment,
@@ -55,6 +55,7 @@ from app.domain.leads import (
     PausedSearchTrackSelectionStatus,
     lead_paused_search_profile,
 )
+from app.domain.llm import LLMTaskKind
 
 
 class ApplyLeadStateClassificationStatus(StrEnum):
@@ -128,8 +129,9 @@ async def apply_lead_state_classification(
     if precomputed_classification_result is not None:
         classification_result = precomputed_classification_result
     else:
-        openrouter_model = await resolve_workspace_openrouter_model(
+        llm_selection = await resolve_workspace_llm_selection(
             workspace_id=workspace_id,
+            task=LLMTaskKind.CLASSIFICATION,
             workspace_llm_config_repository=workspace_llm_config_repository,
             default_openrouter_model=default_openrouter_model,
         )
@@ -152,7 +154,8 @@ async def apply_lead_state_classification(
             conversation_summary=conversation_summary,
             llm_client=llm_client,
             dormant_threshold_days=dormant_threshold_days,
-            model=openrouter_model,
+            model=llm_selection.model,
+            provider=llm_selection.provider,
             paused_search_catalog=catalog,
         )
     if classification_result.status != LeadStateClassificationStatus.CLASSIFIED:

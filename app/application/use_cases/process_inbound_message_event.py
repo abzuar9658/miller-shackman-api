@@ -78,7 +78,9 @@ from app.application.services.llm.reply_classification import (
     classify_inbound_reply,
 )
 from app.application.services.llm.workspace_model_resolution import (
-    resolve_workspace_openrouter_model,
+    WorkspaceLLMSelection,
+    resolve_workspace_llm_config,
+    workspace_llm_selection_for_task,
 )
 from app.application.use_cases.apply_inbound_workflow_transition import (
     InboundWorkflowTransitionOutcome,
@@ -160,6 +162,7 @@ from app.domain.leads import (
     PausedSearchTrackSelectionStatus,
     lead_paused_search_profile,
 )
+from app.domain.llm import LLMTaskKind
 from app.domain.workflows import (
     LeadWorkflow,
     TemporalSignalName,
@@ -423,17 +426,24 @@ async def process_inbound_message_event(
         ),
     )
 
-    openrouter_model = await resolve_workspace_openrouter_model(
+    workspace_llm_config = await resolve_workspace_llm_config(
         workspace_id=event.workspace_id,
         workspace_llm_config_repository=workspace_llm_config_repository,
         default_openrouter_model=default_openrouter_model,
+    )
+    classification_selection = workspace_llm_selection_for_task(
+        workspace_llm_config, LLMTaskKind.CLASSIFICATION
+    )
+    drafting_selection = workspace_llm_selection_for_task(
+        workspace_llm_config, LLMTaskKind.DRAFTING
     )
 
     classification = await classify_inbound_reply(
         lead=lead,
         inbound_text=event.body,
         llm_client=llm_client,
-        model=openrouter_model,
+        model=classification_selection.model,
+        provider=classification_selection.provider,
     )
     classification = _apply_explicit_opt_out_override(
         event=event,
@@ -457,7 +467,7 @@ async def process_inbound_message_event(
         crm_conversation_event_repository=crm_conversation_event_repository,
         conversation_summary_repository=conversation_summary_repository,
         llm_client=llm_client,
-        model=openrouter_model,
+        llm_selection=classification_selection,
     )
     paused_search_reply_decision = await _resolve_paused_search_reply_decision(
         lead=lead,
@@ -900,7 +910,7 @@ async def process_inbound_message_event(
             inbound_message=inbound_message,
             workspace_handoff_config=workspace_handoff_config,
             llm_client=llm_client,
-            openrouter_model=openrouter_model,
+            llm_selection=drafting_selection,
             workspace_contact_policy_repository=workspace_contact_policy_repository,
             workspace_repository=workspace_repository,
             campaign_execution_repository=campaign_execution_repository,
@@ -1195,7 +1205,7 @@ async def _classify_paused_search_timing_if_needed(
     crm_conversation_event_repository: CrmConversationEventRepository | None,
     conversation_summary_repository: ConversationSummaryRepository,
     llm_client: LLMClient,
-    model: str | None,
+    llm_selection: WorkspaceLLMSelection,
 ) -> LeadStateClassificationResult | None:
     if (
         inbound_decision.action != InboundAction.CONTINUE_AI
@@ -1234,7 +1244,8 @@ async def _classify_paused_search_timing_if_needed(
         conversation_summary=previous_summary.summary_text if previous_summary else None,
         crm_conversation_events=(*crm_events, *supplemental_events),
         llm_client=llm_client,
-        model=model,
+        model=llm_selection.model,
+        provider=llm_selection.provider,
         paused_search_catalog=catalog,
     )
 
@@ -1461,7 +1472,7 @@ async def _send_lead_handoff_acknowledgments_if_configured(
     inbound_message: InboundMessage,
     workspace_handoff_config: WorkspaceHandoffConfig | None,
     llm_client: LLMClient,
-    openrouter_model: str,
+    llm_selection: WorkspaceLLMSelection,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None,
     workspace_repository: WorkspaceRepository | None,
     campaign_execution_repository: CampaignExecutionRepository | None,
@@ -1638,7 +1649,8 @@ async def _send_lead_handoff_acknowledgments_if_configured(
                     channel == ContactChannel.EMAIL and email_threading_headers.has_thread
                 ),
                 llm_client=llm_client,
-                model=openrouter_model,
+                model=llm_selection.model,
+                provider=llm_selection.provider,
             )
         except Exception as exc:
             draft_result = None

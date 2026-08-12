@@ -16,6 +16,7 @@ from app.application.services.llm.reply_classification import (
     classify_inbound_reply,
 )
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.llm import LLMProviderKind, LLMTaskKind
 
 NOW = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
 
@@ -99,6 +100,26 @@ async def test_classifies_human_request_and_builds_versioned_prompt() -> None:
     assert result.summary_text == "Lead asked to speak with an agent."
     assert llm.requests[0].prompt_version == INBOUND_REPLY_CLASSIFICATION_PROMPT_VERSION
     assert "Can someone call me today?" in llm.requests[0].prompt
+    assert llm.requests[0].task is LLMTaskKind.CLASSIFICATION
+    assert llm.requests[0].provider is None
+
+
+async def test_threads_provider_through_classification_requests() -> None:
+    llm = FakeLLMClient(["not json", _classification_json()])
+
+    result = await classify_inbound_reply(
+        lead=_lead(),
+        inbound_text="Can someone call me today?",
+        llm_client=llm,
+        provider=LLMProviderKind.BEDROCK,
+    )
+
+    assert result.status == ReplyClassificationStatus.CLASSIFIED
+    assert [request.provider for request in llm.requests] == [
+        LLMProviderKind.BEDROCK,
+        LLMProviderKind.BEDROCK,
+    ]
+    assert all(request.task is LLMTaskKind.CLASSIFICATION for request in llm.requests)
 
 
 @pytest.mark.parametrize(

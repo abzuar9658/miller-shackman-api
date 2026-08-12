@@ -10,6 +10,7 @@ from app.application.services.llm.handoff_acknowledgment_drafting import (
 )
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.llm import LLMProviderKind, LLMTaskKind
 
 NOW = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
 
@@ -91,6 +92,32 @@ async def test_drafts_sms_acknowledgment_with_default_prompt_and_context() -> No
     assert "human_requested" in llm.requests[0].prompt
     assert "Can an agent call me today?" in llm.requests[0].prompt
     assert "Do not answer the lead's substantive question." in llm.requests[0].prompt
+    assert llm.requests[0].task is LLMTaskKind.DRAFTING
+    assert llm.requests[0].provider is None
+
+
+async def test_threads_provider_through_acknowledgment_request() -> None:
+    llm = FakeLLMClient(_draft_json(body="Thanks — our team will be in touch soon."))
+
+    result = await draft_handoff_acknowledgment(
+        lead=_lead(),
+        channel=ContactChannel.SMS,
+        inbound_text="Can an agent call me today?",
+        inbound_email_subject=None,
+        handoff_reason_code="human_requested",
+        handoff_summary=None,
+        recent_conversation_context=None,
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        admin_prompt_text=None,
+        reply_in_existing_email_thread=False,
+        llm_client=llm,
+        provider=LLMProviderKind.BEDROCK,
+    )
+
+    assert result.status == HandoffAcknowledgmentDraftStatus.DRAFTED
+    assert llm.requests[0].provider is LLMProviderKind.BEDROCK
+    assert llm.requests[0].task is LLMTaskKind.DRAFTING
 
 
 async def test_uses_admin_configured_acknowledgment_prompt_text() -> None:

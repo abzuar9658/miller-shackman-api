@@ -22,6 +22,7 @@ from app.domain.leads import (
     LeadStateClassificationOutcome,
     PausedSearchTrackSelectionStatus,
 )
+from app.domain.llm import LLMProviderKind, LLMTaskKind
 
 LEAD_STATE_CLASSIFICATION_PROMPT_VERSION = "lead_state_classification:v6"
 STRICT_RETRY_PROMPT_VERSION = f"{LEAD_STATE_CLASSIFICATION_PROMPT_VERSION}:strict_retry"
@@ -131,6 +132,7 @@ async def classify_lead_from_conversation(
     llm_client: LLMClient,
     dormant_threshold_days: int | None = None,
     model: str | None = None,
+    provider: LLMProviderKind | None = None,
     min_confidence: float = MIN_LEAD_STATE_CLASSIFICATION_CONFIDENCE,
     paused_search_catalog: tuple[PausedSearchTrackCatalogEntry, ...] = (),
 ) -> LeadStateClassificationResult:
@@ -149,6 +151,7 @@ async def classify_lead_from_conversation(
         prompt=prompt_text,
         prompt_version=LEAD_STATE_CLASSIFICATION_PROMPT_VERSION,
         model=model,
+        provider=provider,
     )
 
     try:
@@ -160,6 +163,7 @@ async def classify_lead_from_conversation(
             prompt=prompt_text,
             prompt_version=STRICT_RETRY_PROMPT_VERSION,
             model=model,
+            provider=provider,
         )
         try:
             classification = _parse_classification_result(retry_result.text)
@@ -236,12 +240,15 @@ async def _complete_classification_request(
     prompt: str,
     prompt_version: str,
     model: str | None,
+    provider: LLMProviderKind | None,
 ) -> LLMResult:
     return await llm_client.complete(
         LLMCompletionRequest(
             prompt=prompt,
             prompt_version=prompt_version,
             model=model,
+            provider=provider,
+            task=LLMTaskKind.CLASSIFICATION,
             temperature=0.1,
             max_tokens=800,
         )

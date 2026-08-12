@@ -13,6 +13,7 @@ from app.application.services.llm.structured_json import (
 )
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord
+from app.domain.llm import LLMProviderKind, LLMTaskKind
 
 HANDOFF_ACKNOWLEDGMENT_DRAFT_PROMPT_VERSION_PREFIX = "handoff_acknowledgment_draft:v2"
 DEFAULT_LEAD_ACKNOWLEDGMENT_PROMPT_TEXT = (
@@ -94,6 +95,7 @@ async def draft_handoff_acknowledgment(
     reply_in_existing_email_thread: bool,
     llm_client: LLMClient,
     model: str | None = None,
+    provider: LLMProviderKind | None = None,
     min_confidence: float = MIN_DRAFT_CONFIDENCE,
 ) -> HandoffAcknowledgmentDraftResult:
     resolved_prompt_text = resolve_lead_acknowledgment_prompt_text(admin_prompt_text)
@@ -115,6 +117,8 @@ async def draft_handoff_acknowledgment(
             ),
             prompt_version=prompt_version,
             model=model,
+            provider=provider,
+            task=LLMTaskKind.DRAFTING,
             temperature=0.4,
             max_tokens=300,
         )

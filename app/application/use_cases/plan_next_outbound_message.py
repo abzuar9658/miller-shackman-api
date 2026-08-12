@@ -21,7 +21,7 @@ from app.application.services.llm.outbound_query_extraction import (
     build_outbound_context_with_query_extraction,
 )
 from app.application.services.llm.workspace_model_resolution import (
-    resolve_workspace_openrouter_model,
+    resolve_workspace_llm_selection,
 )
 from app.application.use_cases.plan_outbound_message import (
     OutboundPlanningContext,
@@ -38,6 +38,7 @@ from app.domain.common.ids import CampaignId, LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel, WorkspaceContactPolicy
 from app.domain.conversations import CrmConversationEvent
 from app.domain.leads import CanonicalLeadRecord
+from app.domain.llm import LLMTaskKind
 from app.domain.outbound_drafting import (
     DormantStepTemplateProfile,
     OutboundJourneyKind,
@@ -207,8 +208,9 @@ async def plan_next_outbound_message_for_lead(
             channel_evaluations=selected.evaluations,
         )
 
-    model = await resolve_workspace_openrouter_model(
+    llm_selection = await resolve_workspace_llm_selection(
         workspace_id=workspace_id,
+        task=LLMTaskKind.CLASSIFICATION,
         workspace_llm_config_repository=workspace_llm_config_repository,
         default_openrouter_model=default_openrouter_model,
     )
@@ -223,7 +225,8 @@ async def plan_next_outbound_message_for_lead(
         activity_items=activity_items,
         crm_conversation_events=crm_conversation_events,
         llm_client=llm_client,
-        model=model,
+        model=llm_selection.model,
+        provider=llm_selection.provider,
     )
     lead_context = extraction.lead_context
     lead_context = await maybe_enrich_outbound_lead_context(

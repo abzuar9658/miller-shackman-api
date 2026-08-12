@@ -27,7 +27,7 @@ from app.application.services.llm.outbound_message_drafting import (
     draft_outbound_message,
 )
 from app.application.services.llm.workspace_model_resolution import (
-    resolve_workspace_openrouter_model,
+    resolve_workspace_llm_selection,
 )
 from app.application.services.paused_search_drafting_templates import (
     apply_paused_search_drafting_template,
@@ -53,6 +53,7 @@ from app.domain.compliance.contactability import (
     evaluate_contactability,
 )
 from app.domain.leads import CanonicalLeadRecord
+from app.domain.llm import LLMTaskKind
 from app.domain.outbound_drafting import (
     DormantStepTemplateProfile,
     OutboundJourneyKind,
@@ -221,8 +222,9 @@ async def plan_outbound_message_for_lead_record(
             channel_evaluations=selected.evaluations,
         )
 
-    openrouter_model = await resolve_workspace_openrouter_model(
+    llm_selection = await resolve_workspace_llm_selection(
         workspace_id=workspace_id,
+        task=LLMTaskKind.DRAFTING,
         workspace_llm_config_repository=workspace_llm_config_repository,
         default_openrouter_model=default_openrouter_model,
     )
@@ -276,7 +278,8 @@ async def plan_outbound_message_for_lead_record(
         llm_client=llm_client,
         drafting_config=drafting_config,
         message_purpose=context.paused_search_writing_purpose,
-        model=openrouter_model,
+        model=llm_selection.model,
+        provider=llm_selection.provider,
     )
     if draft_result.status != OutboundMessageDraftStatus.DRAFTED or draft_result.body is None:
         return PlanOutboundMessageResult(

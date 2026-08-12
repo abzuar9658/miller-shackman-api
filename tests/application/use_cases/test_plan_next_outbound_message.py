@@ -35,7 +35,7 @@ from app.domain.listing_sources import (
     ListingSource,
     ListingSourceType,
 )
-from app.domain.llm import WorkspaceLLMConfig
+from app.domain.llm import LLMProviderKind, LLMTaskKind, WorkspaceLLMConfig
 from app.domain.outbound_drafting import (
     OutboundJourneyKind,
     default_workspace_outbound_drafting_config,
@@ -514,7 +514,7 @@ async def test_plans_message_using_safe_context_assembled_from_canonical_lead() 
     draft_requests = _draft_requests(llm)
     assert len(draft_requests) == 1
     assert "No meaningful communication recorded for 90 days." in draft_requests[0].prompt
-    assert '"journey_kind": "dormant"' in draft_requests[0].prompt
+    assert "Journey: dormant" in draft_requests[0].prompt
     assert "the lead inquired about a property" in draft_requests[0].prompt
     assert "Bronx" in draft_requests[0].prompt
     assert "Austin" not in draft_requests[0].prompt
@@ -536,6 +536,8 @@ async def test_uses_workspace_llm_model_for_outbound_planning() -> None:
             WorkspaceLLMConfig(
                 workspace_id=WORKSPACE_ID,
                 openrouter_model="openai/gpt-4.1-mini",
+                openrouter_drafting_model="openai/gpt-4.1-mini",
+                openrouter_classification_model="anthropic/claude-haiku-4.5",
             )
         ),
         default_openrouter_model="openai/gpt-4o-mini",
@@ -543,7 +545,10 @@ async def test_uses_workspace_llm_model_for_outbound_planning() -> None:
         message_id_factory=lambda: MESSAGE_ID,
     )
 
-    assert all(request.model == "openai/gpt-4.1-mini" for request in llm.requests)
+    models_by_task = {request.task: request.model for request in llm.requests}
+    assert models_by_task[LLMTaskKind.CLASSIFICATION] == "anthropic/claude-haiku-4.5"
+    assert models_by_task[LLMTaskKind.DRAFTING] == "openai/gpt-4.1-mini"
+    assert all(request.provider is LLMProviderKind.OPENROUTER for request in llm.requests)
 
 
 async def test_prefers_recent_crm_conversation_history_when_available() -> None:
@@ -637,9 +642,9 @@ async def test_prefers_unified_activity_context_when_available() -> None:
     draft_requests = _draft_requests(llm)
     assert len(draft_requests) == 1
     assert "Recent meaningful activity:" in draft_requests[0].prompt
-    assert "conversation_memory_summary" in draft_requests[0].prompt
-    assert "recent_conversation_items" in draft_requests[0].prompt
-    assert "recent_outbound_messages" in draft_requests[0].prompt
+    assert "Conversation summary:" in draft_requests[0].prompt
+    assert "## Recent Conversation" in draft_requests[0].prompt
+    assert "## Recent Outbound Messages" in draft_requests[0].prompt
     assert (
         "Sent a safe check-in email two days ago asking whether Riverdale"
         in draft_requests[0].prompt
@@ -675,8 +680,8 @@ async def test_enriches_prompt_with_streeteasy_listing_context_when_enabled() ->
     assert result.status == PlanOutboundMessageStatus.PLANNED
     assert len(search_client.queries) == 1
     draft_requests = _draft_requests(llm)
-    assert "approved_listing_context" in draft_requests[0].prompt
-    assert "listing_relevance_brief" in draft_requests[0].prompt
+    assert "# Approved Listing Context" in draft_requests[0].prompt
+    assert "## Listing Relevance" in draft_requests[0].prompt
     assert "StreetEasy" in draft_requests[0].prompt
     assert "2738 Miles Avenue" not in draft_requests[0].prompt
     assert "$650,000" not in draft_requests[0].prompt

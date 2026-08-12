@@ -24,6 +24,7 @@ from app.domain.leads import (
     PausedSearchTrackSelectionStatus,
     PropertyEventType,
 )
+from app.domain.llm import LLMProviderKind, LLMTaskKind
 from scripts.seed_paused_search_tracks import TRACK_DEFINITIONS
 
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -255,6 +256,29 @@ async def test_classifies_paused_search_with_reason_and_timing() -> None:
     assert recent_messages[0]["content"] == "I'm waiting for rates to drop"
     assert result.raw_llm_response_text == client.text
     assert result.parsed_llm_response["outcome"] == "paused_search"
+    assert client.requests[0].task is LLMTaskKind.CLASSIFICATION
+    assert client.requests[0].provider is None
+
+
+async def test_threads_provider_through_classification_request() -> None:
+    client = _StubLLMClient(
+        _classification_json(
+            outcome="dormant",
+            confidence=0.9,
+            evidence=["Lead has gone quiet"],
+            summary="Lead is dormant.",
+        )
+    )
+    result = await classify_lead_from_conversation(
+        lead=_lead(),
+        now=NOW,
+        crm_conversation_events=(_event("Not right now"),),
+        llm_client=client,
+        provider=LLMProviderKind.BEDROCK,
+    )
+    assert result.status == LeadStateClassificationStatus.CLASSIFIED
+    assert client.requests[0].provider is LLMProviderKind.BEDROCK
+    assert client.requests[0].task is LLMTaskKind.CLASSIFICATION
 
 
 async def test_classifies_human_handoff_with_reason_code() -> None:

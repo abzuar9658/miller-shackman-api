@@ -69,7 +69,7 @@ from app.domain.leads import (
     PausedSearchSource,
     lead_paused_search_profile,
 )
-from app.domain.llm import WorkspaceLLMConfig
+from app.domain.llm import LLMProviderKind, LLMTaskKind, WorkspaceLLMConfig
 from app.domain.outbound_drafting import WorkspaceOutboundDraftingConfig
 from app.domain.workflows import LeadWorkflow, TemporalSignalName, WorkflowState
 from tests.application.use_cases._campaign_cadence_fakes import (
@@ -816,7 +816,7 @@ class _FakeLLMClientForContinuation:
 
     async def complete(self, request: LLMCompletionRequest) -> LLMResult:
         self.requests.append(request)
-        if "draft_outbound_real_estate_lead_follow_up" in request.prompt:
+        if request.task is LLMTaskKind.DRAFTING:
             return LLMResult(
                 text=self.draft_text,
                 model="openai/gpt-4o-mini",
@@ -1142,13 +1142,17 @@ async def test_uses_workspace_llm_model_for_classification() -> None:
             WorkspaceLLMConfig(
                 workspace_id=WORKSPACE_ID,
                 openrouter_model="openai/gpt-4.1-mini",
+                openrouter_drafting_model="openai/gpt-4.1-mini",
+                openrouter_classification_model="anthropic/claude-haiku-4.5",
             )
         ),
         default_openrouter_model="openai/gpt-4o-mini",
         now=NOW,
     )
 
-    assert llm.requests[0].model == "openai/gpt-4.1-mini"
+    assert llm.requests[0].model == "anthropic/claude-haiku-4.5"
+    assert llm.requests[0].task is LLMTaskKind.CLASSIFICATION
+    assert llm.requests[0].provider is LLMProviderKind.OPENROUTER
 
 
 async def test_processes_opt_out_without_handoff() -> None:
@@ -1804,12 +1808,10 @@ async def test_continue_ai_preserves_prior_context_for_generic_follow_up_reply()
     assert merged_summary.preferences["location"] == "Manhattan"
     assert merged_summary.preferences["max_price"] == "500000"
     draft_request = next(
-        request
-        for request in llm.requests
-        if "draft_outbound_real_estate_lead_follow_up" in request.prompt
+        request for request in llm.requests if request.task is LLMTaskKind.DRAFTING
     )
-    assert '"location": "Manhattan"' in draft_request.prompt
-    assert '"max_price": "500000"' in draft_request.prompt
+    assert "- location: Manhattan" in draft_request.prompt
+    assert "- max_price: 500000" in draft_request.prompt
 
 
 async def test_continue_ai_pauses_when_reply_reroutes_to_paused_search() -> None:

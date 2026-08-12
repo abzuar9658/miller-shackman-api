@@ -22,6 +22,7 @@ from app.application.services.llm.structured_json import (
 )
 from app.domain.conversations import CrmConversationEvent
 from app.domain.leads import CanonicalLeadRecord
+from app.domain.llm import LLMProviderKind, LLMTaskKind
 from app.domain.outbound_drafting import SUPPORTED_QUERY_EXTRACTION_FIELDS
 
 OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION = "outbound_query_extraction:v1"
@@ -146,6 +147,7 @@ async def build_outbound_context_with_query_extraction(
     activity_items: tuple[LeadActivityItem, ...] = (),
     crm_conversation_events: tuple[CrmConversationEvent, ...] = (),
     model: str | None = None,
+    provider: LLMProviderKind | None = None,
     min_confidence: float = MIN_OUTBOUND_QUERY_EXTRACTION_CONFIDENCE,
 ) -> OutboundQueryExtractionSelection:
     fallback_context = approved_outbound_context_from_canonical_lead(
@@ -165,6 +167,7 @@ async def build_outbound_context_with_query_extraction(
         llm_client=llm_client,
         enabled_fields=enabled_query_extraction_fields,
         model=model,
+        provider=provider,
         min_confidence=min_confidence,
     )
     if extraction.status != OutboundQueryExtractionStatus.EXTRACTED:
@@ -202,6 +205,7 @@ async def extract_outbound_query_preferences(
     llm_client: LLMClient,
     enabled_fields: tuple[str, ...] | None,
     model: str | None = None,
+    provider: LLMProviderKind | None = None,
     min_confidence: float = MIN_OUTBOUND_QUERY_EXTRACTION_CONFIDENCE,
 ) -> OutboundQueryExtractionResult:
     resolved_query = _normalized_query_text(query_text)
@@ -227,6 +231,8 @@ async def extract_outbound_query_preferences(
             ),
             prompt_version=OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION,
             model=model,
+            provider=provider,
+            task=LLMTaskKind.CLASSIFICATION,
             temperature=0.1,
             max_tokens=450,
         )

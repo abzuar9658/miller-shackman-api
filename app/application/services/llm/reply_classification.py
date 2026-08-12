@@ -11,6 +11,7 @@ from app.application.services.llm.structured_json import (
     normalize_llm_json_text,
 )
 from app.domain.leads import CanonicalLeadRecord
+from app.domain.llm import LLMProviderKind, LLMTaskKind
 
 INBOUND_REPLY_CLASSIFICATION_PROMPT_VERSION = "inbound_reply_classification:v2"
 STRICT_RETRY_PROMPT_VERSION = f"{INBOUND_REPLY_CLASSIFICATION_PROMPT_VERSION}:strict_retry"
@@ -111,6 +112,7 @@ async def classify_inbound_reply(
     inbound_text: str,
     llm_client: LLMClient,
     model: str | None = None,
+    provider: LLMProviderKind | None = None,
     min_confidence: float = MIN_REPLY_CLASSIFICATION_CONFIDENCE,
 ) -> ReplyClassificationResult:
     llm_result = await _complete_classification_request(
@@ -118,6 +120,7 @@ async def classify_inbound_reply(
         prompt=_build_prompt(lead=lead, inbound_text=inbound_text),
         prompt_version=INBOUND_REPLY_CLASSIFICATION_PROMPT_VERSION,
         model=model,
+        provider=provider,
     )
 
     try:
@@ -128,6 +131,7 @@ async def classify_inbound_reply(
             prompt=_build_strict_retry_prompt(lead=lead, inbound_text=inbound_text),
             prompt_version=STRICT_RETRY_PROMPT_VERSION,
             model=model,
+            provider=provider,
         )
         try:
             classification = _parse_classification_result(retry_result.text)
@@ -177,12 +181,15 @@ async def _complete_classification_request(
     prompt: str,
     prompt_version: str,
     model: str | None,
+    provider: LLMProviderKind | None,
 ) -> LLMResult:
     return await llm_client.complete(
         LLMCompletionRequest(
             prompt=prompt,
             prompt_version=prompt_version,
             model=model,
+            provider=provider,
+            task=LLMTaskKind.CLASSIFICATION,
             temperature=0.1,
             max_tokens=500,
         )

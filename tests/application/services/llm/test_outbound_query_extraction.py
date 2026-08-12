@@ -13,6 +13,7 @@ from app.application.services.llm.outbound_query_extraction import (
     extract_outbound_query_preferences,
 )
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.llm import LLMProviderKind, LLMTaskKind
 
 NOW = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
 
@@ -77,6 +78,33 @@ async def test_query_extraction_rent_vs_sale() -> None:
     assert result.confidence == 0.92
     assert llm.requests[0].prompt_version == OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION
     assert "Need a 2 bedroom in Astoria around $2,400 per month." in llm.requests[0].prompt
+    assert llm.requests[0].task is LLMTaskKind.CLASSIFICATION
+    assert llm.requests[0].provider is None
+
+
+async def test_threads_provider_through_extraction_request() -> None:
+    llm = FakeLLMClient(
+        json.dumps(
+            {
+                "search_type": "rent",
+                "location": ["Astoria"],
+                "confidence": 0.92,
+                "reasons": [],
+            }
+        )
+    )
+
+    result = await extract_outbound_query_preferences(
+        lead=_lead(),
+        query_text="Need a rental in Astoria.",
+        llm_client=llm,
+        enabled_fields=("search_type", "location"),
+        provider=LLMProviderKind.BEDROCK,
+    )
+
+    assert result.status == OutboundQueryExtractionStatus.EXTRACTED
+    assert llm.requests[0].provider is LLMProviderKind.BEDROCK
+    assert llm.requests[0].task is LLMTaskKind.CLASSIFICATION
 
 
 async def test_extraction_fallback_when_llm_invalid() -> None:
