@@ -440,6 +440,7 @@ def test_paused_search_plan_uses_assignment_without_workflow() -> None:
         _paused_search_plan_view(
             WORKSPACE_ID,
             LEAD_ID,
+            _lead(),
             None,
             FakePausedSearchTrackAssignmentRepository((_paused_search_track_assignment(),)),
             FakePausedSearchTrackAdminRepository(
@@ -454,6 +455,30 @@ def test_paused_search_plan_uses_assignment_without_workflow() -> None:
     assert plan.track.track_key == "rates-watch"
     assert plan.version.version_number == 3
     assert plan.steps[0].template_key == "paused_search_rates_watch_reactivation"
+
+
+def test_paused_search_plan_hidden_when_lead_profile_inactive_and_workflow_unpinned() -> None:
+    plan = asyncio.run(
+        _paused_search_plan_view(
+            WORKSPACE_ID,
+            LEAD_ID,
+            replace(
+                _lead(),
+                paused_search_active=False,
+                paused_search_track_key=None,
+                paused_search_track_version_id=None,
+            ),
+            None,
+            FakePausedSearchTrackAssignmentRepository((_paused_search_track_assignment(),)),
+            FakePausedSearchTrackAdminRepository(
+                tracks=(_paused_search_track(),),
+                versions=(_paused_search_track_version(),),
+                steps=(_paused_search_track_step(),),
+            ),
+        )
+    )
+
+    assert plan is None
 
 
 def _cadence_step(step_id: UUID, order: int, channel: ContactChannel) -> CampaignCadenceStep:

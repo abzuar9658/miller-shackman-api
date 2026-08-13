@@ -337,6 +337,7 @@ async def get_lead_detail_view(
     paused_search_plan = await _paused_search_plan_view(
         workspace_id,
         lead_id,
+        lead,
         latest_workflow,
         paused_search_track_assignment_repository,
         paused_search_track_repository,
@@ -416,6 +417,19 @@ async def _cadence_progress_views(
     campaign_execution_repository: CampaignExecutionRepository | None,
 ) -> tuple[LeadCadenceProgressView, ...]:
     views: list[LeadCadenceProgressView] = []
+    # Tracks are mutually exclusive: an active paused-search plan owns the
+    # journey, so the dormant cadence card is only rendered when no
+    # paused-search plan is in effect.
+    if paused_search_plan is not None:
+        paused_progress = build_paused_search_cadence_progress(
+            flow_name=paused_search_plan.track.display_name,
+            track_steps=paused_search_plan.steps,
+            outbound_messages=outbound_messages,
+            workflow=workflow,
+        )
+        if paused_progress is not None:
+            views.append(paused_progress)
+        return tuple(views)
     dormant_config = await _dormant_campaign_config(
         workspace_id=workspace_id,
         workflow=workflow,
@@ -431,15 +445,6 @@ async def _cadence_progress_views(
         )
         if dormant_progress is not None:
             views.append(dormant_progress)
-    if paused_search_plan is not None:
-        paused_progress = build_paused_search_cadence_progress(
-            flow_name=paused_search_plan.track.display_name,
-            track_steps=paused_search_plan.steps,
-            outbound_messages=outbound_messages,
-            workflow=workflow,
-        )
-        if paused_progress is not None:
-            views.append(paused_progress)
     return tuple(views)
 
 
@@ -478,6 +483,7 @@ async def _dormant_campaign_config(
 async def _paused_search_plan_view(
     workspace_id: WorkspaceId,
     lead_id: LeadId,
+    lead: CanonicalLeadRecord,
     workflow: LeadWorkflow | None,
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository,
     paused_search_track_repository: LeadReadPausedSearchTrackRepository,
@@ -487,6 +493,16 @@ async def _paused_search_plan_view(
         lead_id,
     )
     if assignment is None or assignment.track_version_id is None:
+        return None
+
+    # A stale, never-released assignment must not render as an active track:
+    # the lead profile (or a workflow pinned to the same track) is the source
+    # of truth for whether paused-search is currently in effect.
+    workflow_pinned_to_assignment = (
+        workflow is not None
+        and workflow.paused_search_track_version_id == assignment.track_version_id
+    )
+    if not lead.paused_search_active and not workflow_pinned_to_assignment:
         return None
 
     version = await paused_search_track_repository.get_version(
