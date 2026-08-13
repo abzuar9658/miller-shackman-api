@@ -26,6 +26,16 @@ class Settings(BaseSettings):
     database_migration_url: str = (
         "postgresql+psycopg://postgres:postgres@localhost:55432/miller_schackman"
     )
+    database_pool_size: int = Field(default=5, ge=1)
+    database_max_overflow: int = Field(default=5, ge=0)
+    database_pool_timeout_seconds: float = 30.0
+    database_pool_recycle_seconds: int = 1800
+    # Server-side guards; 0 disables. Applied per connection via asyncpg
+    # server_settings so a hung query or forgotten transaction cannot hold
+    # locks indefinitely.
+    database_statement_timeout_ms: int = Field(default=60_000, ge=0)
+    database_idle_in_transaction_session_timeout_ms: int = Field(default=120_000, ge=0)
+    database_lock_timeout_ms: int = Field(default=15_000, ge=0)
 
     rabbitmq_url: str = "amqp://guest:guest@localhost:55672/"
     crm_sync_exchange_name: str = "miller_schackman.events"

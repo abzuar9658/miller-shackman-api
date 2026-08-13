@@ -8,9 +8,31 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
+
+def _server_settings() -> dict[str, str]:
+    values = {
+        "statement_timeout": settings.database_statement_timeout_ms,
+        "idle_in_transaction_session_timeout": (
+            settings.database_idle_in_transaction_session_timeout_ms
+        ),
+        "lock_timeout": settings.database_lock_timeout_ms,
+    }
+    return {name: str(ms) for name, ms in values.items() if ms > 0}
+
+
+def _connect_args() -> dict[str, object]:
+    server_settings = _server_settings()
+    return {"server_settings": server_settings} if server_settings else {}
+
+
 async_engine = create_async_engine(
     settings.database_url,
     pool_pre_ping=True,
+    pool_size=settings.database_pool_size,
+    max_overflow=settings.database_max_overflow,
+    pool_timeout=settings.database_pool_timeout_seconds,
+    pool_recycle=settings.database_pool_recycle_seconds,
+    connect_args=_connect_args(),
 )
 
 async_session_factory = async_sessionmaker(
