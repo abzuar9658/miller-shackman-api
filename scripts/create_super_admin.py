@@ -119,7 +119,7 @@ async def _run() -> None:
             await credential_repository.save(
                 PasswordCredential(
                     user_id=saved_user.user_id,
-                    password_hash=PasslibPasswordHasher().hash_password(password),
+                    password_hash=await PasslibPasswordHasher().hash_password(password),
                     password_changed_at=now,
                     failed_attempt_count=0,
                     locked_until=None,

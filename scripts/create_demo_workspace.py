@@ -537,7 +537,7 @@ async def _seed_demo_users(
     membership_repository = PostgresWorkspaceMembershipRepository(session)
     credential_repository = PostgresPasswordCredentialRepository(session)
     hasher = password_hasher or PasslibPasswordHasher()
-    password_hash = hasher.hash_password(DEMO_PASSWORD)
+    password_hash = await hasher.hash_password(DEMO_PASSWORD)
 
     for demo_user in users:
         await user_repository.save(

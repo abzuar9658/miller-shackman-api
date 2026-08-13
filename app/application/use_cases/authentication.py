@@ -457,7 +457,7 @@ async def complete_invited_signup(
     )
 
     existing_credential = await credential_repository.get_by_user_id_for_update(saved_user.user_id)
-    password_hash = password_hasher.hash_password(password)
+    password_hash = await password_hasher.hash_password(password)
     credential = PasswordCredential(
         user_id=saved_user.user_id,
         password_hash=password_hash,
@@ -580,7 +580,7 @@ async def sign_in(
             reasons=(AuthReasonCode.USER_LOCKED,),
         )
 
-    if not password_hasher.verify_password(password, credential.password_hash):
+    if not await password_hasher.verify_password(password, credential.password_hash):
         failed_count = credential.failed_attempt_count + 1
         locked_until = None
         user_status = user.status
@@ -650,7 +650,7 @@ async def sign_in(
     if should_update_credential:
         new_hash = credential.password_hash
         if password_hasher.needs_rehash(credential.password_hash):
-            new_hash = password_hasher.hash_password(password)
+            new_hash = await password_hasher.hash_password(password)
         await credential_repository.save(
             replace(
                 credential,
@@ -952,7 +952,7 @@ async def reset_password(
         )
 
     credential = await credential_repository.get_by_user_id_for_update(user.user_id)
-    password_hash = password_hasher.hash_password(new_password)
+    password_hash = await password_hasher.hash_password(new_password)
     await credential_repository.save(
         PasswordCredential(
             user_id=user.user_id,

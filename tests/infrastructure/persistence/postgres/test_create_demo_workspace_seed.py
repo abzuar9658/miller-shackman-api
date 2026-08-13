@@ -18,11 +18,11 @@ from scripts.create_demo_workspace import DemoSeedOptions, seed_demo_workspace
 
 
 class _FastPasswordHasher:
-    def hash_password(self, password: str) -> str:
+    async def hash_password(self, password: str) -> str:
         return f"fake-hash:{password}"
 
-    def verify_password(self, password: str, password_hash: str) -> bool:
-        return password_hash == self.hash_password(password)
+    async def verify_password(self, password: str, password_hash: str) -> bool:
+        return password_hash == f"fake-hash:{password}"
 
     def needs_rehash(self, password_hash: str) -> bool:
         return False

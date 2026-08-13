@@ -865,10 +865,10 @@ class _FakeEmailProvider:
 
 
 class _FakePasswordHasher:
-    def hash_password(self, password: str) -> str:
+    async def hash_password(self, password: str) -> str:
         return f"hashed::{password}"
 
-    def verify_password(self, password: str, password_hash: str) -> bool:
+    async def verify_password(self, password: str, password_hash: str) -> bool:
         return password_hash == f"hashed::{password}"
 
     def needs_rehash(self, password_hash: str) -> bool:

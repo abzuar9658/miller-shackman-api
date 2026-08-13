@@ -43,10 +43,10 @@ class InvalidAccessTokenError(ValueError):
 
 
 class PasswordHasher(Protocol):
-    def hash_password(self, password: str) -> str:
+    async def hash_password(self, password: str) -> str:
         raise NotImplementedError
 
-    def verify_password(self, password: str, password_hash: str) -> bool:
+    async def verify_password(self, password: str, password_hash: str) -> bool:
         raise NotImplementedError
 
     def needs_rehash(self, password_hash: str) -> bool:
