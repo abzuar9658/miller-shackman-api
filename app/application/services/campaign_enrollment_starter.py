@@ -7,6 +7,7 @@ from app.application.ports.event_bus import EventBus
 from app.application.ports.repositories import (
     CampaignEnrollmentRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackAssignmentRepository,
     WorkflowTransitionRepository,
     WorkspaceOperationalControlRepository,
 )
@@ -77,6 +78,9 @@ async def start_single_campaign_enrollment(
     ),
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
+    paused_search_track_assignment_repository: (
+        PausedSearchTrackAssignmentRepository | None
+    ) = None,
     commit: Callable[[], Awaitable[None]] | None = None,
     rollback: Callable[[], Awaitable[None]] | None = None,
 ) -> LeadStartResult:
@@ -95,10 +99,21 @@ async def start_single_campaign_enrollment(
         workspace_id,
         lead_id,
     )
+    enrolling_paused_search = paused_search_track_version_id is not None
+    has_active_paused_search_assignment = False
+    if not enrolling_paused_search and paused_search_track_assignment_repository is not None:
+        active_assignment = (
+            await paused_search_track_assignment_repository.get_active_for_lead_for_update(
+                workspace_id, lead_id
+            )
+        )
+        has_active_paused_search_assignment = active_assignment is not None
     admission = evaluate_lead_enrollment_admission(
         campaign_id=campaign_id,
         source=source,
         latest_workflow=latest_workflow,
+        enrolling_paused_search=enrolling_paused_search,
+        has_active_paused_search_assignment=has_active_paused_search_assignment,
     )
     if not admission.admitted:
         return LeadStartResult(
@@ -300,6 +315,8 @@ def _admission_start_status(outcome: EnrollmentAdmissionOutcome) -> LeadStartSta
         return LeadStartStatus.ALREADY_ENROLLED
     if outcome == EnrollmentAdmissionOutcome.TERMINAL_REQUIRES_MANUAL_ENROLLMENT:
         return LeadStartStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+    if outcome == EnrollmentAdmissionOutcome.PAUSED_SEARCH_TRACK_ASSIGNED:
+        return LeadStartStatus.PAUSED_SEARCH_TRACK_ASSIGNED
     return LeadStartStatus.ALREADY_ACTIVE_ELSEWHERE
 
 

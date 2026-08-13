@@ -300,6 +300,9 @@ async def run_dormant_selector_batch(
             lead_workflow_repository=lead_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
             temporal_workflow_starter=temporal_workflow_starter,
+            paused_search_track_assignment_repository=(
+                paused_search_track_assignment_repository
+            ),
             commit=commit,
             rollback=rollback,
             now=now,

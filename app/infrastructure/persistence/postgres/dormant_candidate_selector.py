@@ -8,7 +8,10 @@ from app.domain.common.ids import CampaignId, WorkspaceId
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.leads.canonical import ActivityReliability
 from app.infrastructure.persistence.postgres.lead_repository import _model_to_record
-from app.infrastructure.persistence.postgres.models import LeadModel
+from app.infrastructure.persistence.postgres.models import (
+    LeadModel,
+    PausedSearchTrackAssignmentModel,
+)
 from app.infrastructure.persistence.postgres.workflow_models import (
     CampaignEnrollmentModel,
     LeadWorkflowModel,
@@ -78,6 +81,15 @@ def _select_candidates_statement(
         )
         .correlate(LeadModel)
     )
+    has_active_paused_search_assignment = (
+        select(PausedSearchTrackAssignmentModel)
+        .where(
+            PausedSearchTrackAssignmentModel.workspace_id == workspace_id,
+            PausedSearchTrackAssignmentModel.lead_id == LeadModel.lead_id,
+            PausedSearchTrackAssignmentModel.released_at.is_(None),
+        )
+        .correlate(LeadModel)
+    )
     return (
         select(LeadModel)
         .where(
@@ -85,8 +97,10 @@ def _select_candidates_statement(
             LeadModel.activity_reliability == ActivityReliability.RELIABLE.value,
             LeadModel.last_meaningful_communication_at.is_not(None),
             LeadModel.last_meaningful_communication_at <= cutoff,
+            LeadModel.paused_search_active.is_(False),
             ~exists(already_enrolled),
             ~exists(has_any_workflow),
+            ~exists(has_active_paused_search_assignment),
         )
         .order_by(LeadModel.last_meaningful_communication_at.asc())
         .limit(limit)

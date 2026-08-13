@@ -78,6 +78,7 @@ class CRMTagCampaignEnrollmentStatus(StrEnum):
     ALREADY_ENROLLED = "already_enrolled"
     ALREADY_ACTIVE_ELSEWHERE = "already_active_elsewhere"
     TERMINAL_REQUIRES_MANUAL_ENROLLMENT = "terminal_requires_manual_enrollment"
+    PAUSED_SEARCH_TRACK_ASSIGNED = "paused_search_track_assigned"
     FAILED = "failed"
     PAUSED_SEARCH = "paused_search"
     HUMAN_HANDOFF = "human_handoff"
@@ -402,6 +403,9 @@ async def process_crm_tag_campaign_enrollment(
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
         temporal_workflow_starter=temporal_workflow_starter,
+        paused_search_track_assignment_repository=(
+            paused_search_track_assignment_repository
+        ),
         event_bus=event_bus,
         workspace_operational_control_repository=workspace_operational_control_repository,
         commit=commit,
@@ -436,12 +440,17 @@ async def process_crm_tag_campaign_enrollment(
     if lead_result is not None and lead_result.status in {
         LeadStartStatus.ALREADY_ACTIVE_ELSEWHERE,
         LeadStartStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT,
+        LeadStartStatus.PAUSED_SEARCH_TRACK_ASSIGNED,
     }:
         return CRMTagCampaignEnrollmentResult(
             status=(
                 CRMTagCampaignEnrollmentStatus.ALREADY_ACTIVE_ELSEWHERE
                 if lead_result.status == LeadStartStatus.ALREADY_ACTIVE_ELSEWHERE
-                else CRMTagCampaignEnrollmentStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+                else (
+                    CRMTagCampaignEnrollmentStatus.PAUSED_SEARCH_TRACK_ASSIGNED
+                    if lead_result.status == LeadStartStatus.PAUSED_SEARCH_TRACK_ASSIGNED
+                    else CRMTagCampaignEnrollmentStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+                )
             ),
             workspace_id=workspace_id,
             lead_id=lead.lead_id,

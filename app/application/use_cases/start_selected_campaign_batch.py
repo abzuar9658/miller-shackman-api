@@ -6,6 +6,7 @@ from app.application.ports.event_bus import EventBus
 from app.application.ports.repositories import (
     CampaignEnrollmentRepository,
     LeadWorkflowRepository,
+    PausedSearchTrackAssignmentRepository,
     WorkflowTransitionRepository,
     WorkspaceOperationalControlRepository,
 )
@@ -26,6 +27,7 @@ class StartSelectedCampaignBatchResult:
     terminal_requires_manual_enrollment_count: int
     failed_count: int
     lead_results: tuple[LeadStartResult, ...]
+    paused_search_track_assigned_count: int = 0
 
 
 async def start_selected_campaign_batch(
@@ -46,6 +48,9 @@ async def start_selected_campaign_batch(
     reentry_reason: str | None = None,
     event_bus: EventBus | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
+    paused_search_track_assignment_repository: (
+        PausedSearchTrackAssignmentRepository | None
+    ) = None,
     commit: Callable[[], Awaitable[None]] | None = None,
     rollback: Callable[[], Awaitable[None]] | None = None,
 ) -> StartSelectedCampaignBatchResult:
@@ -54,6 +59,7 @@ async def start_selected_campaign_batch(
     already_enrolled_count = 0
     already_active_elsewhere_count = 0
     terminal_requires_manual_enrollment_count = 0
+    paused_search_track_assigned_count = 0
     failed_count = 0
 
     for lead_id in lead_ids:
@@ -86,6 +92,9 @@ async def start_selected_campaign_batch(
             workflow_transition_repository=workflow_transition_repository,
             workspace_operational_control_repository=workspace_operational_control_repository,
             temporal_workflow_starter=temporal_workflow_starter,
+            paused_search_track_assignment_repository=(
+                paused_search_track_assignment_repository
+            ),
             commit=commit,
             now=now,
             metadata=metadata,
@@ -102,6 +111,8 @@ async def start_selected_campaign_batch(
             already_active_elsewhere_count += 1
         elif result.status == LeadStartStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT:
             terminal_requires_manual_enrollment_count += 1
+        elif result.status == LeadStartStatus.PAUSED_SEARCH_TRACK_ASSIGNED:
+            paused_search_track_assigned_count += 1
         else:
             failed_count += 1
 
@@ -114,4 +125,5 @@ async def start_selected_campaign_batch(
         terminal_requires_manual_enrollment_count=terminal_requires_manual_enrollment_count,
         failed_count=failed_count,
         lead_results=tuple(lead_results),
+        paused_search_track_assigned_count=paused_search_track_assigned_count,
     )

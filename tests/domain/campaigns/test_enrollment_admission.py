@@ -143,3 +143,40 @@ def test_rejects_assigned_agent_re_entry_after_terminal_state(state: WorkflowSta
 
     assert not decision.admitted
     assert decision.outcome == EnrollmentAdmissionOutcome.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        CampaignEnrollmentSource.CRM_TAG,
+        CampaignEnrollmentSource.DORMANT_SELECTOR,
+        CampaignEnrollmentSource.MANUAL_ADMIN,
+        CampaignEnrollmentSource.MANUAL_AGENT,
+    ],
+)
+def test_rejects_dormant_enrollment_when_paused_search_track_assigned(
+    source: CampaignEnrollmentSource,
+) -> None:
+    decision = evaluate_lead_enrollment_admission(
+        campaign_id=CAMPAIGN_A,
+        source=source,
+        latest_workflow=None,
+        enrolling_paused_search=False,
+        has_active_paused_search_assignment=True,
+    )
+
+    assert not decision.admitted
+    assert decision.outcome == EnrollmentAdmissionOutcome.PAUSED_SEARCH_TRACK_ASSIGNED
+
+
+def test_admits_paused_search_enrollment_when_paused_search_track_assigned() -> None:
+    decision = evaluate_lead_enrollment_admission(
+        campaign_id=CAMPAIGN_A,
+        source=CampaignEnrollmentSource.MANUAL_ADMIN,
+        latest_workflow=None,
+        enrolling_paused_search=True,
+        has_active_paused_search_assignment=True,
+    )
+
+    assert decision.admitted
+    assert decision.outcome == EnrollmentAdmissionOutcome.ADMITTED

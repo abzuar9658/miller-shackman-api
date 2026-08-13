@@ -13,6 +13,7 @@ class EnrollmentAdmissionOutcome(StrEnum):
     ALREADY_ACTIVE_IN_CAMPAIGN = "already_active_in_campaign"
     ACTIVE_ELSEWHERE = "active_elsewhere"
     TERMINAL_REQUIRES_MANUAL_ENROLLMENT = "terminal_requires_manual_enrollment"
+    PAUSED_SEARCH_TRACK_ASSIGNED = "paused_search_track_assigned"
 
 
 @dataclass(frozen=True)
@@ -31,13 +32,27 @@ def evaluate_lead_enrollment_admission(
     campaign_id: CampaignId,
     source: CampaignEnrollmentSource,
     latest_workflow: LeadWorkflow | None,
+    enrolling_paused_search: bool = False,
+    has_active_paused_search_assignment: bool = False,
 ) -> EnrollmentAdmissionDecision:
     """Decide whether a lead may start a new campaign workflow.
 
     A lead may hold at most one non-terminal workflow at a time, regardless of
     campaign or journey kind. Once a workflow reaches a terminal state, automatic
     sources may never re-enter the lead; only an explicit manual enrollment may.
+    A lead holding an active paused-search track assignment may only start a
+    paused-search journey; dormant enrollment requires clearing that assignment
+    first so a lead can never sit on two tracks at once.
     """
+    if not enrolling_paused_search and has_active_paused_search_assignment:
+        return EnrollmentAdmissionDecision(
+            outcome=EnrollmentAdmissionOutcome.PAUSED_SEARCH_TRACK_ASSIGNED,
+            reason=(
+                "Lead has an active paused-search track assignment; clear the "
+                "paused-search profile before enrolling in a dormant journey."
+            ),
+        )
+
     if latest_workflow is None:
         return EnrollmentAdmissionDecision(outcome=EnrollmentAdmissionOutcome.ADMITTED)
 
