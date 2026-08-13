@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     fub_api_key: SecretStr | None = None
     fub_base_url: str = "https://api.followupboss.com/v1"
     fub_timeout_seconds: float = 30.0
+    # X-System-Key issued at FUB system registration; when set, incoming CRM
+    # webhooks must carry a valid FUB-Signature header.
+    fub_system_key: SecretStr | None = None
     fub_inbox_sync_enabled: bool = False
     fub_history_import_enabled: bool = False
     fub_inbox_app_id: str = ""

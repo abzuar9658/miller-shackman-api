@@ -658,9 +658,16 @@ async def receive_follow_up_boss_crm_webhook(
         Depends(get_follow_up_boss_webhook_event_handler),
     ],
     bundle: Annotated[InboundServiceBundle, Depends(get_inbound_service_bundle)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> FollowUpBossWebhookResponse:
     await set_postgres_workspace_context(bundle.session, str(workspace_id))
-    payload = await request.json()
+    body = await request.body()
+    _verify_follow_up_boss_signature_if_configured(
+        request=request,
+        settings=settings,
+        body=body,
+    )
+    payload = json.loads(body)
     now = datetime.now(UTC)
     result = await handler.handle(workspace_id, payload, now)
     await bundle.session.commit()
@@ -903,6 +910,33 @@ def _verify_twilio_signature_if_configured(
     if not validator.validate(str(request.url), form_values, signature):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_twilio_signature"
+        )
+
+
+def _verify_follow_up_boss_signature_if_configured(
+    *,
+    request: Request,
+    settings: Settings,
+    body: bytes,
+) -> None:
+    system_key = settings.fub_system_key
+    if system_key is None or not system_key.get_secret_value():
+        return
+    signature = request.headers.get("FUB-Signature")
+    if not signature:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="missing_fub_signature"
+        )
+    # Per FUB webhooks guide: HMAC-SHA256 of the base64-encoded raw JSON body,
+    # keyed with the X-System-Key issued at system registration.
+    expected = hmac.new(
+        system_key.get_secret_value().encode("utf-8"),
+        base64.b64encode(body),
+        sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_fub_signature"
         )
 
 

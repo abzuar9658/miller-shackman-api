@@ -1,5 +1,6 @@
 import base64
 import hmac
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, time
 from hashlib import sha256
@@ -1346,6 +1347,53 @@ def test_follow_up_boss_suppression_webhook_returns_duplicate_on_replay(
     assert second.status_code == 200
     assert second.json()["status"] == "duplicate"
     assert second.json()["reasons"] == ["duplicate_event"]
+
+
+def test_follow_up_boss_crm_webhook_signature_is_required_when_system_key_is_configured(
+    webhook_bundle: InboundServiceBundle,
+) -> None:
+    settings = Settings(
+        twilio_auth_token=None,
+        sendgrid_event_webhook_public_key=None,
+        mailgun_webhook_signing_key=None,
+        fub_system_key="test-system-key",
+    )
+    payload = {
+        "eventId": "evt-signed-1",
+        "eventCreated": NOW.isoformat(),
+        "event": "peopleUpdated",
+        "resourceIds": [123],
+        "uri": "https://api.followupboss.com/v1/people?id=crm-123",
+    }
+    body = json.dumps(payload).encode("utf-8")
+    signature = hmac.new(
+        b"test-system-key",
+        base64.b64encode(body),
+        sha256,
+    ).hexdigest()
+
+    with _build_webhook_client_with_handler(webhook_bundle, settings) as client:
+        missing = client.post(
+            f"/api/v1/webhooks/crm/follow-up-boss/{WORKSPACE_ID}",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+        invalid = client.post(
+            f"/api/v1/webhooks/crm/follow-up-boss/{WORKSPACE_ID}",
+            content=body,
+            headers={"Content-Type": "application/json", "FUB-Signature": "bad-signature"},
+        )
+        valid = client.post(
+            f"/api/v1/webhooks/crm/follow-up-boss/{WORKSPACE_ID}",
+            content=body,
+            headers={"Content-Type": "application/json", "FUB-Signature": signature},
+        )
+
+    assert missing.status_code == 401
+    assert missing.json()["detail"] == "missing_fub_signature"
+    assert invalid.status_code == 401
+    assert invalid.json()["detail"] == "invalid_fub_signature"
+    assert valid.status_code == 200
 
 
 def test_follow_up_boss_crm_webhook_processes_people_updated_without_pausing_workflow(
