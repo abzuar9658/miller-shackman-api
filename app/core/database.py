@@ -86,3 +86,29 @@ async def clear_postgres_rls_context(session: object) -> None:
             "set_config('app.current_workspace_id', '', true)"
         ),
     )
+
+
+def service_access_commit(session: AsyncSession) -> Callable[[], Awaitable[None]]:
+    """Commit and re-arm the service-access GUC.
+
+    The RLS GUCs are set transaction-locally, so every commit resets them.
+    Worker sessions that commit mid-loop must use this instead of a bare
+    session.commit, or every query after the first commit runs without
+    service access and RLS blocks it under a non-superuser role.
+    """
+
+    async def _commit() -> None:
+        await session.commit()
+        await enable_postgres_service_access(session)
+
+    return _commit
+
+
+def service_access_rollback(session: AsyncSession) -> Callable[[], Awaitable[None]]:
+    """Roll back and re-arm the service-access GUC (see service_access_commit)."""
+
+    async def _rollback() -> None:
+        await session.rollback()
+        await enable_postgres_service_access(session)
+
+    return _rollback

@@ -3,11 +3,14 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.core.database import (
     clear_postgres_rls_context,
     enable_postgres_service_access,
+    service_access_commit,
+    service_access_rollback,
     set_postgres_workspace_context,
 )
 from app.infrastructure.persistence.postgres.models import (
@@ -31,6 +34,7 @@ from app.infrastructure.persistence.postgres.workflow_models import (
     CampaignEnrollmentModel,
     LeadWorkflowModel,
 )
+from tests.infrastructure.persistence.postgres._harness import PostgresHarnessDatabase
 
 NOW = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("11111111-1111-1111-1111-111111111111")
@@ -127,6 +131,37 @@ async def test_workspace_rls_requires_workspace_context_or_service_access(
     assert int(visible_count or 0) == 1
     assert int(wrong_workspace_count or 0) == 0
     assert int(service_access_count or 0) == 1
+
+
+@pytest.mark.asyncio
+async def test_service_access_commit_and_rollback_re_arm_guc(
+    postgres_harness_database: PostgresHarnessDatabase,
+) -> None:
+    engine = create_async_engine(
+        postgres_harness_database.async_url,
+        pool_pre_ping=True,
+        poolclass=NullPool,
+    )
+    try:
+        async with AsyncSession(bind=engine, expire_on_commit=False) as session:
+            await enable_postgres_service_access(session)
+            # A bare commit ends the transaction and resets transaction-local GUCs.
+            await session.commit()
+            assert await _service_access_setting(session) != "on"
+
+            await enable_postgres_service_access(session)
+            await service_access_commit(session)()
+            assert await _service_access_setting(session) == "on"
+
+            await service_access_rollback(session)()
+            assert await _service_access_setting(session) == "on"
+    finally:
+        await engine.dispose()
+
+
+async def _service_access_setting(session: AsyncSession) -> str | None:
+    value = await session.scalar(text("select current_setting('app.service_access', true)"))
+    return None if value is None else str(value)
 
 
 async def _enable_rls_test_role(session: AsyncSession) -> None:
