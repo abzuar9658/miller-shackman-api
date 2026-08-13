@@ -236,7 +236,9 @@ class FakeSMSProvider:
 
     async def send(self, message: SMSMessage) -> str:
         if self.commits is not None:
-            assert self.commits
+            # The claim and the revalidation verdict must both be committed
+            # (locks released) before the provider call.
+            assert len(self.commits) >= 2
         self.messages.append(message)
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
@@ -396,7 +398,8 @@ async def test_dispatch_success_commits_claim_before_provider_and_signals() -> N
     assert not failures.failures
     assert len(signals.entries) == 1
     assert len(provider.messages) == 1
-    assert len(commits) == 2
+    # claim, pre-provider lock release, outcome
+    assert len(commits) == 3
 
 
 async def test_temporary_failure_retries_then_exhausts_without_early_signal() -> None:

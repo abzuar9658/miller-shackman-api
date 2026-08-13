@@ -17,7 +17,11 @@ from app.application.use_cases.timeout_uncertain_paused_search_occurrence import
     timeout_uncertain_paused_search_occurrence,
 )
 from app.core.config import get_settings
-from app.core.database import async_session_factory, enable_postgres_service_access
+from app.core.database import (
+    async_session_factory,
+    enable_postgres_service_access,
+    service_access_commit,
+)
 from app.infrastructure.persistence.postgres.campaign_execution_repository import (
     PostgresCampaignExecutionRepository,
 )
@@ -232,7 +236,7 @@ async def execute_campaign_cadence_step_activity(
             recurring_paused_search_pilot_workspace_ids=(
                 settings.recurring_paused_search_pilot_workspace_ids
             ),
-            before_provider_dispatch=session.commit,
+            before_provider_dispatch=service_access_commit(session),
         )
         await session.commit()
     result = _execution_outcome_to_result(outcome)

@@ -232,6 +232,12 @@ async def dispatch_outbound_send_requests(
             policy_rejected_count += 1
             await commit()
             continue
+        # The revalidation verdict was reached on a consistent snapshot under
+        # row locks. Commit here to release those locks before the external
+        # provider call: the durable DISPATCHING claim already prevents
+        # double-dispatch, and holding locks through provider I/O would stall
+        # webhook processing and concurrent workers for the full call latency.
+        await commit()
         try:
             provider_message_id = await _dispatch_provider(
                 request=request,

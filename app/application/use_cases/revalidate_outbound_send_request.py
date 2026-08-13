@@ -117,7 +117,9 @@ async def revalidate_outbound_send_request(
     recent_human_activity: bool = False,
 ) -> OutboundSendRevalidationResult:
     # The worker performs its live CRM refresh before entering this lock-holding final check.
-    # Keep these locks through provider dispatch and outcome persistence.
+    # The locks guarantee the verdict is computed on a consistent snapshot; the
+    # dispatcher commits (releasing them) before the external provider call and
+    # relies on the durable DISPATCHING claim to prevent double-dispatch.
     lead = await lead_repository.get_by_id_for_update(request.workspace_id, request.lead_id)
     if lead is None:
         return _blocked(request, OutboundSendRevalidationReason.LEAD_NOT_FOUND)
