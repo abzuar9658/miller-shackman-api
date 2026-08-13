@@ -26,6 +26,12 @@ def workspace_id() -> uuid.UUID:
     return uuid.uuid4()
 
 
+def test_timeout_is_applied_to_underlying_client() -> None:
+    client = FollowUpBossCRMClient(api_key="key", timeout_seconds=11.5)
+
+    assert client._client.timeout == httpx.Timeout(11.5)
+
+
 async def test_validate_connection_success(workspace_id: uuid.UUID) -> None:
     client = FollowUpBossCRMClient(
         api_key="key",

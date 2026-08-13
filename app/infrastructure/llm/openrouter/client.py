@@ -14,8 +14,9 @@ class OpenRouterLLMClient:
         model: str = "openai/gpt-4o-mini",
         drafting_model: str | None = None,
         classification_model: str | None = None,
+        timeout_seconds: float = 60.0,
     ) -> None:
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout_seconds)
         self._model = model
         self._drafting_model = drafting_model or model
         self._classification_model = classification_model or model

@@ -35,6 +35,7 @@ def build_crm_client(settings: Settings | None = None) -> CRMClient:
             inbox_sync_enabled=settings.fub_inbox_sync_enabled,
             inbox_app_id=settings.fub_inbox_app_id or None,
             inbox_sender_name=settings.fub_inbox_sender_name,
+            timeout_seconds=settings.fub_timeout_seconds,
         )
     raise ValueError(f"Unsupported CRM provider: {settings.crm_provider}")
 
@@ -69,6 +70,7 @@ def build_llm_client(settings: Settings | None = None) -> LLMClient:
             model=settings.openrouter_model,
             drafting_model=settings.resolved_openrouter_drafting_model,
             classification_model=settings.resolved_openrouter_classification_model,
+            timeout_seconds=settings.openrouter_timeout_seconds,
         )
 
     if settings.bedrock_enabled:
@@ -99,6 +101,7 @@ def build_sms_provider(settings: Settings | None = None) -> SMSProvider:
             account_sid=account_sid,
             auth_token=auth_token,
             from_phone=settings.twilio_from_phone,
+            timeout_seconds=settings.twilio_timeout_seconds,
         )
     if settings.sms_provider == "sink":
         from app.infrastructure.messaging.sink import SinkSMSProvider
@@ -120,6 +123,7 @@ def build_email_provider(settings: Settings | None = None) -> EmailProvider:
         return SendGridEmailProvider(
             api_key=api_key,
             from_email=settings.sendgrid_from_email or settings.email_from_email,
+            timeout_seconds=settings.sendgrid_timeout_seconds,
         )
     if settings.email_provider == "mailgun":
         from app.infrastructure.messaging.mailgun import MailgunEmailProvider

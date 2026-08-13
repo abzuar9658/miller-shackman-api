@@ -16,6 +16,12 @@ def whatsapp_provider() -> TwilioSMSProvider:
     return TwilioSMSProvider("ACsid", "token", "whatsapp:+14155238886")
 
 
+def test_timeout_is_applied_to_underlying_client() -> None:
+    provider = TwilioSMSProvider("ACsid", "token", "+15551234567", timeout_seconds=7.5)
+
+    assert provider._client.http_client.timeout == 7.5
+
+
 async def test_send_returns_message_sid(
     monkeypatch: pytest.MonkeyPatch, provider: TwilioSMSProvider
 ) -> None:

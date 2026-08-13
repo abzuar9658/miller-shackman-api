@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     crm_provider: str = "follow_up_boss"
     fub_api_key: SecretStr | None = None
     fub_base_url: str = "https://api.followupboss.com/v1"
+    fub_timeout_seconds: float = 30.0
     fub_inbox_sync_enabled: bool = False
     fub_history_import_enabled: bool = False
     fub_inbox_app_id: str = ""
@@ -73,6 +74,7 @@ class Settings(BaseSettings):
     llm_provider: str = "openrouter"
     openrouter_api_key: SecretStr | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_timeout_seconds: float = 60.0
     openrouter_model: str = "openai/gpt-4o-mini"
     # Empty values fall back to openrouter_model.
     openrouter_drafting_model: str = ""
@@ -109,6 +111,7 @@ class Settings(BaseSettings):
     twilio_account_sid: SecretStr | None = None
     twilio_auth_token: SecretStr | None = None
     twilio_from_phone: str = ""
+    twilio_timeout_seconds: float = 15.0
 
     # Valid values: "sendgrid", "mailgun", "mailpit" (dev SMTP inbox), or "sink".
     email_provider: str = "sendgrid"
@@ -116,6 +119,7 @@ class Settings(BaseSettings):
     sendgrid_api_key: SecretStr | None = None
     sendgrid_event_webhook_public_key: SecretStr | None = None
     sendgrid_from_email: str = ""
+    sendgrid_timeout_seconds: float = 15.0
     mailgun_api_key: SecretStr | None = None
     mailgun_domain: str = ""
     mailgun_webhook_signing_key: SecretStr | None = None

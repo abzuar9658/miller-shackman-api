@@ -15,6 +15,12 @@ def provider() -> SendGridEmailProvider:
     return SendGridEmailProvider("api-key", "sender@example.com")
 
 
+def test_timeout_is_applied_to_underlying_client() -> None:
+    provider = SendGridEmailProvider("api-key", "sender@example.com", timeout_seconds=9.5)
+
+    assert provider._client.client.timeout == 9.5
+
+
 async def test_send_returns_message_id(
     monkeypatch: pytest.MonkeyPatch, provider: SendGridEmailProvider
 ) -> None:

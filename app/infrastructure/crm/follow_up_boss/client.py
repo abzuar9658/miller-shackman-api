@@ -50,10 +50,15 @@ class FollowUpBossCRMClient:
         inbox_sync_enabled: bool = False,
         inbox_app_id: str | None = None,
         inbox_sender_name: str = "AI Assistant",
+        timeout_seconds: float = 30.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._auth = httpx.BasicAuth(api_key, "")
-        self._client = httpx.AsyncClient(auth=self._auth, base_url=self._base_url)
+        self._client = httpx.AsyncClient(
+            auth=self._auth,
+            base_url=self._base_url,
+            timeout=timeout_seconds,
+        )
         self._inbox_sync_enabled = inbox_sync_enabled
         self._inbox_app_id = inbox_app_id.strip() if inbox_app_id else None
         self._inbox_sender_name = inbox_sender_name.strip() or "AI Assistant"

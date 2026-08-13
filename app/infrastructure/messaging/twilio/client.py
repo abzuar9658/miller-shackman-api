@@ -1,6 +1,7 @@
 import asyncio
 
 from twilio.base.exceptions import TwilioRestException
+from twilio.http.http_client import TwilioHttpClient
 from twilio.rest import Client
 
 from app.application.ports.messaging import ProviderSendFailure, SMSMessage
@@ -23,8 +24,18 @@ def _normalize_whatsapp_recipient(value: str) -> str:
 class TwilioSMSProvider:
     provider_name = "twilio"
 
-    def __init__(self, account_sid: str, auth_token: str, from_phone: str) -> None:
-        self._client = Client(account_sid, auth_token)
+    def __init__(
+        self,
+        account_sid: str,
+        auth_token: str,
+        from_phone: str,
+        timeout_seconds: float = 15.0,
+    ) -> None:
+        self._client = Client(
+            account_sid,
+            auth_token,
+            http_client=TwilioHttpClient(timeout=timeout_seconds),
+        )
         self._from_phone = from_phone.strip()
 
     async def send(self, message: SMSMessage) -> str:

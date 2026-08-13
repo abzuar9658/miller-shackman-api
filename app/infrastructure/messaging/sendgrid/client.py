@@ -14,8 +14,11 @@ from app.infrastructure.messaging.provider_errors import classify_http_status
 class SendGridEmailProvider:
     provider_name = "sendgrid"
 
-    def __init__(self, api_key: str, from_email: str) -> None:
+    def __init__(self, api_key: str, from_email: str, timeout_seconds: float = 15.0) -> None:
         self._client = SendGridAPIClient(api_key)
+        # SendGridAPIClient does not expose a timeout kwarg; the underlying
+        # python_http_client Client honors a `timeout` attribute per request.
+        self._client.client.timeout = timeout_seconds
         self._from_email = from_email
 
     async def send(self, message: EmailMessage) -> str:

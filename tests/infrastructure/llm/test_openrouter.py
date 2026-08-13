@@ -102,3 +102,9 @@ async def test_complete_explicit_model_overrides_task_default(
 
     assert result.model == "openai/gpt-4o"
     assert recorder.calls[0]["model"] == "openai/gpt-4o"
+
+
+def test_timeout_is_applied_to_underlying_client() -> None:
+    client = OpenRouterLLMClient(api_key="key", timeout_seconds=12.5)
+
+    assert client._client.timeout == 12.5
