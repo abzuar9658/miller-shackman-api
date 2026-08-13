@@ -20,6 +20,8 @@ from app.application.use_cases.lead_draft_review import (
 from app.application.use_cases.lead_manual_enrollment import (
     LeadManualEnrollmentActionStatus,
     LeadManualEnrollmentOptionsStatus,
+    LeadManualEnrollmentReasonCode,
+    LeadManualEnrollmentRoute,
     list_lead_manual_enrollment_options,
     start_lead_manual_enrollment,
 )
@@ -363,6 +365,7 @@ async def start_lead_manual_enrollment_route(
         lead_id=lead_id,
         campaign_id=request.campaign_id,
         reason=request.reason,
+        route=LeadManualEnrollmentRoute(request.route),
         lead_repository=bundle.lead_repository,
         campaign_admin_repository=bundle.campaign_admin_repository,
         campaign_enrollment_repository=bundle.campaign_enrollment_repository,
@@ -393,6 +396,14 @@ async def start_lead_manual_enrollment_route(
         user_repository=bundle.user_repository,
     )
     if result.status == LeadManualEnrollmentActionStatus.REJECTED:
+        if (
+            LeadManualEnrollmentReasonCode.PAUSED_SEARCH_TRACK_ASSIGNED.value
+            in result.reasons
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=list(result.reasons),
+            )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=["permission_denied"])
     if result.status == LeadManualEnrollmentActionStatus.NOT_FOUND:
         raise HTTPException(

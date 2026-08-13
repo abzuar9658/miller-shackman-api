@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
@@ -490,6 +491,7 @@ class LeadManualEnrollmentOptionsResponse(BaseModel):
 class StartLeadManualEnrollmentRequest(BaseModel):
     campaign_id: UUID
     reason: str | None = Field(default=None, min_length=1, max_length=500)
+    route: Literal["classify", "dormant"] = "classify"
 
 
 class StartLeadManualEnrollmentResponse(BaseModel):

@@ -67,6 +67,19 @@ class LeadManualEnrollmentOptionsStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class LeadManualEnrollmentRoute(StrEnum):
+    """Explicit route override for manual enrollment.
+
+    CLASSIFY (default) runs AI classification to pick the journey. DORMANT
+    enrolls straight into the dormant cadence; it is still vetoed when the
+    lead holds an active paused-search track assignment, preserving strict
+    single-track exclusivity.
+    """
+
+    CLASSIFY = "classify"
+    DORMANT = "dormant"
+
+
 class LeadManualEnrollmentActionStatus(StrEnum):
     STARTED = "started"
     ALREADY_ENROLLED = "already_enrolled"
@@ -90,6 +103,7 @@ class LeadManualEnrollmentReasonCode(StrEnum):
     CAMPAIGNS_DISALLOW_AGENT_MANUAL_ENROLLMENT = "campaigns_disallow_agent_manual_enrollment"
     NO_STARTABLE_CAMPAIGNS = "no_startable_campaigns"
     REENTRY_REASON_REQUIRED = "reentry_reason_required"
+    PAUSED_SEARCH_TRACK_ASSIGNED = "paused_search_track_assigned"
 
 
 @dataclass(frozen=True)
@@ -230,6 +244,7 @@ async def start_lead_manual_enrollment(
     lead_id: LeadId,
     campaign_id: CampaignId,
     reason: str | None = None,
+    route: LeadManualEnrollmentRoute = LeadManualEnrollmentRoute.CLASSIFY,
     lead_repository: LeadRepository,
     campaign_admin_repository: CampaignAdminRepository,
     campaign_enrollment_repository: CampaignEnrollmentRepository,
@@ -326,6 +341,33 @@ async def start_lead_manual_enrollment(
             campaign_id=campaign_id,
             campaign_version_id=version.campaign_version_id,
             campaign_enrollment_id=existing.campaign_enrollment_id,
+        )
+
+    if route == LeadManualEnrollmentRoute.DORMANT:
+        # Explicit admin choice: skip classification and enroll directly into
+        # the dormant cadence. Single-track exclusivity is still enforced by
+        # start_single_campaign_enrollment via the paused-search assignment check.
+        return await _start_dormant_enrollment(
+            workspace_id=workspace_id,
+            campaign_id=campaign_id,
+            version=version,
+            lead_id=lead_id,
+            enrollment_source=enrollment_source,
+            actor=actor,
+            reason=reason,
+            reason_codes=("manual_dormant_route_override",),
+            campaign_enrollment_repository=campaign_enrollment_repository,
+            lead_workflow_repository=lead_workflow_repository,
+            workflow_transition_repository=workflow_transition_repository,
+            workspace_operational_control_repository=workspace_operational_control_repository,
+            temporal_workflow_starter=temporal_workflow_starter,
+            paused_search_track_assignment_repository=(
+                paused_search_track_assignment_repository
+            ),
+            commit=commit,
+            now=now,
+            event_bus=event_bus,
+            rollback=rollback,
         )
 
     route_result = await route_ai_nurture_lead(
@@ -545,6 +587,49 @@ async def start_lead_manual_enrollment(
             reasons=route_result.reason_codes,
         )
 
+    return await _start_dormant_enrollment(
+        workspace_id=workspace_id,
+        campaign_id=campaign_id,
+        version=version,
+        lead_id=lead_id,
+        enrollment_source=enrollment_source,
+        actor=actor,
+        reason=reason,
+        reason_codes=route_result.reason_codes,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        workspace_operational_control_repository=workspace_operational_control_repository,
+        temporal_workflow_starter=temporal_workflow_starter,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
+        commit=commit,
+        now=now,
+        event_bus=event_bus,
+        rollback=rollback,
+    )
+
+
+async def _start_dormant_enrollment(
+    *,
+    workspace_id: WorkspaceId,
+    campaign_id: CampaignId,
+    version: CampaignAdminVersion,
+    lead_id: LeadId,
+    enrollment_source: CampaignEnrollmentSource,
+    actor: AuthenticatedActor,
+    reason: str | None,
+    reason_codes: tuple[str, ...],
+    campaign_enrollment_repository: CampaignEnrollmentRepository,
+    lead_workflow_repository: LeadWorkflowRepository,
+    workflow_transition_repository: WorkflowTransitionRepository,
+    workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
+    temporal_workflow_starter: TemporalWorkflowStarter,
+    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
+    commit: Callable[[], Awaitable[None]] | None,
+    now: datetime,
+    event_bus: EventBus | None,
+    rollback: Callable[[], Awaitable[None]] | None,
+) -> StartLeadManualEnrollmentResult:
     result = await start_single_campaign_enrollment(
         workspace_id=workspace_id,
         campaign_id=campaign_id,
@@ -558,12 +643,18 @@ async def start_lead_manual_enrollment(
         workflow_transition_repository=workflow_transition_repository,
         workspace_operational_control_repository=workspace_operational_control_repository,
         temporal_workflow_starter=temporal_workflow_starter,
+        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         commit=commit,
         now=now,
         event_bus=event_bus,
         reentry_reason=reason,
         rollback=rollback,
     )
+    result_reasons = reason_codes
+    if result.status == LeadStartStatus.PAUSED_SEARCH_TRACK_ASSIGNED:
+        result_reasons = result_reasons + (
+            LeadManualEnrollmentReasonCode.PAUSED_SEARCH_TRACK_ASSIGNED.value,
+        )
     return StartLeadManualEnrollmentResult(
         status=(
             LeadManualEnrollmentActionStatus.STARTED
@@ -577,7 +668,10 @@ async def start_lead_manual_enrollment(
                     else (
                         LeadManualEnrollmentActionStatus.REJECTED
                         if result.status
-                        == LeadStartStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT
+                        in {
+                            LeadStartStatus.TERMINAL_REQUIRES_MANUAL_ENROLLMENT,
+                            LeadStartStatus.PAUSED_SEARCH_TRACK_ASSIGNED,
+                        }
                         else LeadManualEnrollmentActionStatus.FAILED
                     )
                 )
@@ -589,7 +683,7 @@ async def start_lead_manual_enrollment(
         workflow_id=result.workflow_id,
         temporal_workflow_id=result.temporal_workflow_id,
         route=AiNurtureRoute.DORMANT,
-        reasons=route_result.reason_codes,
+        reasons=result_reasons,
         error=result.error,
     )
 
