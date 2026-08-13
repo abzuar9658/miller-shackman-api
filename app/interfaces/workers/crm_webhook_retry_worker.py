@@ -5,7 +5,12 @@ import structlog
 
 from app.application.use_cases.retry_external_events import retry_due_external_events
 from app.core.config import Settings, get_settings
-from app.core.database import async_session_factory, enable_postgres_service_access
+from app.core.database import (
+    async_session_factory,
+    enable_postgres_service_access,
+    service_access_commit,
+    service_access_rollback,
+)
 from app.core.logging import configure_logging
 from app.domain.leads import CRMProvider
 from app.infrastructure.persistence.postgres.crm_sync_repository import (
@@ -28,8 +33,8 @@ async def run_once(*, settings: Settings | None = None) -> None:
             provider_name=CRMProvider.FOLLOW_UP_BOSS.value,
             external_event_repository=PostgresExternalEventRepository(session),
             webhook_handler=build_follow_up_boss_webhook_event_handler(bundle),
-            commit=session.commit,
-            rollback=session.rollback,
+            commit=service_access_commit(session),
+            rollback=service_access_rollback(session),
             now=datetime.now(UTC),
             limit=resolved_settings.crm_webhook_retry_batch_size,
         )
@@ -47,7 +52,12 @@ async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     while True:
-        await run_once(settings=settings)
+        try:
+            await run_once(settings=settings)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("crm_webhook_retry_run_failed")
         await asyncio.sleep(settings.crm_webhook_retry_poll_seconds)
 
 

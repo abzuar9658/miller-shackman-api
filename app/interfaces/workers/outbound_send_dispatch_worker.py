@@ -21,7 +21,11 @@ from app.application.use_cases.revalidate_outbound_send_request import (
     revalidate_outbound_send_request,
 )
 from app.core.config import Settings, get_settings
-from app.core.database import async_session_factory, enable_postgres_service_access
+from app.core.database import (
+    async_session_factory,
+    enable_postgres_service_access,
+    service_access_commit,
+)
 from app.core.logging import configure_logging
 from app.core.metrics import outbound_send_dispatch_metrics
 from app.infrastructure.persistence.postgres.campaign_execution_repository import (
@@ -208,7 +212,7 @@ async def _run_once(
             ),
             sms_provider=sms_provider,
             email_provider=email_provider,
-            commit=session.commit,
+            commit=service_access_commit(session),
             now=now,
             batch_size=settings.outbound_send_dispatch_batch_size,
             stale_after=timedelta(
@@ -240,20 +244,19 @@ async def main() -> None:
         poll_seconds=settings.outbound_send_dispatch_poll_seconds,
         batch_size=settings.outbound_send_dispatch_batch_size,
     )
-    try:
-        while True:
+    while True:
+        try:
             await run_once(
                 sms_provider=sms_provider,
                 email_provider=email_provider,
                 settings=settings,
             )
-            await asyncio.sleep(settings.outbound_send_dispatch_poll_seconds)
-    except asyncio.CancelledError:
-        logger.info("outbound_send_dispatch_worker_stopped", reason="cancelled")
-        raise
-    except Exception:
-        logger.exception("outbound_send_dispatch_worker_stopped", reason="error")
-        raise
+        except asyncio.CancelledError:
+            logger.info("outbound_send_dispatch_worker_stopped", reason="cancelled")
+            raise
+        except Exception:
+            logger.exception("outbound_send_dispatch_run_failed")
+        await asyncio.sleep(settings.outbound_send_dispatch_poll_seconds)
 
 
 if __name__ == "__main__":

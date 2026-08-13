@@ -15,7 +15,11 @@ from app.application.use_cases.crm_sync import (
     execute_queued_follow_up_boss_crm_sync,
 )
 from app.core.config import Settings, get_settings
-from app.core.database import async_session_factory, enable_postgres_service_access
+from app.core.database import (
+    async_session_factory,
+    enable_postgres_service_access,
+    service_access_commit,
+)
 from app.core.logging import configure_logging
 from app.domain.crm_sync import CRMSyncLeadSort
 from app.domain.events import DomainEventType
@@ -252,7 +256,7 @@ async def run_once(
                 workspace_llm_config_repository=PostgresWorkspaceLLMConfigRepository(session),
                 llm_client=build_llm_client(resolved_settings),
                 default_openrouter_model=resolved_settings.openrouter_model,
-                commit=session.commit,
+                commit=service_access_commit(session),
                 now=datetime.now(UTC),
                 max_leads=message.payload.max_leads,
                 latest_by=message.payload.latest_by,
@@ -304,12 +308,27 @@ async def main() -> None:
         )
         async with queue.iterator() as queue_iter:
             async for message in queue_iter:
-                async with message.process(requeue=True):
-                    await run_once(
-                        message.body,
-                        settings=settings,
-                        temporal_workflow_starter=temporal_workflow_starter,
+                try:
+                    # Requeue only first-time failures; a redelivered message
+                    # that fails again is dropped so a poison message cannot
+                    # loop forever. Sync jobs are re-enqueued by the scheduler
+                    # via the stale-job sweep, so a dropped message is not lost.
+                    async with message.process(requeue=not message.redelivered):
+                        await run_once(
+                            message.body,
+                            settings=settings,
+                            temporal_workflow_starter=temporal_workflow_starter,
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "crm_sync_worker_message_failed",
+                        redelivered=message.redelivered,
                     )
+                    # Brief pause avoids a tight redelivery loop on a
+                    # persistently failing message.
+                    await asyncio.sleep(1)
 
 
 if __name__ == "__main__":

@@ -42,5 +42,10 @@ async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     while True:
-        await run_once()
+        try:
+            await run_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("outbox_publisher_run_failed")
         await asyncio.sleep(1)

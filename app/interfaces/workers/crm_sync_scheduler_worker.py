@@ -58,7 +58,12 @@ async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     while True:
-        await run_once(settings=settings)
+        try:
+            await run_once(settings=settings)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("crm_sync_scheduler_run_failed")
         await asyncio.sleep(settings.crm_sync_scheduler_poll_seconds)
 
 

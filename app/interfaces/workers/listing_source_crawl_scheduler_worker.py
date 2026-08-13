@@ -1,6 +1,8 @@
 import asyncio
 from datetime import UTC, datetime
 
+import structlog
+
 from app.application.use_cases.listing_source_crawls import enqueue_due_listing_source_crawls
 from app.core.config import Settings, get_settings
 from app.core.database import async_session_factory, enable_postgres_service_access
@@ -14,6 +16,8 @@ from app.infrastructure.persistence.postgres.outbox_event_repository import (
     PostgresOutboxEventRepository,
     PostgresTransactionalEventBus,
 )
+
+logger = structlog.get_logger(__name__)
 
 
 async def run_once(*, settings: Settings | None = None) -> None:
@@ -35,7 +39,12 @@ async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     while True:
-        await run_once(settings=settings)
+        try:
+            await run_once(settings=settings)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("listing_source_crawl_scheduler_run_failed")
         await asyncio.sleep(settings.listing_source_crawl_scheduler_poll_seconds)
 
 
