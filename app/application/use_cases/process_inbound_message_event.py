@@ -153,7 +153,11 @@ from app.domain.conversations import (
     WorkspaceHandoffConfig,
     default_workspace_handoff_config,
 )
-from app.domain.crm_sync import ExternalEvent, ExternalEventStatus
+from app.domain.crm_sync import (
+    INBOUND_MESSAGE_RECEIVED_EVENT_TYPE,
+    ExternalEvent,
+    ExternalEventStatus,
+)
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
 from app.domain.leads import (
     CanonicalLeadRecord,
@@ -217,7 +221,7 @@ class InboundMessageEvent:
     body: str
     received_at: datetime
     crm_provider: CRMProvider | None = None
-    event_type: str = "inbound_message.received"
+    event_type: str = INBOUND_MESSAGE_RECEIVED_EVENT_TYPE
     email_subject: str | None = None
     from_address_redacted: str | None = None
     to_address_redacted: str | None = None
@@ -314,37 +318,51 @@ async def process_inbound_message_event(
     summary_id_factory: Callable[[], UUID] | None = None,
     handoff_id_factory: Callable[[], UUID] | None = None,
     workflow_transition_id_factory: Callable[[], UUID] | None = None,
+    claimed_external_event: ExternalEvent | None = None,
 ) -> ProcessInboundMessageEventResult:
-    existing = await external_event_repository.get_by_provider_event_id(
-        event.workspace_id,
-        event.provider,
-        event.provider_event_id,
-    )
-    if existing is not None:
-        return ProcessInboundMessageEventResult(
-            status=ProcessInboundMessageEventStatus.DUPLICATE,
-            external_event_id=existing.external_event_id,
-            lead_id=existing.lead_id,
-            reasons=(ProcessInboundMessageEventReasonCode.DUPLICATE_EVENT,),
+    if claimed_external_event is None:
+        existing = await external_event_repository.get_by_provider_event_id(
+            event.workspace_id,
+            event.provider,
+            event.provider_event_id,
         )
+        if existing is not None:
+            return ProcessInboundMessageEventResult(
+                status=ProcessInboundMessageEventStatus.DUPLICATE,
+                external_event_id=existing.external_event_id,
+                lead_id=existing.lead_id,
+                reasons=(ProcessInboundMessageEventReasonCode.DUPLICATE_EVENT,),
+            )
 
     crm_provider = event.crm_provider or _crm_provider(event.provider)
-    external_event = ExternalEvent(
-        external_event_id=(external_event_id_factory or uuid4)(),
-        workspace_id=event.workspace_id,
-        provider=event.provider,
-        event_type=event.event_type,
-        provider_event_id=event.provider_event_id,
-        crm_lead_id=event.crm_lead_id,
-        lead_id=None,
-        received_at=event.received_at,
-        processed_at=None,
-        status=ExternalEventStatus.PENDING,
-        payload_redacted=dict(event.payload_redacted),
-        failure_reason=None,
-        created_at=now,
-        updated_at=now,
-    )
+    if claimed_external_event is not None:
+        external_event = replace(
+            claimed_external_event,
+            status=ExternalEventStatus.PENDING,
+            processed_at=None,
+            payload_redacted=dict(event.payload_redacted),
+            failure_reason=None,
+            failure_kind=None,
+            next_retry_at=None,
+            updated_at=now,
+        )
+    else:
+        external_event = ExternalEvent(
+            external_event_id=(external_event_id_factory or uuid4)(),
+            workspace_id=event.workspace_id,
+            provider=event.provider,
+            event_type=event.event_type,
+            provider_event_id=event.provider_event_id,
+            crm_lead_id=event.crm_lead_id,
+            lead_id=None,
+            received_at=event.received_at,
+            processed_at=None,
+            status=ExternalEventStatus.PENDING,
+            payload_redacted=dict(event.payload_redacted),
+            failure_reason=None,
+            created_at=now,
+            updated_at=now,
+        )
 
     if crm_provider is None:
         saved_event = await external_event_repository.save(

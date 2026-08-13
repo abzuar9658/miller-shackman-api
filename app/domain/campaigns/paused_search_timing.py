@@ -171,6 +171,29 @@ def plan_next_paused_search_occurrence(
     )
 
 
+def paused_search_planning_reference(
+    *,
+    step: PausedSearchTrackStep,
+    profile: LeadPausedSearchProfile,
+    track_version: PausedSearchTrackVersion,
+    now: datetime,
+) -> datetime:
+    """Return the reference time to plan a step from.
+
+    Reactivation steps are anchored to the start of the reactivation window,
+    never earlier, so projections and previews agree with the scheduler.
+    """
+
+    if step.phase is not PausedSearchTrackStepPhase.REACTIVATION:
+        return now
+    if profile.reengagement_not_before is None:
+        return now
+    boundary = profile.reengagement_not_before - timedelta(
+        days=track_version.reactivation_window_days
+    )
+    return max(now, boundary)
+
+
 def paused_search_step_occurrence_cap(
     step: PausedSearchTrackStep,
     track_version: PausedSearchTrackVersion,

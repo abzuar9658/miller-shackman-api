@@ -2,18 +2,37 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from app.application.ports.repositories import TemporalSignalOutboxRepository
+from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
+    LeadWorkflowRepository,
+    TemporalSignalOutboxRepository,
+)
 from app.application.ports.temporal import (
     InboundProcessedLeadNurtureWorkflowSignal,
     LeadNurtureWorkflowSignaler,
     PauseLeadNurtureWorkflowSignal,
     RescheduleLeadNurtureWorkflowSignal,
     ResumeLeadNurtureWorkflowSignal,
+    TemporalWorkflowExecutionMode,
     TemporalWorkflowNotFoundError,
+    TemporalWorkflowStarter,
     UnblockLeadNurtureWorkflowSignal,
 )
 from app.application.services.retry_backoff import exponential_retry_delay
-from app.domain.workflows import TemporalSignalName, TemporalSignalOutboxEntry
+from app.domain.workflows import (
+    TemporalSignalName,
+    TemporalSignalOutboxEntry,
+    WorkflowState,
+)
+
+_RESTARTABLE_WORKFLOW_STATES = frozenset(
+    {
+        WorkflowState.QUEUED,
+        WorkflowState.ACTIVE_NURTURE,
+        WorkflowState.WAITING_FOR_RESPONSE,
+        WorkflowState.RESPONSE_PROCESSING,
+    }
+)
 
 
 class DispatchTemporalSignalsResult:
@@ -24,11 +43,13 @@ class DispatchTemporalSignalsResult:
         sent_count: int,
         failed_count: int,
         terminal_failure_count: int,
+        restarted_count: int = 0,
     ) -> None:
         self.claimed_count = claimed_count
         self.sent_count = sent_count
         self.failed_count = failed_count
         self.terminal_failure_count = terminal_failure_count
+        self.restarted_count = restarted_count
 
 
 async def dispatch_temporal_signals(
@@ -36,6 +57,9 @@ async def dispatch_temporal_signals(
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     lead_nurture_workflow_signaler: LeadNurtureWorkflowSignaler,
     now: datetime,
+    lead_workflow_repository: LeadWorkflowRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
+    temporal_workflow_starter: TemporalWorkflowStarter | None = None,
     batch_size: int = 100,
     lease_duration: timedelta = timedelta(minutes=5),
     retry_base_delay: timedelta = timedelta(seconds=30),
@@ -51,6 +75,7 @@ async def dispatch_temporal_signals(
     sent_count = 0
     failed_count = 0
     terminal_failure_count = 0
+    restarted_count = 0
 
     for entry in claimed:
         try:
@@ -59,6 +84,35 @@ async def dispatch_temporal_signals(
                 lead_nurture_workflow_signaler=lead_nurture_workflow_signaler,
             )
         except TemporalWorkflowNotFoundError as exc:
+            try:
+                restarted = await _restart_missing_workflow(
+                    entry=entry,
+                    lead_workflow_repository=lead_workflow_repository,
+                    campaign_enrollment_repository=campaign_enrollment_repository,
+                    temporal_workflow_starter=temporal_workflow_starter,
+                )
+            except Exception as restart_exc:  # noqa: BLE001
+                failed_count += 1
+                await temporal_signal_outbox_repository.mark_failed(
+                    entry.temporal_signal_id,
+                    error=f"workflow restart failed: {restart_exc}",
+                    available_at=now
+                    + exponential_retry_delay(
+                        entry.attempt_count,
+                        base_delay=retry_base_delay,
+                        max_delay=retry_max_delay,
+                    ),
+                    now=now,
+                )
+                continue
+            if restarted:
+                restarted_count += 1
+                sent_count += 1
+                await temporal_signal_outbox_repository.mark_sent(
+                    entry.temporal_signal_id,
+                    now=now,
+                )
+                continue
             terminal_failure_count += 1
             await temporal_signal_outbox_repository.mark_terminal_failure(
                 entry.temporal_signal_id,
@@ -97,7 +151,54 @@ async def dispatch_temporal_signals(
         sent_count=sent_count,
         failed_count=failed_count,
         terminal_failure_count=terminal_failure_count,
+        restarted_count=restarted_count,
     )
+
+
+async def _restart_missing_workflow(
+    *,
+    entry: TemporalSignalOutboxEntry,
+    lead_workflow_repository: LeadWorkflowRepository | None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None,
+    temporal_workflow_starter: TemporalWorkflowStarter | None,
+) -> bool:
+    if (
+        lead_workflow_repository is None
+        or campaign_enrollment_repository is None
+        or temporal_workflow_starter is None
+    ):
+        return False
+    lead_id = _uuid_from_payload(entry.payload, "lead_id")
+    workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
+        entry.workspace_id,
+        lead_id,
+    )
+    if workflow is None or workflow.workflow_id != entry.workflow_id:
+        return False
+    if workflow.state not in _RESTARTABLE_WORKFLOW_STATES:
+        return False
+    enrollment = await campaign_enrollment_repository.get_by_lead_and_campaign(
+        entry.workspace_id,
+        lead_id,
+        workflow.campaign_id,
+    )
+    if enrollment is None or enrollment.campaign_enrollment_id != workflow.campaign_enrollment_id:
+        return False
+    execution_mode = (
+        TemporalWorkflowExecutionMode.PAUSED_SEARCH_RECURRING
+        if workflow.paused_search_track_version_id is not None
+        else TemporalWorkflowExecutionMode.STANDARD_CADENCE
+    )
+    await temporal_workflow_starter.start_lead_nurture_workflow(
+        workspace_id=workflow.workspace_id,
+        lead_id=workflow.lead_id,
+        campaign_version_id=enrollment.campaign_version_id,
+        temporal_workflow_id=workflow.temporal_workflow_id,
+        workflow_id=workflow.workflow_id,
+        execution_mode=execution_mode,
+        paused_search_track_version_id=workflow.paused_search_track_version_id,
+    )
+    return True
 
 
 async def _dispatch_entry(

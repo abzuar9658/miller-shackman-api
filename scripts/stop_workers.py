@@ -26,6 +26,7 @@ PROCESS_PATTERNS: list[tuple[str, str]] = [
     ("crm-sync-scheduler", "crm_sync_scheduler_worker import main"),
     ("crm-webhook-retry-worker", "crm_webhook_retry_worker import main"),
     ("crm-history-import-worker", "crm_history_import_worker import main"),
+    ("inbound-message-worker", "inbound_message_worker import main"),
 ]
 
 

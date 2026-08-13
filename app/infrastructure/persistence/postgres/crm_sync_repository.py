@@ -11,6 +11,7 @@ from sqlalchemy.sql import Select
 
 from app.domain.common.ids import WorkspaceId
 from app.domain.crm_sync import (
+    INBOUND_MESSAGE_RECEIVED_EVENT_TYPE,
     CRMSyncJob,
     CRMSyncJobStatus,
     CRMSyncLeadSort,
@@ -277,12 +278,54 @@ class PostgresExternalEventRepository:
         statement = (
             select(ExternalEventModel)
             .where(ExternalEventModel.provider == provider_name)
+            .where(ExternalEventModel.event_type != INBOUND_MESSAGE_RECEIVED_EVENT_TYPE)
             .where(ExternalEventModel.status == ExternalEventStatus.RETRYABLE_FAILURE.value)
             .where(
                 (ExternalEventModel.next_retry_at.is_(None))
                 | (ExternalEventModel.next_retry_at <= now)
             )
             .order_by(ExternalEventModel.next_retry_at.asc(), ExternalEventModel.created_at.asc())
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        result = await self._session.execute(statement)
+        claimed: list[ExternalEvent] = []
+        for model in result.scalars().all():
+            event = _model_to_external_event(model)
+            claimed.append(
+                await self.save(
+                    replace(
+                        event,
+                        attempt_count=event.attempt_count + 1,
+                        next_retry_at=None,
+                        updated_at=now,
+                    )
+                )
+            )
+        return tuple(claimed)
+
+    async def claim_due_queued_inbound_events(
+        self,
+        *,
+        now: datetime,
+        limit: int = 10,
+    ) -> tuple[ExternalEvent, ...]:
+        statement = (
+            select(ExternalEventModel)
+            .where(ExternalEventModel.event_type == INBOUND_MESSAGE_RECEIVED_EVENT_TYPE)
+            .where(
+                ExternalEventModel.status.in_(
+                    (
+                        ExternalEventStatus.PENDING.value,
+                        ExternalEventStatus.RETRYABLE_FAILURE.value,
+                    )
+                )
+            )
+            .where(
+                (ExternalEventModel.next_retry_at.is_(None))
+                | (ExternalEventModel.next_retry_at <= now)
+            )
+            .order_by(ExternalEventModel.received_at.asc(), ExternalEventModel.created_at.asc())
             .limit(limit)
             .with_for_update(skip_locked=True)
         )

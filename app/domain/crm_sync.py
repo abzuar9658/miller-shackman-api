@@ -42,6 +42,9 @@ class ExternalEventFailureKind(StrEnum):
     UNKNOWN = "unknown"
 
 
+INBOUND_MESSAGE_RECEIVED_EVENT_TYPE = "inbound_message.received"
+
+
 DEFAULT_WORKSPACE_CRM_SYNC_INTERVAL_SECONDS = 300
 
 

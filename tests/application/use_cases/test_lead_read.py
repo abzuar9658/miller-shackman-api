@@ -623,6 +623,59 @@ def test_paused_search_cadence_progress_uses_track_cursor() -> None:
     assert current.phase == "reactivation"
 
 
+def test_paused_search_cadence_progress_projects_occurrences_and_repeats() -> None:
+    maintenance_step = replace(_paused_search_maintenance_step(), interval_days=30)
+    reactivation_step = _paused_search_track_step()
+    workflow = replace(
+        _workflow(),
+        paused_search_track_step_id=maintenance_step.step_id,
+        next_action_at=NOW,
+    )
+    profile = LeadPausedSearchProfile(
+        paused_search_active=True,
+        paused_search_track_key="rates-watch",
+        paused_search_track_version_id=TRACK_VERSION_ID,
+        reengagement_not_before=datetime(2030, 6, 1, tzinfo=UTC),
+    )
+
+    progress = build_paused_search_cadence_progress(
+        flow_name="Rates Watch",
+        track_steps=(maintenance_step, reactivation_step),
+        outbound_messages=(),
+        workflow=workflow,
+        profile=profile,
+        track_version=_paused_search_track_version(),
+        timezone="UTC",
+        now=NOW,
+    )
+
+    assert progress is not None
+    maintenance = next(
+        step for step in progress.steps if step.step_id == maintenance_step.step_id
+    )
+    reactivation = next(
+        step for step in progress.steps if step.step_id == reactivation_step.step_id
+    )
+    # Maintenance repeats every 30 days until the reactivation window opens
+    # (2030-05-18 = reengagement 2030-06-01 minus the 14-day window).
+    assert maintenance.interval_days == 30
+    assert [occurrence.occurrence_number for occurrence in maintenance.occurrences] == [
+        1,
+        2,
+        3,
+        4,
+    ]
+    assert maintenance.occurrences[0].projected_for == NOW
+    assert maintenance.occurrences[1].projected_for == datetime(2030, 3, 2, 12, 0, tzinfo=UTC)
+    assert maintenance.occurrences[3].projected_for == datetime(2030, 5, 1, 12, 0, tzinfo=UTC)
+    # The reactivation step is projected at the window start, rolled into
+    # the allowed send window.
+    assert len(reactivation.occurrences) == 1
+    projected = reactivation.occurrences[0].projected_for
+    assert projected == datetime(2030, 5, 18, 10, 0, tzinfo=UTC)
+    assert reactivation.scheduled_for == projected
+
+
 def test_status_narrative_without_workflow() -> None:
     narrative = build_lead_status_narrative(workflow=None, progress_views=(), now=NOW)
     assert "No nurture workflow yet" in narrative

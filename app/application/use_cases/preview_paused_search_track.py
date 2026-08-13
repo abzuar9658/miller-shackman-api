@@ -1,7 +1,7 @@
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from enum import StrEnum
 from hashlib import sha256
 from uuid import UUID
@@ -11,13 +11,13 @@ from app.domain.campaigns.paused_search_timing import (
     PausedSearchOccurrencePlan,
     PausedSearchTimingReasonCode,
     paused_search_duration_end,
+    paused_search_planning_reference,
     paused_search_step_occurrence_cap,
     plan_next_paused_search_occurrence,
 )
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTrack,
     PausedSearchTrackStep,
-    PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
 )
 from app.domain.campaigns.paused_search_validation import (
@@ -218,10 +218,10 @@ def _plan_occurrences(
         previous_due_at: datetime | None = None
         occurrence_cap = paused_search_step_occurrence_cap(step, version)
         for occurrence_number in range(1, occurrence_cap + 1):
-            planning_now = _planning_now_for_step(
+            planning_now = paused_search_planning_reference(
                 step=step,
                 profile=profile,
-                version=version,
+                track_version=version,
                 now=now,
             )
             plan = plan_next_paused_search_occurrence(
@@ -261,18 +261,4 @@ def _plan_occurrences(
     return tuple(items)
 
 
-def _planning_now_for_step(
-    *,
-    step: PausedSearchTrackStep,
-    profile: LeadPausedSearchProfile,
-    version: PausedSearchTrackVersion,
-    now: datetime,
-) -> datetime:
-    if step.phase is not PausedSearchTrackStepPhase.REACTIVATION:
-        return now
-    if profile.reengagement_not_before is None:
-        return now
-    boundary = profile.reengagement_not_before - timedelta(
-        days=version.reactivation_window_days
-    )
-    return max(now, boundary)
+

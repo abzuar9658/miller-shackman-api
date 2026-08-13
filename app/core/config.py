@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     crm_sync_running_heartbeat_interval_seconds: int = 30
     crm_webhook_retry_poll_seconds: int = 5
     crm_webhook_retry_batch_size: int = 10
+    inbound_message_worker_poll_seconds: float = 2.0
+    inbound_message_worker_batch_size: int = 10
     outbound_send_dispatch_poll_seconds: float = 1.0
     outbound_send_dispatch_batch_size: int = 100
     outbound_send_dispatch_stale_seconds: int = 300

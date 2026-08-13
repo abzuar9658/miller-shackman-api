@@ -7,10 +7,11 @@ Groups:
     all      - API, Temporal worker, signal dispatcher, outbound send dispatcher,
                outbox publisher,
                CRM sync worker, CRM sync scheduler, CRM webhook retry worker,
-               CRM history import worker
+               CRM history import worker, inbound message worker
     temporal - Temporal worker + signal dispatcher + outbound send dispatcher
     workers  - API + outbound send dispatcher + outbox publisher + CRM sync worker +
-               CRM webhook retry worker + CRM history import worker
+               CRM webhook retry worker + CRM history import worker +
+               inbound message worker
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ WORKER_DEFINITIONS: dict[str, list[tuple[str, list[str]]]] = {
         ("crm-sync-scheduler", _worker_command("crm_sync_scheduler_worker")),
         ("crm-webhook-retry-worker", _worker_command("crm_webhook_retry_worker")),
         ("crm-history-import-worker", _worker_command("crm_history_import_worker")),
+        ("inbound-message-worker", _worker_command("inbound_message_worker")),
     ],
     "temporal": [
         ("temporal-worker", _worker_command("temporal_worker")),
@@ -62,6 +64,7 @@ WORKER_DEFINITIONS: dict[str, list[tuple[str, list[str]]]] = {
         ("crm-sync-scheduler", _worker_command("crm_sync_scheduler_worker")),
         ("crm-webhook-retry-worker", _worker_command("crm_webhook_retry_worker")),
         ("crm-history-import-worker", _worker_command("crm_history_import_worker")),
+        ("inbound-message-worker", _worker_command("inbound_message_worker")),
     ],
 }
 
@@ -80,6 +83,7 @@ PROCESS_PATTERNS: list[tuple[str, str]] = [
     ("crm-sync-scheduler", "crm_sync_scheduler_worker import main"),
     ("crm-webhook-retry-worker", "crm_webhook_retry_worker import main"),
     ("crm-history-import-worker", "crm_history_import_worker import main"),
+    ("inbound-message-worker", "inbound_message_worker import main"),
 ]
 
 

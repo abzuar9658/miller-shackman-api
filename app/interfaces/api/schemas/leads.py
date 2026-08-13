@@ -381,6 +381,12 @@ class PendingRoutingReviewListResponse(BaseModel):
     items: list[PendingRoutingReviewItemResponse]
 
 
+class LeadCadenceStepOccurrenceResponse(BaseModel):
+    occurrence_number: int
+    sent_at: datetime | None = None
+    projected_for: datetime | None = None
+
+
 class LeadCadenceStepProgressResponse(BaseModel):
     step_id: UUID
     step_order: int
@@ -393,6 +399,9 @@ class LeadCadenceStepProgressResponse(BaseModel):
     scheduled_for: datetime | None = None
     last_failure_reason: str | None = None
     phase: str | None = None
+    interval_days: int | None = None
+    max_occurrences: int = 1
+    occurrences: list[LeadCadenceStepOccurrenceResponse] = Field(default_factory=list)
 
 
 class LeadCadenceProgressResponse(BaseModel):

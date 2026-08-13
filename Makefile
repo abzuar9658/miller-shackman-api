@@ -1,4 +1,4 @@
-.PHONY: infra-up infra-down infra-logs infra-ps db-ui-up db-ui-down db-ui-logs run worker outbox-publisher temporal-signal-dispatcher outbound-send-dispatcher crm-sync-worker crm-sync-scheduler crm-webhook-retry-worker crm-sync-publisher crm-history-import-worker listing-crawl-worker listing-crawl-scheduler report-paused-search-messages start-all start-temporal start-workers stop-all tail-logs test lint format typecheck check migrate revision
+.PHONY: infra-up infra-down infra-logs infra-ps db-ui-up db-ui-down db-ui-logs run worker outbox-publisher temporal-signal-dispatcher outbound-send-dispatcher crm-sync-worker crm-sync-scheduler crm-webhook-retry-worker crm-sync-publisher crm-history-import-worker inbound-message-worker listing-crawl-worker listing-crawl-scheduler report-paused-search-messages start-all start-temporal start-workers stop-all tail-logs test lint format typecheck check migrate revision
 
 infra-up:
 	docker compose up -d --build
@@ -49,6 +49,9 @@ crm-sync-publisher: outbox-publisher
 
 crm-history-import-worker:
 	uv run python -c "import asyncio; from app.interfaces.workers.crm_history_import_worker import main; asyncio.run(main())"
+
+inbound-message-worker:
+	uv run python -c "import asyncio; from app.interfaces.workers.inbound_message_worker import main; asyncio.run(main())"
 
 listing-crawl-worker:
 	uv run python -c "import asyncio; from app.interfaces.workers.listing_source_crawl_worker import main; asyncio.run(main())"

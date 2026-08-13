@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from enum import StrEnum
 from typing import cast
 
@@ -30,6 +30,8 @@ from app.application.ports.repositories import (
     CRMAgentRepository,
     LeadRoutingReviewRepository,
     PausedSearchTrackAssignmentRepository,
+    WorkspaceContactPolicyRepository,
+    WorkspaceRepository,
 )
 from app.application.services.lead_assignment import (
     is_actor_assigned_to_lead,
@@ -72,6 +74,7 @@ from app.domain.leads import (
     LeadClassificationArtifact,
     LeadPausedSearchHistoryEntry,
     LeadRoutingReview,
+    lead_paused_search_profile,
 )
 from app.domain.workflows import LeadWorkflow, LeadWorkflowOverrideAuditLog, WorkflowTransition
 
@@ -255,6 +258,8 @@ async def get_lead_detail_view(
     routing_review_repository: LeadRoutingReviewRepository,
     campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
     campaign_execution_repository: CampaignExecutionRepository | None = None,
+    workspace_repository: WorkspaceRepository | None = None,
+    workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None = None,
     now: datetime | None = None,
 ) -> LeadDetailResult:
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
@@ -368,11 +373,15 @@ async def get_lead_detail_view(
     outbound_messages = await outbound_message_repository.list_for_lead(workspace_id, lead_id)
     cadence_progress = await _cadence_progress_views(
         workspace_id=workspace_id,
+        lead=lead,
         workflow=latest_workflow,
         paused_search_plan=paused_search_plan,
         outbound_messages=outbound_messages,
         campaign_enrollment_repository=campaign_enrollment_repository,
         campaign_execution_repository=campaign_execution_repository,
+        workspace_repository=workspace_repository,
+        workspace_contact_policy_repository=workspace_contact_policy_repository,
+        now=now if now is not None else datetime.now(UTC),
     )
     status_narrative = build_lead_status_narrative(
         workflow=latest_workflow,
@@ -410,22 +419,49 @@ async def get_lead_detail_view(
 async def _cadence_progress_views(
     *,
     workspace_id: WorkspaceId,
+    lead: CanonicalLeadRecord,
     workflow: LeadWorkflow | None,
     paused_search_plan: LeadPausedSearchPlanView | None,
     outbound_messages: tuple[OutboundMessage, ...],
     campaign_enrollment_repository: CampaignEnrollmentRepository | None,
     campaign_execution_repository: CampaignExecutionRepository | None,
+    workspace_repository: WorkspaceRepository | None,
+    workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None,
+    now: datetime,
 ) -> tuple[LeadCadenceProgressView, ...]:
     views: list[LeadCadenceProgressView] = []
     # Tracks are mutually exclusive: an active paused-search plan owns the
     # journey, so the dormant cadence card is only rendered when no
     # paused-search plan is in effect.
     if paused_search_plan is not None:
+        workspace = (
+            await workspace_repository.get_by_id(workspace_id)
+            if workspace_repository is not None
+            else None
+        )
+        contact_policy = (
+            await workspace_contact_policy_repository.get_by_workspace_id(workspace_id)
+            if workspace_contact_policy_repository is not None
+            else None
+        )
         paused_progress = build_paused_search_cadence_progress(
             flow_name=paused_search_plan.track.display_name,
             track_steps=paused_search_plan.steps,
             outbound_messages=outbound_messages,
             workflow=workflow,
+            profile=lead_paused_search_profile(lead),
+            track_version=paused_search_plan.version,
+            timezone=workspace.default_timezone if workspace is not None else None,
+            now=now,
+            quiet_hours_enabled=(
+                contact_policy.quiet_hours_enabled if contact_policy is not None else True
+            ),
+            quiet_hours_start=(
+                contact_policy.quiet_hours_start if contact_policy is not None else time(10, 0)
+            ),
+            quiet_hours_end=(
+                contact_policy.quiet_hours_end if contact_policy is not None else time(17, 0)
+            ),
         )
         if paused_progress is not None:
             views.append(paused_progress)

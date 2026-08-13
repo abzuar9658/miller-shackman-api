@@ -129,6 +129,7 @@ from app.interfaces.api.schemas.leads import (
     LeadActivityItemResponse,
     LeadAssignedCRMAgentResponse,
     LeadCadenceProgressResponse,
+    LeadCadenceStepOccurrenceResponse,
     LeadCadenceStepProgressResponse,
     LeadChannelContactabilityResponse,
     LeadChannelSendabilityResponse,
@@ -285,6 +286,8 @@ async def get_lead_route(
         routing_review_repository=bundle.routing_review_repository,
         campaign_enrollment_repository=bundle.campaign_enrollment_repository,
         campaign_execution_repository=bundle.campaign_execution_repository,
+        workspace_repository=bundle.workspace_repository,
+        workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
     )
     if result.status == LeadReadStatus.REJECTED:
         raise HTTPException(
@@ -1217,6 +1220,16 @@ def _cadence_progress_response(view: LeadCadenceProgressView) -> LeadCadenceProg
                 scheduled_for=step.scheduled_for,
                 last_failure_reason=step.last_failure_reason,
                 phase=step.phase,
+                interval_days=step.interval_days,
+                max_occurrences=step.max_occurrences,
+                occurrences=[
+                    LeadCadenceStepOccurrenceResponse(
+                        occurrence_number=occurrence.occurrence_number,
+                        sent_at=occurrence.sent_at,
+                        projected_for=occurrence.projected_for,
+                    )
+                    for occurrence in step.occurrences
+                ],
             )
             for step in view.steps
         ],

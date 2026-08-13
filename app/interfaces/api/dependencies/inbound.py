@@ -1,5 +1,6 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Annotated, Protocol
 
 from fastapi import Depends
@@ -42,8 +43,14 @@ from app.application.ports.repositories import (
     WorkspaceRepository,
 )
 from app.application.ports.temporal import TemporalWorkflowStarter
+from app.application.use_cases.process_inbound_message_event import (
+    InboundMessageEvent,
+    ProcessInboundMessageEventResult,
+    process_inbound_message_event,
+)
 from app.core.config import Settings, get_settings
 from app.core.database import get_session
+from app.domain.crm_sync import ExternalEvent
 from app.infrastructure.persistence.postgres.campaign_enrollment_repository import (
     PostgresCampaignEnrollmentRepository,
 )
@@ -169,6 +176,61 @@ class InboundServiceBundle:
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None
     paused_search_reminder_repository: PausedSearchAgentReminderRepository | None = None
     rollback: Callable[[], Awaitable[None]] | None = None
+
+
+async def process_inbound_message_event_with_bundle(
+    *,
+    event: InboundMessageEvent,
+    bundle: InboundServiceBundle,
+    now: datetime,
+    claimed_external_event: ExternalEvent | None = None,
+) -> ProcessInboundMessageEventResult:
+    return await process_inbound_message_event(
+        event=event,
+        claimed_external_event=claimed_external_event,
+        lead_repository=bundle.lead_repository,
+        external_event_repository=bundle.external_event_repository,
+        conversation_repository=bundle.conversation_repository,
+        inbound_message_repository=bundle.inbound_message_repository,
+        crm_conversation_event_repository=bundle.crm_conversation_event_repository,
+        lead_classification_artifact_repository=bundle.lead_classification_artifact_repository,
+        routing_review_repository=bundle.routing_review_repository,
+        conversation_summary_repository=bundle.conversation_summary_repository,
+        handoff_repository=bundle.handoff_repository,
+        crm_client=bundle.crm_client,
+        inbound_message_crm_completion_repository=bundle.inbound_message_crm_completion_repository,
+        outbound_message_crm_completion_repository=(
+            bundle.outbound_message_crm_completion_repository
+        ),
+        notification_provider=bundle.notification_provider,
+        workspace_handoff_config_repository=bundle.workspace_handoff_config_repository,
+        workspace_llm_config_repository=bundle.workspace_llm_config_repository,
+        handoff_completion_repository=bundle.handoff_completion_repository,
+        user_repository=bundle.user_repository,
+        lead_workflow_repository=bundle.lead_workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        paused_search_track_repository=bundle.paused_search_track_repository,
+        paused_search_track_assignment_repository=(
+            bundle.paused_search_track_assignment_repository
+        ),
+        paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
+        paused_search_reminder_repository=bundle.paused_search_reminder_repository,
+        llm_client=bundle.llm_client,
+        event_bus=bundle.event_bus,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        default_openrouter_model=bundle.default_openrouter_model,
+        workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
+        workspace_repository=bundle.workspace_repository,
+        campaign_execution_repository=bundle.campaign_execution_repository,
+        workspace_operational_control_repository=bundle.workspace_operational_control_repository,
+        workspace_outbound_drafting_config_repository=(
+            bundle.workspace_outbound_drafting_config_repository
+        ),
+        message_repository=bundle.message_repository,
+        sms_provider=bundle.sms_provider,
+        email_provider=bundle.email_provider,
+        now=now,
+    )
 
 
 async def get_inbound_service_bundle(

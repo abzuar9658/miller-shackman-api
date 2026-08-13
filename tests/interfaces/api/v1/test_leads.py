@@ -866,6 +866,7 @@ def _client_for_role(
         workspace_contact_policy_repository=policy_repository,
         campaign_enrollment_repository=FakeCampaignEnrollmentRepository(),
         campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
     )
     resume_read_bundle = LeadResumeReadBundle(
         lead_repository=bundle.lead_repository,

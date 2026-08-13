@@ -820,6 +820,16 @@ class ExternalEventRetryRepository(Protocol):
         raise NotImplementedError
 
 
+class InboundMessageEventQueueRepository(Protocol):
+    async def claim_due_queued_inbound_events(
+        self,
+        *,
+        now: datetime,
+        limit: int = 10,
+    ) -> tuple[ExternalEvent, ...]:
+        raise NotImplementedError
+
+
 class CRMAgentRepository(Protocol):
     async def get_by_record_id(
         self,

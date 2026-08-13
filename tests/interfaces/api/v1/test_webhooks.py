@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hmac
 import json
@@ -17,6 +18,12 @@ from twilio.request_validator import RequestValidator
 from app.application.ports.crm import CRMAgent, CRMClient
 from app.application.ports.crm_webhook import FollowUpBossWebhookEventBundle
 from app.application.ports.notifications import NotificationProvider
+from app.application.use_cases.enqueue_inbound_message_event import (
+    inbound_message_event_from_external_event,
+)
+from app.application.use_cases.process_inbound_message_event import (
+    ProcessInboundMessageEventResult,
+)
 from app.core.config import Settings, get_settings
 from app.domain.campaigns import CampaignStatus, CampaignVersionStatus
 from app.domain.campaigns.execution import CampaignCadenceStep, CampaignExecutionConfig
@@ -52,6 +59,7 @@ from app.interfaces.api.dependencies.follow_up_boss_webhook import (
 from app.interfaces.api.dependencies.inbound import (
     InboundServiceBundle,
     get_inbound_service_bundle,
+    process_inbound_message_event_with_bundle,
 )
 from app.interfaces.api.schemas.inbound import MailgunInboundParsePayload
 from app.main import create_app
@@ -276,6 +284,37 @@ def _build_webhook_client_with_handler(
     return TestClient(app)
 
 
+async def _drain_queued_inbound_events(
+    bundle: InboundServiceBundle,
+) -> list[ProcessInboundMessageEventResult]:
+    """Simulate the inbound message worker: process queued PENDING inbound events."""
+    repository = cast(FakeExternalEventRepository, bundle.external_event_repository)
+    results: list[ProcessInboundMessageEventResult] = []
+    pending = [
+        event
+        for event in repository.events.values()
+        if event.status.value == "pending" and event.event_type == "inbound_message.received"
+    ]
+    for external_event in pending:
+        inbound_event = inbound_message_event_from_external_event(external_event)
+        assert inbound_event is not None
+        results.append(
+            await process_inbound_message_event_with_bundle(
+                event=inbound_event,
+                bundle=bundle,
+                now=datetime.now(UTC),
+                claimed_external_event=external_event,
+            )
+        )
+    return results
+
+
+def _drain_queued_inbound_events_sync(
+    bundle: InboundServiceBundle,
+) -> list[ProcessInboundMessageEventResult]:
+    return asyncio.run(_drain_queued_inbound_events(bundle))
+
+
 def _workspace() -> Workspace:
     return Workspace(
         workspace_id=WORKSPACE_ID,
@@ -365,7 +404,7 @@ def _continue_ai_webhook_bundle(
     )
 
 
-def test_follow_up_boss_inbound_webhook_returns_processed_response(
+def test_follow_up_boss_inbound_webhook_returns_accepted_response(
     webhook_client: TestClient,
     webhook_bundle: InboundServiceBundle,
 ) -> None:
@@ -385,10 +424,14 @@ def test_follow_up_boss_inbound_webhook_returns_processed_response(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "processed"
+    assert body["status"] == "accepted"
+    assert body["external_event_id"] is not None
+    repository = cast(FakeExternalEventRepository, webhook_bundle.external_event_repository)
+    saved = repository.events[(WORKSPACE_ID, "follow_up_boss", "evt-1")]
+    assert saved.status.value == "pending"
 
 
-def test_follow_up_boss_inbound_webhook_queues_temporal_signal_after_commit(
+def test_follow_up_boss_inbound_webhook_queues_temporal_signal_after_worker_processing(
     webhook_client: TestClient,
     webhook_bundle: InboundServiceBundle,
 ) -> None:
@@ -408,9 +451,14 @@ def test_follow_up_boss_inbound_webhook_queues_temporal_signal_after_commit(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "processed"
-    assert body["signal_queued"] is True
+    assert body["status"] == "accepted"
     assert cast(FakeSession, webhook_bundle.session).commit_count == 1
+
+    results = _drain_queued_inbound_events_sync(webhook_bundle)
+    assert len(results) == 1
+    result = results[0]
+    assert result.status.value == "processed"
+    assert result.signal_queued is True
     outbox_repository = cast(
         FakeTemporalSignalOutboxRepository,
         webhook_bundle.temporal_signal_outbox_repository,
@@ -422,17 +470,10 @@ def test_follow_up_boss_inbound_webhook_queues_temporal_signal_after_commit(
     assert entry.payload["inbound_action"] == "human_handoff"
     assert entry.payload["reason"] == "human_requested"
     assert entry.payload["lead_id"] == str(LEAD_ID)
-    assert entry.payload["conversation_id"] == body["conversation_id"]
-    assert entry.payload["inbound_message_id"] == body["inbound_message_id"]
-    assert body["handoff_required"] is True
-    assert body["intent"] == "human_requested"
-    assert body["review_tag_applied"] is False
-    assert body["review_notification_sent"] is False
-    assert body["continue_ai_status"] is None
-    assert body["continue_ai_outbound_message_id"] is None
-    assert body["continue_ai_provider_message_id"] is None
-    assert body["continue_ai_pause_reason"] is None
-    assert cast(FakeSession, webhook_bundle.session).commit_count == 1
+    assert entry.payload["conversation_id"] == str(result.conversation_id)
+    assert entry.payload["inbound_message_id"] == str(result.inbound_message_id)
+    assert result.handoff_required is True
+    assert result.intent is not None and result.intent.value == "human_requested"
 
 
 def test_follow_up_boss_inbound_webhook_returns_duplicate_on_replay(
@@ -451,9 +492,12 @@ def test_follow_up_boss_inbound_webhook_returns_duplicate_on_replay(
     }
 
     first = webhook_client.post("/api/v1/webhooks/follow-up-boss/inbound-messages", json=payload)
+    results = _drain_queued_inbound_events_sync(webhook_bundle)
     second = webhook_client.post("/api/v1/webhooks/follow-up-boss/inbound-messages", json=payload)
 
     assert first.status_code == 200
+    assert first.json()["status"] == "accepted"
+    assert [result.status.value for result in results] == ["processed"]
     assert second.status_code == 200
     assert second.json()["status"] == "duplicate"
     assert second.json()["reasons"] == ["duplicate_event"]
@@ -482,10 +526,15 @@ def test_twilio_inbound_webhook_processes_sms_reply_with_workspace_scoped_route(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "processed"
-    assert body["handoff_required"] is True
-    assert body["intent"] == "human_requested"
+    assert body["status"] == "accepted"
+    assert body["lead_id"] == str(LEAD_ID)
     assert cast(FakeSession, webhook_bundle.session).commit_count == 1
+
+    results = _drain_queued_inbound_events_sync(webhook_bundle)
+    assert len(results) == 1
+    assert results[0].status.value == "processed"
+    assert results[0].handoff_required is True
+    assert results[0].intent is not None and results[0].intent.value == "human_requested"
 
 
 def test_twilio_inbound_webhook_sends_handoff_sms_acknowledgment_with_workspace_policy(
@@ -536,7 +585,10 @@ def test_twilio_inbound_webhook_sends_handoff_sms_acknowledgment_with_workspace_
         )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "processed"
+    assert response.json()["status"] == "accepted"
+
+    results = _drain_queued_inbound_events_sync(bundle)
+    assert [result.status.value for result in results] == ["processed"]
     assert [message.body for message in sms_provider.messages] == [
         "Thanks — our team will get back to you soon.",
     ]
@@ -562,17 +614,22 @@ def test_twilio_inbound_webhook_returns_general_reply_fields_for_sms_route(
         )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "processed"
-    assert body["handoff_required"] is False
-    assert body["intent"] == "general_reply"
-    assert body["signal_queued"] is True
-    assert body["review_tag_applied"] is False
-    assert body["review_notification_sent"] is False
-    assert body["continue_ai_status"] == "sent"
-    assert body["continue_ai_outbound_message_id"] is not None
-    assert body["continue_ai_provider_message_id"] == "SM-CONT-123"
-    assert body["continue_ai_pause_reason"] is None
+    assert response.json()["status"] == "accepted"
+
+    results = _drain_queued_inbound_events_sync(bundle)
+    assert len(results) == 1
+    result = results[0]
+    assert result.status.value == "processed"
+    assert result.handoff_required is False
+    assert result.intent is not None and result.intent.value == "general_reply"
+    assert result.signal_queued is True
+    assert result.review_tag_applied is False
+    assert result.review_notification_sent is False
+    assert result.continue_ai_status is not None
+    assert result.continue_ai_status.value == "sent"
+    assert result.continue_ai_outbound_message_id is not None
+    assert result.continue_ai_provider_message_id == "SM-CONT-123"
+    assert result.continue_ai_pause_reason is None
     outbox_repository = cast(
         FakeTemporalSignalOutboxRepository,
         bundle.temporal_signal_outbox_repository,
@@ -710,10 +767,15 @@ def test_sendgrid_inbound_webhook_processes_email_reply_with_workspace_scoped_ro
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "processed"
-    assert body["handoff_required"] is True
-    assert body["intent"] == "human_requested"
+    assert body["status"] == "accepted"
+    assert body["lead_id"] == str(LEAD_ID)
     assert cast(FakeSession, webhook_bundle.session).commit_count == 1
+
+    results = _drain_queued_inbound_events_sync(webhook_bundle)
+    assert len(results) == 1
+    assert results[0].status.value == "processed"
+    assert results[0].handoff_required is True
+    assert results[0].intent is not None and results[0].intent.value == "human_requested"
 
 
 def test_sendgrid_inbound_webhook_sends_handoff_email_acknowledgment_only_on_email_channel(
@@ -776,7 +838,10 @@ def test_sendgrid_inbound_webhook_sends_handoff_email_acknowledgment_only_on_ema
         )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "processed"
+    assert response.json()["status"] == "accepted"
+
+    results = _drain_queued_inbound_events_sync(bundle)
+    assert [result.status.value for result in results] == ["processed"]
     assert sms_provider.messages == []
     assert len(email_provider.messages) == 1
     assert email_provider.messages[0].subject == "Re: Need to chat"
@@ -807,17 +872,22 @@ def test_sendgrid_inbound_webhook_returns_general_reply_fields_for_email_route(
         )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "processed"
-    assert body["handoff_required"] is False
-    assert body["intent"] == "general_reply"
-    assert body["signal_queued"] is True
-    assert body["review_tag_applied"] is False
-    assert body["review_notification_sent"] is False
-    assert body["continue_ai_status"] == "sent"
-    assert body["continue_ai_outbound_message_id"] is not None
-    assert body["continue_ai_provider_message_id"] == "email-cont-123"
-    assert body["continue_ai_pause_reason"] is None
+    assert response.json()["status"] == "accepted"
+
+    results = _drain_queued_inbound_events_sync(bundle)
+    assert len(results) == 1
+    result = results[0]
+    assert result.status.value == "processed"
+    assert result.handoff_required is False
+    assert result.intent is not None and result.intent.value == "general_reply"
+    assert result.signal_queued is True
+    assert result.review_tag_applied is False
+    assert result.review_notification_sent is False
+    assert result.continue_ai_status is not None
+    assert result.continue_ai_status.value == "sent"
+    assert result.continue_ai_outbound_message_id is not None
+    assert result.continue_ai_provider_message_id == "email-cont-123"
+    assert result.continue_ai_pause_reason is None
     outbox_repository = cast(
         FakeTemporalSignalOutboxRepository,
         bundle.temporal_signal_outbox_repository,
@@ -871,18 +941,22 @@ def test_follow_up_boss_inbound_webhook_returns_review_pause_fields(
         )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "processed"
-    assert body["handoff_required"] is False
-    assert body["intent"] == "unclear"
-    assert body["signal_queued"] is True
-    assert body["review_tag_applied"] is True
-    assert body["review_notification_sent"] is True
-    assert body["review_notification_recipient"] == "agent@example.com"
-    assert body["review_notification_failure_reason"] is None
-    assert body["continue_ai_status"] is None
-    assert body["continue_ai_outbound_message_id"] is None
-    assert body["continue_ai_provider_message_id"] is None
+    assert response.json()["status"] == "accepted"
+
+    results = _drain_queued_inbound_events_sync(bundle)
+    assert len(results) == 1
+    result = results[0]
+    assert result.status.value == "processed"
+    assert result.handoff_required is False
+    assert result.intent is not None and result.intent.value == "unclear"
+    assert result.signal_queued is True
+    assert result.review_tag_applied is True
+    assert result.review_notification_sent is True
+    assert result.review_notification_recipient == "agent@example.com"
+    assert result.review_notification_failure_reason is None
+    assert result.continue_ai_status is None
+    assert result.continue_ai_outbound_message_id is None
+    assert result.continue_ai_provider_message_id is None
 
 
 def test_sendgrid_inbound_webhook_returns_duplicate_on_replay(
@@ -1118,7 +1192,7 @@ def test_sendgrid_inbound_webhook_allows_when_no_contact_policy_is_configured(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "processed"
+    assert body["status"] == "accepted"
 
 
 def _lead(
@@ -1878,10 +1952,15 @@ def test_mailgun_inbound_webhook_processes_email_reply(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "processed"
-    assert body["handoff_required"] is True
-    assert body["intent"] == "human_requested"
+    assert body["status"] == "accepted"
+    assert body["lead_id"] == str(LEAD_ID)
     assert cast(FakeSession, webhook_bundle.session).commit_count == 1
+
+    results = _drain_queued_inbound_events_sync(webhook_bundle)
+    assert len(results) == 1
+    assert results[0].status.value == "processed"
+    assert results[0].handoff_required is True
+    assert results[0].intent is not None and results[0].intent.value == "human_requested"
 
 
 def test_mailgun_inbound_payload_uses_subject_from_message_headers_when_field_missing() -> None:
@@ -1951,8 +2030,12 @@ def test_mailgun_inbound_webhook_matches_duplicate_email_lead_from_thread_refere
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "processed"
+    assert body["status"] == "accepted"
     assert body["lead_id"] == str(older_lead_id)
+
+    results = _drain_queued_inbound_events_sync(webhook_bundle)
+    assert [result.status.value for result in results] == ["processed"]
+    assert results[0].lead_id == older_lead_id
 
 
 def test_mailgun_inbound_webhook_matches_duplicate_email_lead_from_reply_token(
@@ -1995,8 +2078,12 @@ def test_mailgun_inbound_webhook_matches_duplicate_email_lead_from_reply_token(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "processed"
+    assert body["status"] == "accepted"
     assert body["lead_id"] == str(older_lead_id)
+
+    results = _drain_queued_inbound_events_sync(webhook_bundle)
+    assert [result.status.value for result in results] == ["processed"]
+    assert results[0].lead_id == older_lead_id
 
 
 def test_mailgun_inbound_webhook_rejects_unknown_reply_token_before_sender_fallback(
@@ -2235,8 +2322,12 @@ def test_sendgrid_inbound_webhook_matches_duplicate_email_lead_from_thread_refer
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "processed"
+    assert body["status"] == "accepted"
     assert body["lead_id"] == str(older_lead_id)
+
+    results = _drain_queued_inbound_events_sync(webhook_bundle)
+    assert [result.status.value for result in results] == ["processed"]
+    assert results[0].lead_id == older_lead_id
 
 
 def test_sendgrid_inbound_webhook_matches_duplicate_email_lead_from_reply_token(
@@ -2283,5 +2374,9 @@ def test_sendgrid_inbound_webhook_matches_duplicate_email_lead_from_reply_token(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "processed"
+    assert body["status"] == "accepted"
     assert body["lead_id"] == str(older_lead_id)
+
+    results = _drain_queued_inbound_events_sync(webhook_bundle)
+    assert [result.status.value for result in results] == ["processed"]
+    assert results[0].lead_id == older_lead_id
