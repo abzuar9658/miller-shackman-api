@@ -65,7 +65,11 @@ from app.domain.crm_sync import (
     CRMSyncWindowState,
 )
 from app.domain.events import AggregateType, DomainEvent, DomainEventType
-from app.domain.leads import CanonicalLeadRecord, CRMProvider
+from app.domain.leads import (
+    CanonicalLeadRecord,
+    CRMProvider,
+    preserve_app_owned_lead_state,
+)
 from app.domain.workspace_automation import WorkspaceAutomationStatus
 
 logger = structlog.get_logger(__name__)
@@ -282,7 +286,7 @@ async def run_follow_up_boss_lead_snapshot_sync(
                         lead.crm_lead_id,
                     )
                     resolved_lead = _resolve_lead_assignment(
-                        lead,
+                        preserve_app_owned_lead_state(lead, existing_lead),
                         assignment_context=assignment_context,
                         now=now,
                     )

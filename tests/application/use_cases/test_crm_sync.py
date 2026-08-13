@@ -62,6 +62,7 @@ from app.domain.leads import (
     CRMProvider,
     EffectiveOwnerSource,
     LeadPausedSearchHistoryEntry,
+    PausedSearchSource,
 )
 from app.domain.workflows import (
     LeadWorkflow,
@@ -982,6 +983,51 @@ async def test_runs_full_sync_across_multiple_pages() -> None:
     assert source.requests[0]["updated_before"] == NOW
     assert source.requests[0]["mapped_custom_field_keys"] == ("budget",)
     assert source.requests[1]["cursor"] == "cursor-2"
+
+
+async def test_sync_preserves_app_owned_paused_search_state() -> None:
+    existing_lead = replace(
+        _lead("1"),
+        paused_search_active=True,
+        paused_search_track_key="waiting-for-rates",
+        paused_search_track_version_id=UUID("00000000-0000-0000-0000-000000000077"),
+        pause_reason_note="Asked to revisit once rates settle.",
+        reengagement_not_before=NOW,
+        reengagement_window_label="check back in 90 days",
+        paused_search_source=PausedSearchSource.OPERATOR,
+        paused_search_recorded_at=NOW,
+        paused_search_recorded_by_user_id=UUID("00000000-0000-0000-0000-000000000088"),
+    )
+    source = FakeLeadSnapshotSource(
+        pages=(CanonicalLeadSnapshotPage(leads=(_lead("1"),), next_cursor=None),),
+    )
+    lead_repository = FakeLeadRepository(existing=(existing_lead,))
+
+    result = await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=source,
+        lead_repository=lead_repository,
+        crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        now=NOW,
+        sync_type=CRMSyncType.FULL,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+
+    assert result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+    saved = lead_repository.saved[0]
+    assert saved.paused_search_active is True
+    assert saved.paused_search_track_key == "waiting-for-rates"
+    assert saved.paused_search_track_version_id == UUID(
+        "00000000-0000-0000-0000-000000000077"
+    )
+    assert saved.pause_reason_note == "Asked to revisit once rates settle."
+    assert saved.reengagement_not_before == NOW
+    assert saved.reengagement_window_label == "check back in 90 days"
+    assert saved.paused_search_source == PausedSearchSource.OPERATOR
+    assert saved.paused_search_recorded_at == NOW
+    assert saved.paused_search_recorded_by_user_id == UUID(
+        "00000000-0000-0000-0000-000000000088"
+    )
 
 
 async def test_sync_resolves_effective_owner_from_verified_mapping() -> None:

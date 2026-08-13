@@ -28,7 +28,7 @@ from app.application.use_cases.reconcile_lead_assignment import (
 )
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.common.ids import WorkspaceId
-from app.domain.leads import CanonicalLeadRecord
+from app.domain.leads import CanonicalLeadRecord, preserve_app_owned_lead_state
 
 
 class CRMActivitySource(Protocol):
@@ -108,7 +108,7 @@ async def refresh_lead_for_pre_send(
             user_repository=crm_refresh_context.user_repository,
         )
         resolved_lead = apply_lead_assignment_resolution(
-            refreshed_lead,
+            preserve_app_owned_lead_state(refreshed_lead, lead),
             context=assignment_context,
             now=now,
         )

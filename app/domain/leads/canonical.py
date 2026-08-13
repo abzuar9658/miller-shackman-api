@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
@@ -212,6 +212,33 @@ class CanonicalLeadRecord:
             not self.paused_search_track_key or self.paused_search_track_version_id is None
         ):
             raise ValueError("active paused-search leads require a concrete track assignment")
+
+
+def preserve_app_owned_lead_state(
+    fresh: CanonicalLeadRecord,
+    existing: CanonicalLeadRecord | None,
+) -> CanonicalLeadRecord:
+    """Carry app-owned paused-search state forward onto a freshly CRM-mapped record.
+
+    CRM payloads never carry the paused-search profile; upserting a fresh mapping
+    without this merge silently wipes it, bypassing track-assignment release and
+    the paused-search audit history.
+    """
+    if existing is None:
+        return fresh
+    return replace(
+        fresh,
+        paused_search_active=existing.paused_search_active,
+        paused_search_track_key=existing.paused_search_track_key,
+        paused_search_track_version_id=existing.paused_search_track_version_id,
+        pause_reason_note=existing.pause_reason_note,
+        reengagement_not_before=existing.reengagement_not_before,
+        reengagement_window_label=existing.reengagement_window_label,
+        paused_search_source=existing.paused_search_source,
+        paused_search_recorded_at=existing.paused_search_recorded_at,
+        paused_search_recorded_by_user_id=existing.paused_search_recorded_by_user_id,
+        paused_search_last_confirmed_at=existing.paused_search_last_confirmed_at,
+    )
 
 
 def lead_paused_search_profile(

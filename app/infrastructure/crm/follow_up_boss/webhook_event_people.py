@@ -12,7 +12,7 @@ from app.application.use_cases.process_crm_tag_campaign_enrollment import (
     CRMTagCampaignEnrollmentStatus,
     process_crm_tag_campaign_enrollment,
 )
-from app.domain.leads import CRMProvider
+from app.domain.leads import CRMProvider, preserve_app_owned_lead_state
 from app.infrastructure.crm.follow_up_boss.lead_mapper import (
     map_follow_up_boss_person_to_canonical_lead,
 )
@@ -52,7 +52,9 @@ async def handle_people_event(
             lead_id=existing.lead_id if existing else None,
             now=now,
         )
-        saved = await bundle.lead_repository.upsert(record)
+        saved = await bundle.lead_repository.upsert(
+            preserve_app_owned_lead_state(record, existing)
+        )
         person_processed = False
         activity = _people_activity_event(
             workspace_id, event_id, event_type, occurred_at, existing, saved
