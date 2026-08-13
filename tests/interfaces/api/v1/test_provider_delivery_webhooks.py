@@ -90,7 +90,7 @@ class FakeOutboundMessageRepository:
     ) -> OutboundMessage | None:
         return self.message
 
-    async def get_by_provider_message_id_for_update(
+    async def get_by_provider_message_id(
         self,
         provider_name: str,
         provider_message_id: str,
@@ -102,6 +102,13 @@ class FakeOutboundMessageRepository:
         ):
             return self.message
         return None
+
+    async def get_by_provider_message_id_for_update(
+        self,
+        provider_name: str,
+        provider_message_id: str,
+    ) -> OutboundMessage | None:
+        return await self.get_by_provider_message_id(provider_name, provider_message_id)
 
     async def save(self, message: OutboundMessage) -> OutboundMessage:
         self.message = message

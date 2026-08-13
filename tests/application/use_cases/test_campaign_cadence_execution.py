@@ -303,7 +303,7 @@ class _Phase4OccurrenceRepository:
             return updated
         return None
 
-    async def get_by_id_for_update(
+    async def get_by_id(
         self,
         workspace_id: UUID,
         occurrence_id: UUID,
@@ -317,6 +317,13 @@ class _Phase4OccurrenceRepository:
             ),
             None,
         )
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: UUID,
+        occurrence_id: UUID,
+    ) -> RecurringOccurrence | None:
+        return await self.get_by_id(workspace_id, occurrence_id)
 
 
 def _crm_event(

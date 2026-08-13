@@ -69,6 +69,18 @@ async def resolve_uncertain_paused_search_occurrence(
     actor: AuthenticatedActor | None = None,
     lead_repository: LeadRepository | None = None,
 ) -> UncertainOccurrenceResolutionResult:
+    # Probe unlocked to learn the lead, then lock workflow before occurrence —
+    # the canonical lock order shared with cadence execution and the delivery
+    # callback path (workflow row first, occurrence row after).
+    probe = await occurrence_repository.get_by_id(workspace_id, occurrence_id)
+    if probe is None:
+        return UncertainOccurrenceResolutionResult(
+            status=UncertainOccurrenceResolutionStatus.NOT_FOUND,
+        )
+    workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
+        workspace_id,
+        probe.lead_id,
+    )
     current = await occurrence_repository.get_by_id_for_update(workspace_id, occurrence_id)
     if current is None:
         return UncertainOccurrenceResolutionResult(
@@ -121,10 +133,11 @@ async def resolve_uncertain_paused_search_occurrence(
         return UncertainOccurrenceResolutionResult(
             status=UncertainOccurrenceResolutionStatus.NOT_FOUND,
         )
-    workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
-        workspace_id,
-        occurrence.lead_id,
-    )
+    if workflow is None or occurrence.lead_id != probe.lead_id:
+        workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
+            workspace_id,
+            occurrence.lead_id,
+        )
     if workflow is None:
         return UncertainOccurrenceResolutionResult(
             status=UncertainOccurrenceResolutionStatus.RESOLVED,

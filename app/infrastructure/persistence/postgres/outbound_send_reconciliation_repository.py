@@ -60,6 +60,19 @@ class PostgresOutboundSendReconciliationRepository:
         model = result.scalar_one_or_none()
         return _model_to_reconciliation(model) if model is not None else None
 
+    async def get_by_idempotency_key(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
+    ) -> OutboundSendReconciliation | None:
+        result = await self._session.execute(
+            select(OutboundSendReconciliationModel)
+            .where(OutboundSendReconciliationModel.workspace_id == workspace_id)
+            .where(OutboundSendReconciliationModel.idempotency_key == idempotency_key)
+        )
+        model = result.scalar_one_or_none()
+        return _model_to_reconciliation(model) if model is not None else None
+
     async def get_by_idempotency_key_for_update(
         self,
         workspace_id: WorkspaceId,

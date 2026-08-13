@@ -91,6 +91,19 @@ class FakePausedSearchOccurrenceRepository:
         self.occurrence = occurrence
         self.updated: list[RecurringOccurrence] = []
 
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+    ) -> RecurringOccurrence | None:
+        if (
+            self.occurrence is not None
+            and self.occurrence.workspace_id == workspace_id
+            and self.occurrence.occurrence_id == occurrence_id
+        ):
+            return self.occurrence
+        return None
+
     async def get_latest_for_step(
         self,
         workspace_id: WorkspaceId,

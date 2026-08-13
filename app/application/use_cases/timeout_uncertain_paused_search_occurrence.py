@@ -59,6 +59,20 @@ async def timeout_uncertain_paused_search_occurrence(
     notification_provider: NotificationProvider | None = None,
     notification_repository: PausedSearchNotificationRepository | None = None,
 ) -> UncertainOccurrenceTimeoutResult:
+    # Probe unlocked to learn the lead, then lock workflow before occurrence —
+    # the canonical lock order shared with cadence execution and the delivery
+    # callback path (workflow row first, occurrence row after).
+    probe = await occurrence_repository.get_by_id(workspace_id, occurrence_id)
+    if probe is None or probe.status is not RecurringOccurrenceStatus.UNCERTAIN:
+        return UncertainOccurrenceTimeoutResult(
+            occurrence=probe,
+            workflow_state=None,
+            timed_out=False,
+        )
+    await lead_workflow_repository.get_latest_for_lead_for_update(
+        workspace_id,
+        probe.lead_id,
+    )
     occurrence = await occurrence_repository.get_by_id_for_update(workspace_id, occurrence_id)
     if occurrence is None or occurrence.status is not RecurringOccurrenceStatus.UNCERTAIN:
         return UncertainOccurrenceTimeoutResult(

@@ -102,6 +102,45 @@ async def process_provider_delivery_callback(
             reasons=(ProcessProviderDeliveryCallbackReasonCode.DUPLICATE_EVENT,),
         )
 
+    # Identify the target lead without taking row locks so the locks below can
+    # be acquired in the canonical order shared with the send/dispatch paths:
+    # workflow -> outbound message -> reconciliation -> occurrence. Locking the
+    # workflow last (as this path previously did) inverted that order and could
+    # deadlock against cadence execution and revalidation.
+    probe_message = await message_repository.get_by_provider_message_id(
+        callback.provider,
+        callback.provider_message_id,
+    )
+    probe_reconciliation = None
+    if (
+        probe_message is None
+        and callback.idempotency_key is not None
+        and reconciliation_repository is not None
+        and workspace_id is not None
+    ):
+        probe_reconciliation = await reconciliation_repository.get_by_idempotency_key(
+            workspace_id,
+            callback.idempotency_key,
+        )
+    if probe_message is not None:
+        lead_workspace_id = probe_message.workspace_id
+        lead_id = probe_message.lead_id
+    elif probe_reconciliation is not None:
+        lead_workspace_id = probe_reconciliation.workspace_id
+        lead_id = probe_reconciliation.lead_id
+    else:
+        return ProcessProviderDeliveryCallbackResult(
+            status=ProcessProviderDeliveryCallbackStatus.IGNORED,
+            reasons=(ProcessProviderDeliveryCallbackReasonCode.OUTBOUND_MESSAGE_NOT_FOUND,),
+        )
+
+    workflow = None
+    if lead_workflow_repository is not None:
+        workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
+            lead_workspace_id,
+            lead_id,
+        )
+
     message = await message_repository.get_by_provider_message_id_for_update(
         callback.provider,
         callback.provider_message_id,
@@ -109,6 +148,7 @@ async def process_provider_delivery_callback(
     reconciliation = None
     if (
         message is None
+        and probe_reconciliation is not None
         and callback.idempotency_key is not None
         and reconciliation_repository is not None
         and workspace_id is not None
@@ -249,8 +289,12 @@ async def process_provider_delivery_callback(
                 provider_delivery_status=updated_message.provider_delivery_status,
                 failure_reason=updated_message.failure_reason,
             )
-            workflow = None
-            if lead_workflow_repository is not None:
+            # The lead's workflow row was already locked (canonical order)
+            # before the message/occurrence locks; only re-lock if the
+            # occurrence unexpectedly belongs to a different lead.
+            if lead_workflow_repository is not None and (
+                workflow is None or occurrence.lead_id != lead_id
+            ):
                 workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
                     message.workspace_id,
                     occurrence.lead_id,

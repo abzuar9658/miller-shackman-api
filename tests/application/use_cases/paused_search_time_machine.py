@@ -194,7 +194,7 @@ class PausedSearchTimeMachineOccurrenceRepository:
     async def resolve_uncertain(self, **_: object) -> RecurringOccurrence | None:
         return None
 
-    async def get_by_id_for_update(
+    async def get_by_id(
         self, workspace_id: UUID, occurrence_id: UUID
     ) -> RecurringOccurrence | None:
         return next(
@@ -205,6 +205,11 @@ class PausedSearchTimeMachineOccurrenceRepository:
             ),
             None,
         )
+
+    async def get_by_id_for_update(
+        self, workspace_id: UUID, occurrence_id: UUID
+    ) -> RecurringOccurrence | None:
+        return await self.get_by_id(workspace_id, occurrence_id)
 
 
 class PausedSearchTimeMachine:

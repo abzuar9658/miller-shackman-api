@@ -431,6 +431,13 @@ class OutboundSendReconciliationRepository(Protocol):
     ) -> OutboundSendReconciliation | None:
         raise NotImplementedError
 
+    async def get_by_idempotency_key(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
+    ) -> OutboundSendReconciliation | None:
+        raise NotImplementedError
+
     async def get_by_id_for_update(
         self,
         workspace_id: WorkspaceId,
@@ -1097,6 +1104,13 @@ class PausedSearchTrackAssignmentRepository(Protocol):
 
 
 class PausedSearchOccurrenceRepository(Protocol):
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+    ) -> RecurringOccurrence | None:
+        raise NotImplementedError
+
     async def get_latest_for_step(
         self,
         workspace_id: WorkspaceId,
@@ -1512,6 +1526,13 @@ class ProviderDeliveryMessageRepository(Protocol):
         self,
         workspace_id: WorkspaceId,
         message_id: UUID,
+    ) -> Any | None:
+        raise NotImplementedError
+
+    async def get_by_provider_message_id(
+        self,
+        provider_name: str,
+        provider_message_id: str,
     ) -> Any | None:
         raise NotImplementedError
 

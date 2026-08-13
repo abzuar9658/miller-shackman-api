@@ -73,12 +73,11 @@ class FakeOutboundMessageRepository:
     ) -> OutboundMessage | None:
         return self.message
 
-    async def get_by_provider_message_id_for_update(
+    async def get_by_provider_message_id(
         self,
         provider_name: str,
         provider_message_id: str,
     ) -> OutboundMessage | None:
-        self.locked_provider_messages.append((provider_name, provider_message_id))
         if (
             self.message is not None
             and self.message.provider_name == provider_name
@@ -86,6 +85,14 @@ class FakeOutboundMessageRepository:
         ):
             return self.message
         return None
+
+    async def get_by_provider_message_id_for_update(
+        self,
+        provider_name: str,
+        provider_message_id: str,
+    ) -> OutboundMessage | None:
+        self.locked_provider_messages.append((provider_name, provider_message_id))
+        return await self.get_by_provider_message_id(provider_name, provider_message_id)
 
     async def save(self, message: OutboundMessage) -> OutboundMessage:
         self.message = message
@@ -133,6 +140,13 @@ class FakeOutboundSendReconciliationRepository:
         self,
         workspace_id: WorkspaceId,
         outbound_message_id: UUID,
+    ) -> OutboundSendReconciliation | None:
+        return self.reconciliation
+
+    async def get_by_idempotency_key(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
     ) -> OutboundSendReconciliation | None:
         return self.reconciliation
 
@@ -307,7 +321,7 @@ class FakeOccurrenceRepository:
     ) -> RecurringOccurrence | None:
         return None
 
-    async def get_by_id_for_update(
+    async def get_by_id(
         self,
         workspace_id: WorkspaceId,
         occurrence_id: UUID,
@@ -318,6 +332,13 @@ class FakeOccurrenceRepository:
         ):
             return None
         return self.occurrence
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+    ) -> RecurringOccurrence | None:
+        return await self.get_by_id(workspace_id, occurrence_id)
 
 
 def _message(

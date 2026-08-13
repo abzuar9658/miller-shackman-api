@@ -153,6 +153,19 @@ class PostgresOutboundMessageRepository:
         model = result.scalar_one_or_none()
         return _model_to_message(model) if model else None
 
+    async def get_by_provider_message_id(
+        self,
+        provider_name: str,
+        provider_message_id: str,
+    ) -> OutboundMessage | None:
+        result = await self._session.execute(
+            select(OutboundMessageModel)
+            .where(OutboundMessageModel.provider_name == provider_name)
+            .where(OutboundMessageModel.provider_message_id == provider_message_id),
+        )
+        model = result.scalar_one_or_none()
+        return _model_to_message(model) if model else None
+
     async def get_by_provider_message_id_for_update(
         self,
         provider_name: str,

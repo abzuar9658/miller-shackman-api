@@ -328,13 +328,20 @@ class FakeOutboundSendReconciliationRepository:
             None,
         )
 
-    async def get_by_idempotency_key_for_update(
+    async def get_by_idempotency_key(
         self,
         workspace_id: WorkspaceId,
         idempotency_key: str,
     ) -> OutboundSendReconciliation | None:
         item = self.reconciliations.get(idempotency_key)
         return item if item is not None and item.workspace_id == workspace_id else None
+
+    async def get_by_idempotency_key_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        idempotency_key: str,
+    ) -> OutboundSendReconciliation | None:
+        return await self.get_by_idempotency_key(workspace_id, idempotency_key)
 
     async def create_or_get(
         self,
