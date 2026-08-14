@@ -47,8 +47,6 @@ jobs:
     needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    outputs:
-      image: ${{ steps.meta.outputs.image }}
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/configure-aws-credentials@v4
@@ -60,7 +58,6 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
       - name: Build and push image
-        id: meta
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
           REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
@@ -69,7 +66,6 @@ jobs:
           docker build -t "$IMAGE:${GITHUB_SHA}" -t "$IMAGE:latest" .
           docker push "$IMAGE:${GITHUB_SHA}"
           docker push "$IMAGE:latest"
-          echo "image=$IMAGE:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
   deploy:
     needs: build
@@ -84,8 +80,10 @@ jobs:
       - name: Deploy via SSM
         env:
           INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
-          IMAGE: ${{ needs.build.outputs.image }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
         run: |
+          REGISTRY="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_REGION}.amazonaws.com"
+          IMAGE="$REGISTRY/$ECR_REPOSITORY:${GITHUB_SHA}"
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
@@ -93,7 +91,7 @@ jobs:
             --parameters "commands=[
               \"set -eu\",
               \"cd /opt/miller-schackman\",
-              \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${IMAGE%%/*}\",
+              \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REGISTRY\",
               \"sed -i 's|^API_IMAGE=.*|API_IMAGE=$IMAGE|' .env\",
               \"docker compose -f compose.prod.yaml pull --quiet\",
               \"docker compose -f compose.prod.yaml up -d --remove-orphans\",
