@@ -91,7 +91,7 @@ jobs:
             --document-name "AWS-RunShellScript" \
             --comment "Deploy $GITHUB_SHA" \
             --parameters "commands=[
-              \"set -euo pipefail\",
+              \"set -eu\",
               \"cd /opt/miller-schackman\",
               \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${IMAGE%%/*}\",
               \"sed -i 's|^API_IMAGE=.*|API_IMAGE=$IMAGE|' .env\",
