@@ -49,7 +49,6 @@ from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
-    SmsComplianceState,
     WorkspaceContactPolicy,
 )
 from app.domain.conversations import (
@@ -1275,7 +1274,6 @@ def _config(*, crm_enrollment_tag: str | None = None) -> CampaignExecutionConfig
         quiet_hours_start=time(10, 0),
         quiet_hours_end=time(17, 0),
         timezone="America/Chicago",
-        sms_compliance_required=True,
         preflight_digest_enabled=False,
         crm_enrollment_tag=crm_enrollment_tag,
         prompt_version="v1",
@@ -1290,7 +1288,6 @@ def _config(*, crm_enrollment_tag: str | None = None) -> CampaignExecutionConfig
 def _contact_policy() -> WorkspaceContactPolicy:
     return WorkspaceContactPolicy(
         workspace_id=WORKSPACE_ID,
-        sms_compliance_state=SmsComplianceState.APPROVED,
     )
 
 

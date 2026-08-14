@@ -69,6 +69,22 @@ results are already scoped by role/token server-side.
   backend ticket for enforced server-side scoping (client filtering alone is a
   privacy hole). Record the decision in this document.
 
+**DECISION (verified 2026-08-13): server-scoped.** Backend enforces scoping in
+the use cases, not the routes:
+
+- `app/application/use_cases/lead_read.py::list_lead_views` — actors without
+  `VIEW_WORKSPACE_REPORTING` and with role `ASSIGNED_AGENT` only receive leads
+  where `is_actor_assigned_to_lead(actor, lead)` (effective owner user id ==
+  actor user id, `app/application/services/lead_assignment.py`).
+- `app/application/use_cases/handoff_read.py::list_handoff_views` — same
+  pattern; assignment resolves `handoff.assigned_agent_user_id` first, falling
+  back to the lead's effective owner.
+
+Consequence for Task 1.2: labels are truthful for agents; fix is frontend-only.
+Note the agent default `assignmentFilter = 'assigned'` on HandoffsPage can hide
+server-visible handoffs whose `assigned_agent_user_id` is null (owner-fallback
+scoping) — the agent default should be "all my handoffs", not "assigned".
+
 ### Task 0.2 — Decide the fate of OutboundDraftingPage (dead route)
 
 Finding: `src/pages/OutboundDraftingPage.tsx` is not imported in
@@ -84,6 +100,13 @@ Action: check whether `WorkspaceOutboundDraftingTab` is already mounted under
   target the settings route.
 - If no: register the route in `router.tsx` (admin-only, matching its 403
   handling) and add a navigation entry in `src/lib/navigation.ts`.
+
+**DECISION (verified 2026-08-13): register the route.**
+`WorkspaceOutboundDraftingTab` is NOT mounted anywhere reachable —
+`NurtureSettingsPage.tsx` does not import it; the only consumer is the orphan
+`OutboundDraftingPage`. Action: add `/outbound-drafting` to `router.tsx` with
+`roleAccess.adminOnly` and a navigation entry, keeping the page's own 403
+handling. (Stray `}` in its subtitle is fixed in Task 1.4.)
 
 ### Task 0.3 — Record backend API gaps needed by later phases
 
@@ -105,6 +128,19 @@ Create tickets (or a tracking list) for:
 7. SMS compliance evidence fields (registration ID, approval date, approver).
 8. Batch endpoints for bulk actions (bulk mark-seen on attention, bulk veto on
    preflight) — needed for Phase 6.
+
+**VERIFIED (2026-08-13): all eight gaps are real; none of these exist in the
+backend today.** Evidence: `AttentionAcknowledgementResponse` carries only
+`acknowledged_at` (`app/interfaces/api/schemas/attention.py`); `assigned_leads`
+appears only on retire-preview/retired-track schemas
+(`schemas/paused_search_tracks.py`); no listing inventory count fields; no
+pagination/sorting `Query` params on leads/handoffs/campaigns/users/agent
+mapping list routes (only fixed `limit` defaults inside use cases); no
+acknowledge/reassign routes in `app/interfaces/api/v1/handoffs.py`; only
+`POST /auth/invitations/accept` exists (no token preview route); workspace
+schema carries only `sms_compliance_state`; no bulk/batch routes in
+`attention.py`/`preflight.py`. This list is the backend tracking list; each
+item becomes a backend ticket when its consuming phase starts.
 
 ---
 
@@ -528,6 +564,13 @@ Fix: adopt pagination/sorting params as they land; move Home dashboard
 aggregates to the reporting endpoint (`getWorkspaceOperationsReport`) instead
 of client-side full-list computation (`adminHomeModel.ts` ~line 94).
 
+**STATUS (2026-08-14): blocked on Task 0.3 item 4.** No pagination/sorting
+`Query` params exist on any list route yet. The Home dashboard already sources
+workflow/message/handoff/event counts from `getWorkspaceOperationsReport`; the
+remaining client-side full-list computation (lead inventory `notEnrolled` /
+`blocked` and needs-human alerts in `adminHomeModel.ts`) has no report-side
+equivalent today, so it stays until the reporting endpoint grows those counts.
+
 ### Task 6.2 — Per-row mutation pending state (can be pulled earlier; frontend-only)
 
 Global pending flags freeze whole tables during one row's save:
@@ -538,6 +581,13 @@ Global pending flags freeze whole tables during one row's save:
 - `PausedSearchTrackStudio.tsx` `pendingAction` (~lines 334–339)
 Fix: key pending state by row/entity ID.
 
+**DONE (2026-08-14).** Pending state is now keyed by entity ID via
+`mutation.variables`: AgentMappingPage rows lock individually (`isRowSaving`
+by `agent_record_id`; `isActionLocked` removed), ListingSourcesPage keys
+source updates/crawl requests by `sourceId` and scope toggles by `scopeId`
+(`pendingScopeId`), and PausedSearchTrackStudio passes `pendingTrackId`
+instead of a catalog-wide `pendingAction` flag.
+
 ### Task 6.3 — Bulk actions on queues
 
 When batch endpoints exist: bulk veto on preflight (with per-lead reasons or a
@@ -545,10 +595,17 @@ shared reason), bulk mark-seen on attention, bulk approve/reject on
 paused-search reviews. Design each with an explicit confirmation summarizing
 scope ("Mark 14 items as seen").
 
+**STATUS (2026-08-14): blocked on Task 0.3 item 8** — no batch endpoints exist.
+
 ### Task 6.4 — Table virtualization
 
 If pagination is deferred for any list, add row virtualization for the lead
 workspace table and campaigns list as a stopgap.
+
+**STATUS (2026-08-14): deferred.** No virtualization library is installed and
+current seeded data volumes (~40 leads) render without measurable jank. Revisit
+when a real workspace approaches hundreds of rows and Task 6.1 pagination has
+not yet landed.
 
 ---
 

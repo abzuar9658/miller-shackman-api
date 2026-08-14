@@ -24,7 +24,6 @@ from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
-    SmsComplianceState,
     WorkspaceContactPolicy,
 )
 from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
@@ -394,7 +393,6 @@ def _planning_context(
         enabled_channels=enabled_channels,
         workspace_contact_policy=WorkspaceContactPolicy(
             workspace_id=WORKSPACE_ID,
-            sms_compliance_state=SmsComplianceState.APPROVED,
         ),
         campaign_goal="Re-engage dormant buyer leads without giving property or finance advice.",
         brokerage_name="Miller Schackman",

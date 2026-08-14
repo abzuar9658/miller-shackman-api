@@ -183,6 +183,34 @@ def test_complete_signup_accepts_invitation_alias_route(auth_client: AuthTestCli
     assert auth_client.session.commit_count == 1
 
 
+def test_preview_invitation_returns_200(auth_client: AuthTestClient) -> None:
+    auth_client.deps.invitations[UUID("00000000-0000-0000-0000-00000000000a")] = _invitation(
+        token_hash="hash::invite-token",
+    )
+
+    response = auth_client.client.post(
+        "/api/v1/auth/invitations/preview",
+        json={"invitation_token": "invite-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "valid"
+    assert body["invitation"]["email"] == "user@example.com"
+    assert body["invitation"]["role"] == "assigned_agent"
+    assert body["invitation"]["workspace_name"] == f"Workspace {WORKSPACE_ID}"
+
+
+def test_preview_invitation_unknown_token_returns_400(auth_client: AuthTestClient) -> None:
+    response = auth_client.client.post(
+        "/api/v1/auth/invitations/preview",
+        json={"invitation_token": "unknown-token"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == ["invitation_not_found"]
+
+
 def test_signin_returns_200(auth_client: AuthTestClient) -> None:
     auth_client.bundle.settings = Settings(
         auth_jwt_secret="test-secret",

@@ -16,12 +16,6 @@ class ContactPermissionStatus(StrEnum):
     DENIED = "denied"
 
 
-class SmsComplianceState(StrEnum):
-    APPROVED = "approved"
-    NOT_APPROVED = "not_approved"
-    UNKNOWN = "unknown"
-
-
 class SuppressionType(StrEnum):
     SMS_OPT_OUT = "sms_opt_out"
     EMAIL_UNSUBSCRIBED = "email_unsubscribed"
@@ -37,7 +31,6 @@ class ContactabilityReasonCode(StrEnum):
     DO_NOT_CONTACT = "do_not_contact"
     INSUFFICIENT_DATA = "insufficient_data"
     SMS_OPTED_OUT = "sms_opted_out"
-    SMS_COMPLIANCE_NOT_APPROVED = "sms_compliance_not_approved"
     MISSING_SMS_CONSENT = "missing_sms_consent"
     SMS_PERMISSION_DENIED = "sms_permission_denied"
     EMAIL_UNSUBSCRIBED = "email_unsubscribed"
@@ -70,7 +63,6 @@ def _default_quiet_hours_end() -> time:
 @dataclass(frozen=True)
 class WorkspaceContactPolicy:
     workspace_id: WorkspaceId
-    sms_compliance_state: SmsComplianceState = SmsComplianceState.NOT_APPROVED
     quiet_hours_enabled: bool = True
     quiet_hours_start: time | None = field(default_factory=_default_quiet_hours_start)
     quiet_hours_end: time | None = field(default_factory=_default_quiet_hours_end)
@@ -90,7 +82,6 @@ class ContactabilityDecision:
 
 def evaluate_contactability(
     facts: LeadContactabilityFacts,
-    policy: WorkspaceContactPolicy,
     channel: ContactChannel,
     *,
     require_explicit_automated_permission: bool = False,
@@ -108,7 +99,6 @@ def evaluate_contactability(
         reasons.extend(
             _evaluate_sms_reasons(
                 facts,
-                policy,
                 require_explicit_automated_permission=require_explicit_automated_permission,
             )
         )
@@ -132,7 +122,6 @@ def evaluate_contactability(
 
 def _evaluate_sms_reasons(
     facts: LeadContactabilityFacts,
-    policy: WorkspaceContactPolicy,
     *,
     require_explicit_automated_permission: bool,
 ) -> list[ContactabilityReasonCode]:
@@ -142,8 +131,6 @@ def _evaluate_sms_reasons(
         reasons.append(ContactabilityReasonCode.SMS_OPTED_OUT)
 
     if require_explicit_automated_permission:
-        if policy.sms_compliance_state != SmsComplianceState.APPROVED:
-            reasons.append(ContactabilityReasonCode.SMS_COMPLIANCE_NOT_APPROVED)
         if facts.sms_consent_status == ContactPermissionStatus.DENIED:
             reasons.append(ContactabilityReasonCode.SMS_PERMISSION_DENIED)
 

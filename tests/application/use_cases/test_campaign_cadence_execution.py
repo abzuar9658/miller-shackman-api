@@ -50,7 +50,6 @@ from app.domain.campaigns.pre_send import ProviderSendStatus
 from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
-    SmsComplianceState,
     SuppressionType,
     WorkspaceContactPolicy,
 )
@@ -1687,7 +1686,7 @@ async def test_execute_campaign_cadence_step_respects_authored_sms_step_when_bot
         ),
         workspace_repository=FakeWorkspaceRepository(_workspace()),
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
-            _workspace_contact_policy(sms_compliance_state=SmsComplianceState.NOT_APPROVED)
+            _workspace_contact_policy()
         ),
         lead_repository=FakeLeadRepository(_lead(has_phone=True)),
         lead_workflow_repository=workflow_repository,
@@ -1969,14 +1968,12 @@ def _workspace() -> Workspace:
 
 def _workspace_contact_policy(
     *,
-    sms_compliance_state: SmsComplianceState = SmsComplianceState.APPROVED,
     quiet_hours_enabled: bool = True,
     quiet_hours_start: time = time(10, 0),
     quiet_hours_end: time = time(17, 0),
 ) -> WorkspaceContactPolicy:
     return WorkspaceContactPolicy(
         workspace_id=WORKSPACE_ID,
-        sms_compliance_state=sms_compliance_state,
         quiet_hours_enabled=quiet_hours_enabled,
         quiet_hours_start=quiet_hours_start,
         quiet_hours_end=quiet_hours_end,
@@ -2044,7 +2041,6 @@ def _config(
         quiet_hours_start=time(10, 0),
         quiet_hours_end=time(17, 0),
         timezone="America/Chicago",
-        sms_compliance_required=True,
         preflight_digest_enabled=False,
         crm_enrollment_tag=None,
         prompt_version="v1",

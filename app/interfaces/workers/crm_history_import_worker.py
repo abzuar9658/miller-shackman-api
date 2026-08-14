@@ -84,3 +84,6 @@ async def main() -> None:
         except Exception:
             logger.exception("crm_history_import_run_failed")
         await asyncio.sleep(1)
+
+if __name__ == "__main__":
+    asyncio.run(main())

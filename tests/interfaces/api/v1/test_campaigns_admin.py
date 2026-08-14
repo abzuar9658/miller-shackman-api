@@ -364,7 +364,6 @@ def _payload() -> dict[str, Any]:
         "quiet_hours_start": "10:00:00",
         "quiet_hours_end": "17:00:00",
         "timezone": "America/Chicago",
-        "sms_compliance_required": True,
         "preflight_digest_enabled": True,
         "crm_enrollment_tag": "ai_nurture",
         "allow_assigned_agent_manual_enrollment": True,

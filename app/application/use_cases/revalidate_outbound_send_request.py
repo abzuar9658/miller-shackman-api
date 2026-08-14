@@ -251,7 +251,6 @@ async def revalidate_outbound_send_request(
     )
     contactability = evaluate_contactability(
         contactability_facts_from_canonical_lead(lead),
-        contact_policy,
         message.channel,
         require_explicit_automated_permission=message.channel is ContactChannel.SMS,
     )

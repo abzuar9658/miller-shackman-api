@@ -48,7 +48,6 @@ class CampaignExecutionConfig:
     quiet_hours_start: time
     quiet_hours_end: time
     timezone: str
-    sms_compliance_required: bool
     preflight_digest_enabled: bool
     crm_enrollment_tag: str | None
     prompt_version: str

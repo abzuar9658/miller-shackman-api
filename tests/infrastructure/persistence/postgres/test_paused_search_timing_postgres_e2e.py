@@ -372,7 +372,6 @@ async def _seed(
             quiet_hours_start=time(10),
             quiet_hours_end=time(17),
             timezone="UTC",
-            sms_compliance_required=False,
             preflight_digest_enabled=False,
             prompt_version="test-v1",
             approved_model="test-model",

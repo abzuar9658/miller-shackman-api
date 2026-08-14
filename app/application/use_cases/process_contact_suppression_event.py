@@ -330,7 +330,6 @@ def _channel_sendable(
 
     decision = evaluate_contactability(
         contactability_facts_from_canonical_lead(lead),
-        policy,
         channel,
     )
     return decision.allowed

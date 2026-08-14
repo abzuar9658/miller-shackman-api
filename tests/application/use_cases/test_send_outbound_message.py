@@ -52,7 +52,6 @@ from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
-    SmsComplianceState,
     SuppressionType,
     WorkspaceContactPolicy,
 )
@@ -686,7 +685,6 @@ def _send_context(
     campaign_status: CampaignStatus = CampaignStatus.ACTIVE,
     workflow_state: WorkflowState = WorkflowState.ACTIVE_NURTURE,
     current_message_version: int | None = None,
-    sms_compliance_state: SmsComplianceState = SmsComplianceState.APPROVED,
     inbound_email_address: str | None = None,
 ) -> OutboundSendContext:
     return OutboundSendContext(
@@ -695,7 +693,6 @@ def _send_context(
         enabled_channels=enabled_channels,
         workspace_contact_policy=WorkspaceContactPolicy(
             workspace_id=WORKSPACE_ID,
-            sms_compliance_state=sms_compliance_state,
             inbound_email_address=inbound_email_address,
         ),
         current_message_version=current_message_version,
@@ -1280,53 +1277,6 @@ async def test_rejects_when_pre_send_blocks_message() -> None:
     assert result.pre_send_decision.allowed is False
     assert sms_provider.messages == []
     assert message_repository.saved == []
-
-
-async def test_sends_sms_when_workspace_sms_compliance_is_not_approved_in_v1() -> None:
-    message_repository = FakeOutboundMessageRepository(_message())
-    sms_provider = FakeSMSProvider()
-
-    assert message_repository.message is not None
-    result = await send_outbound_message(
-        workspace_id=WORKSPACE_ID,
-        idempotency_key=message_repository.message.idempotency_key,
-        context=_send_context(sms_compliance_state=SmsComplianceState.NOT_APPROVED),
-        lead_repository=FakeLeadRepository(_lead()),
-        message_repository=message_repository,
-        sms_provider=sms_provider,
-        email_provider=FakeEmailProvider(),
-        now=NOW,
-    )
-
-    assert result.status == SendOutboundMessageStatus.SENT
-    assert result.message is not None
-    assert result.message.channel == ContactChannel.SMS
-    assert result.pre_send_decision is not None
-    assert result.pre_send_decision.allowed is True
-    assert len(sms_provider.messages) == 1
-    assert message_repository.saved
-
-
-async def test_email_send_is_not_blocked_by_workspace_sms_compliance() -> None:
-    message_repository = FakeOutboundMessageRepository(
-        _message(channel=ContactChannel.EMAIL, subject="Quick check-in"),
-    )
-
-    assert message_repository.message is not None
-    result = await send_outbound_message(
-        workspace_id=WORKSPACE_ID,
-        idempotency_key=message_repository.message.idempotency_key,
-        context=_send_context(sms_compliance_state=SmsComplianceState.NOT_APPROVED),
-        lead_repository=FakeLeadRepository(_lead()),
-        message_repository=message_repository,
-        sms_provider=FakeSMSProvider(),
-        email_provider=FakeEmailProvider("msg-123"),
-        now=NOW,
-    )
-
-    assert result.status == SendOutboundMessageStatus.SENT
-    assert result.message is not None
-    assert result.message.channel == ContactChannel.EMAIL
 
 
 async def test_marks_message_uncertain_when_provider_returns_empty_identifier() -> None:

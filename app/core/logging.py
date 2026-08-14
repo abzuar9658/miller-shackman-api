@@ -10,6 +10,9 @@ def configure_logging(log_level: str) -> None:
         processors=[
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             structlog.processors.add_log_level,
+            # Render exc_info into an "exception" field; without this,
+            # logger.exception() emits only {"exc_info": true} with no traceback.
+            structlog.processors.format_exc_info,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(numeric_level),

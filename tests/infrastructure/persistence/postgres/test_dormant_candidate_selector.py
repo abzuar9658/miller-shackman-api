@@ -182,7 +182,6 @@ async def test_excludes_lead_with_workflow_in_another_campaign(
             quiet_hours_start=time(10, 0),
             quiet_hours_end=time(17, 0),
             timezone="UTC",
-            sms_compliance_required=True,
             preflight_digest_enabled=False,
             prompt_version="v1",
             approved_model="openai/gpt-4o-mini",

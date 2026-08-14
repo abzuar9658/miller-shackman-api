@@ -43,7 +43,6 @@ from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
-    SmsComplianceState,
     WorkspaceContactPolicy,
 )
 from app.domain.conversations import (
@@ -709,7 +708,6 @@ def _client_for_role(
     policy_repository = FakeWorkspaceContactPolicyRepository(
         WorkspaceContactPolicy(
             workspace_id=WORKSPACE_ID,
-            sms_compliance_state=SmsComplianceState.APPROVED,
         )
     )
     outbox = FakeTemporalSignalOutboxRepository()
@@ -1283,7 +1281,6 @@ def _config() -> CampaignExecutionConfig:
         quiet_hours_start=datetime(2030, 1, 1, 10, 0, tzinfo=UTC).time(),
         quiet_hours_end=datetime(2030, 1, 1, 17, 0, tzinfo=UTC).time(),
         timezone="America/Chicago",
-        sms_compliance_required=True,
         preflight_digest_enabled=False,
         crm_enrollment_tag=None,
         prompt_version="v1",

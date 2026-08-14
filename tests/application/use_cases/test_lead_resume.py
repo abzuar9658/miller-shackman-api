@@ -13,7 +13,6 @@ from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
     ContactSuppressionKind,
-    SmsComplianceState,
     WorkspaceContactPolicy,
 )
 from app.domain.crm_sync import ExternalEvent
@@ -490,7 +489,6 @@ def _workflow(state: WorkflowState, *, pause_reason: str | None = None) -> LeadW
 def _policy() -> WorkspaceContactPolicy:
     return WorkspaceContactPolicy(
         workspace_id=WORKSPACE_ID,
-        sms_compliance_state=SmsComplianceState.APPROVED,
     )
 
 

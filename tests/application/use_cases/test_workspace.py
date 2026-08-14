@@ -33,7 +33,7 @@ from app.application.use_cases.workspace import (
     update_workspace_outbound_drafting_config,
 )
 from app.domain.common.ids import CampaignId, LeadId
-from app.domain.compliance import SmsComplianceState, WorkspaceContactPolicy
+from app.domain.compliance import WorkspaceContactPolicy
 from app.domain.crm_sync import default_workspace_crm_sync_config
 from app.domain.identity import (
     AuthAuditEventType,
@@ -151,6 +151,58 @@ def test_list_workspace_users_returns_users() -> None:
     assert result.status == ListWorkspaceUsersStatus.FOUND
     assert len(result.users) == 1
     assert result.users[0].user.user_id == ADMIN_ID
+
+
+def test_list_workspace_users_allows_manager_for_reassignment() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.users[ADMIN_ID] = _user(user_id=ADMIN_ID)
+    deps.memberships[MEMBERSHIP_ID] = _membership(
+        membership_id=MEMBERSHIP_ID,
+        user_id=ADMIN_ID,
+        role=WorkspaceMembershipRole.MANAGER,
+    )
+    actor = _actor(role=WorkspaceMembershipRole.MANAGER)
+
+    result = _run(
+        list_workspace_users(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            user_repository=deps.user_repository,
+            invitation_repository=deps.invitation_repository,
+        ),
+    )
+
+    assert result.status == ListWorkspaceUsersStatus.FOUND
+    assert len(result.users) == 1
+
+
+def test_list_workspace_users_rejects_assigned_agent() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.users[ADMIN_ID] = _user(user_id=ADMIN_ID)
+    deps.memberships[MEMBERSHIP_ID] = _membership(
+        membership_id=MEMBERSHIP_ID,
+        user_id=ADMIN_ID,
+        role=WorkspaceMembershipRole.ASSIGNED_AGENT,
+    )
+    actor = _actor(role=WorkspaceMembershipRole.ASSIGNED_AGENT)
+
+    result = _run(
+        list_workspace_users(
+            actor=actor,
+            workspace_id=WORKSPACE_ID,
+            workspace_repository=deps.workspace_repository,
+            membership_repository=deps.membership_repository,
+            user_repository=deps.user_repository,
+            invitation_repository=deps.invitation_repository,
+        ),
+    )
+
+    assert result.status == ListWorkspaceUsersStatus.REJECTED
+    assert result.reasons == (AuthReasonCode.PERMISSION_DENIED,)
 
 
 def test_list_workspace_users_rejects_without_membership() -> None:
@@ -387,7 +439,6 @@ def test_get_workspace_settings_returns_defaults_when_missing() -> None:
     assert result.status == WorkspaceSettingsReadStatus.FOUND
     assert result.view is not None
     assert result.view.workspace.workspace_id == WORKSPACE_ID
-    assert result.view.contact_policy.sms_compliance_state == SmsComplianceState.NOT_APPROVED
     assert result.view.crm_sync_config == default_workspace_crm_sync_config(WORKSPACE_ID)
     assert result.view.llm_config == default_workspace_llm_config(WORKSPACE_ID)
     assert result.view.outbound_drafting_config == default_workspace_outbound_drafting_config(
@@ -425,7 +476,6 @@ def test_update_workspace_contact_policy_persists_values() -> None:
         update_workspace_contact_policy(
             actor=actor,
             workspace_id=WORKSPACE_ID,
-            sms_compliance_state=SmsComplianceState.APPROVED,
             quiet_hours_enabled=False,
             quiet_hours_start=time(9, 0),
             quiet_hours_end=time(16, 0),
@@ -442,7 +492,6 @@ def test_update_workspace_contact_policy_persists_values() -> None:
 
     assert result.status == UpdateWorkspaceContactPolicyStatus.UPDATED
     assert result.contact_policy is not None
-    assert result.contact_policy.sms_compliance_state == SmsComplianceState.APPROVED
     assert result.contact_policy.quiet_hours_enabled is False
     assert result.contact_policy.quiet_hours_start == time(9, 0)
     assert deps.audit_log_repository.logs[-1].event_type == (
@@ -460,7 +509,6 @@ def test_update_workspace_contact_policy_persists_inbound_email_address() -> Non
         update_workspace_contact_policy(
             actor=actor,
             workspace_id=WORKSPACE_ID,
-            sms_compliance_state=SmsComplianceState.APPROVED,
             quiet_hours_enabled=True,
             quiet_hours_start=time(9, 0),
             quiet_hours_end=time(16, 0),
@@ -489,7 +537,6 @@ def test_update_workspace_contact_policy_preserves_inbound_email_when_not_provid
         {
             WORKSPACE_ID: WorkspaceContactPolicy(
                 workspace_id=WORKSPACE_ID,
-                sms_compliance_state=SmsComplianceState.APPROVED,
                 quiet_hours_enabled=True,
                 quiet_hours_start=time(9, 0),
                 quiet_hours_end=time(16, 0),
@@ -503,7 +550,6 @@ def test_update_workspace_contact_policy_preserves_inbound_email_when_not_provid
         update_workspace_contact_policy(
             actor=actor,
             workspace_id=WORKSPACE_ID,
-            sms_compliance_state=SmsComplianceState.APPROVED,
             quiet_hours_enabled=True,
             quiet_hours_start=time(9, 0),
             quiet_hours_end=time(16, 0),
@@ -533,7 +579,6 @@ def test_update_workspace_contact_policy_disables_quiet_hours_without_clearing_w
         update_workspace_contact_policy(
             actor=actor,
             workspace_id=WORKSPACE_ID,
-            sms_compliance_state=SmsComplianceState.APPROVED,
             quiet_hours_enabled=False,
             quiet_hours_start=time(10, 0),
             quiet_hours_end=time(17, 0),
@@ -607,7 +652,6 @@ def test_update_workspace_contact_policy_reactivates_timing_blocked_workflows() 
         update_workspace_contact_policy(
             actor=actor,
             workspace_id=WORKSPACE_ID,
-            sms_compliance_state=SmsComplianceState.APPROVED,
             quiet_hours_enabled=False,
             quiet_hours_start=time(10, 0),
             quiet_hours_end=time(17, 0),

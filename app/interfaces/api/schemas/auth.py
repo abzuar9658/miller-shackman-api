@@ -47,6 +47,22 @@ class InviteWorkspaceUserResponse(BaseModel):
     membership: MembershipResponse | None = None
 
 
+class PreviewInvitationRequest(BaseModel):
+    invitation_token: str
+
+
+class InvitationPreview(BaseModel):
+    email: str
+    role: str
+    workspace_name: str
+    expires_at: datetime
+
+
+class PreviewInvitationResponse(BaseModel):
+    status: str
+    invitation: InvitationPreview | None = None
+
+
 class CompleteInvitedSignupRequest(BaseModel):
     invitation_token: str
     full_name: str

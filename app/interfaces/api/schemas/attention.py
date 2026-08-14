@@ -12,6 +12,8 @@ class AttentionAcknowledgementResponse(BaseModel):
     item_id: str
     item_version: str
     acknowledged_at: datetime
+    acknowledged_by_user_id: UUID
+    acknowledged_by_name: str | None = None
 
 
 class AttentionAcknowledgementListResponse(BaseModel):

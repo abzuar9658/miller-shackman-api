@@ -288,7 +288,6 @@ async def _seed_reporting_fixture(session: AsyncSession) -> None:
                 quiet_hours_start=time(10, 0),
                 quiet_hours_end=time(17, 0),
                 timezone="UTC",
-                sms_compliance_required=True,
                 preflight_digest_enabled=True,
                 prompt_version="v1",
                 approved_model="openai/gpt-4o-mini",

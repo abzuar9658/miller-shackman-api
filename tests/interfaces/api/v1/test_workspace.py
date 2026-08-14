@@ -153,6 +153,8 @@ def test_list_workspace_users_returns_200(workspace_client: WorkspaceTestClient)
         if user["membership"]["membership_id"] == str(invited_membership_id)
     )
     assert invited_user["invitation_id"] == str(INVITATION_ID)
+    assert invited_user["invitation_created_at"] is not None
+    assert invited_user["invitation_expires_at"] is not None
 
 
 def test_invite_user_returns_201(workspace_client: WorkspaceTestClient) -> None:
@@ -235,7 +237,6 @@ def test_get_workspace_settings_returns_crm_sync_defaults(
     assert body["status"] == "found"
     assert body["contact_policy"] == {
         "workspace_id": str(WORKSPACE_ID),
-        "sms_compliance_state": "not_approved",
         "quiet_hours_enabled": True,
         "quiet_hours_start": "10:00:00",
         "quiet_hours_end": "17:00:00",
@@ -521,7 +522,6 @@ def test_update_workspace_contact_policy_returns_200(
     response = workspace_client.client.patch(
         f"/api/v1/workspaces/{WORKSPACE_ID}/settings/contact-policy",
         json={
-            "sms_compliance_state": "approved",
             "quiet_hours_enabled": False,
             "quiet_hours_start": "10:00:00",
             "quiet_hours_end": "17:00:00",
@@ -533,7 +533,6 @@ def test_update_workspace_contact_policy_returns_200(
     assert body["status"] == "updated"
     assert body["contact_policy"] == {
         "workspace_id": str(WORKSPACE_ID),
-        "sms_compliance_state": "approved",
         "quiet_hours_enabled": False,
         "quiet_hours_start": "10:00:00",
         "quiet_hours_end": "17:00:00",

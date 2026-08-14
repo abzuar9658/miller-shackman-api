@@ -86,7 +86,6 @@ from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
-    SmsComplianceState,
     SuppressionType,
     WorkspaceContactPolicy,
 )
@@ -511,7 +510,6 @@ async def _seed_workspace(
     await PostgresWorkspaceContactPolicyRepository(session).save(
         WorkspaceContactPolicy(
             workspace_id=workspace_id,
-            sms_compliance_state=SmsComplianceState.APPROVED,
             quiet_hours_start=time(10, 0),
             quiet_hours_end=time(17, 0),
         ),
@@ -1123,7 +1121,6 @@ def _campaign_config(workspace_id: WorkspaceId) -> CampaignConfigInput:
         quiet_hours_start=time(10, 0),
         quiet_hours_end=time(17, 0),
         timezone="America/Chicago",
-        sms_compliance_required=True,
         preflight_digest_enabled=True,
         crm_enrollment_tag="ai_nurture",
         allow_assigned_agent_manual_enrollment=True,

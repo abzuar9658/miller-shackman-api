@@ -43,7 +43,6 @@ from app.domain.common.ids import WorkspaceId
 from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
-    SmsComplianceState,
     WorkspaceContactPolicy,
 )
 from app.domain.conversations import WorkspaceHandoffConfig
@@ -753,7 +752,6 @@ async def _seed_business_flow_prerequisites(session: AsyncSession) -> None:
             quiet_hours_start=time(10, 0),
             quiet_hours_end=time(17, 0),
             timezone="America/Chicago",
-            sms_compliance_required=True,
             preflight_digest_enabled=False,
             prompt_version="v1",
             approved_model="openai/gpt-4o-mini",
@@ -800,7 +798,6 @@ def _workspace() -> Workspace:
 def _workspace_contact_policy() -> WorkspaceContactPolicy:
     return WorkspaceContactPolicy(
         workspace_id=WORKSPACE_ID,
-        sms_compliance_state=SmsComplianceState.APPROVED,
         quiet_hours_start=time(10, 0),
         quiet_hours_end=time(17, 0),
     )

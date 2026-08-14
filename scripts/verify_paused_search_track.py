@@ -56,7 +56,7 @@ from app.domain.campaigns import (
 )
 from app.domain.campaigns.execution import CampaignExecutionConfig
 from app.domain.campaigns.paused_search_tracks import PausedSearchStepAction
-from app.domain.compliance import SmsComplianceState, WorkspaceContactPolicy
+from app.domain.compliance import WorkspaceContactPolicy
 from app.domain.compliance.contactability import ContactChannel, ContactPermissionStatus
 from app.domain.conversations import CrmConversationEvent, CrmConversationEventDirection
 from app.domain.identity import (
@@ -252,7 +252,6 @@ def build_runtime(mode: DiagnosticMode) -> DiagnosticRuntime:
     )
     contact_policy = WorkspaceContactPolicy(
         workspace_id=WORKSPACE_ID,
-        sms_compliance_state=SmsComplianceState.APPROVED,
     )
     campaign = CampaignExecutionConfig(
         campaign_id=CAMPAIGN_ID,
@@ -267,7 +266,6 @@ def build_runtime(mode: DiagnosticMode) -> DiagnosticRuntime:
         quiet_hours_start=contact_policy.quiet_hours_start,
         quiet_hours_end=contact_policy.quiet_hours_end,
         timezone="America/Chicago",
-        sms_compliance_required=True,
         preflight_digest_enabled=False,
         crm_enrollment_tag="paused-search-diagnostic",
         prompt_version="diagnostic",

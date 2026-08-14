@@ -169,7 +169,6 @@ def _membership_response(membership: WorkspaceMembership) -> MembershipResponse:
 def _contact_policy_response(policy: WorkspaceContactPolicy) -> WorkspaceContactPolicyResponse:
     return WorkspaceContactPolicyResponse(
         workspace_id=policy.workspace_id,
-        sms_compliance_state=policy.sms_compliance_state.value,
         quiet_hours_enabled=policy.quiet_hours_enabled,
         quiet_hours_start=policy.quiet_hours_start,
         quiet_hours_end=policy.quiet_hours_end,
@@ -366,7 +365,6 @@ async def update_workspace_contact_policy_route(
     result = await update_workspace_contact_policy(
         actor=actor,
         workspace_id=workspace_id,
-        sms_compliance_state=request.sms_compliance_state,
         quiet_hours_enabled=request.quiet_hours_enabled,
         quiet_hours_start=request.quiet_hours_start,
         quiet_hours_end=request.quiet_hours_end,
@@ -726,6 +724,8 @@ async def list_workspace_users_route(
                 user=_user_response(workspace_user.user),
                 membership=_membership_response(workspace_user.membership),
                 invitation_id=workspace_user.invitation_id,
+                invitation_created_at=workspace_user.invitation_created_at,
+                invitation_expires_at=workspace_user.invitation_expires_at,
             )
             for workspace_user in result.users
         ],

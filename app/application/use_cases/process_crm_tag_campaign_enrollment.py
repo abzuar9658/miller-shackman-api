@@ -174,7 +174,7 @@ async def process_crm_tag_campaign_enrollment(
     enabled_channels = frozenset(matched_config.enabled_channels)
     contactability_facts = contactability_facts_from_canonical_lead(lead)
     channel_contactability = {
-        channel: evaluate_contactability(contactability_facts, contact_policy, channel)
+        channel: evaluate_contactability(contactability_facts, channel)
         for channel in enabled_channels
     }
     enrollment_facts = enrollment_facts_from_canonical_lead(

@@ -426,7 +426,7 @@ def _contactable_channels(
     for channel in (ContactChannel.SMS, ContactChannel.EMAIL):
         if not lead_has_destination_for_channel(lead, channel):
             continue
-        decision = evaluate_contactability(facts, policy, channel)
+        decision = evaluate_contactability(facts, channel)
         if decision.allowed:
             allowed.append(channel)
             continue

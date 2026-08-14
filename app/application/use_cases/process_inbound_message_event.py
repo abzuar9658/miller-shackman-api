@@ -1565,7 +1565,6 @@ async def _send_lead_handoff_acknowledgments_if_configured(
         handoff_id=str(handoff.handoff_id),
         lead_id=str(handoff.lead_id),
         policy_source="repository" if policy_from_repository is not None else "default",
-        sms_compliance_state=policy.sms_compliance_state.value,
         quiet_hours_enabled=policy.quiet_hours_enabled,
         quiet_hours_start=(
             policy.quiet_hours_start.isoformat() if policy.quiet_hours_start is not None else None
@@ -1621,7 +1620,7 @@ async def _send_lead_handoff_acknowledgments_if_configured(
             continue
 
         contactability_facts = contactability_facts_from_canonical_lead(lead)
-        contactability_decision = evaluate_contactability(contactability_facts, policy, channel)
+        contactability_decision = evaluate_contactability(contactability_facts, channel)
         logger.info(
             "lead_handoff_acknowledgment_contactability",
             workspace_id=str(handoff.workspace_id),

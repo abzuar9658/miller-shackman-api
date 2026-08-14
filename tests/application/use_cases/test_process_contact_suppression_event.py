@@ -11,7 +11,6 @@ from app.application.use_cases.process_contact_suppression_event import (
 from app.domain.compliance import (
     ContactPermissionStatus,
     ContactSuppressionKind,
-    SmsComplianceState,
     SuppressionType,
     WorkspaceContactPolicy,
 )
@@ -104,7 +103,6 @@ async def test_processes_sms_opt_out_and_pauses_when_email_remains_usable() -> N
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             WorkspaceContactPolicy(
                 workspace_id=WORKSPACE_ID,
-                sms_compliance_state=SmsComplianceState.APPROVED,
             )
         ),
         temporal_signal_outbox_repository=outbox,

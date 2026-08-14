@@ -39,7 +39,6 @@ from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
-    SmsComplianceState,
     SuppressionType,
     WorkspaceContactPolicy,
 )
@@ -120,7 +119,6 @@ class FakeContactPolicyRepository:
     async def get_by_workspace_id(self, workspace_id: UUID) -> WorkspaceContactPolicy:
         return WorkspaceContactPolicy(
             workspace_id=workspace_id,
-            sms_compliance_state=SmsComplianceState.APPROVED,
             quiet_hours_start=time(10),
             quiet_hours_end=time(17),
         )
@@ -476,7 +474,6 @@ def _campaign(channel: ContactChannel = ContactChannel.SMS) -> CampaignExecution
         quiet_hours_start=time(10),
         quiet_hours_end=time(17),
         timezone="UTC",
-        sms_compliance_required=True,
         preflight_digest_enabled=True,
         crm_enrollment_tag=None,
         prompt_version="v1",

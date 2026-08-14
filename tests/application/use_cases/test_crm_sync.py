@@ -24,7 +24,6 @@ from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
-    SmsComplianceState,
     WorkspaceContactPolicy,
 )
 from app.domain.conversations import (
@@ -738,7 +737,6 @@ def _campaign_config(*, crm_enrollment_tag: str | None) -> CampaignExecutionConf
         quiet_hours_start=NOW.time(),
         quiet_hours_end=NOW.time(),
         timezone="UTC",
-        sms_compliance_required=False,
         preflight_digest_enabled=False,
         crm_enrollment_tag=crm_enrollment_tag,
         prompt_version="v1",
@@ -752,7 +750,6 @@ def _campaign_config(*, crm_enrollment_tag: str | None) -> CampaignExecutionConf
 def _contact_policy() -> WorkspaceContactPolicy:
     return WorkspaceContactPolicy(
         workspace_id=WORKSPACE_ID,
-        sms_compliance_state=SmsComplianceState.APPROVED,
     )
 
 

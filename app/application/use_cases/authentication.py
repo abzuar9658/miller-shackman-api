@@ -104,6 +104,11 @@ class CompleteInvitedSignupStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class PreviewInvitationStatus(StrEnum):
+    VALID = "valid"
+    REJECTED = "rejected"
+
+
 class SignInStatus(StrEnum):
     AUTHENTICATED = "authenticated"
     REJECTED = "rejected"
@@ -155,6 +160,14 @@ class CompleteInvitedSignupResult:
     tokens: IssuedSessionTokens | None = None
     reasons: tuple[AuthReasonCode, ...] = ()
     password_policy_reasons: tuple[PasswordPolicyReasonCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class PreviewInvitationResult:
+    status: PreviewInvitationStatus
+    invitation: UserInvitation | None = None
+    workspace: Workspace | None = None
+    reasons: tuple[AuthReasonCode, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -365,6 +378,43 @@ async def invite_workspace_user(
         user=saved_user,
         membership=saved_membership,
         invitation=saved_invitation,
+    )
+
+
+async def preview_invitation(
+    *,
+    invitation_token: str,
+    invitation_repository: InvitationRepository,
+    workspace_repository: WorkspaceRepository,
+    opaque_token_service: OpaqueTokenService,
+    now: datetime,
+) -> PreviewInvitationResult:
+    invitation = await invitation_repository.get_by_token_hash(
+        opaque_token_service.hash_token(invitation_token),
+    )
+    validation_reason = _validate_invitation(invitation, now)
+    if validation_reason is not None:
+        return PreviewInvitationResult(
+            status=PreviewInvitationStatus.REJECTED,
+            reasons=(validation_reason,),
+        )
+    assert invitation is not None
+
+    workspace = await workspace_repository.get_by_id(invitation.workspace_id)
+    if workspace is None:
+        return PreviewInvitationResult(
+            status=PreviewInvitationStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_NOT_FOUND,),
+        )
+    if workspace.status != WorkspaceStatus.ACTIVE:
+        return PreviewInvitationResult(
+            status=PreviewInvitationStatus.REJECTED,
+            reasons=(AuthReasonCode.WORKSPACE_NOT_ACTIVE,),
+        )
+    return PreviewInvitationResult(
+        status=PreviewInvitationStatus.VALID,
+        invitation=invitation,
+        workspace=workspace,
     )
 
 

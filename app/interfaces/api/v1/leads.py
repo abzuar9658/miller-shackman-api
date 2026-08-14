@@ -1549,8 +1549,8 @@ def _lead_sendability_response(
     contact_policy: WorkspaceContactPolicy,
 ) -> LeadSendabilityResponse:
     facts = contactability_facts_from_canonical_lead(lead)
-    sms_decision = evaluate_contactability(facts, contact_policy, ContactChannel.SMS)
-    email_decision = evaluate_contactability(facts, contact_policy, ContactChannel.EMAIL)
+    sms_decision = evaluate_contactability(facts, ContactChannel.SMS)
+    email_decision = evaluate_contactability(facts, ContactChannel.EMAIL)
     decisions = (sms_decision, email_decision)
     return LeadSendabilityResponse(
         sms=_channel_sendability_response(sms_decision),

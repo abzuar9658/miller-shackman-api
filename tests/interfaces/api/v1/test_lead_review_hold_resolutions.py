@@ -285,7 +285,6 @@ def _campaign_repository() -> FakeCampaignAdminRepository:
         quiet_hours_start=time(9, 0),
         quiet_hours_end=time(18, 0),
         timezone="America/Los_Angeles",
-        sms_compliance_required=False,
         preflight_digest_enabled=False,
         crm_enrollment_tag="ai_nurture",
         allow_assigned_agent_manual_enrollment=True,

@@ -5,7 +5,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.compliance.contactability import SmsComplianceState, WorkspaceContactPolicy
+from app.domain.compliance.contactability import WorkspaceContactPolicy
 from app.infrastructure.persistence.postgres.models import WorkspaceContactPolicyModel
 from app.infrastructure.persistence.postgres.workspace_contact_policy_repository import (
     PostgresWorkspaceContactPolicyRepository,
@@ -72,7 +72,6 @@ def test_save_maps_policy_to_model() -> None:
 def _policy_model() -> WorkspaceContactPolicyModel:
     return WorkspaceContactPolicyModel(
         workspace_id=WORKSPACE_ID,
-        sms_compliance_state=SmsComplianceState.APPROVED.value,
         quiet_hours_enabled=True,
         quiet_hours_start=time(10, 0),
         quiet_hours_end=time(17, 0),
@@ -85,7 +84,6 @@ def _policy_model() -> WorkspaceContactPolicyModel:
 def _policy() -> WorkspaceContactPolicy:
     return WorkspaceContactPolicy(
         workspace_id=WORKSPACE_ID,
-        sms_compliance_state=SmsComplianceState.APPROVED,
         quiet_hours_enabled=True,
         quiet_hours_start=time(10, 0),
         quiet_hours_end=time(17, 0),

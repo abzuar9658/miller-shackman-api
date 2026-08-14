@@ -64,7 +64,6 @@ def starter_campaign_payload(
         "quiet_hours_start": "10:00:00",
         "quiet_hours_end": "17:00:00",
         "timezone": timezone,
-        "sms_compliance_required": True,
         "preflight_digest_enabled": True,
         "crm_enrollment_tag": crm_enrollment_tag,
         "allow_assigned_agent_manual_enrollment": True,

@@ -941,7 +941,6 @@ class CampaignVersionModel(Base):
     quiet_hours_start: Mapped[time] = mapped_column(Time(), nullable=False)
     quiet_hours_end: Mapped[time] = mapped_column(Time(), nullable=False)
     timezone: Mapped[str] = mapped_column(String(100), nullable=False)
-    sms_compliance_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     preflight_digest_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     crm_enrollment_tag: Mapped[str | None] = mapped_column(String(255))
     allow_assigned_agent_manual_enrollment: Mapped[bool] = mapped_column(
@@ -2258,7 +2257,6 @@ class WorkspaceContactPolicyModel(Base):
     workspace_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("workspaces.workspace_id"), primary_key=True
     )
-    sms_compliance_state: Mapped[str] = mapped_column(String(50), nullable=False)
     quiet_hours_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     quiet_hours_start: Mapped[time] = mapped_column(Time, nullable=False)
     quiet_hours_end: Mapped[time] = mapped_column(Time, nullable=False)

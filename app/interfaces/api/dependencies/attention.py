@@ -4,10 +4,16 @@ from typing import Annotated, Protocol
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.ports.repositories import AttentionAcknowledgementRepository
+from app.application.ports.repositories import (
+    AttentionAcknowledgementRepository,
+    UserRepository,
+)
 from app.core.database import get_session
 from app.infrastructure.persistence.postgres.attention_repository import (
     PostgresAttentionAcknowledgementRepository,
+)
+from app.infrastructure.persistence.postgres.identity_repository import (
+    PostgresUserRepository,
 )
 
 
@@ -20,6 +26,7 @@ class SessionCommitter(Protocol):
 class AttentionAcknowledgementBundle:
     session: SessionCommitter
     repository: AttentionAcknowledgementRepository
+    user_repository: UserRepository
 
 
 async def get_attention_acknowledgement_bundle(
@@ -28,4 +35,5 @@ async def get_attention_acknowledgement_bundle(
     return AttentionAcknowledgementBundle(
         session=session,
         repository=PostgresAttentionAcknowledgementRepository(session),
+        user_repository=PostgresUserRepository(session),
     )

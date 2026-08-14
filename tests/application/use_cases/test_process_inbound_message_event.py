@@ -41,7 +41,7 @@ from app.domain.campaigns.outbound_message import (
 from app.domain.campaigns.paused_search_reply_policy import PausedSearchReplyDecision
 from app.domain.campaigns.start_queue import CampaignStatus
 from app.domain.common.ids import LeadId, WorkspaceId
-from app.domain.compliance import SmsComplianceState, WorkspaceContactPolicy
+from app.domain.compliance import WorkspaceContactPolicy
 from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
@@ -852,12 +852,9 @@ def _workspace() -> Workspace:
     )
 
 
-def _workspace_contact_policy(
-    *, sms_compliance_state: SmsComplianceState = SmsComplianceState.APPROVED
-) -> WorkspaceContactPolicy:
+def _workspace_contact_policy() -> WorkspaceContactPolicy:
     return WorkspaceContactPolicy(
         workspace_id=WORKSPACE_ID,
-        sms_compliance_state=sms_compliance_state,
         quiet_hours_enabled=False,
     )
 
@@ -880,7 +877,6 @@ def _campaign_execution_config(
         quiet_hours_start=time(22, 0),
         quiet_hours_end=time(10, 0),
         timezone="America/Los_Angeles",
-        sms_compliance_required=True,
         preflight_digest_enabled=False,
         crm_enrollment_tag="ai-nurture",
         prompt_version="v1",
@@ -908,7 +904,6 @@ def _continue_ai_dependencies(
     *,
     workflow: LeadWorkflow,
     external_event_repository: FakeExternalEventRepository | None = None,
-    sms_compliance_state: SmsComplianceState = SmsComplianceState.APPROVED,
     channel: ContactChannel = ContactChannel.SMS,
     paused_search_reply_policy: PausedSearchReplyPolicy = PausedSearchReplyPolicy.END,
     restart_delay_days: int = 30,
@@ -939,7 +934,7 @@ def _continue_ai_dependencies(
         "temporal_signal_outbox_repository": FakeTemporalSignalOutboxRepository(),
         "workspace_repository": FakeWorkspaceRepository(_workspace()),
         "workspace_contact_policy_repository": FakeWorkspaceContactPolicyRepository(
-            _workspace_contact_policy(sms_compliance_state=sms_compliance_state)
+            _workspace_contact_policy()
         ),
         "workspace_llm_config_repository": FakeWorkspaceLLMConfigRepository(),
         "workspace_outbound_drafting_config_repository": (
@@ -2299,45 +2294,6 @@ async def test_continue_ai_pauses_when_turn_cap_is_reached() -> None:
     assert final_workflow.state == WorkflowState.PAUSED
     assert final_conversation.ai_interaction_count == 5
     assert final_conversation.status == ConversationStatus.PAUSED
-
-
-async def test_continue_ai_is_not_blocked_when_sms_compliance_is_not_approved_in_v1() -> None:
-    workflow = _workflow()
-    dependencies = _continue_ai_dependencies(
-        workflow=workflow, sms_compliance_state=SmsComplianceState.NOT_APPROVED
-    )
-    conversation_repository = dependencies["conversation_repository"]
-    lead_workflow_repository = dependencies["lead_workflow_repository"]
-    sms_provider = dependencies["sms_provider"]
-    email_provider = dependencies["email_provider"]
-
-    result = await process_inbound_message_event(
-        event=_event(body="How much are your services?"),
-        llm_client=_FakeLLMClientForContinuation(
-            classification_text=_classification_json(
-                intent="general_reply",
-                summary_text="Lead asked about service pricing.",
-            ),
-            draft_text=_draft_json(),
-        ),
-        now=NOW,
-        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
-        conversation_id_factory=lambda: CONVERSATION_ID,
-        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
-        **dependencies,
-    )
-
-    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
-    assert result.inbound_action == InboundAction.CONTINUE_AI
-    assert result.continue_ai_status == ContinueAIStatus.SENT
-    assert result.continue_ai_pause_reason is None
-    assert len(sms_provider.messages) == 1
-    assert len(email_provider.messages) == 0
-    final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
-    final_conversation = conversation_repository.by_id[CONVERSATION_ID]
-    assert final_workflow.state == WorkflowState.WAITING_FOR_RESPONSE
-    assert final_conversation.ai_interaction_count == 1
-    assert final_conversation.status == ConversationStatus.ACTIVE_AI
 
 
 async def test_continue_ai_falls_back_to_paused_when_dependencies_missing() -> None:

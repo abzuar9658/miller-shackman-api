@@ -49,3 +49,7 @@ async def main() -> None:
         except Exception:
             logger.exception("outbox_publisher_run_failed")
         await asyncio.sleep(1)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

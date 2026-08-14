@@ -36,7 +36,6 @@ from app.domain.campaigns.pre_send import ProviderSendStatus
 from app.domain.compliance import (
     ContactPermissionStatus,
     ContactSuppressionKind,
-    SmsComplianceState,
     WorkspaceContactPolicy,
 )
 from app.domain.compliance.contactability import ContactChannel
@@ -171,7 +170,6 @@ def webhook_bundle() -> InboundServiceBundle:
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             WorkspaceContactPolicy(
                 workspace_id=WORKSPACE_ID,
-                sms_compliance_state=SmsComplianceState.APPROVED,
                 inbound_email_address="nurture@inbound.example.com",
             )
         ),
@@ -347,7 +345,6 @@ def _campaign_execution_config(
         quiet_hours_start=time(10, 0),
         quiet_hours_end=time(17, 0),
         timezone="UTC",
-        sms_compliance_required=True,
         preflight_digest_enabled=False,
         crm_enrollment_tag=crm_enrollment_tag,
         prompt_version="v1",
@@ -389,7 +386,6 @@ def _continue_ai_webhook_bundle(
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             WorkspaceContactPolicy(
                 workspace_id=WORKSPACE_ID,
-                sms_compliance_state=SmsComplianceState.APPROVED,
                 quiet_hours_enabled=False,
                 inbound_email_address="nurture@inbound.example.com",
             )
@@ -550,7 +546,6 @@ def test_twilio_inbound_webhook_sends_handoff_sms_acknowledgment_with_workspace_
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             WorkspaceContactPolicy(
                 workspace_id=WORKSPACE_ID,
-                sms_compliance_state=SmsComplianceState.APPROVED,
                 quiet_hours_enabled=False,
                 inbound_email_address="nurture@inbound.example.com",
             )
@@ -795,7 +790,6 @@ def test_sendgrid_inbound_webhook_sends_handoff_email_acknowledgment_only_on_ema
         workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
             WorkspaceContactPolicy(
                 workspace_id=WORKSPACE_ID,
-                sms_compliance_state=SmsComplianceState.APPROVED,
                 quiet_hours_enabled=False,
                 inbound_email_address="nurture@inbound.example.com",
             )

@@ -563,7 +563,6 @@ async def _create_workflow_graph(postgres_session: AsyncSession) -> None:
             quiet_hours_start=time(10, 0),
             quiet_hours_end=time(17, 0),
             timezone="UTC",
-            sms_compliance_required=True,
             preflight_digest_enabled=False,
             allow_assigned_agent_manual_enrollment=True,
             prompt_version="reply-classifier:v1",

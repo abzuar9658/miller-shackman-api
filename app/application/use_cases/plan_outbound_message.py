@@ -374,7 +374,6 @@ async def _select_channel(
 
         contactability_decision = evaluate_contactability(
             contactability_facts,
-            context.workspace_contact_policy,
             channel,
         )
         message_version = _message_version_for_channel(

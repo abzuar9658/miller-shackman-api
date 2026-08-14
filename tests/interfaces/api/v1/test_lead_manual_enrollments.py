@@ -383,7 +383,6 @@ def _client_for_role(
         quiet_hours_start=time(10, 0),
         quiet_hours_end=time(17, 0),
         timezone="America/Chicago",
-        sms_compliance_required=True,
         preflight_digest_enabled=True,
         crm_enrollment_tag="ai_nurture",
         allow_assigned_agent_manual_enrollment=allow_assigned_agent_manual_enrollment,

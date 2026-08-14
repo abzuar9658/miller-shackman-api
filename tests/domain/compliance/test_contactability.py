@@ -1,5 +1,4 @@
 from dataclasses import replace
-from uuid import UUID
 
 import pytest
 
@@ -8,13 +7,9 @@ from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
     LeadContactabilityFacts,
-    SmsComplianceState,
     SuppressionType,
-    WorkspaceContactPolicy,
     evaluate_contactability,
 )
-
-WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
 def _base_facts() -> LeadContactabilityFacts:
@@ -27,18 +22,11 @@ def _base_facts() -> LeadContactabilityFacts:
     )
 
 
-def _approved_policy() -> WorkspaceContactPolicy:
-    return WorkspaceContactPolicy(
-        workspace_id=WORKSPACE_ID,
-        sms_compliance_state=SmsComplianceState.APPROVED,
-    )
-
-
 @pytest.mark.parametrize("channel", [ContactChannel.SMS, ContactChannel.EMAIL])
 def test_do_not_contact_blocks_both_channels(channel: ContactChannel) -> None:
     facts = replace(_base_facts(), do_not_contact=True)
 
-    decision = evaluate_contactability(facts, _approved_policy(), channel)
+    decision = evaluate_contactability(facts, channel)
 
     assert decision.allowed is False
     assert decision.reasons == (ContactabilityReasonCode.DO_NOT_CONTACT,)
@@ -47,7 +35,7 @@ def test_do_not_contact_blocks_both_channels(channel: ContactChannel) -> None:
 def test_sms_opt_out_blocks_sms_even_with_confirmed_consent() -> None:
     facts = replace(_base_facts(), suppressions=frozenset({SuppressionType.SMS_OPT_OUT}))
 
-    decision = evaluate_contactability(facts, _approved_policy(), ContactChannel.SMS)
+    decision = evaluate_contactability(facts, ContactChannel.SMS)
 
     assert decision.allowed is False
     assert decision.reasons == (ContactabilityReasonCode.SMS_OPTED_OUT,)
@@ -59,7 +47,7 @@ def test_email_unsubscribe_blocks_email_even_with_confirmed_permission() -> None
         suppressions=frozenset({SuppressionType.EMAIL_UNSUBSCRIBED}),
     )
 
-    decision = evaluate_contactability(facts, _approved_policy(), ContactChannel.EMAIL)
+    decision = evaluate_contactability(facts, ContactChannel.EMAIL)
 
     assert decision.allowed is False
     assert decision.reasons == (ContactabilityReasonCode.EMAIL_UNSUBSCRIBED,)
@@ -68,7 +56,7 @@ def test_email_unsubscribe_blocks_email_even_with_confirmed_permission() -> None
 def test_unknown_sms_consent_with_sms_destination_allows_sms() -> None:
     facts = replace(_base_facts(), sms_consent_status=ContactPermissionStatus.UNKNOWN)
 
-    decision = evaluate_contactability(facts, _approved_policy(), ContactChannel.SMS)
+    decision = evaluate_contactability(facts, ContactChannel.SMS)
 
     assert decision.allowed is True
     assert decision.reasons == ()
@@ -81,7 +69,7 @@ def test_unknown_sms_consent_without_sms_destination_blocks_sms() -> None:
         has_sms_destination=False,
     )
 
-    decision = evaluate_contactability(facts, _approved_policy(), ContactChannel.SMS)
+    decision = evaluate_contactability(facts, ContactChannel.SMS)
 
     assert decision.allowed is False
     assert decision.reasons == (ContactabilityReasonCode.MISSING_SMS_CONSENT,)
@@ -90,7 +78,7 @@ def test_unknown_sms_consent_without_sms_destination_blocks_sms() -> None:
 def test_unknown_email_permission_with_email_destination_allows_email() -> None:
     facts = replace(_base_facts(), email_permission_status=ContactPermissionStatus.UNKNOWN)
 
-    decision = evaluate_contactability(facts, _approved_policy(), ContactChannel.EMAIL)
+    decision = evaluate_contactability(facts, ContactChannel.EMAIL)
 
     assert decision.allowed is True
     assert decision.reasons == ()
@@ -103,7 +91,7 @@ def test_unknown_email_permission_without_email_destination_blocks_email() -> No
         has_email_destination=False,
     )
 
-    decision = evaluate_contactability(facts, _approved_policy(), ContactChannel.EMAIL)
+    decision = evaluate_contactability(facts, ContactChannel.EMAIL)
 
     assert decision.allowed is False
     assert decision.reasons == (ContactabilityReasonCode.MISSING_EMAIL_PERMISSION,)
@@ -112,7 +100,7 @@ def test_unknown_email_permission_without_email_destination_blocks_email() -> No
 def test_denied_sms_permission_with_destination_allows_sms_in_v1() -> None:
     facts = replace(_base_facts(), sms_consent_status=ContactPermissionStatus.DENIED)
 
-    decision = evaluate_contactability(facts, _approved_policy(), ContactChannel.SMS)
+    decision = evaluate_contactability(facts, ContactChannel.SMS)
 
     assert decision.allowed is True
     assert decision.reasons == ()
@@ -121,45 +109,15 @@ def test_denied_sms_permission_with_destination_allows_sms_in_v1() -> None:
 def test_denied_email_permission_with_destination_allows_email_in_v1() -> None:
     facts = replace(_base_facts(), email_permission_status=ContactPermissionStatus.DENIED)
 
-    decision = evaluate_contactability(facts, _approved_policy(), ContactChannel.EMAIL)
+    decision = evaluate_contactability(facts, ContactChannel.EMAIL)
 
     assert decision.allowed is True
     assert decision.reasons == ()
-
-
-def test_sms_contactability_does_not_block_sms_when_workspace_not_approved_in_v1() -> None:
-    decision = evaluate_contactability(
-        _base_facts(),
-        WorkspaceContactPolicy(
-            workspace_id=WORKSPACE_ID,
-            sms_compliance_state=SmsComplianceState.NOT_APPROVED,
-        ),
-        ContactChannel.SMS,
-    )
-
-    assert decision.allowed is True
-    assert decision.reasons == ()
-
-
-def test_dispatch_strict_mode_requires_sms_approval() -> None:
-    decision = evaluate_contactability(
-        replace(_base_facts(), sms_consent_status=ContactPermissionStatus.UNKNOWN),
-        WorkspaceContactPolicy(
-            workspace_id=WORKSPACE_ID,
-            sms_compliance_state=SmsComplianceState.NOT_APPROVED,
-        ),
-        ContactChannel.SMS,
-        require_explicit_automated_permission=True,
-    )
-
-    assert decision.allowed is False
-    assert decision.reasons == (ContactabilityReasonCode.SMS_COMPLIANCE_NOT_APPROVED,)
 
 
 def test_dispatch_strict_mode_allows_unknown_sms_consent_with_destination() -> None:
     decision = evaluate_contactability(
         replace(_base_facts(), sms_consent_status=ContactPermissionStatus.UNKNOWN),
-        _approved_policy(),
         ContactChannel.SMS,
         require_explicit_automated_permission=True,
     )
@@ -171,7 +129,6 @@ def test_dispatch_strict_mode_allows_unknown_sms_consent_with_destination() -> N
 def test_dispatch_strict_mode_blocks_denied_sms_consent() -> None:
     decision = evaluate_contactability(
         replace(_base_facts(), sms_consent_status=ContactPermissionStatus.DENIED),
-        _approved_policy(),
         ContactChannel.SMS,
         require_explicit_automated_permission=True,
     )
@@ -187,7 +144,6 @@ def test_dispatch_strict_mode_blocks_sms_without_destination() -> None:
             sms_consent_status=ContactPermissionStatus.UNKNOWN,
             has_sms_destination=False,
         ),
-        _approved_policy(),
         ContactChannel.SMS,
         require_explicit_automated_permission=True,
     )
@@ -197,14 +153,14 @@ def test_dispatch_strict_mode_blocks_sms_without_destination() -> None:
 
 
 def test_sms_destination_allows_sms_in_v1() -> None:
-    decision = evaluate_contactability(_base_facts(), _approved_policy(), ContactChannel.SMS)
+    decision = evaluate_contactability(_base_facts(), ContactChannel.SMS)
 
     assert decision.allowed is True
     assert decision.reasons == ()
 
 
 def test_email_destination_allows_email_in_v1() -> None:
-    decision = evaluate_contactability(_base_facts(), _approved_policy(), ContactChannel.EMAIL)
+    decision = evaluate_contactability(_base_facts(), ContactChannel.EMAIL)
 
     assert decision.allowed is True
     assert decision.reasons == ()
@@ -216,9 +172,8 @@ def test_multiple_sms_blockers_return_deterministic_precedence() -> None:
         has_sms_destination=False,
         suppressions=frozenset({SuppressionType.SMS_OPT_OUT}),
     )
-    policy = WorkspaceContactPolicy(workspace_id=WORKSPACE_ID)
 
-    decision = evaluate_contactability(facts, policy, ContactChannel.SMS)
+    decision = evaluate_contactability(facts, ContactChannel.SMS)
 
     assert decision.allowed is False
     assert decision.reasons == (
@@ -230,7 +185,7 @@ def test_multiple_sms_blockers_return_deterministic_precedence() -> None:
 def test_missing_do_not_contact_state_fails_safe() -> None:
     facts = replace(_base_facts(), do_not_contact=None)
 
-    decision = evaluate_contactability(facts, _approved_policy(), ContactChannel.EMAIL)
+    decision = evaluate_contactability(facts, ContactChannel.EMAIL)
 
     assert decision.allowed is False
     assert decision.reasons == (ContactabilityReasonCode.INSUFFICIENT_DATA,)
@@ -245,7 +200,7 @@ def test_missing_do_not_contact_state_is_reported_after_channel_reasons() -> Non
         suppressions=frozenset({SuppressionType.SMS_OPT_OUT}),
     )
 
-    decision = evaluate_contactability(facts, _approved_policy(), ContactChannel.SMS)
+    decision = evaluate_contactability(facts, ContactChannel.SMS)
 
     assert decision.allowed is False
     assert decision.reasons == (

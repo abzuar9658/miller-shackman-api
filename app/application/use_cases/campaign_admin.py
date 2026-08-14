@@ -99,7 +99,6 @@ class CampaignConfigInput:
     quiet_hours_start: time
     quiet_hours_end: time
     timezone: str
-    sms_compliance_required: bool
     preflight_digest_enabled: bool
     crm_enrollment_tag: str | None
     allow_assigned_agent_manual_enrollment: bool
@@ -701,7 +700,6 @@ def _build_version(
         quiet_hours_start=config.quiet_hours_start,
         quiet_hours_end=config.quiet_hours_end,
         timezone=config.timezone.strip(),
-        sms_compliance_required=config.sms_compliance_required,
         preflight_digest_enabled=config.preflight_digest_enabled,
         crm_enrollment_tag=_normalized_optional_tag(config.crm_enrollment_tag),
         allow_assigned_agent_manual_enrollment=config.allow_assigned_agent_manual_enrollment,
@@ -730,7 +728,6 @@ def _replace_version_config(
         quiet_hours_start=config.quiet_hours_start,
         quiet_hours_end=config.quiet_hours_end,
         timezone=config.timezone.strip(),
-        sms_compliance_required=config.sms_compliance_required,
         preflight_digest_enabled=config.preflight_digest_enabled,
         crm_enrollment_tag=_normalized_optional_tag(config.crm_enrollment_tag),
         allow_assigned_agent_manual_enrollment=config.allow_assigned_agent_manual_enrollment,

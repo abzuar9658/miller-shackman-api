@@ -1,8 +1,16 @@
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.application.use_cases.handoff_actions import (
+    HandoffActionReasonCode,
+    HandoffActionResult,
+    HandoffActionStatus,
+    acknowledge_handoff,
+    reassign_handoff,
+)
 from app.application.use_cases.handoff_read import (
     HandoffLeadSummary,
     HandoffReadStatus,
@@ -11,13 +19,20 @@ from app.application.use_cases.handoff_read import (
     list_handoff_views,
 )
 from app.domain.identity import AuthenticatedActor
-from app.interfaces.api.dependencies.handoff import HandoffReadBundle, get_handoff_read_bundle
+from app.interfaces.api.dependencies.handoff import (
+    HandoffActionBundle,
+    HandoffReadBundle,
+    get_handoff_action_bundle,
+    get_handoff_read_bundle,
+)
 from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.interfaces.api.schemas.handoffs import (
+    HandoffActionResponse,
     HandoffDetailResponse,
     HandoffLeadResponse,
     HandoffListResponse,
     HandoffSummaryResponse,
+    ReassignHandoffRequest,
 )
 from app.interfaces.api.serializers.handoffs import handoff_response
 
@@ -81,6 +96,80 @@ async def get_handoff_route(
         assigned_agent_name=result.view.assigned_agent_name,
         recommended_next_action=result.view.recommended_next_action,
     )
+
+
+@router.post(
+    "/{workspace_id}/handoffs/{handoff_id}/acknowledge",
+    response_model=HandoffActionResponse,
+)
+async def acknowledge_handoff_route(
+    workspace_id: UUID,
+    handoff_id: UUID,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[HandoffActionBundle, Depends(get_handoff_action_bundle)],
+) -> HandoffActionResponse:
+    result = await acknowledge_handoff(
+        actor=actor,
+        workspace_id=workspace_id,
+        handoff_id=handoff_id,
+        handoff_repository=bundle.handoff_repository,
+        lead_repository=bundle.lead_repository,
+        now=datetime.now(UTC),
+    )
+    _raise_for_action_failure(result)
+    if result.status == HandoffActionStatus.ACKNOWLEDGED:
+        await bundle.session.commit()
+    assert result.handoff is not None
+    return HandoffActionResponse(
+        status=result.status.value,
+        handoff=handoff_response(result.handoff),
+    )
+
+
+@router.post(
+    "/{workspace_id}/handoffs/{handoff_id}/reassign",
+    response_model=HandoffActionResponse,
+)
+async def reassign_handoff_route(
+    workspace_id: UUID,
+    handoff_id: UUID,
+    request: ReassignHandoffRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[HandoffActionBundle, Depends(get_handoff_action_bundle)],
+) -> HandoffActionResponse:
+    result = await reassign_handoff(
+        actor=actor,
+        workspace_id=workspace_id,
+        handoff_id=handoff_id,
+        assigned_agent_user_id=request.assigned_agent_user_id,
+        handoff_repository=bundle.handoff_repository,
+        membership_repository=bundle.membership_repository,
+    )
+    _raise_for_action_failure(result)
+    await bundle.session.commit()
+    assert result.handoff is not None
+    return HandoffActionResponse(
+        status=result.status.value,
+        handoff=handoff_response(result.handoff),
+    )
+
+
+def _raise_for_action_failure(result: HandoffActionResult) -> None:
+    if result.status == HandoffActionStatus.NOT_FOUND:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=[reason.value for reason in result.reasons],
+        )
+    if result.status == HandoffActionStatus.REJECTED:
+        status_code = (
+            status.HTTP_403_FORBIDDEN
+            if HandoffActionReasonCode.PERMISSION_DENIED in result.reasons
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail=[reason.value for reason in result.reasons],
+        )
 
 
 def _handoff_summary_response(view: HandoffReadView) -> HandoffSummaryResponse:

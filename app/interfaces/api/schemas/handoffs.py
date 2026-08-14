@@ -49,3 +49,12 @@ class HandoffDetailResponse(BaseModel):
     lead: HandoffLeadResponse
     assigned_agent_name: str | None
     recommended_next_action: str
+
+
+class ReassignHandoffRequest(BaseModel):
+    assigned_agent_user_id: UUID
+
+
+class HandoffActionResponse(BaseModel):
+    status: str
+    handoff: HandoffResponse

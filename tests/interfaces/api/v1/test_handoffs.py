@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -9,6 +9,7 @@ from app.domain.identity import (
     AuthenticatedActor,
     User,
     UserStatus,
+    WorkspaceMembership,
     WorkspaceMembershipRole,
     WorkspaceMembershipStatus,
     WorkspaceStatus,
@@ -20,7 +21,12 @@ from app.domain.leads import (
     LeadClassificationReason,
     LeadType,
 )
-from app.interfaces.api.dependencies.handoff import HandoffReadBundle, get_handoff_read_bundle
+from app.interfaces.api.dependencies.handoff import (
+    HandoffActionBundle,
+    HandoffReadBundle,
+    get_handoff_action_bundle,
+    get_handoff_read_bundle,
+)
 from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.main import create_app
 from tests.application.use_cases._handoff_read_fakes import (
@@ -28,6 +34,7 @@ from tests.application.use_cases._handoff_read_fakes import (
     FakeLeadRepository,
     FakeUserRepository,
 )
+from tests.application.use_cases.test_handoff_actions import FakeMembershipRepository
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -41,8 +48,18 @@ OTHER_HANDOFF_ID = UUID("00000000-0000-0000-0000-000000000008")
 
 
 @dataclass
+class RecordingSession:
+    commit_count: int = 0
+
+    async def commit(self) -> None:
+        self.commit_count += 1
+
+
+@dataclass
 class HandoffTestClient:
     client: TestClient
+    handoff_repository: FakeHandoffRepository = field(default_factory=FakeHandoffRepository)
+    session: RecordingSession = field(default_factory=RecordingSession)
 
 
 def test_handoff_routes_return_list_and_detail_for_brokerage_admin() -> None:
@@ -82,26 +99,120 @@ def test_assigned_agent_cannot_view_unowned_handoff_detail() -> None:
     assert response.json()["detail"] == ["permission_denied"]
 
 
+def test_manager_acknowledges_handoff_route() -> None:
+    test_client = _client_for_role(WorkspaceMembershipRole.MANAGER)
+
+    response = test_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/handoffs/{HANDOFF_ID}/acknowledge",
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "acknowledged"
+    assert body["handoff"]["status"] == "acknowledged"
+    assert body["handoff"]["acknowledged_at"] is not None
+    assert test_client.session.commit_count == 1
+
+
+def test_acknowledge_route_is_idempotent_without_second_commit() -> None:
+    test_client = _client_for_role(WorkspaceMembershipRole.MANAGER)
+
+    first = test_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/handoffs/{HANDOFF_ID}/acknowledge",
+    )
+    second = test_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/handoffs/{HANDOFF_ID}/acknowledge",
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["status"] == "already_acknowledged"
+    assert test_client.session.commit_count == 1
+
+
+def test_manager_reassigns_handoff_route() -> None:
+    test_client = _client_for_role(WorkspaceMembershipRole.MANAGER)
+
+    response = test_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/handoffs/{HANDOFF_ID}/reassign",
+        json={"assigned_agent_user_id": str(OTHER_AGENT_ID)},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "reassigned"
+    assert body["handoff"]["assigned_agent_user_id"] == str(OTHER_AGENT_ID)
+    assert test_client.session.commit_count == 1
+
+
+def test_assigned_agent_cannot_reassign_route() -> None:
+    test_client = _client_for_role(WorkspaceMembershipRole.ASSIGNED_AGENT)
+
+    response = test_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/handoffs/{HANDOFF_ID}/reassign",
+        json={"assigned_agent_user_id": str(OTHER_AGENT_ID)},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == ["permission_denied"]
+    assert test_client.session.commit_count == 0
+
+
+def test_acknowledge_unknown_handoff_returns_404() -> None:
+    test_client = _client_for_role(WorkspaceMembershipRole.MANAGER)
+    missing_id = UUID("00000000-0000-0000-0000-0000000000ff")
+
+    response = test_client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/handoffs/{missing_id}/acknowledge",
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == ["handoff_not_found"]
+
+
 def _client_for_role(role: WorkspaceMembershipRole) -> HandoffTestClient:
     app = create_app()
     handoff_repository = FakeHandoffRepository()
     lead_repository = FakeLeadRepository()
     user_repository = FakeUserRepository()
+    membership_repository = FakeMembershipRepository()
+    session = RecordingSession()
 
     handoff_repository.handoffs[HANDOFF_ID] = _handoff(HANDOFF_ID, LEAD_ID)
     handoff_repository.handoffs[OTHER_HANDOFF_ID] = _handoff(OTHER_HANDOFF_ID, OTHER_LEAD_ID)
     lead_repository.leads[LEAD_ID] = _lead(LEAD_ID, "Quinn Demo", ACTOR_ID)
     lead_repository.leads[OTHER_LEAD_ID] = _lead(OTHER_LEAD_ID, "Parker Demo", OTHER_AGENT_ID)
     user_repository.users[ACTOR_ID] = _user(ACTOR_ID, "Avery Demo Agent")
+    membership_repository.memberships[(OTHER_AGENT_ID, WORKSPACE_ID)] = WorkspaceMembership(
+        membership_id=UUID("00000000-0000-0000-0000-0000000000aa"),
+        workspace_id=WORKSPACE_ID,
+        user_id=OTHER_AGENT_ID,
+        role=WorkspaceMembershipRole.ASSIGNED_AGENT,
+        status=WorkspaceMembershipStatus.ACTIVE,
+        created_at=NOW,
+        updated_at=NOW,
+    )
     bundle = HandoffReadBundle(
         handoff_repository=handoff_repository,
         lead_repository=lead_repository,
         user_repository=user_repository,
     )
+    action_bundle = HandoffActionBundle(
+        session=session,
+        handoff_repository=handoff_repository,
+        lead_repository=lead_repository,
+        user_repository=user_repository,
+        membership_repository=membership_repository,
+    )
 
     app.dependency_overrides[get_workspace_actor] = lambda: _actor(role)
     app.dependency_overrides[get_handoff_read_bundle] = lambda: bundle
-    return HandoffTestClient(client=TestClient(app))
+    app.dependency_overrides[get_handoff_action_bundle] = lambda: action_bundle
+    return HandoffTestClient(
+        client=TestClient(app),
+        handoff_repository=handoff_repository,
+        session=session,
+    )
 
 
 def _handoff(handoff_id: UUID, lead_id: UUID) -> Handoff:

@@ -1,0 +1,269 @@
+# Production stack for api.millerschackman.com.
+# Runs on the single EC2 instance from /opt/miller-schackman with a mode-600
+# .env file alongside. Images come from ECR (API_IMAGE); nothing is built on
+# the instance. Only Caddy publishes public ports; observability UIs bind to
+# localhost and are reached via SSM port-forwarding.
+# See docs/planning/production-infrastructure-plan.md.
+
+x-app-environment: &app-environment
+  DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+  DATABASE_MIGRATION_URL: "postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+  RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/"
+  TEMPORAL_ADDRESS: "temporal:7233"
+  REDIS_URL: "redis://redis:6379/0"
+  METRICS_ENABLED: "true"
+
+# Bounded logs: without this the json-file driver grows without limit and
+# can fill the 60 GB root volume. ~50 MB per container, 20+ containers.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-app-service: &app-service
+  image: "${API_IMAGE}"
+  env_file:
+    - path: .env
+      required: true
+  environment: *app-environment
+  restart: unless-stopped
+  # tini as PID 1: forwards SIGTERM to the uv->python child and reaps zombies.
+  init: true
+  # Temporal/queue workers get time to finish in-flight activities on deploy.
+  stop_grace_period: 30s
+  logging: *logging
+  mem_limit: 512m
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    rabbitmq:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    temporal:
+      condition: service_started
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    depends_on:
+      api:
+        condition: service_healthy
+
+  migrate:
+    image: "${API_IMAGE}"
+    command: ["uv", "run", "alembic", "upgrade", "head"]
+    env_file:
+      - path: .env
+        required: true
+    environment: *app-environment
+    logging: *logging
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app-service
+    # Internal only; Caddy terminates TLS and proxies to api:8000.
+    healthcheck:
+      # python:3.12-slim has no curl/wget; use the interpreter already in the image.
+      test: ["CMD", "uv", "run", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  temporal-worker:
+    <<: *app-service
+    command: ["uv", "run", "python", "-m", "app.interfaces.workers.temporal_worker"]
+
+  temporal-signal-dispatcher:
+    <<: *app-service
+    command: ["uv", "run", "python", "-m", "app.interfaces.workers.temporal_signal_dispatcher_worker"]
+
+  outbound-send-dispatcher:
+    <<: *app-service
+    command: ["uv", "run", "python", "-m", "app.interfaces.workers.outbound_send_dispatch_worker"]
+    environment:
+      <<: *app-environment
+      OUTBOUND_SEND_DISPATCH_METRICS_HOST: "0.0.0.0"
+      OUTBOUND_SEND_DISPATCH_METRICS_PORT: "9101"
+
+  outbox-publisher:
+    <<: *app-service
+    command: ["uv", "run", "python", "-m", "app.interfaces.workers.outbox_publisher_worker"]
+
+  crm-sync-worker:
+    <<: *app-service
+    command: ["uv", "run", "python", "-m", "app.interfaces.workers.crm_sync_worker"]
+
+  crm-sync-scheduler:
+    <<: *app-service
+    command: ["uv", "run", "python", "-m", "app.interfaces.workers.crm_sync_scheduler_worker"]
+
+  crm-webhook-retry-worker:
+    <<: *app-service
+    command: ["uv", "run", "python", "-m", "app.interfaces.workers.crm_webhook_retry_worker"]
+
+  crm-history-import-worker:
+    <<: *app-service
+    command: ["uv", "run", "python", "-m", "app.interfaces.workers.crm_history_import_worker"]
+
+  inbound-message-worker:
+    <<: *app-service
+    command: ["uv", "run", "python", "-m", "app.interfaces.workers.inbound_message_worker"]
+
+  postgres:
+    image: pgvector/pgvector:0.8.0-pg16
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB}"
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 1536m
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASSWORD}"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  temporal-postgres:
+    image: postgres:16.9-alpine
+    environment:
+      POSTGRES_DB: temporal
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: "${TEMPORAL_POSTGRES_PASSWORD}"
+    volumes:
+      - temporal_postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 768m
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  temporal:
+    image: temporalio/auto-setup:1.27.2
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: "${TEMPORAL_POSTGRES_PASSWORD}"
+      POSTGRES_SEEDS: temporal-postgres
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 1024m
+
+  temporal-ui:
+    image: temporalio/ui:2.34.0
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "127.0.0.1:58080:8080"
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      # Bound TSDB growth on the 60 GB root volume.
+      - "--storage.tsdb.retention.time=30d"
+      - "--storage.tsdb.retention.size=5GB"
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 512m
+    depends_on:
+      - api
+      - outbound-send-dispatcher
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD}"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: "/var/lib/grafana/dashboards/outbound-send-dispatch.json"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 384m
+    depends_on:
+      - prometheus
+
+# Nightly backups run from the host crontab (scripts/prod_backup.sh), which
+# uses `docker compose exec postgres pg_dump` plus the instance-role AWS CLI.
+
+volumes:
+  caddy_data:
+  caddy_config:
+  grafana_data:
+  postgres_data:
+  prometheus_data:
+  rabbitmq_data:
+  redis_data:
+  temporal_postgres_data:

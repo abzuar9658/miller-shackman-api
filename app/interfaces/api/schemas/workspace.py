@@ -1,10 +1,9 @@
-from datetime import time
+from datetime import datetime, time
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-from app.domain.compliance import SmsComplianceState
 from app.domain.identity import UserStatus, WorkspaceMembershipRole, WorkspaceMembershipStatus
 from app.domain.llm import LLMProviderKind
 from app.domain.outbound_drafting import (
@@ -41,6 +40,8 @@ class WorkspaceUserResponse(BaseModel):
     user: UserResponse
     membership: MembershipResponse
     invitation_id: UUID | None = None
+    invitation_created_at: datetime | None = None
+    invitation_expires_at: datetime | None = None
 
 
 class ListWorkspaceUsersResponse(BaseModel):
@@ -86,7 +87,6 @@ class UpdateUserStatusResponse(BaseModel):
 
 class WorkspaceContactPolicyResponse(BaseModel):
     workspace_id: UUID
-    sms_compliance_state: str
     quiet_hours_enabled: bool = True
     quiet_hours_start: time | None = None
     quiet_hours_end: time | None = None
@@ -166,7 +166,6 @@ class WorkspaceSettingsResponse(BaseModel):
 
 
 class UpdateWorkspaceContactPolicyRequest(BaseModel):
-    sms_compliance_state: SmsComplianceState
     quiet_hours_enabled: bool = True
     quiet_hours_start: time
     quiet_hours_end: time

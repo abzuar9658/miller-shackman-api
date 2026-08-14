@@ -285,7 +285,6 @@ async def send_outbound_message(
 
     contactability_decision = evaluate_contactability(
         contactability_facts_from_canonical_lead(lead),
-        effective_context.workspace_contact_policy,
         message.channel,
     )
     history_facts = await load_pre_send_history_facts(

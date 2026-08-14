@@ -66,7 +66,6 @@ class CampaignConfigRequest(BaseModel):
     quiet_hours_start: time
     quiet_hours_end: time
     timezone: str = Field(min_length=1, max_length=100)
-    sms_compliance_required: bool = True
     preflight_digest_enabled: bool = False
     crm_enrollment_tag: str | None = Field(default=None, max_length=255)
     allow_assigned_agent_manual_enrollment: bool = True
@@ -201,7 +200,6 @@ class CampaignVersionResponse(BaseModel):
     quiet_hours_start: time
     quiet_hours_end: time
     timezone: str
-    sms_compliance_required: bool
     preflight_digest_enabled: bool
     crm_enrollment_tag: str | None
     allow_assigned_agent_manual_enrollment: bool
@@ -283,7 +281,6 @@ class NurtureSettingsConfigResponse(BaseModel):
     quiet_hours_start: time
     quiet_hours_end: time
     timezone: str
-    sms_compliance_required: bool
     preflight_digest_enabled: bool
     crm_enrollment_tag: str | None
     allow_assigned_agent_manual_enrollment: bool

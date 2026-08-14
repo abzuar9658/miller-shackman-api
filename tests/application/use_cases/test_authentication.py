@@ -16,6 +16,7 @@ from app.application.use_cases.authentication import (
     CurrentUserStatus,
     ForgotPasswordStatus,
     InviteWorkspaceUserStatus,
+    PreviewInvitationStatus,
     RefreshAuthenticationStatus,
     ResetPasswordStatus,
     SignInStatus,
@@ -25,6 +26,7 @@ from app.application.use_cases.authentication import (
     invite_workspace_user,
     logout_all_sessions,
     logout_current_session,
+    preview_invitation,
     refresh_authentication,
     request_password_reset,
     reset_password,
@@ -118,6 +120,84 @@ def test_invite_workspace_user_creates_records_and_sends_email() -> None:
     )
     assert "invite-token" in deps.email_provider.messages[0].body
     assert deps.audit_log_repository.logs[-1].event_type == AuthAuditEventType.USER_INVITED
+
+
+def test_preview_invitation_returns_invitation_and_workspace() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.invitations[INVITATION_ID] = _invitation(token_hash="hash::invite-token")
+
+    result = _run(
+        preview_invitation(
+            invitation_token="invite-token",
+            invitation_repository=deps.invitation_repository,
+            workspace_repository=deps.workspace_repository,
+            opaque_token_service=deps.opaque_token_service,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == PreviewInvitationStatus.VALID
+    assert result.invitation is not None
+    assert result.invitation.email == "user@example.com"
+    assert result.workspace is not None
+    assert result.workspace.name == f"Workspace {WORKSPACE_ID}"
+
+
+def test_preview_invitation_rejects_unknown_token() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+
+    result = _run(
+        preview_invitation(
+            invitation_token="unknown-token",
+            invitation_repository=deps.invitation_repository,
+            workspace_repository=deps.workspace_repository,
+            opaque_token_service=deps.opaque_token_service,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == PreviewInvitationStatus.REJECTED
+    assert result.reasons == (AuthReasonCode.INVITATION_NOT_FOUND,)
+
+
+def test_preview_invitation_rejects_expired_invitation() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace()
+    deps.invitations[INVITATION_ID] = _invitation(token_hash="hash::invite-token")
+
+    result = _run(
+        preview_invitation(
+            invitation_token="invite-token",
+            invitation_repository=deps.invitation_repository,
+            workspace_repository=deps.workspace_repository,
+            opaque_token_service=deps.opaque_token_service,
+            now=NOW + timedelta(days=8),
+        ),
+    )
+
+    assert result.status == PreviewInvitationStatus.REJECTED
+    assert result.reasons == (AuthReasonCode.INVITATION_EXPIRED,)
+
+
+def test_preview_invitation_rejects_inactive_workspace() -> None:
+    deps = _Dependencies()
+    deps.workspaces[WORKSPACE_ID] = _workspace(status=WorkspaceStatus.SUSPENDED)
+    deps.invitations[INVITATION_ID] = _invitation(token_hash="hash::invite-token")
+
+    result = _run(
+        preview_invitation(
+            invitation_token="invite-token",
+            invitation_repository=deps.invitation_repository,
+            workspace_repository=deps.workspace_repository,
+            opaque_token_service=deps.opaque_token_service,
+            now=NOW,
+        ),
+    )
+
+    assert result.status == PreviewInvitationStatus.REJECTED
+    assert result.reasons == (AuthReasonCode.WORKSPACE_NOT_ACTIVE,)
 
 
 def test_complete_invited_signup_activates_user_and_issues_tokens() -> None:

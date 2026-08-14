@@ -397,7 +397,6 @@ class PausedSearchTimeMachine:
             quiet_hours_start=time(10, 0),
             quiet_hours_end=time(17, 0),
             timezone=self.timezone,
-            sms_compliance_required=True,
             preflight_digest_enabled=False,
             crm_enrollment_tag=None,
             prompt_version="time-machine",

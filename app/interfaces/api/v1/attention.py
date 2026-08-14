@@ -48,9 +48,13 @@ async def list_attention_acknowledgements_route(
     )
     if result.status == AttentionAcknowledgementStatus.REJECTED:
         _raise_for_reasons(result.reasons)
+    names = await _acknowledger_names(result.acknowledgements, bundle)
     return AttentionAcknowledgementListResponse(
         status=result.status.value,
-        acknowledgements=[_response(item) for item in result.acknowledgements],
+        acknowledgements=[
+            _response(item, acknowledged_by_name=names.get(item.user_id))
+            for item in result.acknowledgements
+        ],
     )
 
 
@@ -79,9 +83,16 @@ async def acknowledge_attention_item_route(
     if result.status == AttentionAcknowledgementStatus.REJECTED:
         _raise_for_reasons(result.reasons)
     await bundle.session.commit()
+    acknowledgement_response = None
+    if result.acknowledgement is not None:
+        acknowledger = await bundle.user_repository.get_by_id(result.acknowledgement.user_id)
+        acknowledgement_response = _response(
+            result.acknowledgement,
+            acknowledged_by_name=acknowledger.full_name if acknowledger else None,
+        )
     return AttentionAcknowledgementResultResponse(
         status=result.status.value,
-        acknowledgement=_response(result.acknowledgement) if result.acknowledgement else None,
+        acknowledgement=acknowledgement_response,
     )
 
 
@@ -125,9 +136,26 @@ def _raise_for_reasons(
     raise HTTPException(status_code=status_code, detail=[reason.value for reason in reasons])
 
 
-def _response(item: AttentionAcknowledgement) -> AttentionAcknowledgementResponse:
+async def _acknowledger_names(
+    acknowledgements: tuple[AttentionAcknowledgement, ...],
+    bundle: AttentionAcknowledgementBundle,
+) -> dict[UUID, str | None]:
+    names: dict[UUID, str | None] = {}
+    for user_id in {item.user_id for item in acknowledgements}:
+        user = await bundle.user_repository.get_by_id(user_id)
+        names[user_id] = user.full_name if user else None
+    return names
+
+
+def _response(
+    item: AttentionAcknowledgement,
+    *,
+    acknowledged_by_name: str | None,
+) -> AttentionAcknowledgementResponse:
     return AttentionAcknowledgementResponse(
         item_id=item.attention_item_id,
         item_version=item.attention_item_version,
         acknowledged_at=item.acknowledged_at,
+        acknowledged_by_user_id=item.user_id,
+        acknowledged_by_name=acknowledged_by_name,
     )

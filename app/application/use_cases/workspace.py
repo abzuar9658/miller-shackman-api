@@ -27,7 +27,6 @@ from app.application.use_cases.reactivate_timing_blocked_workflows import (
     reactivate_timing_blocked_workflows_for_workspace,
 )
 from app.domain.compliance import (
-    SmsComplianceState,
     WorkspaceContactPolicy,
     default_workspace_contact_policy,
 )
@@ -146,6 +145,8 @@ class WorkspaceUser:
     user: User
     membership: WorkspaceMembership
     invitation_id: UUID | None = None
+    invitation_created_at: datetime | None = None
+    invitation_expires_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -319,8 +320,15 @@ async def list_workspace_users(
             reasons=(AuthReasonCode.WORKSPACE_MEMBERSHIP_NOT_FOUND,),
         )
 
-    permission = evaluate_permission(effective_actor, PermissionCapability.INVITE_WORKSPACE_USER)
-    if not permission.allowed:
+    invite_permission = evaluate_permission(
+        effective_actor,
+        PermissionCapability.INVITE_WORKSPACE_USER,
+    )
+    reassign_permission = evaluate_permission(
+        effective_actor,
+        PermissionCapability.RESUME_OR_REASSIGN_ANY_LEAD,
+    )
+    if not invite_permission.allowed and not reassign_permission.allowed:
         return ListWorkspaceUsersResult(
             status=ListWorkspaceUsersStatus.REJECTED,
             reasons=(AuthReasonCode.PERMISSION_DENIED,),
@@ -340,6 +348,8 @@ async def list_workspace_users(
         if user is None:
             continue
         invitation_id: UUID | None = None
+        invitation_created_at: datetime | None = None
+        invitation_expires_at: datetime | None = None
         if membership.status == WorkspaceMembershipStatus.INVITED:
             invitation = await invitation_repository.get_by_workspace_and_email_normalized(
                 workspace_id,
@@ -351,11 +361,15 @@ async def list_workspace_users(
                 and invitation.revoked_at is None
             ):
                 invitation_id = invitation.invitation_id
+                invitation_created_at = invitation.created_at
+                invitation_expires_at = invitation.expires_at
         users.append(
             WorkspaceUser(
                 user=user,
                 membership=membership,
                 invitation_id=invitation_id,
+                invitation_created_at=invitation_created_at,
+                invitation_expires_at=invitation_expires_at,
             ),
         )
 
@@ -759,7 +773,6 @@ async def update_workspace_contact_policy(
     *,
     actor: AuthenticatedActor,
     workspace_id: UUID,
-    sms_compliance_state: SmsComplianceState,
     quiet_hours_enabled: bool,
     quiet_hours_start: time,
     quiet_hours_end: time,
@@ -811,8 +824,7 @@ async def update_workspace_contact_policy(
         else _normalize_optional_text(inbound_email_address)
     )
     if (
-        current_policy.sms_compliance_state == sms_compliance_state
-        and current_policy.quiet_hours_enabled == quiet_hours_enabled
+        current_policy.quiet_hours_enabled == quiet_hours_enabled
         and current_policy.quiet_hours_start == quiet_hours_start
         and current_policy.quiet_hours_end == quiet_hours_end
         and current_policy.inbound_email_address == normalized_inbound_email
@@ -824,7 +836,6 @@ async def update_workspace_contact_policy(
 
     updated_policy = replace(
         current_policy,
-        sms_compliance_state=sms_compliance_state,
         quiet_hours_enabled=quiet_hours_enabled,
         quiet_hours_start=quiet_hours_start,
         quiet_hours_end=quiet_hours_end,
@@ -838,7 +849,6 @@ async def update_workspace_contact_policy(
             workspace_id=workspace_id,
             actor_user_id=actor.user_id,
             event_details={
-                "sms_compliance_state": saved_policy.sms_compliance_state.value,
                 "quiet_hours_enabled": ("true" if saved_policy.quiet_hours_enabled else "false"),
                 "quiet_hours_start": (
                     saved_policy.quiet_hours_start.isoformat()

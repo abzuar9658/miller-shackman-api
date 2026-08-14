@@ -1,0 +1,17 @@
+api.millerschackman.com {
+	encode zstd gzip
+
+	# Block public access to metrics; Prometheus scrapes api:8000 directly
+	# on the internal Docker network.
+	@metrics path /api/v1/metrics
+	respond @metrics 404
+
+	reverse_proxy api:8000
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}

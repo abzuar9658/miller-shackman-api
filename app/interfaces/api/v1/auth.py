@@ -9,6 +9,7 @@ from app.application.use_cases.authentication import (
     AuthReasonCode,
     CompleteInvitedSignupStatus,
     CurrentUserStatus,
+    PreviewInvitationStatus,
     RefreshAuthenticationStatus,
     ResetPasswordStatus,
     SignInStatus,
@@ -17,6 +18,7 @@ from app.application.use_cases.authentication import (
     get_current_user,
     logout_all_sessions,
     logout_current_session,
+    preview_invitation,
     refresh_authentication,
     request_password_reset,
     reset_password,
@@ -35,10 +37,13 @@ from app.interfaces.api.schemas.auth import (
     CurrentUserResponse,
     ForgotPasswordRequest,
     ForgotPasswordResponse,
+    InvitationPreview,
     LogoutAllResponse,
     LogoutRequest,
     LogoutResponse,
     MembershipResponse,
+    PreviewInvitationRequest,
+    PreviewInvitationResponse,
     RefreshAuthenticationRequest,
     RefreshAuthenticationResponse,
     ResetPasswordRequest,
@@ -140,6 +145,33 @@ def _access_token_ttl(bundle: AuthServiceBundle) -> timedelta:
 
 def _refresh_token_ttl(bundle: AuthServiceBundle) -> timedelta:
     return timedelta(days=bundle.settings.auth_refresh_token_ttl_days)
+
+
+@router.post("/invitations/preview", response_model=PreviewInvitationResponse)
+async def preview_invitation_token(
+    request: PreviewInvitationRequest,
+    bundle: Annotated[AuthServiceBundle, Depends(get_auth_service_bundle)],
+) -> PreviewInvitationResponse:
+    result = await preview_invitation(
+        invitation_token=request.invitation_token,
+        invitation_repository=bundle.invitation_repository,
+        workspace_repository=bundle.workspace_repository,
+        opaque_token_service=bundle.opaque_token_service,
+        now=datetime.now(UTC),
+    )
+    if result.status == PreviewInvitationStatus.REJECTED:
+        _raise_for_reasons(result.reasons)
+    assert result.invitation is not None
+    assert result.workspace is not None
+    return PreviewInvitationResponse(
+        status=result.status.value,
+        invitation=InvitationPreview(
+            email=result.invitation.email,
+            role=result.invitation.role.value,
+            workspace_name=result.workspace.name,
+            expires_at=result.invitation.expires_at,
+        ),
+    )
 
 
 @router.post(
