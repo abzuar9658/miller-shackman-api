@@ -33,6 +33,10 @@ from app.application.ports.repositories import (
 from app.application.services.internal_external_events import create_internal_external_event
 from app.application.services.pre_send_crm_refresh import PreSendCRMRefreshContext
 from app.application.services.pre_send_policy import build_pre_send_policy
+from app.application.use_cases.apply_workflow_state_transition import (
+    WorkflowStateTransitionStatus,
+    apply_workflow_state_transition,
+)
 from app.application.use_cases.campaign_cadence_execution import (
     _latest_inbound_conversation_text,
     _summary_text_for_outbound_conversation,
@@ -54,7 +58,11 @@ from app.domain.campaigns.rejected_draft_review import RejectedDraftReviewStatus
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.identity import AuthenticatedActor
-from app.domain.workflows import TemporalSignalName, TemporalSignalOutboxEntry
+from app.domain.workflows import (
+    TemporalSignalName,
+    TemporalSignalOutboxEntry,
+    WorkflowTransitionReasonCode,
+)
 
 
 class ApproveRejectedDraftReviewStatus(StrEnum):
@@ -339,6 +347,140 @@ async def approve_rejected_draft_review_and_send(
             if workflow_result.workflow
             else workflow.workflow_id
         ),
+        signal_queued=True,
+    )
+
+
+class DismissRejectedDraftReviewStatus(StrEnum):
+    DISMISSED = "dismissed"
+    NOT_FOUND = "not_found"
+    REJECTED = "rejected"
+    NOT_ACTIONABLE = "not_actionable"
+
+
+@dataclass(frozen=True)
+class DismissRejectedDraftReviewResult:
+    status: DismissRejectedDraftReviewStatus
+    review_id: UUID | None = None
+    workflow_id: UUID | None = None
+    reasons: tuple[str, ...] = ()
+    signal_queued: bool = False
+
+
+async def dismiss_rejected_draft_review(
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    review_id: UUID,
+    reason: str,
+    lead_repository: LeadRepository,
+    review_repository: RejectedDraftReviewRepository,
+    workflow_repository: LeadWorkflowRepository,
+    workflow_transition_repository: WorkflowTransitionRepository,
+    external_event_repository: ExternalEventRepository,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
+    commit: Callable[[], Awaitable[None]],
+    now: datetime,
+) -> DismissRejectedDraftReviewResult:
+    lead = await lead_repository.get_by_id(workspace_id, lead_id)
+    if lead is None:
+        return DismissRejectedDraftReviewResult(status=DismissRejectedDraftReviewStatus.NOT_FOUND)
+    if not _resume_permission(actor, lead, resume_reason_provided=bool(reason.strip())).allowed:
+        return DismissRejectedDraftReviewResult(
+            status=DismissRejectedDraftReviewStatus.REJECTED,
+            reasons=("permission_denied",),
+        )
+
+    review = await review_repository.get_by_id_for_update(workspace_id, review_id)
+    if review is None or review.lead_id != lead_id:
+        return DismissRejectedDraftReviewResult(status=DismissRejectedDraftReviewStatus.NOT_FOUND)
+    if review.status != RejectedDraftReviewStatus.PENDING_REVIEW:
+        return DismissRejectedDraftReviewResult(
+            status=DismissRejectedDraftReviewStatus.NOT_ACTIONABLE,
+            review_id=review.review_id,
+            reasons=("review_not_pending",),
+        )
+
+    workflow = await workflow_repository.get_latest_for_lead_for_update(
+        workspace_id,
+        lead_id,
+    )
+    if (
+        workflow is None
+        or workflow.workflow_id != review.workflow_id
+        or workflow.state != WorkflowState.PAUSED
+    ):
+        return DismissRejectedDraftReviewResult(
+            status=DismissRejectedDraftReviewStatus.NOT_ACTIONABLE,
+            review_id=review.review_id,
+            reasons=("workflow_not_paused_for_review",),
+        )
+
+    await review_repository.save(
+        replace(
+            review,
+            status=RejectedDraftReviewStatus.DISMISSED,
+            reviewed_by_user_id=actor.user_id,
+            reviewed_at=now,
+            review_note=reason.strip(),
+            updated_at=now,
+        )
+    )
+    external_event = await create_internal_external_event(
+        external_event_repository=external_event_repository,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        event_type="lead.rejected_draft_review_dismissed",
+        now=now,
+        payload_redacted={"actor_user_id": str(actor.user_id), "review_id": str(review.review_id)},
+    )
+    transition = await apply_workflow_state_transition(
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        to_state=WorkflowState.ACTIVE_NURTURE,
+        reason_code=WorkflowTransitionReasonCode.DRAFT_REVIEW_DISMISSED,
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        now=now,
+        actor_user_id=actor.user_id,
+        external_event_id=external_event.external_event_id,
+        metadata={"reason": reason.strip(), "review_id": str(review.review_id)},
+        resume_reason=reason.strip(),
+    )
+    if transition.status != WorkflowStateTransitionStatus.UPDATED or transition.workflow is None:
+        return DismissRejectedDraftReviewResult(
+            status=DismissRejectedDraftReviewStatus.NOT_ACTIONABLE,
+            review_id=review.review_id,
+            workflow_id=workflow.workflow_id,
+            reasons=("workflow_transition_failed",),
+        )
+
+    await temporal_signal_outbox_repository.append(
+        TemporalSignalOutboxEntry(
+            temporal_signal_id=uuid4(),
+            workspace_id=workspace_id,
+            workflow_id=workflow.workflow_id,
+            temporal_workflow_id=workflow.temporal_workflow_id,
+            signal_name=TemporalSignalName.BLOCKED_REVIEW_COMPLETED,
+            payload={
+                "lead_id": str(lead_id),
+                "occurred_at": now.isoformat(),
+                "reason": reason.strip(),
+                "actor_user_id": str(actor.user_id),
+                "external_event_id": str(external_event.external_event_id),
+            },
+            idempotency_key=f"blocked-review-completed:{external_event.external_event_id}",
+            available_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await commit()
+    return DismissRejectedDraftReviewResult(
+        status=DismissRejectedDraftReviewStatus.DISMISSED,
+        review_id=review.review_id,
+        workflow_id=transition.workflow.workflow_id,
         signal_queued=True,
     )
 

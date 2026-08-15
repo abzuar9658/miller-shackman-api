@@ -15,7 +15,9 @@ from app.application.use_cases.apply_lead_state_classification import (
 )
 from app.application.use_cases.lead_draft_review import (
     ApproveRejectedDraftReviewStatus,
+    DismissRejectedDraftReviewStatus,
     approve_rejected_draft_review_and_send,
+    dismiss_rejected_draft_review,
 )
 from app.application.use_cases.lead_manual_enrollment import (
     LeadManualEnrollmentActionStatus,
@@ -125,6 +127,8 @@ from app.interfaces.api.schemas.leads import (
     ApproveRejectedDraftReviewRequest,
     ApproveRejectedDraftReviewResponse,
     ClassifyLeadResponse,
+    DismissRejectedDraftReviewRequest,
+    DismissRejectedDraftReviewResponse,
     InboundMessageResponse,
     LeadActivityItemResponse,
     LeadAssignedCRMAgentResponse,
@@ -399,10 +403,7 @@ async def start_lead_manual_enrollment_route(
         user_repository=bundle.user_repository,
     )
     if result.status == LeadManualEnrollmentActionStatus.REJECTED:
-        if (
-            LeadManualEnrollmentReasonCode.PAUSED_SEARCH_TRACK_ASSIGNED.value
-            in result.reasons
-        ):
+        if LeadManualEnrollmentReasonCode.PAUSED_SEARCH_TRACK_ASSIGNED.value in result.reasons:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=list(result.reasons),
@@ -660,6 +661,7 @@ async def resume_lead_route(
         external_event_repository=bundle.external_event_repository,
         commit=bundle.session.commit,
         now=datetime.now(UTC),
+        rejected_draft_review_repository=bundle.rejected_draft_review_repository,
     )
     if result.status == LeadResumeActionStatus.REJECTED:
         raise HTTPException(
@@ -1127,6 +1129,50 @@ async def approve_rejected_draft_review_route(
     )
 
 
+@router.post(
+    "/{workspace_id}/leads/{lead_id}/rejected-draft-reviews/{review_id}/dismiss",
+    response_model=DismissRejectedDraftReviewResponse,
+)
+async def dismiss_rejected_draft_review_route(
+    workspace_id: UUID,
+    lead_id: UUID,
+    review_id: UUID,
+    request: DismissRejectedDraftReviewRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[
+        LeadDraftReviewActionBundle,
+        Depends(get_lead_draft_review_action_bundle),
+    ],
+) -> DismissRejectedDraftReviewResponse:
+    result = await dismiss_rejected_draft_review(
+        actor=actor,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        review_id=review_id,
+        reason=request.reason,
+        lead_repository=bundle.lead_repository,
+        review_repository=bundle.review_repository,
+        workflow_repository=bundle.workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        external_event_repository=bundle.external_event_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        commit=bundle.session.commit,
+        now=datetime.now(UTC),
+    )
+    if result.status == DismissRejectedDraftReviewStatus.NOT_FOUND:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=["not_found"])
+    if result.status == DismissRejectedDraftReviewStatus.REJECTED:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=list(result.reasons))
+    await bundle.session.commit()
+    return DismissRejectedDraftReviewResponse(
+        status=result.status.value,
+        review_id=result.review_id,
+        workflow_id=result.workflow_id,
+        reasons=list(result.reasons),
+        signal_queued=result.signal_queued,
+    )
+
+
 def _lead_list_item_response(
     view: LeadReadView,
     contact_policy: WorkspaceContactPolicy,
@@ -1182,9 +1228,7 @@ def _lead_detail_response(
         qualification_plan=_qualification_plan_response(view.qualification_plan),
         decision_tree=_decision_tree_response(view.decision_tree),
         status_narrative=view.status_narrative,
-        cadence_progress=[
-            _cadence_progress_response(item) for item in view.cadence_progress
-        ],
+        cadence_progress=[_cadence_progress_response(item) for item in view.cadence_progress],
         workflow_transitions=[_transition_response(item) for item in view.workflow_transitions],
         workflow_override_audits=[
             _workflow_override_audit_response(item) for item in view.workflow_override_audits

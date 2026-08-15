@@ -174,6 +174,7 @@ class LeadsTestClient:
     client: TestClient
     outbox: FakeTemporalSignalOutboxRepository
     crm_client: FakeCRMClient
+    review_repository: FakeRejectedDraftReviewRepository
 
 
 class LeadRouteCRMClient(FakeCRMClient):
@@ -470,6 +471,59 @@ def test_admin_can_approve_rejected_draft_review() -> None:
             "ai_last_activity_at": "2030-01-01T18:00:00+00:00",
         }
     ]
+
+
+def test_admin_can_dismiss_rejected_draft_review() -> None:
+    client = _client_for_role(WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/rejected-draft-reviews/{REVIEW_ID}/dismiss",
+        json={"reason": "Draft references the wrong property. Discard and retry."},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "dismissed"
+    assert response.json()["signal_queued"] is True
+    assert len(client.outbox.entries) == 1
+    review = client.review_repository._reviews[REVIEW_ID]
+    assert review.status == RejectedDraftReviewStatus.DISMISSED
+    assert review.review_note == "Draft references the wrong property. Discard and retry."
+    assert client.crm_client.notes == []
+
+
+def test_dismiss_rejected_draft_review_returns_not_actionable_when_already_reviewed() -> None:
+    client = _client_for_role(WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    first = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/rejected-draft-reviews/{REVIEW_ID}/dismiss",
+        json={"reason": "Discard this draft."},
+    )
+
+    second = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/rejected-draft-reviews/{REVIEW_ID}/dismiss",
+        json={"reason": "Discard this draft again."},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["status"] == "not_actionable"
+    assert second.json()["reasons"] == ["review_not_pending"]
+    assert second.json()["signal_queued"] is False
+
+
+def test_resume_dismisses_pending_rejected_draft_reviews() -> None:
+    client = _client_for_role(WorkspaceMembershipRole.BROKERAGE_ADMIN)
+
+    response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/resume",
+        json={"reason": "Agent requested AI resume after manual follow-up."},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "requested"
+    review = client.review_repository._reviews[REVIEW_ID]
+    assert review.status == RejectedDraftReviewStatus.DISMISSED
+    assert review.review_note is not None
+    assert review.review_note.startswith("Dismissed by manual resume:")
 
 
 def test_lead_routes_return_contactability_and_sendability() -> None:
@@ -871,6 +925,7 @@ def _client_for_role(
         workflow_repository=bundle.workflow_repository,
         workspace_contact_policy_repository=policy_repository,
     )
+    shared_review_repository = FakeRejectedDraftReviewRepository((_rejected_draft_review(),))
     resume_action_bundle = LeadResumeActionBundle(
         session=_FakeSession(),
         lead_repository=bundle.lead_repository,
@@ -880,6 +935,7 @@ def _client_for_role(
         workflow_transition_repository=FakeWorkflowTransitionRepository(()),
         temporal_signal_outbox_repository=outbox,
         external_event_repository=_FakeExternalEventRepository(),
+        rejected_draft_review_repository=shared_review_repository,
     )
     paused_search_action_bundle = LeadPausedSearchActionBundle(
         session=_FakeSession(),
@@ -908,7 +964,7 @@ def _client_for_role(
     draft_review_action_bundle = LeadDraftReviewActionBundle(
         session=_FakeSession(),
         lead_repository=FakeCadenceLeadRepository(lead),
-        review_repository=FakeRejectedDraftReviewRepository((_rejected_draft_review(),)),
+        review_repository=shared_review_repository,
         workflow_repository=FakeLeadWorkflowRepository((workflow,)),
         workflow_transition_repository=FakeWorkflowTransitionRepository(()),
         campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
@@ -954,7 +1010,12 @@ def _client_for_role(
     app.dependency_overrides[get_lead_draft_review_action_bundle] = lambda: (
         draft_review_action_bundle
     )
-    return LeadsTestClient(client=TestClient(app), outbox=outbox, crm_client=crm_client)
+    return LeadsTestClient(
+        client=TestClient(app),
+        outbox=outbox,
+        crm_client=crm_client,
+        review_repository=shared_review_repository,
+    )
 
 
 def _classification_artifact() -> LeadClassificationArtifact:

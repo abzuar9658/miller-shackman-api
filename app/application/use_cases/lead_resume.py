@@ -1,10 +1,11 @@
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
 from app.application.ports.lead_read import LeadReadLeadRepository, LeadReadWorkflowRepository
+from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
     ExternalEventRepository,
     LeadWorkflowRepository,
@@ -22,6 +23,7 @@ from app.application.use_cases.apply_workflow_state_transition import (
     WorkflowStateTransitionStatus,
     apply_workflow_state_transition,
 )
+from app.domain.campaigns.rejected_draft_review import RejectedDraftReviewStatus
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance import (
     ContactChannel,
@@ -166,6 +168,7 @@ async def resume_lead_workflow(
     external_event_repository: ExternalEventRepository,
     commit: Callable[[], Awaitable[None]],
     now: datetime,
+    rejected_draft_review_repository: RejectedDraftReviewRepository | None = None,
     id_generator: Callable[[], UUID] = uuid4,
 ) -> ResumeLeadWorkflowResult:
     lead = await lead_repository.get_by_id_for_update(workspace_id, lead_id)
@@ -191,11 +194,9 @@ async def resume_lead_workflow(
         workspace_id,
         lead_id,
     )
-    active_workflows = (
-        await lead_workflow_repository.list_active_paused_search_for_lead_for_update(
-            workspace_id,
-            lead_id,
-        )
+    active_workflows = await lead_workflow_repository.list_active_paused_search_for_lead_for_update(
+        workspace_id,
+        lead_id,
     )
     policy = await workspace_contact_policy_repository.get_by_workspace_id(workspace_id)
     eligibility = _build_resume_eligibility(
@@ -242,6 +243,16 @@ async def resume_lead_workflow(
             workflow_id=eligibility.workflow_id,
             workflow_state=eligibility.workflow_state,
             reasons=(LeadResumeActionReasonCode.MANUAL_REVIEW_REQUIRED,),
+        )
+
+    if rejected_draft_review_repository is not None:
+        await _dismiss_pending_rejected_draft_reviews(
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            actor=actor,
+            reason=f"Dismissed by manual resume: {resume_reason}",
+            review_repository=rejected_draft_review_repository,
+            now=now,
         )
 
     await temporal_signal_outbox_repository.append(
@@ -447,3 +458,28 @@ def _active_or_recovering_states() -> frozenset[WorkflowState]:
             WorkflowState.RESPONSE_PROCESSING,
         }
     )
+
+
+async def _dismiss_pending_rejected_draft_reviews(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    actor: AuthenticatedActor,
+    reason: str,
+    review_repository: RejectedDraftReviewRepository,
+    now: datetime,
+) -> None:
+    reviews = await review_repository.list_for_lead(workspace_id, lead_id)
+    for review in reviews:
+        if review.status != RejectedDraftReviewStatus.PENDING_REVIEW:
+            continue
+        await review_repository.save(
+            replace(
+                review,
+                status=RejectedDraftReviewStatus.DISMISSED,
+                reviewed_by_user_id=actor.user_id,
+                reviewed_at=now,
+                review_note=reason,
+                updated_at=now,
+            )
+        )

@@ -45,6 +45,7 @@ class WorkflowTransitionReasonCode(StrEnum):
     OUTBOUND_MESSAGE_FAILED = "outbound_message_failed"
     MANUAL_PAUSE = "manual_pause"
     MANUAL_RESUME = "manual_resume"
+    DRAFT_REVIEW_DISMISSED = "draft_review_dismissed"
     CONTACT_POLICY_UPDATED = "contact_policy_updated"
     PAUSED_SEARCH_TERMINALIZED = "paused_search_terminalized"
     UNCERTAIN_SEND_TIMEOUT = "uncertain_send_timeout"

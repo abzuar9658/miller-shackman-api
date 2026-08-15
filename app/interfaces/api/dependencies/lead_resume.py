@@ -5,6 +5,7 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.ports.lead_read import LeadReadLeadRepository, LeadReadWorkflowRepository
+from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
     ExternalEventRepository,
     LeadWorkflowRepository,
@@ -20,6 +21,9 @@ from app.infrastructure.persistence.postgres.crm_sync_repository import (
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
 from app.infrastructure.persistence.postgres.paused_search_occurrence_repository import (
     PostgresPausedSearchOccurrenceRepository,
+)
+from app.infrastructure.persistence.postgres.rejected_draft_review_repository import (
+    PostgresRejectedDraftReviewRepository,
 )
 from app.infrastructure.persistence.postgres.temporal_signal_outbox_repository import (
     PostgresTemporalSignalOutboxRepository,
@@ -56,6 +60,7 @@ class LeadResumeActionBundle:
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository
     external_event_repository: ExternalEventRepository
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None
+    rejected_draft_review_repository: RejectedDraftReviewRepository | None = None
 
 
 async def get_lead_resume_read_bundle(
@@ -81,4 +86,5 @@ async def get_lead_resume_action_bundle(
         temporal_signal_outbox_repository=PostgresTemporalSignalOutboxRepository(session),
         external_event_repository=PostgresExternalEventRepository(session),
         paused_search_occurrence_repository=PostgresPausedSearchOccurrenceRepository(session),
+        rejected_draft_review_repository=PostgresRejectedDraftReviewRepository(session),
     )

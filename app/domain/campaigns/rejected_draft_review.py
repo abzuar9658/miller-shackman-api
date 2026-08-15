@@ -10,6 +10,7 @@ from app.domain.compliance.contactability import ContactChannel
 class RejectedDraftReviewStatus(StrEnum):
     PENDING_REVIEW = "pending_review"
     APPROVED_SENT = "approved_sent"
+    DISMISSED = "dismissed"
 
 
 @dataclass(frozen=True)

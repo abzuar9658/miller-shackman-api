@@ -649,3 +649,15 @@ class ApproveRejectedDraftReviewResponse(BaseModel):
     workflow_id: UUID | None = None
     reasons: list[str] = Field(default_factory=list)
     signal_queued: bool = False
+
+
+class DismissRejectedDraftReviewRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class DismissRejectedDraftReviewResponse(BaseModel):
+    status: str
+    review_id: UUID | None = None
+    workflow_id: UUID | None = None
+    reasons: list[str] = Field(default_factory=list)
+    signal_queued: bool = False
