@@ -454,8 +454,12 @@ def test_default_workspace_outbound_drafting_config_uses_polished_starter_values
 
     assert (
         config.prompt_text
-        == "You are an administrative follow-up assistant for a real estate brokerage.\n"
-        "Draft one compliant outbound message using only the approved context below."
+        == "You write follow-up messages for a real estate brokerage in the voice of a "
+        "busy, friendly human agent.\n"
+        "Draft one compliant outbound message using only the approved context below. "
+        "Write like a real person: plain everyday words, contractions, short "
+        "sentences, one thought at a time. Never sound like marketing copy or an AI "
+        "assistant."
     )
     assert config.sms_template == "Hi there,\n\n{{message_body}}"
     assert config.email_template == "Hi there,\n\n{{message_body}}\n\nBest,\n{{brokerage_name}}"

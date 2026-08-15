@@ -25,7 +25,7 @@ from app.domain.outbound_drafting import (
 
 logger = structlog.get_logger(__name__)
 
-OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v15"
+OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v16"
 MIN_DRAFT_CONFIDENCE = 0.7
 MAX_SMS_BODY_LENGTH = 320
 MAX_EMAIL_BODY_LENGTH = 4000
@@ -552,19 +552,20 @@ def _journey_instructions(journey_kind: OutboundJourneyKind | None) -> str:
     if journey_kind == OutboundJourneyKind.DORMANT:
         return (
             "For dormant outreach, treat the lead as quiet for an unknown reason. Keep the "
-            "message low-pressure and administrative. Do not imply you already know why they "
-            "stopped responding unless that reason appears in the approved context. Use the "
-            "approved context to ask whether they are still interested, whether timing or "
-            "preferences changed, or whether they want their assigned agent to reconnect.\n"
+            "message low-pressure and casual, like a person checking in — not a company "
+            "following up. Do not imply you already know why they stopped responding unless "
+            "that reason appears in the approved context. Use the approved context to ask "
+            "whether they are still interested, whether timing or preferences changed, or "
+            "whether they want their assigned agent to reconnect.\n"
         )
     if journey_kind == OutboundJourneyKind.PAUSED_SEARCH:
         return (
             "For paused-search outreach, treat the lead as someone whose home search or "
-            "move timing was intentionally paused. Keep the message administrative, "
-            "low-pressure, and timing-aware. Do not imply urgency, available listings, "
-            "pricing advice, or market predictions. Ask whether their timing or "
-            "preferences have changed, or whether they want their assigned agent to "
-            "reconnect.\n"
+            "move timing was intentionally paused. Keep the message casual, low-pressure, "
+            "and timing-aware — a person checking in, not a company following up. Do not "
+            "imply urgency, available listings, pricing advice, or market predictions. Ask "
+            "whether their timing or preferences have changed, or whether they want their "
+            "assigned agent to reconnect.\n"
         )
     return ""
 

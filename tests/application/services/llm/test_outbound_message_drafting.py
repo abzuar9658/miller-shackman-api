@@ -111,7 +111,7 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
     assert result.body == "Hi there,\n\nare you still thinking about making a move this year?"
     assert result.model == "openai/gpt-4o-mini"
     assert result.usage_tokens == 42
-    assert llm.requests[0].prompt_version == "outbound_message_draft:v15:r1"
+    assert llm.requests[0].prompt_version == "outbound_message_draft:v16:r1"
     assert "Austin" in llm.requests[0].prompt
     assert "Journey: dormant" in llm.requests[0].prompt
     assert "lease-end timing changed" in llm.requests[0].prompt
@@ -136,8 +136,8 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
         in llm.requests[0].prompt
     )
     assert (
-        "You are an administrative follow-up assistant for a real estate brokerage."
-        in llm.requests[0].prompt
+        "You write follow-up messages for a real estate brokerage in the voice of a "
+        "busy, friendly human agent." in llm.requests[0].prompt
     )
     assert "Conversation summary:" in llm.requests[0].prompt
     assert "## Recent Conversation" in llm.requests[0].prompt
@@ -191,8 +191,8 @@ async def test_uses_admin_configured_top_level_prompt_text() -> None:
         "message and tee up the assigned agent when appropriate." in llm.requests[0].prompt
     )
     assert (
-        "You are an administrative follow-up assistant for a real estate brokerage."
-        not in llm.requests[0].prompt
+        "You write follow-up messages for a real estate brokerage in the voice of a "
+        "busy, friendly human agent." not in llm.requests[0].prompt
     )
 
 

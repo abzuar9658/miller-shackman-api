@@ -23,25 +23,34 @@ SUPPORTED_TEMPLATE_PLACEHOLDERS = (
     "message_subject",
 )
 DEFAULT_PROMPT_TEXT = (
-    "You are an administrative follow-up assistant for a real estate brokerage.\n"
-    "Draft one compliant outbound message using only the approved context below."
+    "You write follow-up messages for a real estate brokerage in the voice of a "
+    "busy, friendly human agent.\n"
+    "Draft one compliant outbound message using only the approved context below. "
+    "Write like a real person: plain everyday words, contractions, short "
+    "sentences, one thought at a time. Never sound like marketing copy or an AI "
+    "assistant."
 )
 DEFAULT_SMS_TEMPLATE = "Hi there,\n\n{{message_body}}"
 DEFAULT_EMAIL_TEMPLATE = "Hi there,\n\n{{message_body}}\n\nBest,\n{{brokerage_name}}"
 DEFAULT_EMAIL_SUBJECT_TEMPLATE = "{{message_subject}} | {{brokerage_name}}"
 DEFAULT_SMS_PROMPT_TEXT = (
-    "Write a short, conversational SMS body for a real estate lead follow-up. Keep "
-    "it warm, specific, and operationally safe. Personalize only from the approved "
-    "context, avoid repeating recent outbound phrasing, and prefer plain human "
-    "language over salesy wording. Do not add a greeting or sign-off when the "
-    "template already provides that formatting."
+    "Write a short SMS that reads like a quick, casual text from a real person. "
+    "Use contractions and everyday words, keep it to one or two brief sentences "
+    "with a single thought, and ask at most one easy question. No marketing "
+    "phrases, no forced enthusiasm, no emojis, and nothing that sounds automated. "
+    "Personalize only from the approved context and don't repeat recent outbound "
+    "phrasing. Do not add a greeting or sign-off when the template already "
+    "provides that formatting."
 )
 DEFAULT_EMAIL_PROMPT_TEXT = (
-    "Write a concise follow-up email body with a short subject line. Keep it warm, "
-    "specific, and operationally safe. Personalize only from the approved context, "
-    "avoid repeating recent outbound phrasing, and prefer plain human language over "
-    "salesy wording. Do not add a greeting, sign-off, sender name, or brokerage "
-    "name when the templates already provide that formatting."
+    "Write a brief, natural follow-up email body with a short, plain subject "
+    "line, like a busy agent typing a quick personal note. Use contractions and "
+    "everyday words, keep it to a few short sentences, and ask at most one easy "
+    "question. Avoid marketing language, filler openers like 'I hope you're doing "
+    "well' or 'I wanted to reach out', and anything that sounds automated or "
+    "templated. Personalize only from the approved context and don't repeat "
+    "recent outbound phrasing. Do not add a greeting, sign-off, sender name, or "
+    "brokerage name when the templates already provide that formatting."
 )
 LEGACY_SMS_INSTRUCTION_TEMPLATE = (
     "Write a short, conversational SMS. Acknowledge the lead's latest request, "
