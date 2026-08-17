@@ -12,6 +12,14 @@ from app.domain.campaigns.enrollment import (
 from app.domain.common.ids import CampaignId, LeadId, WorkspaceId
 from app.infrastructure.persistence.postgres.workflow_models import CampaignEnrollmentModel
 
+_ACTIVE_ENROLLMENT_STATUSES = (
+    CampaignEnrollmentStatus.CANDIDATE.value,
+    CampaignEnrollmentStatus.QUEUED.value,
+    CampaignEnrollmentStatus.ACTIVE.value,
+    CampaignEnrollmentStatus.PAUSED.value,
+    CampaignEnrollmentStatus.HANDOFF.value,
+)
+
 
 class PostgresCampaignEnrollmentRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -24,7 +32,24 @@ class PostgresCampaignEnrollmentRepository:
         campaign_id: CampaignId,
     ) -> CampaignEnrollment | None:
         result = await self._session.execute(
-            _by_lead_and_campaign_statement(workspace_id, lead_id, campaign_id),
+            _by_lead_and_campaign_statement(workspace_id, lead_id, campaign_id)
+            .where(CampaignEnrollmentModel.status.in_(_ACTIVE_ENROLLMENT_STATUSES))
+            .order_by(CampaignEnrollmentModel.created_at.desc())
+            .limit(1),
+        )
+        model = result.scalar_one_or_none()
+        return _model_to_enrollment(model) if model is not None else None
+
+    async def get_latest_by_lead_and_campaign(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        campaign_id: CampaignId,
+    ) -> CampaignEnrollment | None:
+        result = await self._session.execute(
+            _by_lead_and_campaign_statement(workspace_id, lead_id, campaign_id)
+            .order_by(CampaignEnrollmentModel.created_at.desc())
+            .limit(1),
         )
         model = result.scalar_one_or_none()
         return _model_to_enrollment(model) if model is not None else None

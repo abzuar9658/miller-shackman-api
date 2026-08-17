@@ -497,7 +497,7 @@ async def _dormant_campaign_config(
         or campaign_execution_repository is None
     ):
         return None
-    enrollment = await campaign_enrollment_repository.get_by_lead_and_campaign(
+    enrollment = await campaign_enrollment_repository.get_latest_by_lead_and_campaign(
         workspace_id,
         workflow.lead_id,
         workflow.campaign_id,

@@ -1419,6 +1419,21 @@ class CampaignEnrollmentRepository(Protocol):
         lead_id: LeadId,
         campaign_id: UUID,
     ) -> Any | None:
+        """Return the lead's active (non-terminal) enrollment for the campaign, if any.
+
+        Terminal enrollments (completed/suppressed/closed) are history, not a
+        block on re-entry, so they are excluded here. Use
+        get_latest_by_lead_and_campaign for historical reads.
+        """
+        raise NotImplementedError
+
+    async def get_latest_by_lead_and_campaign(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        campaign_id: UUID,
+    ) -> Any | None:
+        """Return the newest enrollment for the campaign regardless of status."""
         raise NotImplementedError
 
     async def count_started_today(

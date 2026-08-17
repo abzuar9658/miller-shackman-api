@@ -59,7 +59,7 @@ def _run(coro: object) -> object:
     return asyncio.run(coro)  # type: ignore[arg-type]
 
 
-async def test_get_by_lead_and_campaign_maps_model() -> None:
+async def test_get_by_lead_and_campaign_returns_only_active_enrollments() -> None:
     session = _FakeSession(_FakeResult(scalar_value=_model()))
 
     result = await PostgresCampaignEnrollmentRepository(
@@ -71,6 +71,47 @@ async def test_get_by_lead_and_campaign_maps_model() -> None:
     assert "campaign_enrollments.workspace_id" in statement
     assert "campaign_enrollments.lead_id" in statement
     assert "campaign_enrollments.campaign_id" in statement
+    assert "campaign_enrollments.status IN" in statement
+    assert "ORDER BY campaign_enrollments.created_at DESC" in statement
+    assert "LIMIT" in statement
+
+
+def test_get_by_lead_and_campaign_filters_exactly_the_non_terminal_statuses() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    session = _FakeSession(_FakeResult(scalar_value=None))
+
+    _run(
+        PostgresCampaignEnrollmentRepository(
+            cast(AsyncSession, session)
+        ).get_by_lead_and_campaign(WORKSPACE_ID, LEAD_ID, CAMPAIGN_ID)
+    )
+
+    statement = session.statements[0]
+    compiled = str(
+        statement.compile(  # type: ignore[attr-defined]
+            dialect=postgresql.dialect(),  # type: ignore[no-untyped-call]
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    for status in ("candidate", "queued", "active", "paused", "handoff"):
+        assert f"'{status}'" in compiled
+    for status in ("completed", "suppressed", "closed"):
+        assert f"'{status}'" not in compiled
+
+
+async def test_get_latest_by_lead_and_campaign_includes_terminal_enrollments() -> None:
+    session = _FakeSession(_FakeResult(scalar_value=_model()))
+
+    result = await PostgresCampaignEnrollmentRepository(
+        cast(AsyncSession, session)
+    ).get_latest_by_lead_and_campaign(WORKSPACE_ID, LEAD_ID, CAMPAIGN_ID)
+
+    assert result == _enrollment()
+    statement = str(session.statements[0])
+    assert "campaign_enrollments.status IN" not in statement
+    assert "ORDER BY campaign_enrollments.created_at DESC" in statement
+    assert "LIMIT" in statement
 
 
 async def test_save_uses_unique_constraint_upsert() -> None:

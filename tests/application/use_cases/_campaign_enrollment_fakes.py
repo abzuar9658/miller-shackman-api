@@ -11,7 +11,7 @@ from app.application.ports.temporal import (
     TemporalWorkflowExecutionMode,
     UnblockLeadNurtureWorkflowSignal,
 )
-from app.domain.campaigns.enrollment import CampaignEnrollment
+from app.domain.campaigns.enrollment import CampaignEnrollment, CampaignEnrollmentStatus
 from app.domain.common.ids import CampaignVersionId, LeadId, WorkspaceId
 from app.domain.workflows import (
     LeadWorkflow,
@@ -21,12 +21,31 @@ from app.domain.workflows import (
     WorkflowTransition,
 )
 
+_ACTIVE_ENROLLMENT_STATUSES = {
+    CampaignEnrollmentStatus.CANDIDATE,
+    CampaignEnrollmentStatus.QUEUED,
+    CampaignEnrollmentStatus.ACTIVE,
+    CampaignEnrollmentStatus.PAUSED,
+    CampaignEnrollmentStatus.HANDOFF,
+}
+
 
 class FakeCampaignEnrollmentRepository:
     def __init__(self) -> None:
         self.enrollments: dict[tuple[WorkspaceId, LeadId, UUID], CampaignEnrollment] = {}
 
     async def get_by_lead_and_campaign(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        campaign_id: UUID,
+    ) -> CampaignEnrollment | None:
+        enrollment = self.enrollments.get((workspace_id, lead_id, campaign_id))
+        if enrollment is None or enrollment.status not in _ACTIVE_ENROLLMENT_STATUSES:
+            return None
+        return enrollment
+
+    async def get_latest_by_lead_and_campaign(
         self,
         workspace_id: WorkspaceId,
         lead_id: LeadId,
