@@ -224,6 +224,99 @@ def _set_latest_workflow_state(
     repository.latest_by_lead[key] = replace(repository.latest_by_lead[key], state=state)
 
 
+def _close_enrollment_and_workflow(client: LeadManualEnrollmentTestClient) -> None:
+    """Mirror the prod terminal state: enrollment closed, workflow closed."""
+    from app.domain.campaigns.enrollment import CampaignEnrollmentStatus
+
+    enrollment_repository = cast(
+        FakeCampaignEnrollmentRepository,
+        client.bundle.campaign_enrollment_repository,
+    )
+    key = (WORKSPACE_ID, LEAD_ID, CAMPAIGN_ID)
+    enrollment_repository.enrollments[key] = replace(
+        enrollment_repository.enrollments[key],
+        status=CampaignEnrollmentStatus.CLOSED,
+        ended_at=NOW,
+    )
+    _set_latest_workflow_state(client, WorkflowState.CLOSED)
+
+
+def test_admin_sees_reenroll_options_after_terminal_enrollment() -> None:
+    client = _client_for_role(WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    first_response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/manual-enrollments",
+        json={"campaign_id": str(CAMPAIGN_ID)},
+    )
+    assert first_response.status_code == 200
+    _close_enrollment_and_workflow(client)
+
+    options_response = client.client.get(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/manual-enrollment-options"
+    )
+
+    assert options_response.status_code == 200
+    assert [
+        campaign["campaign_id"] for campaign in options_response.json()["campaigns"]
+    ] == [str(CAMPAIGN_ID)]
+    assert options_response.json()["already_enrolled_campaign_count"] == 0
+
+
+def test_admin_can_manually_reenroll_after_terminal_enrollment() -> None:
+    client = _client_for_role(WorkspaceMembershipRole.BROKERAGE_ADMIN)
+    first_response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/manual-enrollments",
+        json={"campaign_id": str(CAMPAIGN_ID)},
+    )
+    assert first_response.status_code == 200
+    _close_enrollment_and_workflow(client)
+
+    reenroll_response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/manual-enrollments",
+        json={
+            "campaign_id": str(CAMPAIGN_ID),
+            "reason": "Lead requested renewed outreach.",
+        },
+    )
+
+    assert reenroll_response.status_code == 200
+    assert reenroll_response.json()["status"] == "started"
+    assert len(client.starter.calls) == 2
+
+
+def test_selected_paused_search_restart_after_terminal_enrollment_starts_new_workflow() -> None:
+    client = _client_for_role(
+        WorkspaceMembershipRole.BROKERAGE_ADMIN,
+        operator_paused_search=True,
+    )
+    first_response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search/start",
+        json={"campaign_id": str(CAMPAIGN_ID)},
+    )
+    assert first_response.status_code == 200
+    assert first_response.json()["status"] == "started"
+    _close_enrollment_and_workflow(client)
+
+    restart_response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/paused-search/start",
+        json={
+            "campaign_id": str(CAMPAIGN_ID),
+            "reason": "Lead requested renewed outreach.",
+        },
+    )
+
+    assert restart_response.status_code == 200
+    assert restart_response.json()["status"] == "started"
+    start_calls = [
+        call
+        for call in client.starter.calls
+        if call.get("operation") != "configure_paused_search_workflow"
+    ]
+    assert len(start_calls) == 2
+    repository = cast(FakeLeadWorkflowRepository, client.bundle.lead_workflow_repository)
+    latest_workflow = repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert latest_workflow.state == WorkflowState.ACTIVE_NURTURE
+
+
 def test_selected_paused_search_start_requires_operator_assignment() -> None:
     client = _client_for_role(WorkspaceMembershipRole.BROKERAGE_ADMIN)
 
