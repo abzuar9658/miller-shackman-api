@@ -32,6 +32,7 @@ from app.application.use_cases.lead_pause import (
     pause_lead_workflow,
 )
 from app.application.use_cases.lead_paused_search import (
+    LeadPausedSearchActionReasonCode,
     LeadPausedSearchActionStatus,
     update_lead_paused_search,
 )
@@ -739,6 +740,15 @@ async def update_lead_paused_search_route(
         Depends(get_lead_paused_search_action_bundle),
     ],
 ) -> UpdateLeadPausedSearchResponse:
+    terminal_behavior: PausedSearchTerminalBehavior | None = None
+    if request.terminal_behavior is not None:
+        try:
+            terminal_behavior = PausedSearchTerminalBehavior(request.terminal_behavior)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=["terminal_behavior_invalid"],
+            ) from exc
     result = await update_lead_paused_search(
         actor=actor,
         workspace_id=workspace_id,
@@ -756,9 +766,20 @@ async def update_lead_paused_search_route(
             bundle.paused_search_track_assignment_repository
         ),
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        terminal_behavior=terminal_behavior,
+        terminal_reason=request.terminal_reason,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        paused_search_occurrence_repository=bundle.occurrence_repository,
+        campaign_enrollment_repository=bundle.campaign_enrollment_repository,
+        external_event_repository=bundle.external_event_repository,
         now=datetime.now(UTC),
     )
     if result.status == LeadPausedSearchActionStatus.REJECTED:
+        if LeadPausedSearchActionReasonCode.TERMINAL_BEHAVIOR_INVALID in result.reasons:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=[reason.value for reason in result.reasons],
+            )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=[reason.value for reason in result.reasons],
@@ -781,6 +802,8 @@ async def update_lead_paused_search_route(
             else None
         ),
         reasons=[reason.value for reason in result.reasons],
+        workflow_terminalized=result.workflow_terminalized,
+        workflow_state=result.workflow_state.value if result.workflow_state else None,
     )
 
 
@@ -900,6 +923,7 @@ async def terminalize_paused_search_route(
         paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         external_event_repository=bundle.external_event_repository,
+        campaign_enrollment_repository=bundle.campaign_enrollment_repository,
         commit=bundle.session.commit,
         now=datetime.now(UTC),
     )

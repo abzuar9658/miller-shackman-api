@@ -7,6 +7,8 @@ from app.application.use_cases.lead_paused_search import (
     LeadPausedSearchActionStatus,
     update_lead_paused_search,
 )
+from app.domain.campaigns.paused_search_tracks import PausedSearchTerminalBehavior
+from app.domain.crm_sync import ExternalEvent
 from app.domain.identity import (
     AuthenticatedActor,
     UserStatus,
@@ -27,6 +29,7 @@ from tests.application.use_cases._lead_read_fakes import (
     FakeLeadPausedSearchHistoryRepository,
     FakeLeadRepository,
     FakeLeadWorkflowRepository,
+    FakeWorkflowTransitionRepository,
 )
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
@@ -182,6 +185,197 @@ def test_assigned_agent_cannot_edit_unowned_paused_search_profile() -> None:
 
     assert result.status == LeadPausedSearchActionStatus.REJECTED
     assert result.reasons == (LeadPausedSearchActionReasonCode.PERMISSION_DENIED,)
+
+
+def test_clear_with_terminal_behavior_terminalizes_active_workflow() -> None:
+    lead_repository = FakeLeadRepository((_paused_search_lead(),))
+    workflow_repository = FakeLeadWorkflowRepository(
+        (_workflow(paused_search_track_version_id=TRACK_VERSION_ID),)
+    )
+    transition_repository = FakeWorkflowTransitionRepository(())
+    signal_outbox_repository = FakeTemporalSignalOutboxRepository()
+
+    result = asyncio.run(
+        update_lead_paused_search(
+            actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            active=False,
+            selected_track_key=None,
+            reason_note=None,
+            reengagement_not_before=None,
+            reengagement_window_label=None,
+            lead_repository=lead_repository,
+            paused_search_history_repository=FakeLeadPausedSearchHistoryRepository(()),
+            lead_workflow_repository=workflow_repository,
+            paused_search_track_repository=_track_repository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
+            temporal_signal_outbox_repository=signal_outbox_repository,
+            terminal_behavior=PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED,
+            terminal_reason="Switching to dormant path",
+            workflow_transition_repository=transition_repository,
+            external_event_repository=FakeExternalEventRepository(),
+            now=NOW,
+        )
+    )
+
+    assert result.status == LeadPausedSearchActionStatus.CLEARED
+    assert result.workflow_terminalized is True
+    assert result.workflow_state == WorkflowState.COMPLETED
+    workflow = asyncio.run(workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID))
+    assert workflow is not None
+    assert workflow.state == WorkflowState.COMPLETED
+    assert not signal_outbox_repository.entries
+
+
+def test_clear_with_terminal_behavior_skips_already_terminal_workflow() -> None:
+    lead_repository = FakeLeadRepository((_paused_search_lead(),))
+    workflow = LeadWorkflow(
+        workflow_id=WORKFLOW_ID,
+        temporal_workflow_id="lead-nurture:test",
+        workspace_id=WORKSPACE_ID,
+        campaign_enrollment_id=ENROLLMENT_ID,
+        campaign_id=CAMPAIGN_ID,
+        lead_id=LEAD_ID,
+        state=WorkflowState.COMPLETED,
+        last_transition_at=NOW,
+        state_version=2,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    workflow_repository = FakeLeadWorkflowRepository((workflow,))
+
+    result = asyncio.run(
+        update_lead_paused_search(
+            actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            active=False,
+            selected_track_key=None,
+            reason_note=None,
+            reengagement_not_before=None,
+            reengagement_window_label=None,
+            lead_repository=lead_repository,
+            paused_search_history_repository=FakeLeadPausedSearchHistoryRepository(()),
+            lead_workflow_repository=workflow_repository,
+            paused_search_track_repository=_track_repository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
+            terminal_behavior=PausedSearchTerminalBehavior.CLOSE_AUTOMATION,
+            terminal_reason=None,
+            workflow_transition_repository=FakeWorkflowTransitionRepository(()),
+            external_event_repository=FakeExternalEventRepository(),
+            now=NOW,
+        )
+    )
+
+    assert result.status == LeadPausedSearchActionStatus.CLEARED
+    assert result.workflow_terminalized is False
+    saved = asyncio.run(workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID))
+    assert saved is not None
+    assert saved.state == WorkflowState.COMPLETED
+
+
+def test_terminal_behavior_rejected_when_setting_profile() -> None:
+    result = asyncio.run(
+        update_lead_paused_search(
+            actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            active=True,
+            selected_track_key="waiting-rates",
+            reason_note=None,
+            reengagement_not_before=None,
+            reengagement_window_label=None,
+            lead_repository=FakeLeadRepository((_lead(),)),
+            paused_search_history_repository=FakeLeadPausedSearchHistoryRepository(()),
+            lead_workflow_repository=FakeLeadWorkflowRepository((_workflow(),)),
+            paused_search_track_repository=_track_repository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
+            terminal_behavior=PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED,
+            terminal_reason=None,
+            workflow_transition_repository=FakeWorkflowTransitionRepository(()),
+            external_event_repository=FakeExternalEventRepository(),
+            now=NOW,
+        )
+    )
+
+    assert result.status == LeadPausedSearchActionStatus.REJECTED
+    assert result.reasons == (LeadPausedSearchActionReasonCode.TERMINAL_BEHAVIOR_INVALID,)
+
+
+def test_terminal_behavior_rejected_without_required_repositories() -> None:
+    result = asyncio.run(
+        update_lead_paused_search(
+            actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            active=False,
+            selected_track_key=None,
+            reason_note=None,
+            reengagement_not_before=None,
+            reengagement_window_label=None,
+            lead_repository=FakeLeadRepository((_paused_search_lead(),)),
+            paused_search_history_repository=FakeLeadPausedSearchHistoryRepository(()),
+            lead_workflow_repository=FakeLeadWorkflowRepository((_workflow(),)),
+            paused_search_track_repository=_track_repository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
+            terminal_behavior=PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED,
+            terminal_reason=None,
+            now=NOW,
+        )
+    )
+
+    assert result.status == LeadPausedSearchActionStatus.REJECTED
+    assert result.reasons == (LeadPausedSearchActionReasonCode.TERMINAL_BEHAVIOR_INVALID,)
+
+
+def test_unchanged_clear_still_terminalizes_active_workflow() -> None:
+    lead_repository = FakeLeadRepository((_lead(),))
+    workflow_repository = FakeLeadWorkflowRepository((_workflow(),))
+    transition_repository = FakeWorkflowTransitionRepository(())
+
+    result = asyncio.run(
+        update_lead_paused_search(
+            actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            active=False,
+            selected_track_key=None,
+            reason_note=None,
+            reengagement_not_before=None,
+            reengagement_window_label=None,
+            lead_repository=lead_repository,
+            paused_search_history_repository=FakeLeadPausedSearchHistoryRepository(()),
+            lead_workflow_repository=workflow_repository,
+            paused_search_track_repository=_track_repository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
+            terminal_behavior=PausedSearchTerminalBehavior.CLOSE_AUTOMATION,
+            terminal_reason="Stop automation",
+            workflow_transition_repository=transition_repository,
+            external_event_repository=FakeExternalEventRepository(),
+            now=NOW,
+        )
+    )
+
+    assert result.status == LeadPausedSearchActionStatus.UNCHANGED
+    assert result.workflow_terminalized is True
+    assert result.workflow_state == WorkflowState.CLOSED
+    workflow = asyncio.run(workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID))
+    assert workflow is not None
+    assert workflow.state == WorkflowState.CLOSED
+
+
+class FakeExternalEventRepository:
+    async def save(self, event: ExternalEvent) -> ExternalEvent:
+        return event
+
+    async def get_by_provider_event_id(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        provider_event_id: str,
+    ) -> ExternalEvent | None:
+        return None
 
 
 def _lead(*, owner_id: UUID = USER_ID) -> CanonicalLeadRecord:

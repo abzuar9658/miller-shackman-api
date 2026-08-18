@@ -4,13 +4,18 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
+    ExternalEventRepository,
     LeadPausedSearchHistoryRepository,
     LeadRepository,
     LeadWorkflowRepository,
+    PausedSearchOccurrenceRepository,
     PausedSearchTrackAssignmentRepository,
     PausedSearchTrackRepository,
     TemporalSignalOutboxRepository,
+    WorkflowTransitionRepository,
 )
+from app.application.services.internal_external_events import create_internal_external_event
 from app.application.services.lead_assignment import is_actor_assigned_to_lead
 from app.application.services.lead_nurture_rescheduling import (
     enqueue_lead_nurture_reschedule_signal,
@@ -18,10 +23,15 @@ from app.application.services.lead_nurture_rescheduling import (
 from app.application.services.paused_search_track_assignment import (
     synchronize_paused_search_track_assignment,
 )
+from app.application.use_cases.apply_workflow_state_transition import (
+    WorkflowStateTransitionStatus,
+    apply_workflow_state_transition,
+)
 from app.domain.campaigns import (
     PausedSearchTrackAssignmentSource,
     PausedSearchTrackCatalogEntry,
 )
+from app.domain.campaigns.paused_search_tracks import PausedSearchTerminalBehavior
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.identity import (
     AuthenticatedActor,
@@ -36,6 +46,11 @@ from app.domain.leads import (
     PausedSearchAction,
     PausedSearchSource,
     lead_paused_search_profile,
+)
+from app.domain.workflows import (
+    WorkflowState,
+    WorkflowTransitionReasonCode,
+    is_terminal_workflow_state,
 )
 
 
@@ -53,6 +68,7 @@ class LeadPausedSearchActionReasonCode(StrEnum):
     TRACK_REQUIRED = "track_required"
     TRACK_UNAVAILABLE = "track_unavailable"
     TRACK_AMBIGUOUS = "track_ambiguous"
+    TERMINAL_BEHAVIOR_INVALID = "terminal_behavior_invalid"
 
 
 @dataclass(frozen=True)
@@ -62,6 +78,8 @@ class LeadPausedSearchActionResult:
     profile: LeadPausedSearchProfile | None = None
     history_entry: LeadPausedSearchHistoryEntry | None = None
     reasons: tuple[LeadPausedSearchActionReasonCode, ...] = ()
+    workflow_terminalized: bool = False
+    workflow_state: WorkflowState | None = None
 
 
 async def update_lead_paused_search(
@@ -80,6 +98,12 @@ async def update_lead_paused_search(
     paused_search_track_repository: PausedSearchTrackRepository,
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
+    terminal_behavior: PausedSearchTerminalBehavior | None = None,
+    terminal_reason: str | None = None,
+    workflow_transition_repository: WorkflowTransitionRepository | None = None,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
+    external_event_repository: ExternalEventRepository | None = None,
     now: datetime,
 ) -> LeadPausedSearchActionResult:
     lead = await lead_repository.get_by_id_for_update(workspace_id, lead_id)
@@ -93,6 +117,22 @@ async def update_lead_paused_search(
         return LeadPausedSearchActionResult(
             status=LeadPausedSearchActionStatus.REJECTED,
             reasons=(LeadPausedSearchActionReasonCode.PERMISSION_DENIED,),
+        )
+
+    if terminal_behavior is not None and (
+        active
+        or terminal_behavior
+        not in {
+            PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED,
+            PausedSearchTerminalBehavior.CLOSE_AUTOMATION,
+        }
+        or workflow_transition_repository is None
+        or external_event_repository is None
+    ):
+        return LeadPausedSearchActionResult(
+            status=LeadPausedSearchActionStatus.REJECTED,
+            lead_id=lead_id,
+            reasons=(LeadPausedSearchActionReasonCode.TERMINAL_BEHAVIOR_INVALID,),
         )
 
     selected_track: PausedSearchTrackCatalogEntry | None = None
@@ -156,10 +196,30 @@ async def update_lead_paused_search(
             paused_search_track_assignment_repository=paused_search_track_assignment_repository,
             now=now,
         )
+        unchanged_terminalized = False
+        unchanged_workflow_state: WorkflowState | None = None
+        if current_profile is None and terminal_behavior is not None:
+            assert workflow_transition_repository is not None
+            assert external_event_repository is not None
+            unchanged_terminalized, unchanged_workflow_state = await _terminalize_active_workflow(
+                workspace_id=workspace_id,
+                lead_id=lead_id,
+                actor=actor,
+                terminal_behavior=terminal_behavior,
+                terminal_reason=terminal_reason,
+                lead_workflow_repository=lead_workflow_repository,
+                workflow_transition_repository=workflow_transition_repository,
+                paused_search_occurrence_repository=paused_search_occurrence_repository,
+                campaign_enrollment_repository=campaign_enrollment_repository,
+                external_event_repository=external_event_repository,
+                now=now,
+            )
         return LeadPausedSearchActionResult(
             status=LeadPausedSearchActionStatus.UNCHANGED,
             lead_id=lead_id,
             profile=current_profile,
+            workflow_terminalized=unchanged_terminalized,
+            workflow_state=unchanged_workflow_state,
         )
 
     updated_lead = replace(
@@ -204,7 +264,25 @@ async def update_lead_paused_search(
         paused_search_track_assignment_repository=paused_search_track_assignment_repository,
         now=now,
     )
-    if temporal_signal_outbox_repository is not None:
+    workflow_terminalized = False
+    terminal_workflow_state: WorkflowState | None = None
+    if saved_profile is None and terminal_behavior is not None:
+        assert workflow_transition_repository is not None
+        assert external_event_repository is not None
+        workflow_terminalized, terminal_workflow_state = await _terminalize_active_workflow(
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            actor=actor,
+            terminal_behavior=terminal_behavior,
+            terminal_reason=terminal_reason,
+            lead_workflow_repository=lead_workflow_repository,
+            workflow_transition_repository=workflow_transition_repository,
+            paused_search_occurrence_repository=paused_search_occurrence_repository,
+            campaign_enrollment_repository=campaign_enrollment_repository,
+            external_event_repository=external_event_repository,
+            now=now,
+        )
+    if temporal_signal_outbox_repository is not None and not workflow_terminalized:
         await enqueue_lead_nurture_reschedule_signal(
             workspace_id=workspace_id,
             lead_id=lead_id,
@@ -239,7 +317,74 @@ async def update_lead_paused_search(
         lead_id=lead_id,
         profile=saved_profile,
         history_entry=history_entry,
+        workflow_terminalized=workflow_terminalized,
+        workflow_state=terminal_workflow_state,
     )
+
+
+async def _terminalize_active_workflow(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    actor: AuthenticatedActor,
+    terminal_behavior: PausedSearchTerminalBehavior,
+    terminal_reason: str | None,
+    lead_workflow_repository: LeadWorkflowRepository,
+    workflow_transition_repository: WorkflowTransitionRepository,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None,
+    external_event_repository: ExternalEventRepository,
+    now: datetime,
+) -> tuple[bool, WorkflowState | None]:
+    """End the active workflow as part of an atomic profile clear.
+
+    Skips silently when there is no workflow or it is already terminal, so a
+    plain profile clear on an idle lead never fails. The transition reuses the
+    standard terminalization pathway (occurrence cancellation + enrollment
+    sync), keeping DB state consistent for immediate re-enrollment.
+    """
+    workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
+        workspace_id, lead_id
+    )
+    if workflow is None or is_terminal_workflow_state(workflow.state):
+        return False, workflow.state if workflow is not None else None
+    target_state = (
+        WorkflowState.COMPLETED
+        if terminal_behavior is PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED
+        else WorkflowState.CLOSED
+    )
+    event = await create_internal_external_event(
+        external_event_repository=external_event_repository,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        event_type="lead.paused_search_cleared_and_terminalized",
+        now=now,
+        payload_redacted={"actor_user_id": str(actor.user_id)},
+    )
+    transition = await apply_workflow_state_transition(
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        to_state=target_state,
+        reason_code=WorkflowTransitionReasonCode.PAUSED_SEARCH_TERMINALIZED,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        paused_search_occurrence_repository=paused_search_occurrence_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        now=now,
+        actor_user_id=actor.user_id,
+        external_event_id=event.external_event_id,
+        metadata={
+            "reason": _normalized_optional_text(terminal_reason) or "profile_cleared",
+            "terminal_behavior": terminal_behavior.value,
+            "source": "paused_search_profile_clear",
+        },
+    )
+    if (
+        transition.status is WorkflowStateTransitionStatus.UPDATED
+        and transition.workflow is not None
+    ):
+        return True, transition.workflow.state
+    return False, transition.workflow.state if transition.workflow is not None else None
 
 
 def _can_edit_paused_search(actor: AuthenticatedActor, lead: CanonicalLeadRecord) -> bool:

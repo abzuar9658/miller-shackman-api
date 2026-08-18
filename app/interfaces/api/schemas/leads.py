@@ -443,6 +443,8 @@ class UpdateLeadPausedSearchRequest(BaseModel):
     reason_note: str | None = Field(default=None, max_length=1000)
     reengagement_not_before: datetime | None = None
     reengagement_window_label: str | None = Field(default=None, max_length=100)
+    terminal_behavior: str | None = Field(default=None, min_length=1, max_length=50)
+    terminal_reason: str | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
     def validate_shape(self) -> "UpdateLeadPausedSearchRequest":
@@ -458,6 +460,10 @@ class UpdateLeadPausedSearchRequest(BaseModel):
             )
         ):
             raise ValueError("clear requests cannot include paused-search profile fields")
+        if self.active and (self.terminal_behavior is not None or self.terminal_reason is not None):
+            raise ValueError("terminal fields are only allowed when clearing the profile")
+        if self.terminal_reason is not None and self.terminal_behavior is None:
+            raise ValueError("terminal_reason requires terminal_behavior")
         return self
 
 
@@ -467,6 +473,8 @@ class UpdateLeadPausedSearchResponse(BaseModel):
     paused_search: LeadPausedSearchProfileResponse | None = None
     history_entry: LeadPausedSearchHistoryEntryResponse | None = None
     reasons: list[str] = Field(default_factory=list)
+    workflow_terminalized: bool = False
+    workflow_state: str | None = None
 
 
 class LeadResumeEligibilityResponse(BaseModel):

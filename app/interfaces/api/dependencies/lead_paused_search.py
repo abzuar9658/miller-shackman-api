@@ -5,6 +5,8 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
+    ExternalEventRepository,
     LeadPausedSearchHistoryRepository,
     LeadRepository,
     LeadWorkflowRepository,
@@ -15,6 +17,12 @@ from app.application.ports.repositories import (
     WorkflowTransitionRepository,
 )
 from app.core.database import get_session
+from app.infrastructure.persistence.postgres.campaign_enrollment_repository import (
+    PostgresCampaignEnrollmentRepository,
+)
+from app.infrastructure.persistence.postgres.crm_sync_repository import (
+    PostgresExternalEventRepository,
+)
 from app.infrastructure.persistence.postgres.lead_repository import PostgresLeadRepository
 from app.infrastructure.persistence.postgres.paused_search_occurrence_repository import (
     PostgresPausedSearchOccurrenceRepository,
@@ -48,6 +56,8 @@ class LeadPausedSearchActionBundle:
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository
     occurrence_repository: PausedSearchOccurrenceRepository | None = None
     workflow_transition_repository: WorkflowTransitionRepository | None = None
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None
+    external_event_repository: ExternalEventRepository | None = None
 
 
 async def get_lead_paused_search_action_bundle(
@@ -65,4 +75,6 @@ async def get_lead_paused_search_action_bundle(
         temporal_signal_outbox_repository=PostgresTemporalSignalOutboxRepository(session),
         occurrence_repository=PostgresPausedSearchOccurrenceRepository(session),
         workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
+        campaign_enrollment_repository=PostgresCampaignEnrollmentRepository(session),
+        external_event_repository=PostgresExternalEventRepository(session),
     )
