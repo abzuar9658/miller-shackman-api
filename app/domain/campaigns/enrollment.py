@@ -11,6 +11,7 @@ from app.domain.common.ids import (
     UserId,
     WorkspaceId,
 )
+from app.domain.workflows import WorkflowState
 
 
 class CampaignEnrollmentSource(StrEnum):
@@ -56,6 +57,20 @@ class CampaignEnrollment:
             CampaignEnrollmentStatus.SUPPRESSED,
             CampaignEnrollmentStatus.CLOSED,
         }
+
+
+def enrollment_status_for_terminal_workflow_state(
+    state: WorkflowState,
+) -> CampaignEnrollmentStatus | None:
+    """Map a terminal workflow state to the enrollment status that mirrors it.
+
+    Returns None for non-terminal states so callers can no-op safely.
+    """
+    return {
+        WorkflowState.COMPLETED: CampaignEnrollmentStatus.COMPLETED,
+        WorkflowState.SUPPRESSED: CampaignEnrollmentStatus.SUPPRESSED,
+        WorkflowState.CLOSED: CampaignEnrollmentStatus.CLOSED,
+    }.get(state)
 
 
 def build_enrollment_reason_codes(

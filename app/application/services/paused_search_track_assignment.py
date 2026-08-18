@@ -22,7 +22,7 @@ from app.domain.common.ids import (
     UserId,
     WorkspaceId,
 )
-from app.domain.workflows import LeadWorkflow
+from app.domain.workflows import LeadWorkflow, is_terminal_workflow_state
 
 
 class PausedSearchTrackAssignmentSyncStatus(StrEnum):
@@ -174,6 +174,10 @@ async def _pin_workflow(
     now: datetime,
 ) -> LeadWorkflow | None:
     if workflow is None or workflow.paused_search_track_version_id == track_version_id:
+        return workflow
+    # Terminal workflows are immutable history; re-pinning them would revive a
+    # finished run instead of letting enrollment create a fresh workflow.
+    if is_terminal_workflow_state(workflow.state):
         return workflow
     return await lead_workflow_repository.save(
         replace(workflow, paused_search_track_version_id=track_version_id, updated_at=now)

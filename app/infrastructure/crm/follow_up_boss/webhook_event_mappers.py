@@ -160,6 +160,7 @@ async def handle_em_events_unsubscribed(
             lead_workflow_repository=bundle.lead_workflow_repository,
             workflow_transition_repository=bundle.workflow_transition_repository,
             paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
+            campaign_enrollment_repository=bundle.campaign_enrollment_repository,
             workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
             temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
             now=occurred_at,

@@ -586,6 +586,7 @@ async def receive_follow_up_boss_contact_suppression_event(
         external_event_repository=bundle.external_event_repository,
         lead_workflow_repository=bundle.lead_workflow_repository,
         workflow_transition_repository=bundle.workflow_transition_repository,
+        campaign_enrollment_repository=bundle.campaign_enrollment_repository,
         workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
         now=datetime.now(UTC),

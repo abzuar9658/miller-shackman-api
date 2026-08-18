@@ -172,6 +172,7 @@ async def resolve_uncertain_occurrence_route(
         actor_user_id=actor.user_id,
         actor=actor,
         lead_repository=bundle.lead_repository,
+        campaign_enrollment_repository=bundle.campaign_enrollment_repository,
     )
     if result.status is UncertainOccurrenceResolutionStatus.REJECTED:
         raise HTTPException(
@@ -918,6 +919,7 @@ async def _apply_review_action_route(
         lead_workflow_override_audit_repository=bundle.lead_workflow_override_audit_repository,
         workspace_repository=bundle.workspace_repository,
         paused_search_occurrence_repository=bundle.occurrence_transition_repository,
+        campaign_enrollment_repository=bundle.campaign_enrollment_repository,
         commit=bundle.session.commit,
         message_repository=bundle.message_repository,
         idempotency_key=idempotency_key,

@@ -34,11 +34,18 @@ from app.application.use_cases.campaign_enrollment_types import (
     LeadStartResult,
     LeadStartStatus,
 )
-from app.domain.campaigns.enrollment import CampaignEnrollmentSource
+from app.domain.campaigns.enrollment import (
+    CampaignEnrollmentSource,
+    enrollment_status_for_terminal_workflow_state,
+)
 from app.domain.campaigns.paused_search_tracks import PausedSearchTrackAssignmentSource
 from app.domain.common.ids import CampaignId, CampaignVersionId, LeadId, WorkspaceId
 from app.domain.leads import CanonicalLeadRecord
-from app.domain.workflows import WorkflowState, WorkflowTransitionReasonCode
+from app.domain.workflows import (
+    WorkflowState,
+    WorkflowTransitionReasonCode,
+    is_terminal_workflow_state,
+)
 
 
 class PausedSearchCampaignEnrollmentStatus(StrEnum):
@@ -120,6 +127,30 @@ async def start_paused_search_campaign_enrollment(
         lead_id,
         campaign_id,
     )
+    if existing is not None:
+        # An enrollment row can be left in an active status when its workflow
+        # terminalized before the enrollment sync existed. Repair it here so a
+        # stale row never blocks a legitimate re-enrollment.
+        latest_workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
+            workspace_id,
+            lead_id,
+        )
+        if (
+            latest_workflow is not None
+            and latest_workflow.campaign_enrollment_id == existing.campaign_enrollment_id
+            and is_terminal_workflow_state(latest_workflow.state)
+        ):
+            terminal_status = enrollment_status_for_terminal_workflow_state(
+                latest_workflow.state,
+            )
+            if terminal_status is not None:
+                await campaign_enrollment_repository.mark_terminal(
+                    workspace_id,
+                    existing.campaign_enrollment_id,
+                    terminal_status,
+                    now,
+                )
+                existing = None
     if existing is None:
         lead_result = await start_single_campaign_enrollment(
             workspace_id=workspace_id,
@@ -210,7 +241,11 @@ async def start_paused_search_campaign_enrollment(
         if transition_result.workflow is not None:
             pinned_workflow = transition_result.workflow
 
-    if existing is not None and pinned_workflow.temporal_workflow_id is not None:
+    if (
+        existing is not None
+        and pinned_workflow.temporal_workflow_id is not None
+        and not is_terminal_workflow_state(pinned_workflow.state)
+    ):
         if commit is not None:
             await commit()
         await temporal_workflow_starter.configure_paused_search_workflow(

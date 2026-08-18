@@ -4,6 +4,7 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     LeadRepository,
     LeadWorkflowRepository,
     PausedSearchOccurrenceRepository,
@@ -68,6 +69,7 @@ async def resolve_uncertain_paused_search_occurrence(
     actor_user_id: UUID | None = None,
     actor: AuthenticatedActor | None = None,
     lead_repository: LeadRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
 ) -> UncertainOccurrenceResolutionResult:
     # Probe unlocked to learn the lead, then lock workflow before occurrence —
     # the canonical lock order shared with cadence execution and the delivery
@@ -156,6 +158,7 @@ async def resolve_uncertain_paused_search_occurrence(
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
         paused_search_occurrence_repository=occurrence_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
         now=now,
         actor_user_id=actor_user_id,
         metadata={"occurrence_id": str(occurrence_id), "resolution": resolution.value},

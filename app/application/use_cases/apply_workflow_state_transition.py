@@ -5,10 +5,12 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     LeadWorkflowRepository,
     PausedSearchOccurrenceRepository,
     WorkflowTransitionRepository,
 )
+from app.domain.campaigns.enrollment import enrollment_status_for_terminal_workflow_state
 from app.domain.common.ids import LeadId, UserId, WorkspaceId
 from app.domain.workflows import (
     LeadWorkflow,
@@ -42,6 +44,7 @@ async def apply_workflow_state_transition(
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
     now: datetime,
     actor_user_id: UserId | None = None,
     external_event_id: UUID | None = None,
@@ -90,8 +93,37 @@ async def apply_workflow_state_transition(
             now=now,
             reason=reason_code.value,
         )
+    if campaign_enrollment_repository is not None:
+        await _sync_enrollment_with_terminal_workflow(
+            workflow=saved_workflow,
+            campaign_enrollment_repository=campaign_enrollment_repository,
+            now=now,
+        )
     return WorkflowStateTransitionOutcome(
         status=WorkflowStateTransitionStatus.UPDATED,
         workflow=saved_workflow,
         transition_id=saved_transition.transition_id,
+    )
+
+
+async def _sync_enrollment_with_terminal_workflow(
+    *,
+    workflow: LeadWorkflow,
+    campaign_enrollment_repository: CampaignEnrollmentRepository,
+    now: datetime,
+) -> None:
+    """Mirror a terminal workflow state onto its campaign enrollment.
+
+    The enrollment row is the admission gate for re-entry; leaving it in an
+    active status after the workflow terminalizes blocks legitimate
+    re-enrollment. Only the enrollment owned by this workflow is touched.
+    """
+    terminal_status = enrollment_status_for_terminal_workflow_state(workflow.state)
+    if terminal_status is None:
+        return
+    await campaign_enrollment_repository.mark_terminal(
+        workflow.workspace_id,
+        workflow.campaign_enrollment_id,
+        terminal_status,
+        now,
     )

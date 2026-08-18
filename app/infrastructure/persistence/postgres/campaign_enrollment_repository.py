@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
-from sqlalchemy import Select, func, select, text
+from sqlalchemy import Select, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,6 +72,25 @@ class PostgresCampaignEnrollmentRepository:
             .where(CampaignEnrollmentModel.started_at < tomorrow_start),
         )
         return result.scalar() or 0
+
+    async def mark_terminal(
+        self,
+        workspace_id: WorkspaceId,
+        campaign_enrollment_id: UUID,
+        status: CampaignEnrollmentStatus,
+        now: datetime,
+    ) -> None:
+        await self._session.execute(
+            update(CampaignEnrollmentModel)
+            .where(CampaignEnrollmentModel.workspace_id == workspace_id)
+            .where(CampaignEnrollmentModel.campaign_enrollment_id == campaign_enrollment_id)
+            .where(CampaignEnrollmentModel.status.in_(_ACTIVE_ENROLLMENT_STATUSES))
+            .values(
+                status=status.value,
+                ended_at=func.coalesce(CampaignEnrollmentModel.ended_at, now),
+                updated_at=now,
+            ),
+        )
 
     async def save(self, enrollment: CampaignEnrollment) -> CampaignEnrollment:
         now = datetime.now(UTC)

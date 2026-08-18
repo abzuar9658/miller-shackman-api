@@ -59,6 +59,27 @@ class FakeCampaignEnrollmentRepository:
         )
         return enrollment
 
+    async def mark_terminal(
+        self,
+        workspace_id: WorkspaceId,
+        campaign_enrollment_id: UUID,
+        status: CampaignEnrollmentStatus,
+        now: datetime,
+    ) -> None:
+        for key, enrollment in self.enrollments.items():
+            if (
+                enrollment.workspace_id == workspace_id
+                and enrollment.campaign_enrollment_id == campaign_enrollment_id
+                and enrollment.status in _ACTIVE_ENROLLMENT_STATUSES
+            ):
+                self.enrollments[key] = replace(
+                    enrollment,
+                    status=status,
+                    ended_at=enrollment.ended_at or now,
+                    updated_at=now,
+                )
+                return
+
     async def count_started_today(
         self,
         workspace_id: WorkspaceId,

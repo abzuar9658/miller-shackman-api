@@ -5,6 +5,7 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     ExternalEventRepository,
     LeadRepository,
     LeadWorkflowRepository,
@@ -92,6 +93,7 @@ async def process_contact_suppression_event(
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     now: datetime,
@@ -177,6 +179,7 @@ async def process_contact_suppression_event(
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
         paused_search_occurrence_repository=paused_search_occurrence_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
         now=event.occurred_at,
         external_event_id=saved_event.external_event_id,
         metadata=_suppression_metadata(event),

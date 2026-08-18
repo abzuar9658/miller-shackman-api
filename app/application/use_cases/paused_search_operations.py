@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 from app.application.ports.lead_read import LeadReadLeadRepository, LeadReadWorkflowRepository
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     ExternalEventRepository,
     LeadPausedSearchHistoryRepository,
     LeadRepository,
@@ -287,6 +288,7 @@ async def apply_paused_search_review_action(
     lead_workflow_override_audit_repository: LeadWorkflowOverrideAuditLogRepository | None = None,
     workspace_repository: WorkspaceRepository | None = None,
     paused_search_occurrence_repository: PausedSearchOccurrenceOperationsRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
     commit: Callable[[], Awaitable[None]] | None = None,
     action_lead_repository: LeadRepository | None = None,
     message_repository: OutboundMessageRepository | None = None,
@@ -361,6 +363,7 @@ async def apply_paused_search_review_action(
             lead_workflow_override_audit_repository=lead_workflow_override_audit_repository,
             workspace_repository=workspace_repository,
             paused_search_occurrence_repository=paused_search_occurrence_repository,
+            campaign_enrollment_repository=campaign_enrollment_repository,
             terminal_behavior=terminal_behavior,
             commit=commit,
         ):
@@ -714,6 +717,7 @@ async def _execute_policy_resolution(
     lead_workflow_override_audit_repository: LeadWorkflowOverrideAuditLogRepository | None,
     workspace_repository: WorkspaceRepository | None,
     paused_search_occurrence_repository: PausedSearchOccurrenceOperationsRepository | None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None,
     terminal_behavior: PausedSearchTerminalBehavior | None,
     commit: Callable[[], Awaitable[None]] | None,
 ) -> bool:
@@ -785,6 +789,7 @@ async def _execute_policy_resolution(
             lead_workflow_repository=action_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
             paused_search_occurrence_repository=None,
+            campaign_enrollment_repository=campaign_enrollment_repository,
             now=now,
             actor_user_id=actor.user_id,
             metadata={"reason": reason, "terminal_behavior": terminal_behavior.value},

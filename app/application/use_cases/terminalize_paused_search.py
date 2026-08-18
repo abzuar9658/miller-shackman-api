@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from app.application.ports.lead_read import LeadReadLeadRepository
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     ExternalEventRepository,
     LeadWorkflowRepository,
     PausedSearchOccurrenceRepository,
@@ -74,6 +75,7 @@ async def terminalize_paused_search(
     external_event_repository: ExternalEventRepository,
     commit: Callable[[], Awaitable[None]],
     now: datetime,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
 ) -> PausedSearchTerminalizationResult:
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
     if lead is None:
@@ -119,6 +121,7 @@ async def terminalize_paused_search(
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
         paused_search_occurrence_repository=paused_search_occurrence_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
         now=now,
         actor_user_id=actor.user_id,
         external_event_id=event.external_event_id,

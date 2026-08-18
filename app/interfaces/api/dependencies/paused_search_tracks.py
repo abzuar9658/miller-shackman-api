@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.ports.event_bus import EventBus
 from app.application.ports.lead_read import LeadReadLeadRepository, LeadReadWorkflowRepository
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     ExternalEventRepository,
     LeadPausedSearchHistoryRepository,
     LeadRepository,
@@ -27,6 +28,9 @@ from app.application.ports.repositories import (
     WorkspaceRepository,
 )
 from app.core.database import get_session
+from app.infrastructure.persistence.postgres.campaign_enrollment_repository import (
+    PostgresCampaignEnrollmentRepository,
+)
 from app.infrastructure.persistence.postgres.crm_sync_repository import (
     PostgresExternalEventRepository,
 )
@@ -104,6 +108,7 @@ class PausedSearchOperationsBundle:
     lead_workflow_override_audit_repository: LeadWorkflowOverrideAuditLogRepository
     workspace_repository: WorkspaceRepository
     occurrence_transition_repository: PausedSearchOccurrenceOperationsRepository
+    campaign_enrollment_repository: CampaignEnrollmentRepository
     session: SessionCommitter
 
 
@@ -152,5 +157,6 @@ async def get_paused_search_operations_bundle(
         lead_workflow_override_audit_repository=PostgresLeadWorkflowOverrideAuditLogRepository(session),
         workspace_repository=PostgresWorkspaceRepository(session),
         occurrence_transition_repository=PostgresPausedSearchOccurrenceRepository(session),
+        campaign_enrollment_repository=PostgresCampaignEnrollmentRepository(session),
         session=session,
     )

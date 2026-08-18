@@ -1455,6 +1455,19 @@ class CampaignEnrollmentRepository(Protocol):
     ) -> int:
         raise NotImplementedError
 
+    async def mark_terminal(
+        self,
+        workspace_id: WorkspaceId,
+        campaign_enrollment_id: UUID,
+        status: Any,
+        now: Any,
+    ) -> None:
+        """Move the enrollment to a terminal status and stamp ended_at.
+
+        No-op when the enrollment does not exist or is already terminal.
+        """
+        raise NotImplementedError
+
 
 class LeadWorkflowRepository(Protocol):
     async def list_active_paused_search_for_lead_for_update(

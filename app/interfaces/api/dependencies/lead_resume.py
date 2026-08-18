@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.ports.lead_read import LeadReadLeadRepository, LeadReadWorkflowRepository
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     ExternalEventRepository,
     LeadWorkflowRepository,
     PausedSearchOccurrenceRepository,
@@ -15,6 +16,9 @@ from app.application.ports.repositories import (
     WorkspaceContactPolicyRepository,
 )
 from app.core.database import get_session
+from app.infrastructure.persistence.postgres.campaign_enrollment_repository import (
+    PostgresCampaignEnrollmentRepository,
+)
 from app.infrastructure.persistence.postgres.crm_sync_repository import (
     PostgresExternalEventRepository,
 )
@@ -61,6 +65,7 @@ class LeadResumeActionBundle:
     external_event_repository: ExternalEventRepository
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None
     rejected_draft_review_repository: RejectedDraftReviewRepository | None = None
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None
 
 
 async def get_lead_resume_read_bundle(
@@ -87,4 +92,5 @@ async def get_lead_resume_action_bundle(
         external_event_repository=PostgresExternalEventRepository(session),
         paused_search_occurrence_repository=PostgresPausedSearchOccurrenceRepository(session),
         rejected_draft_review_repository=PostgresRejectedDraftReviewRepository(session),
+        campaign_enrollment_repository=PostgresCampaignEnrollmentRepository(session),
     )
