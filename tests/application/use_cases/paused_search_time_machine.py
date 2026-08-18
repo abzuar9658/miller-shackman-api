@@ -194,6 +194,34 @@ class PausedSearchTimeMachineOccurrenceRepository:
     async def resolve_uncertain(self, **_: object) -> RecurringOccurrence | None:
         return None
 
+    async def reopen_failed_for_retry(
+        self,
+        *,
+        workspace_id: UUID,
+        occurrence_id: UUID,
+        scheduled_for: datetime,
+        due_at: datetime,
+        now: datetime,
+    ) -> RecurringOccurrence | None:
+        for index, item in enumerate(self.occurrences):
+            if (
+                item.workspace_id == workspace_id
+                and item.occurrence_id == occurrence_id
+                and item.status is RecurringOccurrenceStatus.FAILED
+            ):
+                reopened = replace(
+                    item,
+                    status=RecurringOccurrenceStatus.PLANNED,
+                    scheduled_for=scheduled_for,
+                    due_at=due_at,
+                    closed_at=None,
+                    provider_message_id=None,
+                    provider_delivery_status=None,
+                )
+                self.occurrences[index] = reopened
+                return reopened
+        return None
+
     async def get_by_id(
         self, workspace_id: UUID, occurrence_id: UUID
     ) -> RecurringOccurrence | None:

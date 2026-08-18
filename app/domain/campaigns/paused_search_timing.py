@@ -64,6 +64,7 @@ def plan_next_paused_search_occurrence(
     now: datetime,
     occurrence_number: int,
     previous_due_at: datetime | None,
+    is_retry: bool = False,
     quiet_hours_enabled: bool = True,
     quiet_hours_start: time | None = time(10, 0),
     quiet_hours_end: time | None = time(17, 0),
@@ -102,7 +103,10 @@ def plan_next_paused_search_occurrence(
             reason_detail=base_plan.reason_detail,
         )
 
-    if occurrence_number == 1:
+    if occurrence_number == 1 or is_retry:
+        # A retry re-plans the same occurrence slot: the failed attempt never
+        # reached the lead, so the step is still due and timing derives fresh
+        # from the base plan instead of the previous occurrence's interval.
         due_at = base_plan.next_action_at
     else:
         if step.interval_days is None or previous_due_at is None:

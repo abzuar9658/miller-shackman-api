@@ -243,6 +243,34 @@ class FakePausedSearchOccurrenceRepository:
         self.updated.append(self.occurrence)
         return self.occurrence
 
+    async def reopen_failed_for_retry(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+        scheduled_for: datetime,
+        due_at: datetime,
+        now: datetime,
+    ) -> RecurringOccurrence | None:
+        if (
+            self.occurrence is None
+            or self.occurrence.workspace_id != workspace_id
+            or self.occurrence.occurrence_id != occurrence_id
+            or self.occurrence.status != RecurringOccurrenceStatus.FAILED
+        ):
+            return None
+        self.occurrence = replace(
+            self.occurrence,
+            status=RecurringOccurrenceStatus.PLANNED,
+            scheduled_for=scheduled_for,
+            due_at=due_at,
+            closed_at=None,
+            provider_message_id=None,
+            provider_delivery_status=None,
+        )
+        self.updated.append(self.occurrence)
+        return self.occurrence
+
     async def get_by_id_for_update(
         self,
         workspace_id: WorkspaceId,

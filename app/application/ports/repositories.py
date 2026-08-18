@@ -1193,6 +1193,17 @@ class PausedSearchOccurrenceRepository(Protocol):
     ) -> RecurringOccurrence | None:
         raise NotImplementedError
 
+    async def reopen_failed_for_retry(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+        scheduled_for: datetime,
+        due_at: datetime,
+        now: datetime,
+    ) -> RecurringOccurrence | None:
+        raise NotImplementedError
+
     async def get_by_id_for_update(
         self,
         workspace_id: WorkspaceId,

@@ -324,6 +324,35 @@ class _Phase4OccurrenceRepository:
     ) -> RecurringOccurrence | None:
         return await self.get_by_id(workspace_id, occurrence_id)
 
+    async def reopen_failed_for_retry(
+        self,
+        *,
+        workspace_id: UUID,
+        occurrence_id: UUID,
+        scheduled_for: datetime,
+        due_at: datetime,
+        now: datetime,
+    ) -> RecurringOccurrence | None:
+        for index, occurrence in enumerate(self.occurrences):
+            if (
+                occurrence.workspace_id != workspace_id
+                or occurrence.occurrence_id != occurrence_id
+                or occurrence.status != RecurringOccurrenceStatus.FAILED
+            ):
+                continue
+            updated = replace(
+                occurrence,
+                status=RecurringOccurrenceStatus.PLANNED,
+                scheduled_for=scheduled_for,
+                due_at=due_at,
+                closed_at=None,
+                provider_message_id=None,
+                provider_delivery_status=None,
+            )
+            self.occurrences[index] = updated
+            return updated
+        return None
+
 
 def _crm_event(
     *,
