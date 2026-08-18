@@ -19,6 +19,11 @@ from app.domain.campaigns import (
     RecurringOccurrence,
     RecurringOccurrenceStatus,
 )
+from app.domain.campaigns.enrollment import (
+    CampaignEnrollment,
+    CampaignEnrollmentSource,
+    CampaignEnrollmentStatus,
+)
 from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.common.ids import PausedSearchTrackVersionId
 from app.domain.compliance.contactability import (
@@ -41,6 +46,9 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeWorkflowTransitionRepository,
     FakeWorkspaceContactPolicyRepository,
     FakeWorkspaceOperationalControlRepository,
+)
+from tests.application.use_cases._campaign_enrollment_fakes import (
+    FakeCampaignEnrollmentRepository,
 )
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
@@ -75,7 +83,11 @@ class _FakeOccurrenceRepository:
             and occurrence.track_version_id == track_version_id
             and occurrence.step_id == step_id
         ]
-        return max(matches, key=lambda occurrence: occurrence.occurrence_number, default=None)
+        return max(
+            matches,
+            key=lambda occurrence: (occurrence.occurrence_number, occurrence.scheduled_for),
+            default=None,
+        )
 
     async def get_by_identity(
         self,
@@ -134,6 +146,34 @@ class _FakeOccurrenceRepository:
             return existing
         self.saved.append(occurrence)
         return occurrence
+
+    async def reopen_failed_for_retry(
+        self,
+        *,
+        workspace_id: UUID,
+        occurrence_id: UUID,
+        scheduled_for: datetime,
+        due_at: datetime,
+        now: datetime,
+    ) -> RecurringOccurrence | None:
+        for index, occurrence in enumerate(self.saved):
+            if (
+                occurrence.workspace_id == workspace_id
+                and occurrence.occurrence_id == occurrence_id
+                and occurrence.status is RecurringOccurrenceStatus.FAILED
+            ):
+                reopened = replace(
+                    occurrence,
+                    status=RecurringOccurrenceStatus.PLANNED,
+                    scheduled_for=scheduled_for,
+                    due_at=due_at,
+                    closed_at=None,
+                    provider_message_id=None,
+                    provider_delivery_status=None,
+                )
+                self.saved[index] = reopened
+                return reopened
+        return None
 
 
 def _lead(*, paused_search_active: bool = True) -> CanonicalLeadRecord:
@@ -228,6 +268,68 @@ async def test_recurring_schedule_is_idempotent_and_stops_at_limit() -> None:
         occurrence_repo.saved[1], status=RecurringOccurrenceStatus.SENT
     )
     terminal = await schedule_next_paused_search_action(**kwargs)
+    assert terminal.status == PausedSearchScheduleStatus.TERMINAL
+    assert terminal.reason_code == PausedSearchTimingReasonCode.OCCURRENCE_LIMIT_REACHED
+
+
+async def test_failed_occurrence_is_retried_without_consuming_cap() -> None:
+    workflow_repo = FakeLeadWorkflowRepository()
+    await workflow_repo.save(_workflow())
+    occurrence_repo = _FakeOccurrenceRepository()
+    track_repo = FakePausedSearchTrackAdminRepository(
+        versions=(_track_version(),),
+        steps=(replace(_step(), delay_hours=0, interval_days=30, max_occurrences=2),),
+    )
+    kwargs: dict[str, Any] = {
+        "workspace_id": WORKSPACE_ID,
+        "lead_id": LEAD_ID,
+        "lead_repository": FakeLeadRepository(_lead()),
+        "paused_search_track_repository": track_repo,
+        "lead_workflow_repository": workflow_repo,
+        "timezone": TIMEZONE,
+        "now": NOW,
+        "occurrence_repository": occurrence_repo,
+    }
+
+    first = await schedule_next_paused_search_action(**kwargs)
+    assert first.occurrence is not None
+    assert first.occurrence.occurrence_number == 1
+    failed = replace(
+        occurrence_repo.saved[0],
+        status=RecurringOccurrenceStatus.FAILED,
+        failure_reason="provider send failed",
+    )
+    occurrence_repo.saved[0] = failed
+
+    retry = await schedule_next_paused_search_action(
+        **{**kwargs, "now": NOW + timedelta(hours=1)}
+    )
+    assert retry.status == PausedSearchScheduleStatus.SCHEDULED
+    assert retry.occurrence is not None
+    assert retry.occurrence.occurrence_number == 1
+    assert retry.occurrence.occurrence_id == failed.occurrence_id
+    assert retry.occurrence.status is RecurringOccurrenceStatus.PLANNED
+    assert retry.occurrence.closed_at is None
+    assert len(occurrence_repo.saved) == 1
+
+    # The retried slot completes; the second slot is still available because
+    # the failed attempt did not consume it.
+    occurrence_repo.saved[0] = replace(
+        occurrence_repo.saved[0], status=RecurringOccurrenceStatus.SENT
+    )
+    second = await schedule_next_paused_search_action(
+        **{**kwargs, "now": NOW + timedelta(hours=2)}
+    )
+    assert second.occurrence is not None
+    assert second.occurrence.occurrence_number == 2
+    assert len(occurrence_repo.saved) == 2
+
+    occurrence_repo.saved[1] = replace(
+        occurrence_repo.saved[1], status=RecurringOccurrenceStatus.SENT
+    )
+    terminal = await schedule_next_paused_search_action(
+        **{**kwargs, "now": NOW + timedelta(hours=3)}
+    )
     assert terminal.status == PausedSearchScheduleStatus.TERMINAL
     assert terminal.reason_code == PausedSearchTimingReasonCode.OCCURRENCE_LIMIT_REACHED
 
@@ -438,6 +540,58 @@ async def test_touch_limit_terminalizes_workflow_with_published_behavior() -> No
     assert result.workflow is not None
     assert result.workflow.state == WorkflowState.COMPLETED
     assert len(transition_repo.transitions) == 1
+
+
+async def test_touch_limit_terminalization_closes_campaign_enrollment() -> None:
+    workflow_repo = FakeLeadWorkflowRepository()
+    workflow = replace(_workflow(), logical_touch_count=5)
+    await workflow_repo.save(workflow)
+    transition_repo = FakeWorkflowTransitionRepository()
+    enrollment_repo = FakeCampaignEnrollmentRepository()
+    await enrollment_repo.save(
+        CampaignEnrollment(
+            campaign_enrollment_id=workflow.campaign_enrollment_id,
+            workspace_id=WORKSPACE_ID,
+            campaign_id=workflow.campaign_id,
+            campaign_version_id=uuid4(),
+            lead_id=LEAD_ID,
+            source=CampaignEnrollmentSource.MANUAL_ADMIN,
+            status=CampaignEnrollmentStatus.QUEUED,
+            eligible_at=NOW,
+            enrolled_at=NOW,
+            started_at=None,
+            ended_at=None,
+            created_by_user_id=None,
+            reason_codes=(),
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+
+    result = await schedule_next_paused_search_action(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        lead_repository=FakeLeadRepository(_lead()),
+        paused_search_track_repository=FakePausedSearchTrackAdminRepository(
+            versions=(_track_version(),),
+            steps=(_step(),),
+        ),
+        lead_workflow_repository=workflow_repo,
+        workflow_transition_repository=transition_repo,
+        campaign_enrollment_repository=enrollment_repo,
+        timezone=TIMEZONE,
+        now=NOW,
+    )
+
+    assert result.status == PausedSearchScheduleStatus.TERMINAL
+    stored = await enrollment_repo.get_latest_by_lead_and_campaign(
+        WORKSPACE_ID,
+        LEAD_ID,
+        workflow.campaign_id,
+    )
+    assert stored is not None
+    assert stored.status == CampaignEnrollmentStatus.COMPLETED
+    assert stored.ended_at == NOW
 
 
 async def test_terminal_pause_for_review_keeps_workflow_open_for_resolution() -> None:

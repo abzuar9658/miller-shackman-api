@@ -22,6 +22,9 @@ from app.core.database import (
     enable_postgres_service_access,
     service_access_commit,
 )
+from app.infrastructure.persistence.postgres.campaign_enrollment_repository import (
+    PostgresCampaignEnrollmentRepository,
+)
 from app.infrastructure.persistence.postgres.campaign_execution_repository import (
     PostgresCampaignExecutionRepository,
 )
@@ -144,6 +147,7 @@ async def schedule_next_campaign_cadence_step_activity(
                 session
             ),
             workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
+            campaign_enrollment_repository=PostgresCampaignEnrollmentRepository(session),
             recurring_paused_search_pilot_workspace_ids=(
                 settings.recurring_paused_search_pilot_workspace_ids
             ),
@@ -231,6 +235,7 @@ async def execute_campaign_cadence_step_activity(
                 PostgresOutboundMessageCRMCompletionRepository(session)
             ),
             workspace_handoff_config_repository=PostgresWorkspaceHandoffConfigRepository(session),
+            campaign_enrollment_repository=PostgresCampaignEnrollmentRepository(session),
             now=input_.occurred_at,
             default_openrouter_model=settings.openrouter_model,
             recurring_paused_search_pilot_workspace_ids=(

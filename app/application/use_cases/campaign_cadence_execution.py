@@ -17,6 +17,7 @@ from app.application.ports.messaging import (
 )
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     CampaignExecutionRepository,
     CRMAgentRepository,
     CrmConversationEventRepository,
@@ -190,6 +191,7 @@ async def schedule_next_campaign_cadence_step(
     workflow_transition_repository: WorkflowTransitionRepository | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
     recurring_paused_search_pilot_workspace_ids: Collection[WorkspaceId] | None = None,
     now: datetime,
 ) -> CadenceStepScheduleResult:
@@ -265,6 +267,7 @@ async def schedule_next_campaign_cadence_step(
             workflow_transition_repository=workflow_transition_repository,
             workspace_operational_control_repository=workspace_operational_control_repository,
             workspace_contact_policy_repository=workspace_contact_policy_repository,
+            campaign_enrollment_repository=campaign_enrollment_repository,
             recurring_paused_search_pilot_workspace_ids=recurring_paused_search_pilot_workspace_ids,
             timezone=config.timezone,
             now=now,
@@ -345,6 +348,7 @@ async def execute_campaign_cadence_step(
     outbound_provider_failure_repository: OutboundProviderFailureRepository | None = None,
     outbound_send_request_repository: OutboundSendRequestRepository | None = None,
     workspace_handoff_config_repository: WorkspaceHandoffConfigRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
     now: datetime,
     default_openrouter_model: str = "openai/gpt-4o-mini",
     workspace_automation_defer_interval: timedelta = timedelta(minutes=15),
@@ -410,6 +414,7 @@ async def execute_campaign_cadence_step(
             paused_search_occurrence_repository=paused_search_occurrence_repository,
             workspace_operational_control_repository=workspace_operational_control_repository,
             workspace_contact_policy_repository=workspace_contact_policy_repository,
+            campaign_enrollment_repository=campaign_enrollment_repository,
             recurring_paused_search_pilot_workspace_ids=recurring_paused_search_pilot_workspace_ids,
             workflow=workflow,
             now=now,
@@ -1285,6 +1290,7 @@ async def _revalidate_paused_search_execution_gate(
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None,
     recurring_paused_search_pilot_workspace_ids: Collection[WorkspaceId] | None,
     workflow: LeadWorkflow,
     now: datetime,
@@ -1297,6 +1303,7 @@ async def _revalidate_paused_search_execution_gate(
         occurrence_repository=paused_search_occurrence_repository,
         workspace_operational_control_repository=workspace_operational_control_repository,
         workspace_contact_policy_repository=workspace_contact_policy_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
         recurring_paused_search_pilot_workspace_ids=recurring_paused_search_pilot_workspace_ids,
         lead_workflow_repository=lead_workflow_repository,
         timezone=timezone,

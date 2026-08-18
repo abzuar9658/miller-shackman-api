@@ -5,6 +5,7 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     LeadRepository,
     LeadWorkflowRepository,
     PausedSearchOccurrenceRepository,
@@ -86,6 +87,7 @@ async def schedule_next_paused_search_action(
     workflow_transition_repository: WorkflowTransitionRepository | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
     recurring_paused_search_pilot_workspace_ids: Collection[WorkspaceId] | None = None,
 ) -> PausedSearchNextActionScheduleResult:
     workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
@@ -181,6 +183,7 @@ async def schedule_next_paused_search_action(
             reason_detail=plan.reason_detail,
             lead_workflow_repository=lead_workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
+            campaign_enrollment_repository=campaign_enrollment_repository,
             now=now,
         )
         return _hold_result(workflow, plan)
@@ -220,7 +223,16 @@ async def schedule_next_paused_search_action(
                     occurrence=latest,
                 )
 
-            occurrence_number = latest.occurrence_number + 1 if latest is not None else 1
+            # A provider-failed attempt never reached the lead, so it must not
+            # consume the step's occurrence slot: retry the same occurrence
+            # number instead of planning the next one.
+            is_retry = latest is not None and latest.status is RecurringOccurrenceStatus.FAILED
+            if latest is None:
+                occurrence_number = 1
+            elif is_retry:
+                occurrence_number = latest.occurrence_number
+            else:
+                occurrence_number = latest.occurrence_number + 1
             occurrence_plan = plan_next_paused_search_occurrence(
                 profile=profile,
                 track_version=track_version,
@@ -231,6 +243,7 @@ async def schedule_next_paused_search_action(
                 now=now,
                 occurrence_number=occurrence_number,
                 previous_due_at=latest.due_at if latest is not None else None,
+                is_retry=is_retry,
                 quiet_hours_enabled=contact_policy.quiet_hours_enabled,
                 quiet_hours_start=contact_policy.quiet_hours_start,
                 quiet_hours_end=contact_policy.quiet_hours_end,
@@ -283,36 +296,46 @@ async def schedule_next_paused_search_action(
                     reason_detail=occurrence_plan.reason_detail,
                     lead_workflow_repository=lead_workflow_repository,
                     workflow_transition_repository=workflow_transition_repository,
+                    campaign_enrollment_repository=campaign_enrollment_repository,
                     now=now,
                 )
                 return _occurrence_hold_result(workflow, occurrence_plan)
 
             assert occurrence_plan.next_action_at is not None
             assert occurrence_plan.due_at is not None
-            occurrence = await occurrence_repository.create_or_get(
-                RecurringOccurrence(
-                    occurrence_id=uuid4(),
+            if is_retry and latest is not None:
+                occurrence = await occurrence_repository.reopen_failed_for_retry(
                     workspace_id=workspace_id,
-                    lead_id=lead_id,
-                    workflow_id=workflow.workflow_id,
-                    track_version_id=track_version_id,
-                    step_id=step.step_id,
-                    phase=step.phase,
-                    occurrence_number=occurrence_plan.occurrence_number,
+                    occurrence_id=latest.occurrence_id,
                     scheduled_for=occurrence_plan.next_action_at,
                     due_at=occurrence_plan.due_at,
-                    status=RecurringOccurrenceStatus.PLANNED,
-                    idempotency_key=occurrence_idempotency_key(
+                    now=now,
+                )
+            if occurrence is None:
+                occurrence = await occurrence_repository.create_or_get(
+                    RecurringOccurrence(
+                        occurrence_id=uuid4(),
+                        workspace_id=workspace_id,
+                        lead_id=lead_id,
                         workflow_id=workflow.workflow_id,
                         track_version_id=track_version_id,
                         step_id=step.step_id,
+                        phase=step.phase,
                         occurrence_number=occurrence_plan.occurrence_number,
-                        channel=step.channel.value,
-                    ),
-                    created_at=now,
-                    timezone_snapshot=timezone,
+                        scheduled_for=occurrence_plan.next_action_at,
+                        due_at=occurrence_plan.due_at,
+                        status=RecurringOccurrenceStatus.PLANNED,
+                        idempotency_key=occurrence_idempotency_key(
+                            workflow_id=workflow.workflow_id,
+                            track_version_id=track_version_id,
+                            step_id=step.step_id,
+                            occurrence_number=occurrence_plan.occurrence_number,
+                            channel=step.channel.value,
+                        ),
+                        created_at=now,
+                        timezone_snapshot=timezone,
+                    )
                 )
-            )
             plan = PausedSearchNextActionPlan(
                 next_action_at=occurrence_plan.next_action_at,
                 phase=occurrence_plan.phase,
@@ -366,6 +389,7 @@ async def _save_terminal_or_hold(
     reason_detail: str | None,
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository | None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None,
     now: datetime,
 ) -> LeadWorkflow:
     terminal_reason_codes = {
@@ -388,6 +412,7 @@ async def _save_terminal_or_hold(
         reason_code=WorkflowTransitionReasonCode.PAUSED_SEARCH_TERMINALIZED,
         lead_workflow_repository=lead_workflow_repository,
         workflow_transition_repository=workflow_transition_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
         now=now,
         metadata={
             "reason_code": reason_code.value,
