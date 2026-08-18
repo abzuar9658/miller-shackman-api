@@ -74,6 +74,7 @@ def _activity_item(
     direction: str | None = None,
     channel: str | None = None,
     actor_name: str | None = None,
+    status: str | None = None,
 ) -> LeadActivityItem:
     lead = _canonical_lead()
     return LeadActivityItem(
@@ -87,6 +88,7 @@ def _activity_item(
         direction=direction,
         channel=channel,
         actor_name=actor_name,
+        status=status,
     )
 
 
@@ -252,6 +254,80 @@ def test_activity_history_builds_bounded_memory_recent_transcript_and_outbound_h
     assert context.recent_outbound_messages == (
         "Checking in about your home search in Riverdale and whether a 2 bed still works.",
     )
+
+
+def test_failed_and_cancelled_outbound_items_are_excluded_from_all_history_sections() -> None:
+    lead = _canonical_lead()
+    failed_body = "You recently renewed your lease, which pushed back your home-buying timeline."
+    activity_items = tuple(
+        _activity_item(
+            title="Outbound outreach logged",
+            preview=failed_body,
+            content=failed_body,
+            kind=LeadActivityKind.OUTBOUND_MESSAGE,
+            occurred_at=NOW - timedelta(minutes=index),
+            direction="outbound",
+            channel="email",
+            status="failed",
+        )
+        for index in range(24)
+    ) + (
+        _activity_item(
+            title="Outbound outreach logged",
+            preview="Cancelled draft about lease renewal.",
+            content="Cancelled draft about lease renewal.",
+            kind=LeadActivityKind.OUTBOUND_MESSAGE,
+            occurred_at=NOW - timedelta(hours=1),
+            direction="outbound",
+            channel="email",
+            status="cancelled",
+        ),
+        _activity_item(
+            title="Outbound outreach logged",
+            preview="Checking in about your home search.",
+            content="Checking in about your home search.",
+            kind=LeadActivityKind.OUTBOUND_MESSAGE,
+            occurred_at=NOW - timedelta(hours=2),
+            direction="outbound",
+            channel="email",
+            status="sent",
+        ),
+    )
+
+    context = approved_outbound_context_from_canonical_lead(
+        lead,
+        now=NOW,
+        activity_items=activity_items,
+    )
+
+    assert context.conversation_memory_summary is not None
+    assert "renewed your lease" not in context.conversation_memory_summary
+    assert "Checking in about your home search." in context.conversation_memory_summary
+    assert all(
+        "renewed your lease" not in (item.content or "")
+        for item in context.recent_conversation_items
+    )
+    assert context.recent_outbound_messages == ("Checking in about your home search.",)
+
+
+def test_outbound_items_without_status_remain_in_history() -> None:
+    context = approved_outbound_context_from_canonical_lead(
+        _canonical_lead(),
+        now=NOW,
+        activity_items=(
+            _activity_item(
+                title="Outbound outreach logged",
+                preview="Checking in about your search.",
+                content="Checking in about your search.",
+                kind=LeadActivityKind.OUTBOUND_MESSAGE,
+                occurred_at=NOW,
+                direction="outbound",
+                channel="email",
+            ),
+        ),
+    )
+
+    assert context.recent_outbound_messages == ("Checking in about your search.",)
 
 
 def test_history_preferences_are_extracted_from_activity_items() -> None:

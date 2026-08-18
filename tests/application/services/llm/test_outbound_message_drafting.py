@@ -17,7 +17,11 @@ from app.application.services.llm.outbound_message_drafting import (
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.domain.llm import LLMProviderKind, LLMTaskKind
-from app.domain.outbound_drafting import OutboundJourneyKind, WorkspaceOutboundDraftingConfig
+from app.domain.outbound_drafting import (
+    OutboundJourneyChange,
+    OutboundJourneyKind,
+    WorkspaceOutboundDraftingConfig,
+)
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
 
@@ -164,6 +168,91 @@ async def test_threads_provider_through_draft_request() -> None:
     assert result.status == OutboundMessageDraftStatus.DRAFTED
     assert llm.requests[0].provider is LLMProviderKind.BEDROCK
     assert llm.requests[0].task is LLMTaskKind.DRAFTING
+
+
+async def test_journey_change_section_added_when_previous_journey_differs() -> None:
+    llm = FakeLLMClient(_draft_json())
+
+    await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.EMAIL,
+        campaign_goal="Re-open a helpful conversation without pressure.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(),
+        journey_kind=OutboundJourneyKind.DORMANT,
+        journey_change=OutboundJourneyChange(
+            previous_journey_kind=OutboundJourneyKind.PAUSED_SEARCH,
+        ),
+        llm_client=llm,
+    )
+
+    prompt = llm.requests[0].prompt
+    assert "## Journey Change" in prompt
+    assert "previously on a paused-search journey" in prompt
+    assert "moved to a dormant journey" in prompt
+    assert "Do not reuse, paraphrase, or reference the framing" in prompt
+
+
+async def test_journey_change_section_added_when_paused_search_track_changed() -> None:
+    llm = FakeLLMClient(_draft_json())
+
+    await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.EMAIL,
+        campaign_goal="Check in on paused timing.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(),
+        journey_kind=OutboundJourneyKind.PAUSED_SEARCH,
+        journey_change=OutboundJourneyChange(
+            previous_journey_kind=OutboundJourneyKind.PAUSED_SEARCH,
+            track_changed=True,
+        ),
+        llm_client=llm,
+    )
+
+    prompt = llm.requests[0].prompt
+    assert "## Journey Change" in prompt
+    assert "previously on a different paused-search track" in prompt
+    assert "moved to a new paused-search track" in prompt
+
+
+async def test_no_journey_change_section_without_journey_change() -> None:
+    llm = FakeLLMClient(_draft_json())
+
+    await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.EMAIL,
+        campaign_goal="Re-open a helpful conversation without pressure.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(),
+        journey_kind=OutboundJourneyKind.DORMANT,
+        llm_client=llm,
+    )
+
+    assert "## Journey Change" not in llm.requests[0].prompt
+
+
+async def test_no_journey_change_section_when_previous_journey_matches() -> None:
+    llm = FakeLLMClient(_draft_json())
+
+    await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.EMAIL,
+        campaign_goal="Re-open a helpful conversation without pressure.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(),
+        journey_kind=OutboundJourneyKind.DORMANT,
+        journey_change=OutboundJourneyChange(
+            previous_journey_kind=OutboundJourneyKind.DORMANT,
+        ),
+        llm_client=llm,
+    )
+
+    assert "## Journey Change" not in llm.requests[0].prompt
 
 
 async def test_uses_admin_configured_top_level_prompt_text() -> None:

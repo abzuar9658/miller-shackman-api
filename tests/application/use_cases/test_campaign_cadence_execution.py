@@ -3,6 +3,7 @@ from datetime import UTC, datetime, time, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+from app.application.ports.lead_activity import LeadActivityItem, LeadActivityKind
 from app.application.services.llm.outbound_query_extraction import (
     OUTBOUND_QUERY_EXTRACTION_PROMPT_VERSION,
 )
@@ -82,6 +83,9 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeWorkspaceContactPolicyRepository,
     FakeWorkspaceOutboundDraftingConfigRepository,
     FakeWorkspaceRepository,
+)
+from tests.application.use_cases._lead_read_fakes import (
+    FakeLeadActivityRepository,
 )
 from tests.application.use_cases._paused_search_track_fakes import (
     FakePausedSearchTrackAdminRepository,
@@ -493,6 +497,177 @@ async def test_execute_campaign_cadence_step_sends_first_step_and_advances_curso
     assert "Use the campaign version's dormant drafting voice." in draft_requests[0].prompt
 
 
+async def test_execute_dormant_step_after_paused_search_adds_journey_change_to_prompt() -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    llm_client = FakeLLMClient()
+    previous_paused_search_workflow = replace(
+        _paused_search_workflow(),
+        workflow_id=uuid4(),
+        temporal_workflow_id="lead-nurture:previous",
+        campaign_enrollment_id=uuid4(),
+        state=WorkflowState.COMPLETED,
+        last_transition_at=NOW - timedelta(days=30),
+    )
+    await workflow_repository.save(previous_paused_search_workflow)
+    await workflow_repository.save(_workflow())
+    schedule_result = await schedule_next_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        lead_workflow_repository=workflow_repository,
+        now=NOW,
+    )
+
+    result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=STEP_ONE_ID,
+        scheduled_for=schedule_result.scheduled_for or NOW,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        message_repository=FakeOutboundMessageRepository(),
+        llm_client=llm_client,
+        sms_provider=FakeSMSProvider(),
+        email_provider=FakeEmailProvider("email-123"),
+        crm_client=FakeCRMClient(),
+        outbound_message_crm_completion_repository=FakeOutboundMessageCRMCompletionRepository(),
+        now=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
+    )
+
+    assert result.status == CadenceStepExecutionStatus.SENT
+    draft_requests = _draft_requests(llm_client)
+    assert len(draft_requests) == 1
+    assert "## Journey Change" in draft_requests[0].prompt
+    assert "previously on a paused-search journey" in draft_requests[0].prompt
+    assert "moved to a dormant journey" in draft_requests[0].prompt
+
+
+async def test_execute_dormant_step_without_prior_workflow_has_no_journey_change() -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    llm_client = FakeLLMClient()
+    await workflow_repository.save(_workflow())
+    schedule_result = await schedule_next_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        lead_workflow_repository=workflow_repository,
+        now=NOW,
+    )
+
+    result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=STEP_ONE_ID,
+        scheduled_for=schedule_result.scheduled_for or NOW,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        message_repository=FakeOutboundMessageRepository(),
+        llm_client=llm_client,
+        sms_provider=FakeSMSProvider(),
+        email_provider=FakeEmailProvider("email-123"),
+        crm_client=FakeCRMClient(),
+        outbound_message_crm_completion_repository=FakeOutboundMessageCRMCompletionRepository(),
+        now=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
+    )
+
+    assert result.status == CadenceStepExecutionStatus.SENT
+    draft_requests = _draft_requests(llm_client)
+    assert len(draft_requests) == 1
+    assert "## Journey Change" not in draft_requests[0].prompt
+
+
+async def test_execute_step_excludes_failed_outbound_history_from_drafting_prompt() -> None:
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    llm_client = FakeLLMClient()
+    await workflow_repository.save(_workflow())
+    schedule_result = await schedule_next_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        lead_workflow_repository=workflow_repository,
+        now=NOW,
+    )
+    failed_body = "You recently renewed your lease, which pushed back your home-buying timeline."
+    activity_items = tuple(
+        LeadActivityItem(
+            activity_id=uuid4(),
+            lead_id=LEAD_ID,
+            kind=LeadActivityKind.OUTBOUND_MESSAGE,
+            occurred_at=NOW - timedelta(minutes=index),
+            title="Outbound outreach logged",
+            preview=failed_body,
+            content=failed_body,
+            channel="email",
+            direction="outbound",
+            status="failed",
+        )
+        for index in range(10)
+    ) + (
+        LeadActivityItem(
+            activity_id=uuid4(),
+            lead_id=LEAD_ID,
+            kind=LeadActivityKind.OUTBOUND_MESSAGE,
+            occurred_at=NOW - timedelta(days=2),
+            title="Outbound outreach logged",
+            preview="Checking in about your home search.",
+            content="Checking in about your home search.",
+            channel="email",
+            direction="outbound",
+            status="sent",
+        ),
+    )
+
+    result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=STEP_ONE_ID,
+        scheduled_for=schedule_result.scheduled_for or NOW,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        message_repository=FakeOutboundMessageRepository(),
+        lead_activity_repository=FakeLeadActivityRepository(activity_items),
+        llm_client=llm_client,
+        sms_provider=FakeSMSProvider(),
+        email_provider=FakeEmailProvider("email-123"),
+        crm_client=FakeCRMClient(),
+        outbound_message_crm_completion_repository=FakeOutboundMessageCRMCompletionRepository(),
+        now=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
+    )
+
+    assert result.status == CadenceStepExecutionStatus.SENT
+    draft_requests = _draft_requests(llm_client)
+    assert len(draft_requests) == 1
+    assert "renewed your lease" not in draft_requests[0].prompt
+    assert "Checking in about your home search." in draft_requests[0].prompt
+
+
 async def test_schedule_next_campaign_cadence_step_schedules_second_step_after_first_send() -> None:
     workflow_repository = FakeLeadWorkflowRepository()
     transition_repository = FakeWorkflowTransitionRepository()
@@ -752,6 +927,137 @@ async def test_execute_campaign_cadence_step_sends_paused_search_step_and_advanc
 
     assert duplicate_result.status == CadenceStepExecutionStatus.SKIPPED
     assert len(email_provider.messages) == 1
+
+
+async def test_pre_send_blocked_paused_search_step_leaves_occurrence_open() -> None:
+    """Regression: a pre-send policy block (e.g. 24h frequency limit) must not
+    close the occurrence as CANCELLED — that consumed the step's occurrence cap
+    and terminalized the workflow straight to COMPLETED on the next resume."""
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    send_now = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
+    await workflow_repository.save(
+        replace(
+            _paused_search_workflow(),
+            paused_search_track_step_id=PAUSED_SEARCH_STEP_ONE_ID,
+            next_action_at=send_now,
+        )
+    )
+    message_repository = FakeOutboundMessageRepository()
+    # A same-channel send one hour earlier trips the frequency-limit pre-send check.
+    await message_repository.save(
+        OutboundMessage(
+            message_id=UUID("00000000-0000-0000-0000-000000000098"),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            campaign_id=CAMPAIGN_ID,
+            cadence_step_id=str(STEP_ONE_ID),
+            channel=ContactChannel.EMAIL,
+            status=OutboundMessageStatus.SENT,
+            idempotency_key="previous-email-send",
+            body="Earlier outreach",
+            subject="Earlier outreach",
+            created_at=NOW,
+            updated_at=NOW,
+            planned_at=NOW,
+            scheduled_for=send_now - timedelta(hours=1),
+            sent_at=send_now - timedelta(hours=1),
+            message_version=1,
+            provider_send_status=ProviderSendStatus.ACCEPTED,
+            provider_name="mailgun",
+        )
+    )
+    email_provider = FakeEmailProvider("must-not-send")
+    occurrence_repository = FakePausedSearchOccurrenceRepository()
+
+    result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=PAUSED_SEARCH_STEP_ONE_ID,
+        scheduled_for=send_now,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        paused_search_track_repository=_paused_search_track_repository(),
+        paused_search_occurrence_repository=occurrence_repository,
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        workspace_outbound_drafting_config_repository=(
+            FakeWorkspaceOutboundDraftingConfigRepository(
+                default_workspace_outbound_drafting_config(WORKSPACE_ID)
+            )
+        ),
+        lead_repository=FakeLeadRepository(_paused_search_lead()),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        message_repository=message_repository,
+        llm_client=FakeLLMClient(),
+        sms_provider=FakeSMSProvider(),
+        email_provider=email_provider,
+        now=send_now,
+    )
+
+    assert result.status == CadenceStepExecutionStatus.REJECTED
+    assert result.workflow is not None
+    assert result.workflow.state == WorkflowState.PAUSED
+    assert email_provider.messages == []
+    # The occurrence slot must remain open so a resume retries the same step
+    # instead of counting the blocked attempt against the occurrence cap.
+    assert occurrence_repository.occurrence is not None
+    assert occurrence_repository.occurrence.status is RecurringOccurrenceStatus.PLANNED
+    assert occurrence_repository.occurrence.logical_touch_count == 0
+    assert result.workflow.logical_touch_count == 0
+    last_transition = list(transition_repository.transitions.values())[-1]
+    assert last_transition.reason_code == WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED
+    assert "frequency_limit_reached" in cast(
+        list[str], last_transition.metadata["pre_send_reasons"]
+    )
+
+    # A resume while the frequency window is still active blocks again but
+    # must keep the same occurrence open — repeated blocks never consume it.
+    await workflow_repository.save(
+        replace(
+            result.workflow,
+            state=WorkflowState.ACTIVE_NURTURE,
+            paused_search_track_step_id=PAUSED_SEARCH_STEP_ONE_ID,
+            next_action_at=send_now + timedelta(minutes=30),
+        )
+    )
+    second_result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=PAUSED_SEARCH_STEP_ONE_ID,
+        scheduled_for=send_now + timedelta(minutes=30),
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        paused_search_track_repository=_paused_search_track_repository(),
+        paused_search_occurrence_repository=occurrence_repository,
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        workspace_outbound_drafting_config_repository=(
+            FakeWorkspaceOutboundDraftingConfigRepository(
+                default_workspace_outbound_drafting_config(WORKSPACE_ID)
+            )
+        ),
+        lead_repository=FakeLeadRepository(_paused_search_lead()),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        message_repository=message_repository,
+        llm_client=FakeLLMClient(),
+        sms_provider=FakeSMSProvider(),
+        email_provider=email_provider,
+        now=send_now + timedelta(minutes=30),
+    )
+
+    assert second_result.status == CadenceStepExecutionStatus.REJECTED
+    assert second_result.workflow is not None
+    assert second_result.workflow.state == WorkflowState.PAUSED
+    assert email_provider.messages == []
+    assert occurrence_repository.occurrence.status is RecurringOccurrenceStatus.PLANNED
+    assert occurrence_repository.occurrence.logical_touch_count == 0
 
 
 async def test_execute_campaign_cadence_step_holds_review_required_message() -> None:

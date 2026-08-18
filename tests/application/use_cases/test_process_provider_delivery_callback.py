@@ -199,6 +199,15 @@ class FakeLeadWorkflowRepository:
     ) -> LeadWorkflow | None:
         return self.workflow
 
+    async def list_recent_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 5,
+    ) -> tuple[LeadWorkflow, ...]:
+        return (self.workflow,)[:limit]
+
     async def save(self, workflow: LeadWorkflow) -> LeadWorkflow:
         self.workflow = workflow
         self.saved.append(workflow)

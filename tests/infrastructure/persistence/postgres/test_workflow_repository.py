@@ -98,6 +98,26 @@ def test_list_active_paused_search_for_lead_for_update_uses_lock_and_scope() -> 
     assert "FOR UPDATE" in statement
 
 
+def test_list_recent_for_lead_orders_by_last_transition_desc_without_lock() -> None:
+    session = _FakeSession(_FakeResult(scalar_values=[_workflow_model()]))
+
+    result = _run(
+        PostgresLeadWorkflowRepository(cast(AsyncSession, session)).list_recent_for_lead(
+            WORKSPACE_ID,
+            LEAD_ID,
+            limit=5,
+        )
+    )
+
+    assert result == (_workflow(),)
+    statement = str(session.statements[0])
+    assert "lead_workflows.workspace_id" in statement
+    assert "lead_workflows.lead_id" in statement
+    assert "ORDER BY lead_workflows.last_transition_at DESC" in statement
+    assert "LIMIT" in statement
+    assert "FOR UPDATE" not in statement
+
+
 def test_save_workflow_uses_primary_key_upsert() -> None:
     session = _FakeSession(_FakeResult(scalar_value=_workflow_model()))
 

@@ -182,6 +182,11 @@ class FakeLeadWorkflowRepository:
     ) -> tuple[LeadWorkflow, ...]:
         return ()
 
+    async def list_recent_for_lead(
+        self, workspace_id: WorkspaceId, lead_id: LeadId, *, limit: int = 5
+    ) -> tuple[LeadWorkflow, ...]:
+        return (self.workflow,)[:limit]
+
     async def list_paused_for_workspace(
         self, workspace_id: WorkspaceId, *, limit: int = 100
     ) -> tuple[LeadWorkflow, ...]:

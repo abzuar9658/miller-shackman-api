@@ -1484,6 +1484,16 @@ class LeadWorkflowRepository(Protocol):
     ) -> LeadWorkflow | None:
         raise NotImplementedError
 
+    async def list_recent_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 5,
+    ) -> tuple[LeadWorkflow, ...]:
+        """Return the lead's workflows, newest transition first, including terminal ones."""
+        raise NotImplementedError
+
     async def list_paused_for_workspace(
         self,
         workspace_id: WorkspaceId,

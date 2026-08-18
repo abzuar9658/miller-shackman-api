@@ -70,6 +70,19 @@ class OutboundJourneyKind(StrEnum):
     PAUSED_SEARCH = "paused_search"
 
 
+@dataclass(frozen=True)
+class OutboundJourneyChange:
+    """The lead's previous journey, when it differs from the current draft's journey.
+
+    Earlier outreach in the lead's history was written for a different journey
+    or track; the drafting prompt uses this to keep the LLM from reusing that
+    copy's framing as if it still applied.
+    """
+
+    previous_journey_kind: OutboundJourneyKind
+    track_changed: bool = False
+
+
 class DormantMessageTone(StrEnum):
     WARM = "warm"
     CONVERSATIONAL = "conversational"

@@ -334,6 +334,58 @@ async def test_failed_occurrence_is_retried_without_consuming_cap() -> None:
     assert terminal.reason_code == PausedSearchTimingReasonCode.OCCURRENCE_LIMIT_REACHED
 
 
+async def test_pre_send_blocked_occurrence_is_retried_after_resume() -> None:
+    """A pre-send-rejected occurrence never reached the lead, so a manual
+    resume must retry the same slot instead of terminalizing the workflow.
+
+    Reproduces the production failure where resume-after-frequency-block went
+    straight to COMPLETED with occurrence_limit_reached.
+    """
+    workflow_repo = FakeLeadWorkflowRepository()
+    await workflow_repo.save(_workflow())
+    occurrence_repo = _FakeOccurrenceRepository()
+    transition_repo = FakeWorkflowTransitionRepository()
+    track_repo = FakePausedSearchTrackAdminRepository(
+        versions=(_track_version(),),
+        steps=(replace(_step(), delay_hours=0, max_occurrences=1),),
+    )
+    kwargs: dict[str, Any] = {
+        "workspace_id": WORKSPACE_ID,
+        "lead_id": LEAD_ID,
+        "lead_repository": FakeLeadRepository(_lead()),
+        "paused_search_track_repository": track_repo,
+        "lead_workflow_repository": workflow_repo,
+        "workflow_transition_repository": transition_repo,
+        "timezone": TIMEZONE,
+        "now": NOW,
+        "occurrence_repository": occurrence_repo,
+    }
+
+    first = await schedule_next_paused_search_action(**kwargs)
+    assert first.occurrence is not None
+    assert first.occurrence.occurrence_number == 1
+
+    # Pre-send checks rejected the send (e.g. same-channel frequency limit):
+    # the cadence executor pauses the workflow but leaves the occurrence open
+    # (PLANNED) — it never reached the lead. The operator then manually resumes.
+    blocked = occurrence_repo.saved[0]
+    assert blocked.status is RecurringOccurrenceStatus.PLANNED
+
+    retry = await schedule_next_paused_search_action(
+        **{**kwargs, "now": NOW + timedelta(hours=1)}
+    )
+
+    assert retry.status == PausedSearchScheduleStatus.SCHEDULED
+    assert retry.occurrence is not None
+    assert retry.occurrence.occurrence_number == 1
+    assert retry.occurrence.occurrence_id == blocked.occurrence_id
+    assert retry.occurrence.status is RecurringOccurrenceStatus.PLANNED
+    assert len(occurrence_repo.saved) == 1
+    assert retry.workflow is not None
+    assert retry.workflow.state == WorkflowState.ACTIVE_NURTURE
+    assert not transition_repo.transitions
+
+
 async def test_derived_maintenance_recurrence_switches_to_reactivation() -> None:
     workflow_repo = FakeLeadWorkflowRepository()
     await workflow_repo.save(_workflow())

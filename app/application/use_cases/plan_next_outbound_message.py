@@ -41,6 +41,7 @@ from app.domain.leads import CanonicalLeadRecord
 from app.domain.llm import LLMTaskKind
 from app.domain.outbound_drafting import (
     DormantStepTemplateProfile,
+    OutboundJourneyChange,
     OutboundJourneyKind,
     WorkspaceOutboundDraftingConfig,
 )
@@ -76,6 +77,7 @@ class PlanNextOutboundMessageContext:
     message_version: int = 1
     pre_send_policy: PreSendPolicy = field(default_factory=PreSendPolicy)
     journey_kind: OutboundJourneyKind | None = None
+    journey_change: OutboundJourneyChange | None = None
     preflight_vetoed: bool = False
     handoff_active: bool = False
     human_owned: bool = False
@@ -171,6 +173,7 @@ async def plan_next_outbound_message_for_lead(
         message_version=context.message_version,
         pre_send_policy=context.pre_send_policy,
         journey_kind=context.journey_kind,
+        journey_change=context.journey_change,
         drafting_config=context.drafting_config,
         template_profile=context.template_profile,
         paused_search_writing_purpose=context.paused_search_writing_purpose,
@@ -256,6 +259,7 @@ async def plan_next_outbound_message_for_lead(
         pre_send_policy=context.pre_send_policy,
         lead_context=lead_context,
         journey_kind=context.journey_kind,
+        journey_change=context.journey_change,
         drafting_config=context.drafting_config,
         template_profile=context.template_profile,
         paused_search_writing_purpose=context.paused_search_writing_purpose,

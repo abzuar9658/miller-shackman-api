@@ -81,6 +81,22 @@ class PostgresLeadWorkflowRepository:
         model = result.scalar_one_or_none()
         return _model_to_workflow(model) if model is not None else None
 
+    async def list_recent_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 5,
+    ) -> tuple[LeadWorkflow, ...]:
+        result = await self._session.execute(
+            select(LeadWorkflowModel)
+            .where(LeadWorkflowModel.workspace_id == workspace_id)
+            .where(LeadWorkflowModel.lead_id == lead_id)
+            .order_by(LeadWorkflowModel.last_transition_at.desc())
+            .limit(limit),
+        )
+        return tuple(_model_to_workflow(model) for model in result.scalars().all())
+
     async def list_paused_for_workspace(
         self,
         workspace_id: WorkspaceId,

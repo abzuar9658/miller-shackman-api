@@ -243,6 +243,16 @@ class FakeLeadWorkflowRepository:
     ) -> LeadWorkflow | None:
         return await self.get_latest_for_lead(workspace_id, lead_id)
 
+    async def list_recent_for_lead(
+        self,
+        workspace_id: UUID,
+        lead_id: UUID,
+        *,
+        limit: int = 5,
+    ) -> tuple[LeadWorkflow, ...]:
+        workflow = self._latest.get((workspace_id, lead_id))
+        return (workflow,)[:limit] if workflow is not None else ()
+
     async def list_active_paused_search_for_lead(
         self,
         workspace_id: UUID,

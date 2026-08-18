@@ -117,6 +117,7 @@ from app.domain.compliance.contactability import (
 from app.domain.conversations import CrmConversationEventDirection, WorkspaceHandoffConfig
 from app.domain.leads import CanonicalLeadRecord
 from app.domain.outbound_drafting import (
+    OutboundJourneyChange,
     OutboundJourneyKind,
     WorkspaceOutboundDraftingConfig,
     default_workspace_outbound_drafting_config,
@@ -717,6 +718,14 @@ async def execute_campaign_cadence_step(
 
     enabled_channels = (step.channel,)
 
+    journey_change = await _journey_change_for_workflow(
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        workflow=workflow,
+        journey_kind=journey_kind,
+        lead_workflow_repository=lead_workflow_repository,
+    )
+
     planning_context = PlanNextOutboundMessageContext(
         campaign_status=config.campaign_status,
         workflow_state=WorkflowState.ACTIVE_NURTURE,
@@ -735,6 +744,7 @@ async def execute_campaign_cadence_step(
         ),
         pre_send_policy=pre_send_policy,
         journey_kind=journey_kind,
+        journey_change=journey_change,
         drafting_config=drafting_config,
         template_profile=step.template_profile,
         paused_search_writing_purpose=paused_search_writing_purpose,
@@ -1082,6 +1092,53 @@ async def execute_campaign_cadence_step(
     )
 
 
+async def _journey_change_for_workflow(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    workflow: LeadWorkflow,
+    journey_kind: OutboundJourneyKind,
+    lead_workflow_repository: LeadWorkflowRepository,
+) -> OutboundJourneyChange | None:
+    """Detect whether earlier outreach was written for a different journey or track.
+
+    Looks at the lead's most recent prior workflow (the one before the current
+    one) so the drafting prompt can tell the LLM that copy from that journey's
+    messages no longer applies.
+    """
+    previous_workflows = await lead_workflow_repository.list_recent_for_lead(
+        workspace_id,
+        lead_id,
+        limit=5,
+    )
+    previous = next(
+        (
+            candidate
+            for candidate in previous_workflows
+            if candidate.workflow_id != workflow.workflow_id
+        ),
+        None,
+    )
+    if previous is None:
+        return None
+    previous_journey_kind = (
+        OutboundJourneyKind.PAUSED_SEARCH
+        if previous.paused_search_track_version_id is not None
+        else OutboundJourneyKind.DORMANT
+    )
+    track_changed = (
+        previous_journey_kind == OutboundJourneyKind.PAUSED_SEARCH
+        and journey_kind == OutboundJourneyKind.PAUSED_SEARCH
+        and previous.paused_search_track_version_id != workflow.paused_search_track_version_id
+    )
+    if previous_journey_kind == journey_kind and not track_changed:
+        return None
+    return OutboundJourneyChange(
+        previous_journey_kind=previous_journey_kind,
+        track_changed=track_changed,
+    )
+
+
 async def _pause_after_block(
     *,
     workspace_id: WorkspaceId,
@@ -1369,12 +1426,16 @@ async def _record_paused_search_occurrence_outcome(
     if occurrence_repository is None:
         return workflow
 
+    # A pre-send REJECTED result is a policy block ("not now"), not an
+    # abandoned touch: the message never reached the lead, so the occurrence
+    # must stay open (PLANNED) for the same slot to be retried after a resume.
+    # Closing it as CANCELLED would consume the step's occurrence cap and
+    # terminalize the workflow on the next scheduling pass.
     status_by_send_status = {
         SendOutboundMessageStatus.SENT: RecurringOccurrenceStatus.SENT,
         SendOutboundMessageStatus.ALREADY_SENT: RecurringOccurrenceStatus.SENT,
         SendOutboundMessageStatus.FAILED: RecurringOccurrenceStatus.FAILED,
         SendOutboundMessageStatus.UNCERTAIN: RecurringOccurrenceStatus.UNCERTAIN,
-        SendOutboundMessageStatus.REJECTED: RecurringOccurrenceStatus.CANCELLED,
     }
     occurrence_status = status_by_send_status.get(send_result.status)
     if occurrence_status is None:

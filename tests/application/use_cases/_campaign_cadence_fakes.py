@@ -656,6 +656,21 @@ class FakeLeadWorkflowRepository:
     ) -> LeadWorkflow | None:
         return self.latest_by_lead.get((workspace_id, lead_id))
 
+    async def list_recent_for_lead(
+        self,
+        workspace_id: WorkspaceId,
+        lead_id: LeadId,
+        *,
+        limit: int = 5,
+    ) -> tuple[LeadWorkflow, ...]:
+        matching = [
+            workflow
+            for workflow in self.workflows.values()
+            if workflow.workspace_id == workspace_id and workflow.lead_id == lead_id
+        ]
+        matching.sort(key=lambda workflow: workflow.last_transition_at, reverse=True)
+        return tuple(matching[:limit])
+
     async def list_active_paused_search_for_lead(
         self,
         workspace_id: WorkspaceId,

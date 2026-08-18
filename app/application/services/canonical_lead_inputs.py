@@ -8,6 +8,7 @@ from app.application.services.llm.outbound_message_drafting import (
     ApprovedOutboundConversationItem,
     ApprovedOutboundLeadContext,
 )
+from app.domain.campaigns.outbound_message import OutboundMessageStatus
 from app.domain.campaigns.start_queue import CampaignStartCandidate
 from app.domain.compliance.contactability import (
     ContactabilityDecision,
@@ -33,6 +34,15 @@ MAX_RECENT_OUTBOUND_MESSAGES = 4
 MAX_RECENT_OUTBOUND_MESSAGE_CHARS = 240
 MAX_HISTORY_LOCATION_VALUES = 3
 MAX_HISTORY_KEYWORD_VALUES = 5
+# Outbound messages that never reached the lead are not conversation history:
+# feeding them back into drafting context makes the LLM echo copy the lead
+# never saw (including copy from an earlier journey or track).
+EXCLUDED_OUTBOUND_HISTORY_STATUSES = frozenset(
+    {
+        OutboundMessageStatus.FAILED.value,
+        OutboundMessageStatus.CANCELLED.value,
+    }
+)
 LOCATION_PREFERENCE_KEYS = frozenset({"location", "preferred_location", "neighborhood"})
 ADDRESS_PREFERENCE_KEYS = frozenset({"address", "preferred_address"})
 
@@ -204,6 +214,7 @@ def approved_outbound_context_from_canonical_lead(
     activity_items: tuple[LeadActivityItem, ...] = (),
     crm_conversation_events: tuple[CrmConversationEvent, ...] = (),
 ) -> ApprovedOutboundLeadContext:
+    activity_items = _without_undelivered_outbound_items(activity_items)
     preferences = _safe_preference_snapshot(
         lead,
         allowed_mapped_custom_field_keys=allowed_mapped_custom_field_keys,
@@ -807,3 +818,16 @@ def _is_inbound(item: LeadActivityItem) -> bool:
 
 def _is_outbound(item: LeadActivityItem) -> bool:
     return item.kind == LeadActivityKind.OUTBOUND_MESSAGE or item.direction == "outbound"
+
+
+def _without_undelivered_outbound_items(
+    activity_items: tuple[LeadActivityItem, ...],
+) -> tuple[LeadActivityItem, ...]:
+    return tuple(
+        item
+        for item in activity_items
+        if not (
+            item.kind == LeadActivityKind.OUTBOUND_MESSAGE
+            and (item.status or "").strip().lower() in EXCLUDED_OUTBOUND_HISTORY_STATUSES
+        )
+    )

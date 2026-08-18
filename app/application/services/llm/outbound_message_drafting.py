@@ -16,6 +16,7 @@ from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord
 from app.domain.llm import LLMProviderKind, LLMTaskKind
 from app.domain.outbound_drafting import (
+    OutboundJourneyChange,
     OutboundJourneyKind,
     WorkspaceOutboundDraftingConfig,
     default_workspace_outbound_drafting_config,
@@ -187,6 +188,7 @@ async def draft_outbound_message(
     assigned_agent_name: str | None,
     lead_context: ApprovedOutboundLeadContext,
     journey_kind: OutboundJourneyKind | None = None,
+    journey_change: OutboundJourneyChange | None = None,
     message_purpose: str | None = None,
     llm_client: LLMClient,
     drafting_config: WorkspaceOutboundDraftingConfig | None = None,
@@ -208,6 +210,7 @@ async def draft_outbound_message(
         assigned_agent_name=resolved_agent_name,
         lead_context=lead_context,
         journey_kind=journey_kind,
+        journey_change=journey_change,
         message_purpose=message_purpose,
         drafting_config=resolved_config,
     )
@@ -353,6 +356,7 @@ def _build_prompt(
     assigned_agent_name: str | None,
     lead_context: ApprovedOutboundLeadContext,
     journey_kind: OutboundJourneyKind | None,
+    journey_change: OutboundJourneyChange | None,
     message_purpose: str | None,
     drafting_config: WorkspaceOutboundDraftingConfig,
 ) -> str:
@@ -384,6 +388,17 @@ def _build_prompt(
             "",
             "This purpose guides wording only; it never overrides application safety, "
             "consent, suppression, handoff, or send rules.",
+        ])
+
+    journey_change_note = _journey_change_note(
+        journey_kind=journey_kind,
+        journey_change=journey_change,
+    )
+    if journey_change_note:
+        sections.extend([
+            "",
+            "## Journey Change",
+            journey_change_note,
         ])
 
     # Add lead context
@@ -546,6 +561,42 @@ def _build_prompt(
     ])
 
     return "\n".join(sections)
+
+
+def _journey_change_note(
+    *,
+    journey_kind: OutboundJourneyKind | None,
+    journey_change: OutboundJourneyChange | None,
+) -> str | None:
+    if journey_change is None or journey_kind is None:
+        return None
+    previous = journey_change.previous_journey_kind
+    if previous == journey_kind and not journey_change.track_changed:
+        return None
+    previous_label = _journey_label(previous)
+    current_label = _journey_label(journey_kind)
+    if previous == journey_kind and journey_change.track_changed:
+        transition_text = (
+            f"This lead was previously on a different {previous_label} track and has now "
+            f"moved to a new {current_label} track."
+        )
+    else:
+        transition_text = (
+            f"This lead was previously on a {previous_label} journey and has now moved "
+            f"to a {current_label} journey."
+        )
+    return (
+        f"{transition_text} Earlier outbound messages in the history above were written "
+        "for that previous journey and its reason for outreach no longer applies. Do not "
+        "reuse, paraphrase, or reference the framing, assumptions, or stated reasons from "
+        "those earlier messages (for example a lease renewal, a paused timeline, or any "
+        "other prior-track premise) unless the lead themselves confirmed it in an inbound "
+        "reply. Write this message purely from the current journey's perspective."
+    )
+
+
+def _journey_label(journey_kind: OutboundJourneyKind) -> str:
+    return journey_kind.value.replace("_", "-")
 
 
 def _journey_instructions(journey_kind: OutboundJourneyKind | None) -> str:
