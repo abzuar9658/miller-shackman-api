@@ -82,6 +82,30 @@ class _StepFacts:
     last_failure_reason: str | None
 
 
+def _messages_for_workflow_run(
+    outbound_messages: tuple[OutboundMessage, ...],
+    workflow: LeadWorkflow | None,
+) -> tuple[OutboundMessage, ...]:
+    """Keep only messages belonging to the given workflow run.
+
+    Progress must never adopt sends from a previous enrollment of the same
+    campaign (close-and-create re-enrollments reuse campaign and step ids).
+    Messages written before workflow attribution existed have no workflow_id;
+    those are attributed by creation time relative to the run's start.
+    """
+    if workflow is None:
+        return outbound_messages
+    return tuple(
+        message
+        for message in outbound_messages
+        if (
+            message.workflow_id == workflow.workflow_id
+            if message.workflow_id is not None
+            else message.created_at >= workflow.created_at
+        )
+    )
+
+
 def build_dormant_cadence_progress(
     *,
     flow_name: str,
@@ -91,6 +115,7 @@ def build_dormant_cadence_progress(
 ) -> LeadCadenceProgressView | None:
     if not cadence_steps:
         return None
+    outbound_messages = _messages_for_workflow_run(outbound_messages, workflow)
     ordered = tuple(sorted(cadence_steps, key=lambda step: step.step_order))
     specs = tuple(
         (
@@ -129,6 +154,7 @@ def build_paused_search_cadence_progress(
 ) -> LeadCadenceProgressView | None:
     if not track_steps:
         return None
+    outbound_messages = _messages_for_workflow_run(outbound_messages, workflow)
     ordered = tuple(sorted(track_steps, key=lambda step: (step.phase.value, step.step_order)))
     specs = tuple(
         (

@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from app.application.ports.lead_activity import LeadActivityItem, LeadActivityKind
@@ -579,6 +579,67 @@ def test_dormant_cadence_progress_uses_cursor_when_present() -> None:
     statuses = {step.step_id: step.status for step in progress.steps}
     assert statuses[STEP_1] == CadenceStepProgressStatus.COMPLETED
     assert statuses[STEP_2] == CadenceStepProgressStatus.CURRENT
+
+
+def test_dormant_cadence_progress_ignores_prior_workflow_run_messages() -> None:
+    """Re-enrollment must not inherit sent/failed state from a closed run."""
+    steps = (
+        _cadence_step(STEP_1, 1, ContactChannel.EMAIL),
+        _cadence_step(STEP_2, 2, ContactChannel.SMS),
+    )
+    prior_run_workflow_id = UUID("00000000-0000-0000-0000-000000000099")
+    prior_run_messages = tuple(
+        replace(message, workflow_id=prior_run_workflow_id)
+        for message in (
+            _step_message(STEP_1, OutboundMessageStatus.SENT),
+            _step_message(STEP_2, OutboundMessageStatus.SENT),
+        )
+    )
+    workflow = replace(
+        _workflow(),
+        current_step_id=STEP_1,
+        paused_search_track_version_id=None,
+        paused_search_track_step_id=None,
+    )
+
+    progress = build_dormant_cadence_progress(
+        flow_name="Dormant Buyers",
+        cadence_steps=steps,
+        outbound_messages=prior_run_messages,
+        workflow=workflow,
+    )
+
+    assert progress is not None
+    assert progress.completed_steps == 0
+    statuses = {step.step_id: step.status for step in progress.steps}
+    assert statuses[STEP_1] == CadenceStepProgressStatus.CURRENT
+    assert statuses[STEP_2] == CadenceStepProgressStatus.UPCOMING
+
+
+def test_dormant_cadence_progress_attributes_legacy_messages_by_run_start() -> None:
+    """Messages without workflow attribution belong to the run only if created after it began."""
+    steps = (_cadence_step(STEP_1, 1, ContactChannel.EMAIL),)
+    stale = replace(
+        _step_message(STEP_1, OutboundMessageStatus.SENT),
+        created_at=NOW - timedelta(days=3),
+    )
+    workflow = replace(
+        _workflow(),
+        current_step_id=STEP_1,
+        paused_search_track_version_id=None,
+        paused_search_track_step_id=None,
+    )
+
+    progress = build_dormant_cadence_progress(
+        flow_name="Dormant Buyers",
+        cadence_steps=steps,
+        outbound_messages=(stale,),
+        workflow=workflow,
+    )
+
+    assert progress is not None
+    assert progress.completed_steps == 0
+    assert progress.steps[0].status == CadenceStepProgressStatus.CURRENT
 
 
 def test_dormant_cadence_progress_terminal_workflow_has_no_current_step() -> None:
