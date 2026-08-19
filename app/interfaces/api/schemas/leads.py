@@ -412,6 +412,8 @@ class LeadCadenceProgressResponse(BaseModel):
     completed_steps: int
     current_step_order: int | None = None
     next_action_at: datetime | None = None
+    workflow_state: str | None = None
+    is_sendable: bool = True
 
 
 class LeadDetailResponse(BaseModel):

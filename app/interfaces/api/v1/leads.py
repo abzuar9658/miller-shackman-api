@@ -1319,6 +1319,10 @@ def _cadence_progress_response(view: LeadCadenceProgressView) -> LeadCadenceProg
         completed_steps=view.completed_steps,
         current_step_order=view.current_step_order,
         next_action_at=view.next_action_at,
+        workflow_state=(
+            view.workflow_state.value if view.workflow_state is not None else None
+        ),
+        is_sendable=view.is_sendable,
     )
 
 

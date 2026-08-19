@@ -74,6 +74,8 @@ class LeadCadenceProgressView:
     completed_steps: int
     current_step_order: int | None = None
     next_action_at: datetime | None = None
+    workflow_state: WorkflowState | None = None
+    is_sendable: bool = True
 
 
 @dataclass(frozen=True)
@@ -390,6 +392,10 @@ def _build_progress(
         completed_steps=completed,
         current_step_order=current_order,
         next_action_at=workflow.next_action_at if workflow is not None else None,
+        workflow_state=workflow.state if workflow is not None else None,
+        is_sendable=(
+            is_sendable_workflow_state(workflow.state) if workflow is not None else True
+        ),
     )
 
 

@@ -576,6 +576,8 @@ def test_dormant_cadence_progress_uses_cursor_when_present() -> None:
 
     assert progress is not None
     assert progress.current_step_order == 2
+    assert progress.is_sendable is True
+    assert progress.workflow_state == WorkflowState.WAITING_FOR_RESPONSE
     statuses = {step.step_id: step.status for step in progress.steps}
     assert statuses[STEP_1] == CadenceStepProgressStatus.COMPLETED
     assert statuses[STEP_2] == CadenceStepProgressStatus.CURRENT
@@ -694,6 +696,8 @@ def test_dormant_cadence_progress_non_sendable_workflows_have_no_current_step() 
         assert progress is not None
         assert progress.current_step_order is None, state
         assert progress.completed_steps == 1
+        assert progress.is_sendable is False
+        assert progress.workflow_state == state
         statuses = {step.step_id: step.status for step in progress.steps}
         assert statuses[STEP_1] == CadenceStepProgressStatus.COMPLETED
         assert statuses[STEP_2] == CadenceStepProgressStatus.UPCOMING
