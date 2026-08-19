@@ -115,7 +115,14 @@ def evaluate_pre_send_safety(
     facts: PreSendFacts,
     policy: PreSendPolicy,
     now: datetime,
+    *,
+    confirmed_frequency_limit_override: bool = False,
 ) -> PreSendDecision:
+    # confirmed_frequency_limit_override may only be set by an explicit,
+    # permission-checked operator action (admin-confirmed "send now" on a
+    # deferred message). Automation never sets it, and consent, suppression,
+    # handoff, contactability, and every other guard still apply even when the
+    # frequency limit is overridden.
     reasons: list[PreSendReasonCode] = []
     local_now = _to_policy_timezone(now, policy.timezone)
 
@@ -139,7 +146,11 @@ def evaluate_pre_send_safety(
         reasons.append(PreSendReasonCode.OUTSIDE_ALLOWED_HOURS)
 
     frequency_block_until = _frequency_block_until(facts, policy)
-    if frequency_block_until is not None and now < frequency_block_until:
+    if (
+        frequency_block_until is not None
+        and now < frequency_block_until
+        and not confirmed_frequency_limit_override
+    ):
         reasons.append(PreSendReasonCode.FREQUENCY_LIMIT_REACHED)
 
     simultaneous_block_until = _simultaneous_block_until(facts, policy)

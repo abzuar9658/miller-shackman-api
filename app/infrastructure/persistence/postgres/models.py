@@ -714,6 +714,7 @@ class OutboundMessageModel(Base):
     provider_status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_reason: Mapped[str | None] = mapped_column(String(500))
+    status_detail: Mapped[str | None] = mapped_column(String(500))
     provider_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     provider_last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     provider_next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

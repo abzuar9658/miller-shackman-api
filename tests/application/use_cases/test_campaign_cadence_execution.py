@@ -12,8 +12,8 @@ from app.application.use_cases.campaign_cadence_execution import (
     CadenceStepExecutionStatus,
     CadenceStepScheduleResult,
     CadenceStepScheduleStatus,
-    _record_paused_search_occurrence_outcome,
     execute_campaign_cadence_step,
+    record_paused_search_occurrence_outcome,
     schedule_next_campaign_cadence_step,
 )
 from app.application.use_cases.process_inbound_message_event import (
@@ -1091,6 +1091,17 @@ async def test_pre_send_frequency_block_defers_step_and_retries_after_window() -
     assert occurrence_repository.occurrence.scheduled_for == retry_at
     assert occurrence_repository.occurrence.logical_touch_count == 0
     assert result.workflow.logical_touch_count == 0
+    # The still-pending message carries the deferral so operators can see why
+    # it has not sent and when it will be retried, instead of looking stuck.
+    pending_messages = [
+        message
+        for message in message_repository.messages_by_idempotency_key.values()
+        if message.status == OutboundMessageStatus.PENDING
+    ]
+    assert len(pending_messages) == 1
+    assert pending_messages[0].scheduled_for == retry_at
+    assert pending_messages[0].status_detail is not None
+    assert "frequency limit" in pending_messages[0].status_detail
     # No pause transition is recorded for a timing-only deferral.
     assert all(
         transition.to_state != WorkflowState.PAUSED
@@ -1135,6 +1146,15 @@ async def test_pre_send_frequency_block_defers_step_and_retries_after_window() -
     assert final_occurrence is not None
     assert final_occurrence.status is RecurringOccurrenceStatus.SENT
     assert final_occurrence.logical_touch_count == 1
+    # The deferral annotation is cleared once the message actually sends.
+    sent_messages = [
+        message
+        for message in message_repository.messages_by_idempotency_key.values()
+        if message.status == OutboundMessageStatus.SENT
+        and message.idempotency_key != "previous-email-send"
+    ]
+    assert len(sent_messages) == 1
+    assert sent_messages[0].status_detail is None
 
 
 async def test_execute_campaign_cadence_step_holds_review_required_message() -> None:
@@ -1311,7 +1331,7 @@ async def test_paused_search_occurrence_outcome_updates_status_and_touch_once() 
     )
     occurrence_repository = FakePausedSearchOccurrenceRepository(occurrence)
 
-    updated_workflow = await _record_paused_search_occurrence_outcome(
+    updated_workflow = await record_paused_search_occurrence_outcome(
         workspace_id=WORKSPACE_ID,
         workflow=workflow,
         occurrence=occurrence,
@@ -1327,7 +1347,7 @@ async def test_paused_search_occurrence_outcome_updates_status_and_touch_once() 
     assert occurrence_repository.occurrence.status == RecurringOccurrenceStatus.SENT
     assert occurrence_repository.occurrence.logical_touch_count == 1
 
-    duplicate_workflow = await _record_paused_search_occurrence_outcome(
+    duplicate_workflow = await record_paused_search_occurrence_outcome(
         workspace_id=WORKSPACE_ID,
         workflow=updated_workflow,
         occurrence=occurrence_repository.occurrence,

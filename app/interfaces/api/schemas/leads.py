@@ -298,6 +298,7 @@ class OutboundMessageResponse(BaseModel):
     provider_delivery_status: str | None
     delivered_at: datetime | None
     failure_reason: str | None
+    status_detail: str | None = None
 
 
 class LeadActivityItemResponse(BaseModel):
@@ -658,6 +659,17 @@ class ApproveRejectedDraftReviewRequest(BaseModel):
 class ApproveRejectedDraftReviewResponse(BaseModel):
     status: str
     review_id: UUID | None = None
+    outbound_message_id: UUID | None = None
+    workflow_id: UUID | None = None
+    reasons: list[str] = Field(default_factory=list)
+    signal_queued: bool = False
+
+class SendDeferredMessageNowRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class SendDeferredMessageNowResponse(BaseModel):
+    status: str
     outbound_message_id: UUID | None = None
     workflow_id: UUID | None = None
     reasons: list[str] = Field(default_factory=list)

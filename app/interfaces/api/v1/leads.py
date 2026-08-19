@@ -72,6 +72,10 @@ from app.application.use_cases.review_queue_read import (
     ReviewQueueReadStatus,
     list_pending_routing_reviews,
 )
+from app.application.use_cases.send_deferred_outbound_message_now import (
+    SendDeferredMessageNowStatus,
+    send_deferred_outbound_message_now,
+)
 from app.application.use_cases.start_selected_paused_search_track import (
     start_selected_paused_search_track,
 )
@@ -102,6 +106,10 @@ from app.domain.workflows import LeadWorkflow, WorkflowTransition
 from app.interfaces.api.dependencies.lead_classification import (
     LeadClassificationActionBundle,
     get_lead_classification_action_bundle,
+)
+from app.interfaces.api.dependencies.lead_deferred_send import (
+    LeadDeferredSendBundle,
+    get_lead_deferred_send_bundle,
 )
 from app.interfaces.api.dependencies.lead_draft_review import (
     LeadDraftReviewActionBundle,
@@ -177,6 +185,8 @@ from app.interfaces.api.schemas.leads import (
     ResolveLeadReviewHoldResponse,
     ResumeLeadWorkflowRequest,
     ResumeLeadWorkflowResponse,
+    SendDeferredMessageNowRequest,
+    SendDeferredMessageNowResponse,
     SkipPausedSearchNextTouchRequest,
     SkipPausedSearchNextTouchResponse,
     StartLeadManualEnrollmentRequest,
@@ -1168,6 +1178,67 @@ async def approve_rejected_draft_review_route(
 
 
 @router.post(
+    "/{workspace_id}/leads/{lead_id}/outbound-messages/{message_id}/send-now",
+    response_model=SendDeferredMessageNowResponse,
+)
+async def send_deferred_message_now_route(
+    workspace_id: UUID,
+    lead_id: UUID,
+    message_id: UUID,
+    request: SendDeferredMessageNowRequest,
+    actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
+    bundle: Annotated[
+        LeadDeferredSendBundle,
+        Depends(get_lead_deferred_send_bundle),
+    ],
+) -> SendDeferredMessageNowResponse:
+    result = await send_deferred_outbound_message_now(
+        actor=actor,
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        message_id=message_id,
+        reason=request.reason,
+        lead_repository=bundle.lead_repository,
+        lead_workflow_repository=bundle.workflow_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        message_repository=bundle.message_repository,
+        campaign_admin_repository=bundle.campaign_admin_repository,
+        campaign_execution_repository=bundle.campaign_execution_repository,
+        paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
+        workspace_repository=bundle.workspace_repository,
+        workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
+        workspace_operational_control_repository=bundle.workspace_operational_control_repository,
+        external_event_repository=bundle.external_event_repository,
+        temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        crm_conversation_event_repository=bundle.crm_conversation_event_repository,
+        crm_client=bundle.crm_client,
+        crm_agent_repository=bundle.crm_agent_repository,
+        workspace_agent_crm_mapping_repository=bundle.workspace_agent_crm_mapping_repository,
+        workspace_agent_mapping_config_repository=bundle.workspace_agent_mapping_config_repository,
+        workspace_membership_repository=bundle.workspace_membership_repository,
+        user_repository=bundle.user_repository,
+        outbound_message_crm_completion_repository=bundle.outbound_message_crm_completion_repository,
+        workspace_handoff_config_repository=bundle.workspace_handoff_config_repository,
+        commit=bundle.session.commit,
+        sms_provider=bundle.sms_provider,
+        email_provider=bundle.email_provider,
+        now=datetime.now(UTC),
+    )
+    if result.status == SendDeferredMessageNowStatus.NOT_FOUND:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=["not_found"])
+    if result.status == SendDeferredMessageNowStatus.REJECTED:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=list(result.reasons))
+    await bundle.session.commit()
+    return SendDeferredMessageNowResponse(
+        status=result.status.value,
+        outbound_message_id=result.outbound_message_id,
+        workflow_id=result.workflow_id,
+        reasons=list(result.reasons),
+        signal_queued=result.signal_queued,
+    )
+
+
+@router.post(
     "/{workspace_id}/leads/{lead_id}/rejected-draft-reviews/{review_id}/dismiss",
     response_model=DismissRejectedDraftReviewResponse,
 )
@@ -1745,4 +1816,5 @@ def _outbound_message_response(message: OutboundMessage) -> OutboundMessageRespo
         ),
         delivered_at=message.delivered_at,
         failure_reason=message.failure_reason,
+        status_detail=message.status_detail,
     )

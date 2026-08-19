@@ -436,6 +436,7 @@ async def apply_paused_search_review_action(
                 status=OutboundMessageStatus.CANCELLED,
                 updated_at=now,
                 failure_reason=updated_review.action_reason,
+                status_detail=None,
             )
         )
     if review.kind is PausedSearchReviewKind.MESSAGE:
@@ -582,6 +583,7 @@ async def edit_paused_search_message_review(
             status=OutboundMessageStatus.CANCELLED,
             updated_at=now,
             failure_reason=f"Superseded by operator-edited version {next_version}.",
+            status_detail=None,
         )
     )
     saved_review = await review_repository.save(

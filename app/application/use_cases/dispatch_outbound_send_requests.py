@@ -426,6 +426,7 @@ async def _record_sent(
                 provider_next_retry_at=None,
                 provider_last_failure_kind=None,
                 failure_reason=None,
+                status_detail=None,
                 sent_at=now,
                 updated_at=now,
             )
@@ -480,6 +481,7 @@ async def _record_failed(
                 provider_next_retry_at=None,
                 provider_last_failure_kind=failure_kind.value,
                 failure_reason=reason,
+                status_detail=None,
                 updated_at=now,
             )
         )
@@ -556,6 +558,7 @@ async def _record_policy_rejected(
                 provider_next_retry_at=None,
                 provider_last_failure_kind=failure_kind,
                 failure_reason=reason,
+                status_detail=None,
                 updated_at=now,
             )
         )
@@ -617,6 +620,7 @@ async def _record_uncertain(
                 provider_next_retry_at=None,
                 provider_last_failure_kind=ProviderFailureKind.UNCERTAIN.value,
                 failure_reason=reason,
+                status_detail=None,
                 updated_at=now,
             )
         )

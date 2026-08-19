@@ -144,6 +144,13 @@ class FakeOutboundMessageRepository:
                 return message
         return None
 
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        message_id: UUID,
+    ) -> OutboundMessage | None:
+        return await self.get_by_id(workspace_id, message_id)
+
     async def get_by_idempotency_key(
         self,
         workspace_id: WorkspaceId,

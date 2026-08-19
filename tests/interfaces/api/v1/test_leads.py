@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from typing import cast
 from uuid import UUID
 
@@ -18,12 +18,17 @@ from app.application.ports.repositories import (
     WorkspaceAgentMappingConfigRepository,
     WorkspaceMembershipRepository,
 )
+from app.domain.campaigns.admin import CampaignAdminCampaign, CampaignAdminVersion
 from app.domain.campaigns.execution import (
     CampaignCadenceStep,
     CampaignExecutionConfig,
     CampaignVersionStatus,
 )
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
+from app.domain.campaigns.paused_search_occurrences import (
+    RecurringOccurrence,
+    RecurringOccurrenceStatus,
+)
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchFallbackTimingPolicy,
     PausedSearchTrack,
@@ -93,6 +98,10 @@ from app.domain.workflows import (
     WorkflowTransition,
     WorkflowTransitionReasonCode,
 )
+from app.interfaces.api.dependencies.lead_deferred_send import (
+    LeadDeferredSendBundle,
+    get_lead_deferred_send_bundle,
+)
 from app.interfaces.api.dependencies.lead_draft_review import (
     LeadDraftReviewActionBundle,
     get_lead_draft_review_action_bundle,
@@ -114,10 +123,12 @@ from app.interfaces.api.dependencies.lead_workflow_overrides import (
 )
 from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.main import create_app
+from tests.application.use_cases._campaign_admin_fakes import FakeCampaignAdminRepository
 from tests.application.use_cases._campaign_cadence_fakes import (
     FakeCampaignExecutionRepository,
     FakeEmailProvider,
     FakeLeadRoutingReviewRepository,
+    FakePausedSearchOccurrenceRepository,
     FakeSMSProvider,
     FakeWorkspaceContactPolicyRepository,
     FakeWorkspaceOperationalControlRepository,
@@ -175,6 +186,7 @@ class LeadsTestClient:
     outbox: FakeTemporalSignalOutboxRepository
     crm_client: FakeCRMClient
     review_repository: FakeRejectedDraftReviewRepository
+    deferred_send_bundle: "LeadDeferredSendBundle"
 
 
 class LeadRouteCRMClient(FakeCRMClient):
@@ -473,6 +485,62 @@ def test_admin_can_approve_rejected_draft_review() -> None:
     ]
 
 
+def test_admin_can_send_deferred_message_now() -> None:
+    client = _client_for_role(
+        WorkspaceMembershipRole.BROKERAGE_ADMIN,
+        workflow_state=WorkflowState.ACTIVE_NURTURE,
+    )
+
+    # The previous send was one hour earlier, so only the operator-confirmed
+    # frequency override lets this deferred message go out now.
+    with time_machine.travel("2030-01-01T18:00:00Z"):
+        response = client.client.post(
+            f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/outbound-messages/{DEFERRED_MESSAGE_ID}/send-now",
+            json={"reason": "Admin confirmed immediate send after talking to the lead."},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "sent"
+    assert response.json()["outbound_message_id"] == str(DEFERRED_MESSAGE_ID)
+    assert response.json()["signal_queued"] is True
+    message = cast(
+        FakeCadenceOutboundMessageRepository,
+        client.deferred_send_bundle.message_repository,
+    ).messages_by_idempotency_key[(WORKSPACE_ID, "outbound:test:deferred-message")]
+    assert message.status == OutboundMessageStatus.SENT
+    assert message.status_detail is None
+
+
+def test_send_now_rejects_agent_when_campaign_disallows_agent_enrollment() -> None:
+    client = _client_for_role(
+        WorkspaceMembershipRole.ASSIGNED_AGENT,
+        workflow_state=WorkflowState.ACTIVE_NURTURE,
+        allow_agent_manual_enrollment=False,
+    )
+
+    response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/outbound-messages/{DEFERRED_MESSAGE_ID}/send-now",
+        json={"reason": "Agent tried to force a send."},
+    )
+
+    assert response.status_code == 403
+
+
+def test_send_now_returns_not_found_for_unknown_message() -> None:
+    client = _client_for_role(
+        WorkspaceMembershipRole.BROKERAGE_ADMIN,
+        workflow_state=WorkflowState.ACTIVE_NURTURE,
+    )
+
+    response = client.client.post(
+        f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/outbound-messages/00000000-0000-0000-0000-000000000099/send-now",
+        json={"reason": "Missing message."},
+    )
+
+    assert response.status_code == 404
+
+
+
 def test_admin_can_dismiss_rejected_draft_review() -> None:
     client = _client_for_role(WorkspaceMembershipRole.BROKERAGE_ADMIN)
 
@@ -702,6 +770,7 @@ def _client_for_role(
     sms_permission_status: ContactPermissionStatus = ContactPermissionStatus.CONFIRMED,
     email_permission_status: ContactPermissionStatus = ContactPermissionStatus.CONFIRMED,
     workflow_state: WorkflowState = WorkflowState.PAUSED,
+    allow_agent_manual_enrollment: bool = True,
     workflow_pause_reason: str | None = None,
     routing_reviews: tuple[LeadRoutingReview, ...] | None = None,
 ) -> LeadsTestClient:
@@ -1010,11 +1079,61 @@ def _client_for_role(
     app.dependency_overrides[get_lead_draft_review_action_bundle] = lambda: (
         draft_review_action_bundle
     )
+    deferred_message_repository = FakeCadenceOutboundMessageRepository()
+    deferred_message_repository.messages_by_idempotency_key[
+        (WORKSPACE_ID, "outbound:test:deferred-message")
+    ] = _deferred_outbound_message()
+    deferred_message_repository.messages_by_idempotency_key[
+        (WORKSPACE_ID, "outbound:test:previously-sent")
+    ] = _previously_sent_message()
+    deferred_send_bundle = LeadDeferredSendBundle(
+        session=_FakeSession(),
+        lead_repository=FakeCadenceLeadRepository(lead),
+        workflow_repository=FakeLeadWorkflowRepository((workflow,)),
+        workflow_transition_repository=FakeWorkflowTransitionRepository(()),
+        message_repository=deferred_message_repository,
+        campaign_admin_repository=_deferred_send_campaign_admin_repository(
+            allow_agent_manual_enrollment=allow_agent_manual_enrollment
+        ),
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        paused_search_occurrence_repository=FakePausedSearchOccurrenceRepository(
+            _deferred_occurrence()
+        ),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=policy_repository,
+        workspace_operational_control_repository=FakeWorkspaceOperationalControlRepository(),
+        external_event_repository=_FakeExternalEventRepository(),
+        temporal_signal_outbox_repository=outbox,
+        crm_conversation_event_repository=FakeCrmConversationEventRepository(()),
+        crm_client=crm_client,
+        crm_agent_repository=cast(CRMAgentRepository, FakeCRMAgentRepository()),
+        workspace_agent_crm_mapping_repository=cast(
+            WorkspaceAgentCRMMappingRepository,
+            FakeWorkspaceAgentCRMMappingRepository(),
+        ),
+        workspace_agent_mapping_config_repository=cast(
+            WorkspaceAgentMappingConfigRepository,
+            FakeWorkspaceAgentMappingConfigRepository(),
+        ),
+        workspace_membership_repository=cast(
+            WorkspaceMembershipRepository,
+            FakeWorkspaceMembershipRepository(),
+        ),
+        user_repository=cast(UserRepository, bundle.user_repository),
+        outbound_message_crm_completion_repository=FakeOutboundMessageCRMCompletionRepository(),
+        workspace_handoff_config_repository=FakeWorkspaceHandoffConfigRepository(
+            _workspace_handoff_config_with_snapshot_fields()
+        ),
+        sms_provider=FakeSMSProvider("msg-1"),
+        email_provider=FakeEmailProvider("email-1"),
+    )
+    app.dependency_overrides[get_lead_deferred_send_bundle] = lambda: deferred_send_bundle
     return LeadsTestClient(
         client=TestClient(app),
         outbox=outbox,
         crm_client=crm_client,
         review_repository=shared_review_repository,
+        deferred_send_bundle=deferred_send_bundle,
     )
 
 
@@ -1392,6 +1511,116 @@ class _FakeExternalEventRepository:
             ):
                 return event
         return None
+
+
+DEFERRED_MESSAGE_ID = UUID("00000000-0000-0000-0000-000000000061")
+DEFERRED_STEP_ID = UUID("00000000-0000-0000-0000-000000000053")
+DEFERRED_TRACK_VERSION_ID = UUID("00000000-0000-0000-0000-000000000052")
+
+
+def _deferred_outbound_message() -> OutboundMessage:
+    # Mirrors a message whose send was vetoed by the 24h frequency guard:
+    # still pending, annotated with the reason, retry scheduled a day out.
+    return OutboundMessage(
+        message_id=DEFERRED_MESSAGE_ID,
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        workflow_id=WORKFLOW_ID,
+        cadence_step_id=str(DEFERRED_STEP_ID),
+        channel=ContactChannel.EMAIL,
+        status=OutboundMessageStatus.PENDING,
+        idempotency_key="outbound:test:deferred-message",
+        body="Checking in on your home search timing.",
+        subject="Checking in on your home search",
+        scheduled_for=NOW + timedelta(hours=23),
+        planned_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+        message_version=1,
+        provider_send_status=ProviderSendStatus.NOT_ATTEMPTED,
+        status_detail=(
+            "Sending blocked: pre send blocked. Pre-send checks blocked delivery: "
+            "frequency limit reached. Next eligible send time: 2030-01-02T17:00:00+00:00."
+        ),
+    )
+
+
+def _previously_sent_message() -> OutboundMessage:
+    return OutboundMessage(
+        message_id=UUID("00000000-0000-0000-0000-000000000062"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        cadence_step_id=str(DEFERRED_STEP_ID),
+        channel=ContactChannel.EMAIL,
+        status=OutboundMessageStatus.SENT,
+        idempotency_key="outbound:test:previously-sent",
+        body="Earlier outreach",
+        subject="Earlier outreach",
+        created_at=NOW,
+        updated_at=NOW,
+        sent_at=datetime(2030, 1, 1, 17, 0, tzinfo=UTC),
+        provider_send_status=ProviderSendStatus.ACCEPTED,
+        provider_name="mailgun",
+    )
+
+
+def _deferred_occurrence() -> RecurringOccurrence:
+    return RecurringOccurrence(
+        occurrence_id=UUID("00000000-0000-0000-0000-000000000063"),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        workflow_id=WORKFLOW_ID,
+        track_version_id=DEFERRED_TRACK_VERSION_ID,
+        step_id=DEFERRED_STEP_ID,
+        phase=PausedSearchTrackStepPhase.REACTIVATION,
+        occurrence_number=1,
+        scheduled_for=NOW + timedelta(hours=23),
+        due_at=NOW,
+        status=RecurringOccurrenceStatus.PLANNED,
+        idempotency_key="occurrence-deferred-test",
+        created_at=NOW,
+    )
+
+
+def _deferred_send_campaign_admin_repository(
+    *,
+    allow_agent_manual_enrollment: bool,
+) -> FakeCampaignAdminRepository:
+    repository = FakeCampaignAdminRepository()
+    repository.campaigns[CAMPAIGN_ID] = CampaignAdminCampaign(
+        campaign_id=CAMPAIGN_ID,
+        workspace_id=WORKSPACE_ID,
+        name="Dormant Buyers",
+        status=CampaignStatus.ACTIVE,
+        active_version_id=CAMPAIGN_VERSION_ID,
+        created_by_user_id=USER_ID,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    repository.versions[CAMPAIGN_VERSION_ID] = CampaignAdminVersion(
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        workspace_id=WORKSPACE_ID,
+        campaign_id=CAMPAIGN_ID,
+        version_number=1,
+        status=CampaignVersionStatus.PUBLISHED,
+        enabled_channels=(ContactChannel.EMAIL,),
+        daily_start_cap=50,
+        dormant_threshold_days=60,
+        quiet_hours_start=time(10, 0),
+        quiet_hours_end=time(17, 0),
+        timezone="America/Chicago",
+        preflight_digest_enabled=False,
+        crm_enrollment_tag=None,
+        allow_assigned_agent_manual_enrollment=allow_agent_manual_enrollment,
+        prompt_version="v1",
+        approved_model="openai/gpt-4o-mini",
+        created_by_user_id=USER_ID,
+        created_at=NOW,
+        published_at=NOW,
+    )
+    return repository
 
 
 def _actor(role: WorkspaceMembershipRole) -> AuthenticatedActor:

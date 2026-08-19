@@ -154,7 +154,12 @@ async def send_outbound_message(
     temporal_workflow_id: str | None = None,
     email_thread_anchor_inbound_message_id: UUID | None = None,
     before_provider_dispatch: Callable[[], Awaitable[None]] | None = None,
+    confirmed_frequency_limit_override: bool = False,
 ) -> SendOutboundMessageResult:
+    # confirmed_frequency_limit_override is forwarded to the pre-send domain
+    # check and may only be set by an explicit, permission-checked operator
+    # action. Every automated caller (cadence, dispatcher, webhooks) must keep
+    # the default so the frequency cap always applies to machine-driven sends.
     message = await message_repository.get_by_idempotency_key(
         workspace_id,
         idempotency_key,
@@ -349,6 +354,7 @@ async def send_outbound_message(
         ),
         effective_context.pre_send_policy,
         now,
+        confirmed_frequency_limit_override=confirmed_frequency_limit_override,
     )
     if not pre_send_decision.allowed:
         return SendOutboundMessageResult(
@@ -542,6 +548,7 @@ async def send_outbound_message(
             provider_message_id=provider_message_id,
             provider_delivery_status=ProviderDeliveryStatus.ACCEPTED,
             failure_reason=None,
+            status_detail=None,
             provider_next_retry_at=None,
             provider_last_failure_kind=None,
             sent_at=now,
@@ -674,6 +681,7 @@ async def _uncertain_send_result(
         provider_name=provider_name,
         provider_message_id=None,
         failure_reason=failure_reason,
+        status_detail=None,
         updated_at=now,
     )
     saved = await message_repository.save(uncertain_message)
@@ -901,6 +909,7 @@ async def _failed_send_result(
         status=OutboundMessageStatus.FAILED,
         provider_name=provider_name,
         failure_reason=failure_reason,
+        status_detail=None,
         updated_at=now,
     )
     saved = await message_repository.save(failed_message)

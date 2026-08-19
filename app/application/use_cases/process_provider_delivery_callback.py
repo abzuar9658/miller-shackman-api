@@ -218,6 +218,7 @@ async def process_provider_delivery_callback(
                         provider_message_id=callback.provider_message_id,
                         sent_at=updated_message.sent_at or callback.occurred_at,
                         failure_reason=None,
+                        status_detail=None,
                         updated_at=now,
                     )
                 elif reconciliation_status is OutboundSendReconciliationStatus.FAILED:
@@ -227,6 +228,7 @@ async def process_provider_delivery_callback(
                         provider_name=callback.provider,
                         provider_message_id=callback.provider_message_id,
                         failure_reason=callback.failure_reason,
+                        status_detail=None,
                         updated_at=now,
                     )
     if (

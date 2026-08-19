@@ -365,6 +365,13 @@ class OutboundMessageRepository(Protocol):
     ) -> OutboundMessage | None:
         raise NotImplementedError
 
+    async def get_by_id_for_update(
+        self,
+        workspace_id: WorkspaceId,
+        message_id: UUID,
+    ) -> OutboundMessage | None:
+        raise NotImplementedError
+
     async def get_by_idempotency_key(
         self,
         workspace_id: WorkspaceId,

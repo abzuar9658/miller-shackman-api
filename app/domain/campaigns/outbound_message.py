@@ -92,6 +92,11 @@ class OutboundMessage:
     provider_status_updated_at: datetime | None = None
     delivered_at: datetime | None = None
     failure_reason: str | None = None
+    # Human-readable explanation set while the message stays PENDING because a
+    # timing guard (frequency limit, quiet hours, simultaneous-channel window)
+    # deferred it; cleared once the message leaves PENDING. Lets operators see
+    # why a message has not sent instead of an unexplained "pending" state.
+    status_detail: str | None = None
     provider_attempt_count: int = 0
     provider_last_attempt_at: datetime | None = None
     provider_next_retry_at: datetime | None = None

@@ -266,6 +266,52 @@ def test_strictest_frequency_limit_blocks_and_returns_latest_retry_time() -> Non
     assert decision.reasons == (PreSendReasonCode.FREQUENCY_LIMIT_REACHED,)
     assert decision.next_allowed_at == NOW + timedelta(hours=1, minutes=30)
 
+def test_confirmed_frequency_override_allows_send_within_frequency_window() -> None:
+    facts = _facts(last_global_outreach_at=NOW - timedelta(hours=1))
+    blocked = evaluate_pre_send_safety(facts, _policy(), NOW)
+    assert blocked.allowed is False
+    assert blocked.reasons == (PreSendReasonCode.FREQUENCY_LIMIT_REACHED,)
+
+    decision = evaluate_pre_send_safety(
+        facts,
+        _policy(),
+        NOW,
+        confirmed_frequency_limit_override=True,
+    )
+
+    assert decision.allowed is True
+    assert decision.reasons == ()
+
+
+def test_confirmed_frequency_override_does_not_bypass_other_guards() -> None:
+    decision = evaluate_pre_send_safety(
+        _facts(
+            last_global_outreach_at=NOW - timedelta(hours=1),
+            handoff_active=True,
+        ),
+        _policy(),
+        NOW,
+        confirmed_frequency_limit_override=True,
+    )
+
+    assert decision.allowed is False
+    assert PreSendReasonCode.FREQUENCY_LIMIT_REACHED not in decision.reasons
+    assert PreSendReasonCode.HANDOFF_ACTIVE in decision.reasons
+
+
+def test_confirmed_frequency_override_does_not_bypass_allowed_hours() -> None:
+    late_evening = datetime(2026, 7, 6, 20, 0, 0)
+    decision = evaluate_pre_send_safety(
+        _facts(last_global_outreach_at=late_evening - timedelta(hours=1)),
+        _policy(),
+        late_evening,
+        confirmed_frequency_limit_override=True,
+    )
+
+    assert decision.allowed is False
+    assert decision.reasons == (PreSendReasonCode.OUTSIDE_ALLOWED_HOURS,)
+
+
 
 def test_simultaneous_channel_protection_blocks_send() -> None:
     decision = evaluate_pre_send_safety(

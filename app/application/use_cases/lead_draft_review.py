@@ -3,11 +3,9 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from secrets import token_hex
-from typing import cast
 from uuid import UUID, uuid4
 
 from app.application.ports.crm import CRMClient
-from app.application.ports.crm_sync import CanonicalLeadRefreshSource
 from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
@@ -31,7 +29,7 @@ from app.application.ports.repositories import (
     WorkspaceRepository,
 )
 from app.application.services.internal_external_events import create_internal_external_event
-from app.application.services.pre_send_crm_refresh import PreSendCRMRefreshContext
+from app.application.services.pre_send_crm_refresh import build_pre_send_crm_refresh_context
 from app.application.services.pre_send_policy import build_pre_send_policy
 from app.application.use_cases.apply_workflow_state_transition import (
     WorkflowStateTransitionStatus,
@@ -234,14 +232,14 @@ async def approve_rejected_draft_review_and_send(
         sms_provider=sms_provider,
         email_provider=email_provider,
         workspace_operational_control_repository=workspace_operational_control_repository,
-        crm_refresh_context=_pre_send_crm_refresh_context(
+        crm_refresh_context=build_pre_send_crm_refresh_context(
             crm_client=crm_client,
             crm_agent_repository=crm_agent_repository,
             workspace_agent_crm_mapping_repository=workspace_agent_crm_mapping_repository,
             workspace_agent_mapping_config_repository=workspace_agent_mapping_config_repository,
             workspace_membership_repository=workspace_membership_repository,
             user_repository=user_repository,
-            workflow_repository=workflow_repository,
+            lead_workflow_repository=workflow_repository,
             workflow_transition_repository=workflow_transition_repository,
             temporal_signal_outbox_repository=temporal_signal_outbox_repository,
         ),
@@ -487,45 +485,4 @@ async def dismiss_rejected_draft_review(
     )
 
 
-def _pre_send_crm_refresh_context(
-    *,
-    crm_client: CRMClient | None,
-    crm_agent_repository: CRMAgentRepository | None,
-    workspace_agent_crm_mapping_repository: WorkspaceAgentCRMMappingRepository | None,
-    workspace_agent_mapping_config_repository: WorkspaceAgentMappingConfigRepository | None,
-    workspace_membership_repository: WorkspaceMembershipRepository | None,
-    user_repository: UserRepository | None,
-    workflow_repository: LeadWorkflowRepository,
-    workflow_transition_repository: WorkflowTransitionRepository,
-    temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
-) -> PreSendCRMRefreshContext | None:
-    if not all(
-        dependency is not None
-        for dependency in (
-            crm_client,
-            crm_agent_repository,
-            workspace_agent_crm_mapping_repository,
-            workspace_agent_mapping_config_repository,
-            workspace_membership_repository,
-            user_repository,
-        )
-    ):
-        return None
-    assert crm_client is not None
-    assert crm_agent_repository is not None
-    assert workspace_agent_crm_mapping_repository is not None
-    assert workspace_agent_mapping_config_repository is not None
-    assert workspace_membership_repository is not None
-    assert user_repository is not None
-    return PreSendCRMRefreshContext(
-        lead_refresh_source=cast(CanonicalLeadRefreshSource, crm_client),
-        crm_activity_source=crm_client,
-        crm_agent_repository=crm_agent_repository,
-        workspace_agent_crm_mapping_repository=workspace_agent_crm_mapping_repository,
-        workspace_agent_mapping_config_repository=workspace_agent_mapping_config_repository,
-        workspace_membership_repository=workspace_membership_repository,
-        user_repository=user_repository,
-        lead_workflow_repository=workflow_repository,
-        workflow_transition_repository=workflow_transition_repository,
-        temporal_signal_outbox_repository=temporal_signal_outbox_repository,
-    )
+
