@@ -16,6 +16,7 @@ from app.application.ports.repositories import (
     TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
 )
+from app.application.ports.temporal import TemporalWorkflowStarter
 from app.core.database import get_session
 from app.infrastructure.persistence.postgres.campaign_enrollment_repository import (
     PostgresCampaignEnrollmentRepository,
@@ -38,6 +39,7 @@ from app.infrastructure.persistence.postgres.workflow_repository import (
     PostgresLeadWorkflowRepository,
     PostgresWorkflowTransitionRepository,
 )
+from app.infrastructure.providers import build_temporal_workflow_starter
 
 
 class SessionCommitter(Protocol):
@@ -58,6 +60,7 @@ class LeadPausedSearchActionBundle:
     workflow_transition_repository: WorkflowTransitionRepository | None = None
     campaign_enrollment_repository: CampaignEnrollmentRepository | None = None
     external_event_repository: ExternalEventRepository | None = None
+    temporal_workflow_starter: TemporalWorkflowStarter | None = None
 
 
 async def get_lead_paused_search_action_bundle(
@@ -77,4 +80,5 @@ async def get_lead_paused_search_action_bundle(
         workflow_transition_repository=PostgresWorkflowTransitionRepository(session),
         campaign_enrollment_repository=PostgresCampaignEnrollmentRepository(session),
         external_event_repository=PostgresExternalEventRepository(session),
+        temporal_workflow_starter=await build_temporal_workflow_starter(),
     )

@@ -209,6 +209,10 @@ async def start_paused_search_campaign_enrollment(
         lead_workflow_repository=lead_workflow_repository,
         now=now,
         target_track_version_id=active_assignment.track_version_id,
+        workflow_transition_repository=workflow_transition_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        temporal_workflow_starter=temporal_workflow_starter,
+        commit=commit,
     )
     pinned_workflow = assignment_result.workflow
     if pinned_workflow is None:

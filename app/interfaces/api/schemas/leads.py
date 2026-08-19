@@ -445,6 +445,7 @@ class UpdateLeadPausedSearchRequest(BaseModel):
     reengagement_window_label: str | None = Field(default=None, max_length=100)
     terminal_behavior: str | None = Field(default=None, min_length=1, max_length=50)
     terminal_reason: str | None = Field(default=None, max_length=500)
+    progress_handling: Literal["restart", "continue"] | None = None
 
     @model_validator(mode="after")
     def validate_shape(self) -> "UpdateLeadPausedSearchRequest":
@@ -464,6 +465,8 @@ class UpdateLeadPausedSearchRequest(BaseModel):
             raise ValueError("terminal fields are only allowed when clearing the profile")
         if self.terminal_reason is not None and self.terminal_behavior is None:
             raise ValueError("terminal_reason requires terminal_behavior")
+        if not self.active and self.progress_handling is not None:
+            raise ValueError("progress_handling is only allowed when setting a track")
         return self
 
 

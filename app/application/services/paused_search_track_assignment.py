@@ -1,13 +1,28 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from uuid import uuid4
 
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     LeadWorkflowRepository,
+    PausedSearchOccurrenceRepository,
     PausedSearchTrackAssignmentRepository,
     PausedSearchTrackRepository,
+    TemporalSignalOutboxRepository,
+    WorkflowTransitionRepository,
 )
+from app.application.ports.temporal import (
+    TemporalWorkflowExecutionMode,
+    TemporalWorkflowStarter,
+)
+from app.application.services.campaign_enrollment_starter import start_single_campaign_enrollment
+from app.application.use_cases.apply_workflow_state_transition import (
+    WorkflowStateTransitionStatus,
+    apply_workflow_state_transition,
+)
+from app.application.use_cases.campaign_enrollment_types import LeadStartStatus
 from app.domain.campaigns import (
     PausedSearchTrack,
     PausedSearchTrackAssignment,
@@ -22,13 +37,34 @@ from app.domain.common.ids import (
     UserId,
     WorkspaceId,
 )
-from app.domain.workflows import LeadWorkflow, is_terminal_workflow_state
+from app.domain.workflows import (
+    LeadWorkflow,
+    TemporalSignalName,
+    TemporalSignalOutboxEntry,
+    WorkflowState,
+    WorkflowTransitionReasonCode,
+    is_terminal_workflow_state,
+)
 
 
 class PausedSearchTrackAssignmentSyncStatus(StrEnum):
     RESOLVED = "resolved"
+    REASSIGNED = "reassigned"
     PRESERVED = "preserved"
     CLEARED = "cleared"
+
+
+class PausedSearchProgressHandling(StrEnum):
+    """Admin choice for what happens to a live workflow when a track is (re)selected.
+
+    RESTART closes the current run and starts fresh from step one even when the
+    selected track is unchanged. CONTINUE keeps the current run and re-pins it,
+    resuming phase-based in the new track. When unspecified, a different track
+    restarts and the same track is a no-op (the pre-existing default).
+    """
+
+    RESTART = "restart"
+    CONTINUE = "continue"
 
 
 @dataclass(frozen=True)
@@ -37,6 +73,7 @@ class PausedSearchTrackAssignmentSyncResult:
     assignment: PausedSearchTrackAssignment | None
     workflow: LeadWorkflow | None
     resolved_track_version_id: PausedSearchTrackVersionId | None = None
+    error: str | None = None
 
 
 async def synchronize_paused_search_track_assignment(
@@ -51,8 +88,29 @@ async def synchronize_paused_search_track_assignment(
     lead_workflow_repository: LeadWorkflowRepository,
     now: datetime,
     target_track_version_id: PausedSearchTrackVersionId | None = None,
+    workflow_transition_repository: WorkflowTransitionRepository | None = None,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
+    temporal_workflow_starter: TemporalWorkflowStarter | None = None,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
+    commit: Callable[[], Awaitable[None]] | None = None,
+    progress_handling: PausedSearchProgressHandling | None = None,
 ) -> PausedSearchTrackAssignmentSyncResult:
-    """Synchronize the durable assignment and latest workflow while both rows are locked."""
+    """Synchronize the durable assignment and latest workflow while both rows are locked.
+
+    Assigning a different track to a lead with a live paused-search workflow is a
+    lifecycle event, not an edit: the old run is closed and a fresh enrollment,
+    workflow, and Temporal execution are started so the step cursor, touch budget,
+    and occurrence idempotency keys all reset for the new track. Re-pinning the
+    old row would resume mid-track with a spent budget. The close-and-create path
+    requires the transition/enrollment repositories and the Temporal starter;
+    callers that cannot supply them fall back to the legacy re-pin.
+
+    ``progress_handling`` lets the admin override that default: RESTART forces
+    close-and-create even when the track is unchanged; CONTINUE keeps the
+    current run and re-pins it (clearing a now-stale step cursor so the timing
+    planner resumes phase-based in the new track).
+    """
     workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
         workspace_id, lead_id
     )
@@ -120,6 +178,30 @@ async def synchronize_paused_search_track_assignment(
         )
     assert assignment is not None
 
+    if _should_restart_workflow(workflow, version.track_version_id, progress_handling) and (
+        workflow_transition_repository is not None
+        and campaign_enrollment_repository is not None
+        and temporal_workflow_starter is not None
+    ):
+        assert workflow is not None
+        return await _close_and_restart_workflow_for_reassignment(
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            old_workflow=workflow,
+            assignment=assignment,
+            new_track_version_id=version.track_version_id,
+            actor_user_id=actor_user_id,
+            progress_handling=progress_handling,
+            lead_workflow_repository=lead_workflow_repository,
+            workflow_transition_repository=workflow_transition_repository,
+            paused_search_occurrence_repository=paused_search_occurrence_repository,
+            campaign_enrollment_repository=campaign_enrollment_repository,
+            temporal_workflow_starter=temporal_workflow_starter,
+            temporal_signal_outbox_repository=temporal_signal_outbox_repository,
+            commit=commit,
+            now=now,
+        )
+
     workflow = await _pin_workflow(
         workflow=workflow,
         track_version_id=assignment.track_version_id,
@@ -131,6 +213,175 @@ async def synchronize_paused_search_track_assignment(
         assignment=assignment,
         workflow=workflow,
         resolved_track_version_id=version.track_version_id,
+    )
+
+
+# Human-pause states are excluded: reassignment must never silently restart
+# automation on a lead a human paused or took over. Those workflows keep the
+# legacy re-pin and resume only through the explicit, permission-checked paths.
+_REASSIGNABLE_STATES = frozenset(
+    {
+        WorkflowState.QUEUED,
+        WorkflowState.ACTIVE_NURTURE,
+        WorkflowState.WAITING_FOR_RESPONSE,
+        WorkflowState.RESPONSE_PROCESSING,
+    }
+)
+
+
+def _should_restart_workflow(
+    workflow: LeadWorkflow | None,
+    new_track_version_id: PausedSearchTrackVersionId,
+    progress_handling: PausedSearchProgressHandling | None,
+) -> bool:
+    if (
+        workflow is None
+        or workflow.state not in _REASSIGNABLE_STATES
+        or workflow.paused_search_track_version_id is None
+    ):
+        return False
+    if progress_handling is PausedSearchProgressHandling.CONTINUE:
+        return False
+    if progress_handling is PausedSearchProgressHandling.RESTART:
+        return True
+    return workflow.paused_search_track_version_id != new_track_version_id
+
+
+async def _close_and_restart_workflow_for_reassignment(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    old_workflow: LeadWorkflow,
+    assignment: PausedSearchTrackAssignment,
+    new_track_version_id: PausedSearchTrackVersionId,
+    actor_user_id: UserId | None,
+    progress_handling: PausedSearchProgressHandling | None,
+    lead_workflow_repository: LeadWorkflowRepository,
+    workflow_transition_repository: WorkflowTransitionRepository,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository,
+    temporal_workflow_starter: TemporalWorkflowStarter,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None,
+    commit: Callable[[], Awaitable[None]] | None,
+    now: datetime,
+) -> PausedSearchTrackAssignmentSyncResult:
+    """Close the current run and start a fresh one on the newly assigned track."""
+    old_enrollment = await campaign_enrollment_repository.get_latest_by_lead_and_campaign(
+        workspace_id,
+        lead_id,
+        old_workflow.campaign_id,
+    )
+    if old_enrollment is None:
+        # A workflow without its enrollment row is unexpected; re-pin rather
+        # than guess a campaign version for the fresh run.
+        pinned = await _pin_workflow(
+            workflow=old_workflow,
+            track_version_id=new_track_version_id,
+            lead_workflow_repository=lead_workflow_repository,
+            now=now,
+        )
+        return PausedSearchTrackAssignmentSyncResult(
+            status=PausedSearchTrackAssignmentSyncStatus.RESOLVED,
+            assignment=assignment,
+            workflow=pinned,
+            resolved_track_version_id=new_track_version_id,
+            error="enrollment_missing_for_reassignment",
+        )
+
+    transition = await apply_workflow_state_transition(
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        to_state=WorkflowState.CLOSED,
+        reason_code=WorkflowTransitionReasonCode.TRACK_REASSIGNED,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        paused_search_occurrence_repository=paused_search_occurrence_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        now=now,
+        actor_user_id=actor_user_id,
+        metadata={
+            "previous_track_version_id": str(old_workflow.paused_search_track_version_id),
+            "new_track_version_id": str(new_track_version_id),
+            **(
+                {"progress_handling": progress_handling.value}
+                if progress_handling is not None
+                else {}
+            ),
+        },
+    )
+    if transition.status is not WorkflowStateTransitionStatus.UPDATED:
+        return PausedSearchTrackAssignmentSyncResult(
+            status=PausedSearchTrackAssignmentSyncStatus.RESOLVED,
+            assignment=assignment,
+            workflow=old_workflow,
+            resolved_track_version_id=new_track_version_id,
+            error=transition.skip_reason or "failed to close workflow for track reassignment",
+        )
+
+    if temporal_signal_outbox_repository is not None:
+        # Wake the old Temporal execution so it observes it has been superseded
+        # and exits instead of sleeping until its next timer.
+        await temporal_signal_outbox_repository.append(
+            TemporalSignalOutboxEntry(
+                temporal_signal_id=uuid4(),
+                workspace_id=workspace_id,
+                workflow_id=old_workflow.workflow_id,
+                temporal_workflow_id=old_workflow.temporal_workflow_id,
+                signal_name=TemporalSignalName.RESCHEDULE_REQUESTED,
+                payload={
+                    "lead_id": str(lead_id),
+                    "occurred_at": now.isoformat(),
+                    "reason": "track_reassigned",
+                },
+                idempotency_key=f"track-reassigned:{old_workflow.workflow_id}:{new_track_version_id}",
+                available_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    lead_result = await start_single_campaign_enrollment(
+        workspace_id=workspace_id,
+        campaign_id=old_workflow.campaign_id,
+        campaign_version_id=old_enrollment.campaign_version_id,
+        lead_id=lead_id,
+        source=old_enrollment.source,
+        reason_codes=("track_reassigned",),
+        actor_user_id=actor_user_id,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        lead_workflow_repository=lead_workflow_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        temporal_workflow_starter=temporal_workflow_starter,
+        now=now,
+        metadata={
+            "route": "paused_search",
+            "track_reassignment": True,
+            "previous_workflow_id": str(old_workflow.workflow_id),
+            "previous_track_version_id": str(old_workflow.paused_search_track_version_id),
+        },
+        initial_workflow_state=WorkflowState.ACTIVE_NURTURE,
+        paused_search_track_version_id=new_track_version_id,
+        execution_mode=TemporalWorkflowExecutionMode.PAUSED_SEARCH_RECURRING,
+        commit=commit,
+        is_track_reassignment=True,
+    )
+    if lead_result.status is not LeadStartStatus.STARTED:
+        return PausedSearchTrackAssignmentSyncResult(
+            status=PausedSearchTrackAssignmentSyncStatus.REASSIGNED,
+            assignment=assignment,
+            workflow=transition.workflow,
+            resolved_track_version_id=new_track_version_id,
+            error=lead_result.error or "failed to start fresh workflow for reassigned track",
+        )
+
+    new_workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
+        workspace_id, lead_id
+    )
+    return PausedSearchTrackAssignmentSyncResult(
+        status=PausedSearchTrackAssignmentSyncStatus.REASSIGNED,
+        assignment=assignment,
+        workflow=new_workflow,
+        resolved_track_version_id=new_track_version_id,
     )
 
 
@@ -179,6 +430,14 @@ async def _pin_workflow(
     # finished run instead of letting enrollment create a fresh workflow.
     if is_terminal_workflow_state(workflow.state):
         return workflow
+    # The step cursor belongs to the previously pinned track; keeping it would
+    # make the timing planner hold for review instead of resuming phase-based
+    # in the newly pinned track.
     return await lead_workflow_repository.save(
-        replace(workflow, paused_search_track_version_id=track_version_id, updated_at=now)
+        replace(
+            workflow,
+            paused_search_track_version_id=track_version_id,
+            paused_search_track_step_id=None,
+            updated_at=now,
+        )
     )

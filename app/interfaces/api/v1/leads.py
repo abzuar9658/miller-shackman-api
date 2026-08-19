@@ -9,6 +9,9 @@ from app.application.ports.lead_read import LeadReadLeadRepository
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
 from app.application.services.lead_cadence_progress import LeadCadenceProgressView
 from app.application.services.lead_decision_tree import LeadDecisionTreeView
+from app.application.services.paused_search_track_assignment import (
+    PausedSearchProgressHandling,
+)
 from app.application.use_cases.apply_lead_state_classification import (
     ApplyLeadStateClassificationStatus,
     apply_lead_state_classification,
@@ -772,6 +775,13 @@ async def update_lead_paused_search_route(
         paused_search_occurrence_repository=bundle.occurrence_repository,
         campaign_enrollment_repository=bundle.campaign_enrollment_repository,
         external_event_repository=bundle.external_event_repository,
+        temporal_workflow_starter=bundle.temporal_workflow_starter,
+        commit=bundle.session.commit,
+        progress_handling=(
+            PausedSearchProgressHandling(request.progress_handling)
+            if request.progress_handling is not None
+            else None
+        ),
         now=datetime.now(UTC),
     )
     if result.status == LeadPausedSearchActionStatus.REJECTED:
@@ -980,6 +990,10 @@ async def classify_lead_route(
             bundle.paused_search_track_assignment_repository
         ),
         temporal_signal_outbox_repository=bundle.temporal_signal_outbox_repository,
+        workflow_transition_repository=bundle.workflow_transition_repository,
+        paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
+        campaign_enrollment_repository=bundle.campaign_enrollment_repository,
+        temporal_workflow_starter=bundle.temporal_workflow_starter,
         llm_client=bundle.llm_client,
         now=datetime.now(UTC),
         default_openrouter_model=bundle.default_openrouter_model,

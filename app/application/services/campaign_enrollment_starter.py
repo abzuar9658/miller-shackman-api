@@ -83,6 +83,7 @@ async def start_single_campaign_enrollment(
     ) = None,
     commit: Callable[[], Awaitable[None]] | None = None,
     rollback: Callable[[], Awaitable[None]] | None = None,
+    is_track_reassignment: bool = False,
 ) -> LeadStartResult:
     operational_control = await resolve_workspace_operational_control(
         workspace_id=workspace_id,
@@ -114,6 +115,7 @@ async def start_single_campaign_enrollment(
         latest_workflow=latest_workflow,
         enrolling_paused_search=enrolling_paused_search,
         has_active_paused_search_assignment=has_active_paused_search_assignment,
+        is_track_reassignment=is_track_reassignment,
     )
     if not admission.admitted:
         return LeadStartResult(

@@ -48,6 +48,7 @@ class WorkflowTransitionReasonCode(StrEnum):
     DRAFT_REVIEW_DISMISSED = "draft_review_dismissed"
     CONTACT_POLICY_UPDATED = "contact_policy_updated"
     PAUSED_SEARCH_TERMINALIZED = "paused_search_terminalized"
+    TRACK_REASSIGNED = "track_reassigned"
     UNCERTAIN_SEND_TIMEOUT = "uncertain_send_timeout"
     UNCERTAIN_SEND_RESOLVED = "uncertain_send_resolved"
 

@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
@@ -15,12 +16,14 @@ from app.application.ports.repositories import (
     TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
 )
+from app.application.ports.temporal import TemporalWorkflowStarter
 from app.application.services.internal_external_events import create_internal_external_event
 from app.application.services.lead_assignment import is_actor_assigned_to_lead
 from app.application.services.lead_nurture_rescheduling import (
     enqueue_lead_nurture_reschedule_signal,
 )
 from app.application.services.paused_search_track_assignment import (
+    PausedSearchProgressHandling,
     synchronize_paused_search_track_assignment,
 )
 from app.application.use_cases.apply_workflow_state_transition import (
@@ -104,6 +107,9 @@ async def update_lead_paused_search(
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
     campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
     external_event_repository: ExternalEventRepository | None = None,
+    temporal_workflow_starter: TemporalWorkflowStarter | None = None,
+    commit: Callable[[], Awaitable[None]] | None = None,
+    progress_handling: PausedSearchProgressHandling | None = None,
     now: datetime,
 ) -> LeadPausedSearchActionResult:
     lead = await lead_repository.get_by_id_for_update(workspace_id, lead_id)
@@ -194,6 +200,13 @@ async def update_lead_paused_search(
             lead_workflow_repository=lead_workflow_repository,
             paused_search_track_repository=paused_search_track_repository,
             paused_search_track_assignment_repository=paused_search_track_assignment_repository,
+            workflow_transition_repository=workflow_transition_repository,
+            paused_search_occurrence_repository=paused_search_occurrence_repository,
+            campaign_enrollment_repository=campaign_enrollment_repository,
+            temporal_workflow_starter=temporal_workflow_starter,
+            temporal_signal_outbox_repository=temporal_signal_outbox_repository,
+            commit=commit,
+            progress_handling=progress_handling,
             now=now,
         )
         unchanged_terminalized = False
@@ -262,6 +275,13 @@ async def update_lead_paused_search(
         lead_workflow_repository=lead_workflow_repository,
         paused_search_track_repository=paused_search_track_repository,
         paused_search_track_assignment_repository=paused_search_track_assignment_repository,
+        workflow_transition_repository=workflow_transition_repository,
+        paused_search_occurrence_repository=paused_search_occurrence_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        temporal_workflow_starter=temporal_workflow_starter,
+        temporal_signal_outbox_repository=temporal_signal_outbox_repository,
+        commit=commit,
+        progress_handling=progress_handling,
         now=now,
     )
     workflow_terminalized = False
@@ -411,6 +431,13 @@ async def _synchronize_track_assignment(
     lead_workflow_repository: LeadWorkflowRepository,
     paused_search_track_repository: PausedSearchTrackRepository,
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository,
+    workflow_transition_repository: WorkflowTransitionRepository | None,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None,
+    temporal_workflow_starter: TemporalWorkflowStarter | None,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None,
+    commit: Callable[[], Awaitable[None]] | None,
+    progress_handling: PausedSearchProgressHandling | None = None,
     now: datetime,
 ) -> None:
     await synchronize_paused_search_track_assignment(
@@ -424,6 +451,13 @@ async def _synchronize_track_assignment(
         lead_workflow_repository=lead_workflow_repository,
         now=now,
         target_track_version_id=target_track_version_id,
+        workflow_transition_repository=workflow_transition_repository,
+        paused_search_occurrence_repository=paused_search_occurrence_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        temporal_workflow_starter=temporal_workflow_starter,
+        temporal_signal_outbox_repository=temporal_signal_outbox_repository,
+        commit=commit,
+        progress_handling=progress_handling,
     )
 
 

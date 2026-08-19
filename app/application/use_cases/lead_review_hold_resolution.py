@@ -495,6 +495,11 @@ async def _resolve_to_paused_search(
         lead_workflow_repository=lead_workflow_repository,
         now=now,
         target_track_version_id=selected_track.track_version_id,
+        workflow_transition_repository=workflow_transition_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        temporal_workflow_starter=temporal_workflow_starter,
+        temporal_signal_outbox_repository=temporal_signal_outbox_repository,
+        commit=commit,
     )
 
     paused_result = await update_lead_paused_search(

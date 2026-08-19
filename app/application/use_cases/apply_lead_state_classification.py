@@ -5,16 +5,20 @@ from uuid import UUID, uuid4
 
 from app.application.ports.llm import LLMClient
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     CrmConversationEventRepository,
     LeadClassificationArtifactRepository,
     LeadPausedSearchHistoryRepository,
     LeadRepository,
     LeadWorkflowRepository,
+    PausedSearchOccurrenceRepository,
     PausedSearchTrackAssignmentRepository,
     PausedSearchTrackRepository,
     TemporalSignalOutboxRepository,
+    WorkflowTransitionRepository,
     WorkspaceLLMConfigRepository,
 )
+from app.application.ports.temporal import TemporalWorkflowStarter
 from app.application.services.lead_assignment import is_actor_assigned_to_lead
 from app.application.services.lead_nurture_rescheduling import (
     enqueue_lead_nurture_reschedule_signal,
@@ -99,6 +103,10 @@ async def apply_lead_state_classification(
     paused_search_track_repository: PausedSearchTrackRepository | None = None,
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
+    workflow_transition_repository: WorkflowTransitionRepository | None = None,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
+    temporal_workflow_starter: TemporalWorkflowStarter | None = None,
     precomputed_classification_result: LeadStateClassificationResult | None = None,
     artifact_source: str = "ai_conversation_classification",
     paused_search_source: PausedSearchSource = PausedSearchSource.AI_CONVERSATION_CLASSIFICATION,
@@ -212,6 +220,10 @@ async def apply_lead_state_classification(
             paused_search_track_repository=paused_search_track_repository,
             paused_search_track_assignment_repository=paused_search_track_assignment_repository,
             temporal_signal_outbox_repository=temporal_signal_outbox_repository,
+            workflow_transition_repository=workflow_transition_repository,
+            paused_search_occurrence_repository=paused_search_occurrence_repository,
+            campaign_enrollment_repository=campaign_enrollment_repository,
+            temporal_workflow_starter=temporal_workflow_starter,
             paused_search_source=paused_search_source,
         )
 
@@ -250,6 +262,10 @@ async def _apply_paused_search(
     paused_search_track_repository: PausedSearchTrackRepository | None,
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None,
+    workflow_transition_repository: WorkflowTransitionRepository | None,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None,
+    temporal_workflow_starter: TemporalWorkflowStarter | None,
     paused_search_source: PausedSearchSource,
 ) -> ApplyLeadStateClassificationResult:
     previous_profile = lead_paused_search_profile(lead)
@@ -286,6 +302,11 @@ async def _apply_paused_search(
             lead_workflow_repository=lead_workflow_repository,
             paused_search_track_repository=paused_search_track_repository,
             paused_search_track_assignment_repository=paused_search_track_assignment_repository,
+            workflow_transition_repository=workflow_transition_repository,
+            paused_search_occurrence_repository=paused_search_occurrence_repository,
+            campaign_enrollment_repository=campaign_enrollment_repository,
+            temporal_workflow_starter=temporal_workflow_starter,
+            temporal_signal_outbox_repository=temporal_signal_outbox_repository,
             now=now,
         )
     ):
@@ -343,6 +364,11 @@ async def _apply_paused_search(
                 paused_search_track_assignment_repository=(
                     paused_search_track_assignment_repository
                 ),
+                workflow_transition_repository=workflow_transition_repository,
+                paused_search_occurrence_repository=paused_search_occurrence_repository,
+                campaign_enrollment_repository=campaign_enrollment_repository,
+                temporal_workflow_starter=temporal_workflow_starter,
+                temporal_signal_outbox_repository=temporal_signal_outbox_repository,
                 now=now,
             )
         saved_artifact = await _save_artifact(
@@ -379,6 +405,11 @@ async def _apply_paused_search(
             lead_workflow_repository=lead_workflow_repository,
             paused_search_track_repository=paused_search_track_repository,
             paused_search_track_assignment_repository=paused_search_track_assignment_repository,
+            workflow_transition_repository=workflow_transition_repository,
+            paused_search_occurrence_repository=paused_search_occurrence_repository,
+            campaign_enrollment_repository=campaign_enrollment_repository,
+            temporal_workflow_starter=temporal_workflow_starter,
+            temporal_signal_outbox_repository=temporal_signal_outbox_repository,
             now=now,
         )
         if temporal_signal_outbox_repository is not None:
@@ -432,6 +463,11 @@ async def _synchronize_track_assignment(
     lead_workflow_repository: LeadWorkflowRepository,
     paused_search_track_repository: PausedSearchTrackRepository,
     paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
+    workflow_transition_repository: WorkflowTransitionRepository | None,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None,
+    temporal_workflow_starter: TemporalWorkflowStarter | None,
+    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None,
     now: datetime,
 ) -> bool:
     if paused_search_track_assignment_repository is None:
@@ -447,6 +483,11 @@ async def _synchronize_track_assignment(
         lead_workflow_repository=lead_workflow_repository,
         now=now,
         target_track_version_id=track_version_id,
+        workflow_transition_repository=workflow_transition_repository,
+        paused_search_occurrence_repository=paused_search_occurrence_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+        temporal_workflow_starter=temporal_workflow_starter,
+        temporal_signal_outbox_repository=temporal_signal_outbox_repository,
     )
     return (
         result.assignment is not None

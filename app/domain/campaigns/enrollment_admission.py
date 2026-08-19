@@ -34,6 +34,7 @@ def evaluate_lead_enrollment_admission(
     latest_workflow: LeadWorkflow | None,
     enrolling_paused_search: bool = False,
     has_active_paused_search_assignment: bool = False,
+    is_track_reassignment: bool = False,
 ) -> EnrollmentAdmissionDecision:
     """Decide whether a lead may start a new campaign workflow.
 
@@ -43,6 +44,11 @@ def evaluate_lead_enrollment_admission(
     A lead holding an active paused-search track assignment may only start a
     paused-search journey; dormant enrollment requires clearing that assignment
     first so a lead can never sit on two tracks at once.
+
+    Track reassignment is the one sanctioned exception to terminal re-entry: the
+    previous workflow was closed moments earlier for the express purpose of
+    starting a fresh run on the newly assigned track, so no separate re-entry
+    reason is required.
     """
     if not enrolling_paused_search and has_active_paused_search_assignment:
         return EnrollmentAdmissionDecision(
@@ -71,6 +77,9 @@ def evaluate_lead_enrollment_admission(
                 f"{latest_workflow.campaign_id}."
             ),
         )
+
+    if is_track_reassignment:
+        return EnrollmentAdmissionDecision(outcome=EnrollmentAdmissionOutcome.ADMITTED)
 
     if source in _TERMINAL_REENTRY_SOURCES:
         return EnrollmentAdmissionDecision(
