@@ -86,6 +86,7 @@ from app.application.use_cases.schedule_next_paused_search_action import (
 )
 from app.application.use_cases.send_outbound_message import (
     OutboundSendContext,
+    SendOutboundMessageReasonCode,
     SendOutboundMessageResult,
     SendOutboundMessageStatus,
     send_outbound_message,
@@ -103,6 +104,10 @@ from app.domain.campaigns.paused_search_tracks import (
     PausedSearchStepAction,
     PausedSearchTrackStep,
     effective_paused_search_step_action,
+)
+from app.domain.campaigns.pre_send import (
+    TIMING_PRE_SEND_REASON_CODES,
+    PreSendReasonCode,
 )
 from app.domain.campaigns.rejected_draft_review import (
     RejectedDraftReview,
@@ -776,6 +781,22 @@ async def execute_campaign_cadence_step(
             cadence_step_id=step.cadence_step_id,
             plan_result=plan_result,
         )
+        planning_retry_at = _planning_timing_retry_at(plan_result, now)
+        if planning_retry_at is not None:
+            return await _defer_after_timing_block(
+                workspace_id=workspace_id,
+                workflow=workflow,
+                cadence_step_id=step.cadence_step_id,
+                retry_at=planning_retry_at,
+                skip_reason=str(
+                    block_metadata.get("explanation", _reason_values(plan_result.reasons))
+                ),
+                is_paused_search_step=is_paused_search_step,
+                paused_search_occurrence=paused_search_occurrence,
+                paused_search_occurrence_repository=paused_search_occurrence_repository,
+                lead_workflow_repository=lead_workflow_repository,
+                now=now,
+            )
         blocked_result = await _pause_after_block(
             workspace_id=workspace_id,
             lead_id=lead_id,
@@ -1058,6 +1079,22 @@ async def execute_campaign_cadence_step(
         cadence_step_id=step.cadence_step_id,
         send_result=send_result,
     )
+    send_retry_at = _send_timing_retry_at(send_result, now)
+    if send_retry_at is not None:
+        return await _defer_after_timing_block(
+            workspace_id=workspace_id,
+            workflow=workflow,
+            cadence_step_id=step.cadence_step_id,
+            retry_at=send_retry_at,
+            skip_reason=str(
+                block_metadata.get("explanation", _reason_values(send_result.reasons))
+            ),
+            is_paused_search_step=is_paused_search_step,
+            paused_search_occurrence=paused_search_occurrence,
+            paused_search_occurrence_repository=paused_search_occurrence_repository,
+            lead_workflow_repository=lead_workflow_repository,
+            now=now,
+        )
     result = await _pause_after_block(
         workspace_id=workspace_id,
         lead_id=lead_id,
@@ -1182,6 +1219,109 @@ async def _pause_after_block(
         skip_reason=skip_reason or outcome.skip_reason,
         reconciliation_id=reconciliation_id,
         provider_failure_id=provider_failure_id,
+    )
+
+
+def _planning_timing_retry_at(
+    plan_result: PlanOutboundMessageResult,
+    now: datetime,
+) -> datetime | None:
+    if plan_result.reasons != (PlanOutboundMessageReasonCode.PRE_SEND_BLOCKED,):
+        return None
+    pre_send_reasons: tuple[PreSendReasonCode, ...]
+    next_allowed_at: datetime | None
+    if plan_result.pre_send_decision is not None:
+        pre_send_reasons = plan_result.pre_send_decision.reasons
+        next_allowed_at = plan_result.pre_send_decision.next_allowed_at
+    else:
+        pre_send_reasons = tuple(
+            reason
+            for evaluation in plan_result.channel_evaluations
+            for reason in evaluation.pre_send_reasons
+        )
+        next_allowed_at = _planning_next_allowed_at(plan_result.channel_evaluations)
+    return _timing_retry_at(pre_send_reasons, next_allowed_at, now)
+
+
+def _send_timing_retry_at(
+    send_result: SendOutboundMessageResult,
+    now: datetime,
+) -> datetime | None:
+    if (
+        send_result.status is not SendOutboundMessageStatus.REJECTED
+        or send_result.reasons != (SendOutboundMessageReasonCode.PRE_SEND_BLOCKED,)
+        or send_result.pre_send_decision is None
+    ):
+        return None
+    return _timing_retry_at(
+        send_result.pre_send_decision.reasons,
+        send_result.pre_send_decision.next_allowed_at,
+        now,
+    )
+
+
+def _timing_retry_at(
+    pre_send_reasons: tuple[PreSendReasonCode, ...],
+    next_allowed_at: datetime | None,
+    now: datetime,
+) -> datetime | None:
+    if (
+        not pre_send_reasons
+        or any(reason not in TIMING_PRE_SEND_REASON_CODES for reason in pre_send_reasons)
+        or next_allowed_at is None
+        or next_allowed_at <= now
+    ):
+        return None
+    return next_allowed_at
+
+
+async def _defer_after_timing_block(
+    *,
+    workspace_id: WorkspaceId,
+    workflow: LeadWorkflow,
+    cadence_step_id: UUID,
+    retry_at: datetime,
+    skip_reason: str,
+    is_paused_search_step: bool,
+    paused_search_occurrence: RecurringOccurrence | None,
+    paused_search_occurrence_repository: PausedSearchOccurrenceRepository | None,
+    lead_workflow_repository: LeadWorkflowRepository,
+    now: datetime,
+) -> CadenceStepExecutionResult:
+    # A timing-only block (frequency limit, quiet hours, simultaneous-channel
+    # window) clears on its own at next_allowed_at, so the workflow stays in
+    # active nurture and the same step is retried then — pausing would strand
+    # the lead until a human resumes it.
+    occurrence = paused_search_occurrence
+    if (
+        is_paused_search_step
+        and paused_search_occurrence is not None
+        and paused_search_occurrence_repository is not None
+    ):
+        occurrence = (
+            await paused_search_occurrence_repository.reschedule_open(
+                workspace_id=workspace_id,
+                occurrence_id=paused_search_occurrence.occurrence_id,
+                scheduled_for=retry_at,
+                now=now,
+            )
+            or paused_search_occurrence
+        )
+    workflow = await _save_step_cursor(
+        workflow=workflow,
+        cadence_step_id=cadence_step_id,
+        scheduled_for=retry_at,
+        is_paused_search_step=is_paused_search_step,
+        lead_workflow_repository=lead_workflow_repository,
+        now=now,
+    )
+    return CadenceStepExecutionResult(
+        status=CadenceStepExecutionStatus.DEFERRED,
+        workflow=workflow,
+        cadence_step_id=cadence_step_id,
+        skip_reason=skip_reason,
+        occurrence_id=occurrence.occurrence_id if occurrence is not None else None,
+        has_more_steps=True,
     )
 
 

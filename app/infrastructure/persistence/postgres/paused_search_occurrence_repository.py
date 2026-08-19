@@ -288,6 +288,30 @@ class PostgresPausedSearchOccurrenceRepository:
         model.provider_delivery_status = None
         return _from_model(model)
 
+    async def reschedule_open(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+        scheduled_for: datetime,
+        now: datetime,
+    ) -> RecurringOccurrence | None:
+        result = await self._session.execute(
+            select(RecurringOccurrenceModel)
+            .where(RecurringOccurrenceModel.workspace_id == workspace_id)
+            .where(RecurringOccurrenceModel.occurrence_id == occurrence_id)
+            .with_for_update(),
+        )
+        model = result.scalar_one_or_none()
+        if model is None or RecurringOccurrenceStatus(model.status) in _TERMINAL_STATUSES:
+            return None
+
+        # A timing-only pre-send block ("not now, retry after X") keeps the
+        # same occurrence slot open and simply moves its attempt time forward.
+        model.status = RecurringOccurrenceStatus.PLANNED.value
+        model.scheduled_for = scheduled_for
+        return _from_model(model)
+
     async def get_by_id_for_update(
         self,
         workspace_id: WorkspaceId,

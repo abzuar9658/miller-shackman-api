@@ -357,6 +357,37 @@ class _Phase4OccurrenceRepository:
             return updated
         return None
 
+    async def reschedule_open(
+        self,
+        *,
+        workspace_id: UUID,
+        occurrence_id: UUID,
+        scheduled_for: datetime,
+        now: datetime,
+    ) -> RecurringOccurrence | None:
+        for index, occurrence in enumerate(self.occurrences):
+            if (
+                occurrence.workspace_id != workspace_id
+                or occurrence.occurrence_id != occurrence_id
+                or occurrence.status
+                in {
+                    RecurringOccurrenceStatus.SENT,
+                    RecurringOccurrenceStatus.SKIPPED,
+                    RecurringOccurrenceStatus.CANCELLED,
+                    RecurringOccurrenceStatus.EXPIRED,
+                    RecurringOccurrenceStatus.FAILED,
+                }
+            ):
+                continue
+            updated = replace(
+                occurrence,
+                status=RecurringOccurrenceStatus.PLANNED,
+                scheduled_for=scheduled_for,
+            )
+            self.occurrences[index] = updated
+            return updated
+        return None
+
 
 def _crm_event(
     *,
@@ -929,10 +960,11 @@ async def test_execute_campaign_cadence_step_sends_paused_search_step_and_advanc
     assert len(email_provider.messages) == 1
 
 
-async def test_pre_send_blocked_paused_search_step_leaves_occurrence_open() -> None:
-    """Regression: a pre-send policy block (e.g. 24h frequency limit) must not
-    close the occurrence as CANCELLED — that consumed the step's occurrence cap
-    and terminalized the workflow straight to COMPLETED on the next resume."""
+async def test_pre_send_frequency_block_defers_step_and_retries_after_window() -> None:
+    """A timing-only pre-send block (24h same-channel frequency limit) defers
+    the step to next_allowed_at instead of pausing — the workflow stays in
+    active nurture, the occurrence slot stays open, and the retry after the
+    window sends normally without any human resume."""
     workflow_repository = FakeLeadWorkflowRepository()
     transition_repository = FakeWorkflowTransitionRepository()
     send_now = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
@@ -998,38 +1030,36 @@ async def test_pre_send_blocked_paused_search_step_leaves_occurrence_open() -> N
         now=send_now,
     )
 
-    assert result.status == CadenceStepExecutionStatus.REJECTED
+    # Frequency window opened at send_now - 1h and clears 24h later (14:00 UTC),
+    # but that is 9 AM Chicago — before allowed hours — so the retry lands at
+    # 10 AM Chicago = 15:00 UTC.
+    retry_at = send_now + timedelta(hours=24)
+    assert result.status == CadenceStepExecutionStatus.DEFERRED
     assert result.workflow is not None
-    assert result.workflow.state == WorkflowState.PAUSED
+    assert result.workflow.state == WorkflowState.ACTIVE_NURTURE
+    assert result.workflow.next_action_at == retry_at
+    assert result.workflow.paused_search_track_step_id == PAUSED_SEARCH_STEP_ONE_ID
     assert email_provider.messages == []
-    # The occurrence slot must remain open so a resume retries the same step
-    # instead of counting the blocked attempt against the occurrence cap.
+    # The occurrence slot must remain open and move to the retry time so the
+    # blocked attempt never counts against the occurrence cap.
     assert occurrence_repository.occurrence is not None
     assert occurrence_repository.occurrence.status is RecurringOccurrenceStatus.PLANNED
+    assert occurrence_repository.occurrence.scheduled_for == retry_at
     assert occurrence_repository.occurrence.logical_touch_count == 0
     assert result.workflow.logical_touch_count == 0
-    last_transition = list(transition_repository.transitions.values())[-1]
-    assert last_transition.reason_code == WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED
-    assert "frequency_limit_reached" in cast(
-        list[str], last_transition.metadata["pre_send_reasons"]
+    # No pause transition is recorded for a timing-only deferral.
+    assert all(
+        transition.to_state != WorkflowState.PAUSED
+        for transition in transition_repository.transitions.values()
     )
 
-    # A resume while the frequency window is still active blocks again but
-    # must keep the same occurrence open — repeated blocks never consume it.
-    await workflow_repository.save(
-        replace(
-            result.workflow,
-            state=WorkflowState.ACTIVE_NURTURE,
-            paused_search_track_step_id=PAUSED_SEARCH_STEP_ONE_ID,
-            next_action_at=send_now + timedelta(minutes=30),
-        )
-    )
+    # Once the frequency window passes, the retried step sends normally.
     second_result = await execute_campaign_cadence_step(
         workspace_id=WORKSPACE_ID,
         lead_id=LEAD_ID,
         campaign_version_id=CAMPAIGN_VERSION_ID,
         cadence_step_id=PAUSED_SEARCH_STEP_ONE_ID,
-        scheduled_for=send_now + timedelta(minutes=30),
+        scheduled_for=retry_at,
         campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
         paused_search_track_repository=_paused_search_track_repository(),
         paused_search_occurrence_repository=occurrence_repository,
@@ -1049,15 +1079,18 @@ async def test_pre_send_blocked_paused_search_step_leaves_occurrence_open() -> N
         llm_client=FakeLLMClient(),
         sms_provider=FakeSMSProvider(),
         email_provider=email_provider,
-        now=send_now + timedelta(minutes=30),
+        now=retry_at,
     )
 
-    assert second_result.status == CadenceStepExecutionStatus.REJECTED
-    assert second_result.workflow is not None
-    assert second_result.workflow.state == WorkflowState.PAUSED
-    assert email_provider.messages == []
-    assert occurrence_repository.occurrence.status is RecurringOccurrenceStatus.PLANNED
-    assert occurrence_repository.occurrence.logical_touch_count == 0
+    assert second_result.status in {
+        CadenceStepExecutionStatus.SENT,
+        CadenceStepExecutionStatus.DISPATCH_PENDING,
+    }
+    assert len(email_provider.messages) == 1
+    final_occurrence = occurrence_repository.occurrence
+    assert final_occurrence is not None
+    assert final_occurrence.status is RecurringOccurrenceStatus.SENT
+    assert final_occurrence.logical_touch_count == 1
 
 
 async def test_execute_campaign_cadence_step_holds_review_required_message() -> None:
@@ -2079,16 +2112,17 @@ async def test_execute_campaign_cadence_step_respects_persisted_quiet_hours() ->
         now=datetime(2026, 7, 10, 13, 0, tzinfo=UTC),
     )
 
-    assert result.status == CadenceStepExecutionStatus.REJECTED
+    # Quiet hours are a timing-only block: the step defers itself to the next
+    # allowed window instead of pausing the workflow for a human resume.
+    assert result.status == CadenceStepExecutionStatus.DEFERRED
     assert result.workflow is not None
-    assert result.workflow.state == WorkflowState.PAUSED
-    last_transition = list(transition_repository.transitions.values())[-1]
-    assert last_transition.metadata["block_stage"] == "planning"
-    assert last_transition.metadata["reason_codes"] == ["pre_send_blocked"]
-    assert last_transition.metadata["evaluated_channels"] == ["email"]
-    assert last_transition.metadata["channel_block_outcomes"] == ["pre_send_blocked"]
-    assert last_transition.metadata["pre_send_reasons"] == ["outside_allowed_hours"]
-    assert last_transition.metadata["next_allowed_at"] == "2026-07-10T15:00:00+00:00"
+    assert result.workflow.state == WorkflowState.ACTIVE_NURTURE
+    assert result.workflow.next_action_at == datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
+    assert result.workflow.current_step_id == STEP_ONE_ID
+    assert all(
+        transition.to_state != WorkflowState.PAUSED
+        for transition in transition_repository.transitions.values()
+    )
 
 
 async def test_execute_campaign_cadence_step_ignores_quiet_hour_window_when_disabled() -> None:

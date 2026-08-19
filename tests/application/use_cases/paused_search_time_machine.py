@@ -222,6 +222,36 @@ class PausedSearchTimeMachineOccurrenceRepository:
                 return reopened
         return None
 
+    async def reschedule_open(
+        self,
+        *,
+        workspace_id: UUID,
+        occurrence_id: UUID,
+        scheduled_for: datetime,
+        now: datetime,
+    ) -> RecurringOccurrence | None:
+        for index, item in enumerate(self.occurrences):
+            if (
+                item.workspace_id == workspace_id
+                and item.occurrence_id == occurrence_id
+                and item.status
+                not in {
+                    RecurringOccurrenceStatus.SENT,
+                    RecurringOccurrenceStatus.SKIPPED,
+                    RecurringOccurrenceStatus.CANCELLED,
+                    RecurringOccurrenceStatus.EXPIRED,
+                    RecurringOccurrenceStatus.FAILED,
+                }
+            ):
+                rescheduled = replace(
+                    item,
+                    status=RecurringOccurrenceStatus.PLANNED,
+                    scheduled_for=scheduled_for,
+                )
+                self.occurrences[index] = rescheduled
+                return rescheduled
+        return None
+
     async def get_by_id(
         self, workspace_id: UUID, occurrence_id: UUID
     ) -> RecurringOccurrence | None:

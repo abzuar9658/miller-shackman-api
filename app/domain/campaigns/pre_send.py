@@ -41,6 +41,18 @@ class PreSendReasonCode(StrEnum):
     SIMULTANEOUS_CHANNEL_NOT_ALLOWED = "simultaneous_channel_not_allowed"
 
 
+# Timing blocks are "not now, retry after next_allowed_at" conditions — unlike
+# every other reason code, they clear on their own once the window passes, so
+# callers may reschedule instead of requiring a human resume.
+TIMING_PRE_SEND_REASON_CODES: frozenset[PreSendReasonCode] = frozenset(
+    {
+        PreSendReasonCode.OUTSIDE_ALLOWED_HOURS,
+        PreSendReasonCode.FREQUENCY_LIMIT_REACHED,
+        PreSendReasonCode.SIMULTANEOUS_CHANNEL_NOT_ALLOWED,
+    }
+)
+
+
 def _default_sendable_workflow_states() -> frozenset[WorkflowState]:
     return frozenset(
         {
@@ -254,12 +266,9 @@ def _next_allowed_at(
     frequency_block_until: datetime | None,
     simultaneous_block_until: datetime | None,
 ) -> datetime | None:
-    timing_reasons = {
-        PreSendReasonCode.OUTSIDE_ALLOWED_HOURS,
-        PreSendReasonCode.FREQUENCY_LIMIT_REACHED,
-        PreSendReasonCode.SIMULTANEOUS_CHANNEL_NOT_ALLOWED,
-    }
-    if not reasons or any(reason not in timing_reasons for reason in reasons):
+    if not reasons or any(
+        reason not in TIMING_PRE_SEND_REASON_CODES for reason in reasons
+    ):
         return None
 
     candidate = now

@@ -1204,6 +1204,16 @@ class PausedSearchOccurrenceRepository(Protocol):
     ) -> RecurringOccurrence | None:
         raise NotImplementedError
 
+    async def reschedule_open(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        occurrence_id: UUID,
+        scheduled_for: datetime,
+        now: datetime,
+    ) -> RecurringOccurrence | None:
+        raise NotImplementedError
+
     async def get_by_id_for_update(
         self,
         workspace_id: WorkspaceId,
