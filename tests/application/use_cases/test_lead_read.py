@@ -662,6 +662,72 @@ def test_dormant_cadence_progress_terminal_workflow_has_no_current_step() -> Non
     assert progress.steps[0].status == CadenceStepProgressStatus.UPCOMING
 
 
+def test_dormant_cadence_progress_non_sendable_workflows_have_no_current_step() -> None:
+    """Paused/handoff/human-owned workflows are not actively progressing."""
+    steps = (
+        _cadence_step(STEP_1, 1, ContactChannel.EMAIL),
+        _cadence_step(STEP_2, 2, ContactChannel.EMAIL),
+    )
+    for state in (
+        WorkflowState.PAUSED,
+        WorkflowState.HUMAN_HANDOFF,
+        WorkflowState.HUMAN_OWNED,
+    ):
+        # Mirrors the handoff path: the transition clears the cursor and
+        # next_action_at, leaving one sent step and one never-sent step.
+        workflow = replace(
+            _workflow(),
+            state=state,
+            current_step_id=None,
+            next_action_at=None,
+            paused_search_track_version_id=None,
+            paused_search_track_step_id=None,
+        )
+
+        progress = build_dormant_cadence_progress(
+            flow_name="Dormant Buyers",
+            cadence_steps=steps,
+            outbound_messages=(_step_message(STEP_1, OutboundMessageStatus.SENT),),
+            workflow=workflow,
+        )
+
+        assert progress is not None
+        assert progress.current_step_order is None, state
+        assert progress.completed_steps == 1
+        statuses = {step.step_id: step.status for step in progress.steps}
+        assert statuses[STEP_1] == CadenceStepProgressStatus.COMPLETED
+        assert statuses[STEP_2] == CadenceStepProgressStatus.UPCOMING
+
+
+def test_dormant_cadence_progress_paused_workflow_suppresses_cursor_current_step() -> None:
+    """Pausing keeps current_step_id on the workflow; it must not surface."""
+    steps = (
+        _cadence_step(STEP_1, 1, ContactChannel.EMAIL),
+        _cadence_step(STEP_2, 2, ContactChannel.EMAIL),
+    )
+    workflow = replace(
+        _workflow(),
+        state=WorkflowState.PAUSED,
+        current_step_id=STEP_2,
+        next_action_at=None,
+        paused_search_track_version_id=None,
+        paused_search_track_step_id=None,
+    )
+
+    progress = build_dormant_cadence_progress(
+        flow_name="Dormant Buyers",
+        cadence_steps=steps,
+        outbound_messages=(_step_message(STEP_1, OutboundMessageStatus.SENT),),
+        workflow=workflow,
+    )
+
+    assert progress is not None
+    assert progress.current_step_order is None
+    statuses = {step.step_id: step.status for step in progress.steps}
+    assert statuses[STEP_1] == CadenceStepProgressStatus.COMPLETED
+    assert statuses[STEP_2] == CadenceStepProgressStatus.UPCOMING
+
+
 def test_paused_search_cadence_progress_uses_track_cursor() -> None:
     steps = (_paused_search_maintenance_step(), _paused_search_track_step())
     workflow = _workflow()  # cursor points at reactivation step ...16
@@ -735,6 +801,39 @@ def test_paused_search_cadence_progress_projects_occurrences_and_repeats() -> No
     projected = reactivation.occurrences[0].projected_for
     assert projected == datetime(2030, 5, 18, 10, 0, tzinfo=UTC)
     assert reactivation.scheduled_for == projected
+
+
+def test_paused_search_cadence_progress_does_not_project_when_human_handoff() -> None:
+    """A handoff halts the track; projecting future sends would be misleading."""
+    maintenance_step = replace(_paused_search_maintenance_step(), interval_days=30)
+    reactivation_step = _paused_search_track_step()
+    workflow = replace(
+        _workflow(),
+        state=WorkflowState.HUMAN_HANDOFF,
+        next_action_at=None,
+    )
+    profile = LeadPausedSearchProfile(
+        paused_search_active=True,
+        paused_search_track_key="rates-watch",
+        paused_search_track_version_id=TRACK_VERSION_ID,
+        reengagement_not_before=datetime(2030, 6, 1, tzinfo=UTC),
+    )
+
+    progress = build_paused_search_cadence_progress(
+        flow_name="Rates Watch",
+        track_steps=(maintenance_step, reactivation_step),
+        outbound_messages=(),
+        workflow=workflow,
+        profile=profile,
+        track_version=_paused_search_track_version(),
+        timezone="UTC",
+        now=NOW,
+    )
+
+    assert progress is not None
+    assert progress.current_step_order is None
+    assert all(step.occurrences == () for step in progress.steps)
+    assert all(step.scheduled_for is None for step in progress.steps)
 
 
 def test_status_narrative_without_workflow() -> None:

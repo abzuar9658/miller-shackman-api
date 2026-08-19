@@ -19,7 +19,12 @@ from app.domain.campaigns.paused_search_tracks import (
 )
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import LeadPausedSearchProfile
-from app.domain.workflows import LeadWorkflow, WorkflowState, is_terminal_workflow_state
+from app.domain.workflows import (
+    LeadWorkflow,
+    WorkflowState,
+    is_sendable_workflow_state,
+    is_terminal_workflow_state,
+)
 
 
 class LeadCadenceJourney(StrEnum):
@@ -230,7 +235,7 @@ def _apply_paused_search_projection(
     dispatcher will produce as the track unfolds.
     """
 
-    if is_terminal_workflow_state(workflow.state):
+    if not is_sendable_workflow_state(workflow.state):
         return progress
     occurrences_by_step: dict[UUID, tuple[CadenceStepOccurrenceView, ...]] = {}
     sim_now = now
@@ -431,7 +436,7 @@ def _derive_current_step_id(
     workflow: LeadWorkflow | None,
     cursor_step_id: UUID | None,
 ) -> UUID | None:
-    if workflow is not None and is_terminal_workflow_state(workflow.state):
+    if workflow is not None and not is_sendable_workflow_state(workflow.state):
         return None
     known_ids = {step_id for step_id, *_ in specs}
     if cursor_step_id is not None and cursor_step_id in known_ids:

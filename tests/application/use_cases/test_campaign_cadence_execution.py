@@ -699,6 +699,50 @@ async def test_execute_step_excludes_failed_outbound_history_from_drafting_promp
     assert "Checking in about your home search." in draft_requests[0].prompt
 
 
+async def test_execute_step_skips_when_workflow_in_human_handoff() -> None:
+    """A reply-triggered handoff clears the cursor; a late step-2 timer must not send."""
+    workflow_repository = FakeLeadWorkflowRepository()
+    transition_repository = FakeWorkflowTransitionRepository()
+    llm_client = FakeLLMClient()
+    email_provider = FakeEmailProvider("email-123")
+    await workflow_repository.save(
+        replace(
+            _workflow(),
+            state=WorkflowState.HUMAN_HANDOFF,
+            current_step_id=None,
+            next_action_at=None,
+        )
+    )
+
+    result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=STEP_TWO_ID,
+        scheduled_for=NOW,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
+            _workspace_contact_policy()
+        ),
+        lead_repository=FakeLeadRepository(_lead()),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        message_repository=FakeOutboundMessageRepository(),
+        llm_client=llm_client,
+        sms_provider=FakeSMSProvider(),
+        email_provider=email_provider,
+        crm_client=FakeCRMClient(),
+        outbound_message_crm_completion_repository=FakeOutboundMessageCRMCompletionRepository(),
+        now=NOW,
+    )
+
+    assert result.status == CadenceStepExecutionStatus.SKIPPED
+    assert "not sendable" in (result.skip_reason or "")
+    assert _draft_requests(llm_client) == []
+    assert email_provider.messages == []
+
+
 async def test_schedule_next_campaign_cadence_step_schedules_second_step_after_first_send() -> None:
     workflow_repository = FakeLeadWorkflowRepository()
     transition_repository = FakeWorkflowTransitionRepository()

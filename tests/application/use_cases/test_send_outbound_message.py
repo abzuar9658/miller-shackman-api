@@ -1202,9 +1202,7 @@ async def test_sends_pending_email_message_with_subject() -> None:
     assert result.message.provider_message_id == "msg-123"
     assert result.message.reply_routing_token is not None
     assert len(email_provider.messages) == 1
-    assert email_provider.messages[0].reply_to == (
-        f"nurture+{result.message.reply_routing_token}@inbound.example.com"
-    )
+    assert email_provider.messages[0].reply_to == "nurture@inbound.example.com"
 
 
 async def test_sends_pending_email_message_with_deterministic_message_id() -> None:

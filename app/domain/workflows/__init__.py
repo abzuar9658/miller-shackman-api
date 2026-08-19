@@ -5,6 +5,7 @@ from app.domain.workflows.models import (
     WorkflowTransitionError,
     WorkflowTransitionReasonCode,
     WorkflowTransitionResult,
+    is_sendable_workflow_state,
     is_terminal_workflow_state,
     transition_workflow,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "TemporalSignalName",
     "TemporalSignalOutboxEntry",
     "TemporalSignalOutboxStatus",
+    "is_sendable_workflow_state",
     "is_terminal_workflow_state",
     "transition_workflow",
 ]

@@ -224,6 +224,16 @@ def _non_sendable_states() -> frozenset[WorkflowState]:
     )
 
 
+def is_sendable_workflow_state(state: WorkflowState) -> bool:
+    """Whether automated outreach may proceed from this state.
+
+    Paused, human-handoff, human-owned, and terminal workflows must not be
+    presented as actively progressing (e.g. cadence progress projections)
+    even though they may still be resumable.
+    """
+    return state not in _non_sendable_states()
+
+
 def _next_current_step_id(workflow: LeadWorkflow, to_state: WorkflowState) -> UUID | None:
     if to_state in _terminal_states() | {WorkflowState.HUMAN_HANDOFF, WorkflowState.HUMAN_OWNED}:
         return None

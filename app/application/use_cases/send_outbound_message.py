@@ -470,7 +470,6 @@ async def send_outbound_message(
             message_id=build_outbound_email_message_id(message.message_id),
             reply_to=build_outbound_reply_to_address(
                 effective_context.workspace_contact_policy.inbound_email_address or "",
-                message.reply_routing_token or "",
             ),
             in_reply_to_message_id=email_threading_headers.in_reply_to_message_id,
             reference_message_ids=email_threading_headers.reference_message_ids,
@@ -498,7 +497,6 @@ async def send_outbound_message(
                 to_email=destination,
                 reply_to_address=build_outbound_reply_to_address(
                     effective_context.workspace_contact_policy.inbound_email_address or "",
-                    message.reply_routing_token or "",
                 ),
                 in_reply_to_message_id=email_threading_headers.in_reply_to_message_id,
                 reference_message_ids=email_threading_headers.reference_message_ids,

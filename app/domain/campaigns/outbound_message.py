@@ -52,18 +52,16 @@ def parse_outbound_email_message_id(value: str) -> UUID | None:
         return None
 
 
-def build_outbound_reply_to_address(
-    inbound_email_address: str,
-    reply_routing_token: str,
-) -> str | None:
+def build_outbound_reply_to_address(inbound_email_address: str) -> str | None:
+    # Plain address only: plus-addressed routing tokens in Reply-To trigger
+    # Outlook's reply-redirection heuristics, which disable the Reply button.
+    # Inbound attribution relies on In-Reply-To/References thread headers and
+    # sender-email fallback instead; plus-addressed replies remain accepted.
     normalized_inbound = inbound_email_address.strip().lower()
     local_part, separator, domain = normalized_inbound.partition("@")
     if not separator or not local_part or not domain:
         return None
-    normalized_token = reply_routing_token.strip().lower()
-    if not normalized_token:
-        return None
-    return f"{local_part}+{normalized_token}@{domain}"
+    return normalized_inbound
 
 
 @dataclass(frozen=True)
