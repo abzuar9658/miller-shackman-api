@@ -233,6 +233,7 @@ def _planning_context(
     enabled_channels: tuple[ContactChannel, ...] = (ContactChannel.SMS,),
     campaign_status: CampaignStatus = CampaignStatus.ACTIVE,
     workflow_state: WorkflowState = WorkflowState.ACTIVE_NURTURE,
+    workflow_id: UUID | None = None,
 ) -> OutboundPlanningContext:
     return OutboundPlanningContext(
         campaign_status=campaign_status,
@@ -244,6 +245,7 @@ def _planning_context(
         campaign_goal="Re-engage dormant buyer leads without giving property or finance advice.",
         brokerage_name="Miller Schackman",
         cadence_step_id="step-1",
+        workflow_id=workflow_id,
         assigned_agent_name="Alex Agent",
         drafting_config=default_workspace_outbound_drafting_config(WORKSPACE_ID),
     )
@@ -413,6 +415,57 @@ async def test_duplicate_plan_returns_existing_message_without_calling_llm() -> 
     assert result.reasons == (PlanOutboundMessageReasonCode.DUPLICATE_PLAN,)
     assert messages.saved == []
     assert llm.requests == []
+
+
+async def test_re_enrollment_workflow_plans_fresh_message_despite_prior_run_send() -> None:
+    """A new workflow run must not collide with a previous enrollment's sends.
+
+    Track switching closes the old workflow and creates a new one on the same
+    campaign; the same step ids reappear. The prior run's sent message must not
+    be treated as a duplicate for the new run.
+    """
+    messages = FakeOutboundMessageRepository()
+    old_workflow_id = UUID("55555555-5555-5555-5555-555555555555")
+    new_workflow_id = UUID("66666666-6666-6666-6666-666666666666")
+    prior_run_sent = OutboundMessage(
+        message_id=MESSAGE_ID,
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        workflow_id=old_workflow_id,
+        cadence_step_id="step-1",
+        channel=ContactChannel.SMS,
+        status=OutboundMessageStatus.SENT,
+        idempotency_key=(
+            f"outbound:{WORKSPACE_ID}:{CAMPAIGN_ID}:{LEAD_ID}:wf:{old_workflow_id}:step-1:sms:v1"
+        ),
+        body="Prior run's send",
+        sent_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    await messages.save(prior_run_sent)
+    messages.saved.clear()
+    llm = FakeLLMClient(_draft_json())
+
+    result = await plan_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        context=_planning_context(workflow_id=new_workflow_id),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=messages,
+        llm_client=llm,
+        now=NOW,
+    )
+
+    assert result.status == PlanOutboundMessageStatus.PLANNED
+    assert result.message is not None
+    assert result.message.workflow_id == new_workflow_id
+    assert result.message.message_version == 1
+    assert f":wf:{new_workflow_id}:" in result.message.idempotency_key
+    assert result.message.idempotency_key != prior_run_sent.idempotency_key
+    assert llm.requests != []
 
 
 async def test_failed_existing_message_plans_new_retry_version() -> None:

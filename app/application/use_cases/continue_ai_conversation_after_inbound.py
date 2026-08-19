@@ -332,6 +332,7 @@ async def continue_ai_conversation_after_inbound(
             campaign_goal=campaign_goal,
             brokerage_name=workspace.name,
             cadence_step_id=cadence_step_id,
+            workflow_id=response_processing_workflow_id,
             scheduled_for=now,
             pre_send_policy=_pre_send_policy(workspace_contact_policy, workspace.default_timezone),
             journey_kind=OutboundJourneyKind.DORMANT,

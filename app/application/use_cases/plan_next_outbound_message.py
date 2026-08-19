@@ -70,6 +70,7 @@ class PlanNextOutboundMessageContext:
     campaign_goal: str
     brokerage_name: str
     cadence_step_id: str
+    workflow_id: UUID | None = None
     template_key: str | None = None
     template_version: TemplateVersion | None = None
     assigned_agent_name: str | None = None
@@ -166,6 +167,7 @@ async def plan_next_outbound_message_for_lead(
         campaign_goal=context.campaign_goal,
         brokerage_name=context.brokerage_name,
         cadence_step_id=context.cadence_step_id,
+        workflow_id=context.workflow_id,
         template_key=context.template_key,
         template_version=context.template_version,
         assigned_agent_name=context.assigned_agent_name or _assigned_agent_name_from_lead(lead),
@@ -252,6 +254,7 @@ async def plan_next_outbound_message_for_lead(
         campaign_goal=context.campaign_goal,
         brokerage_name=context.brokerage_name,
         cadence_step_id=context.cadence_step_id,
+        workflow_id=context.workflow_id,
         template_key=context.template_key,
         assigned_agent_name=context.assigned_agent_name or _assigned_agent_name_from_lead(lead),
         scheduled_for=context.scheduled_for,

@@ -105,6 +105,7 @@ class OutboundPlanningContext:
     campaign_goal: str
     brokerage_name: str
     cadence_step_id: str
+    workflow_id: UUID | None = None
     template_key: str | None = None
     template_version: TemplateVersion | None = None
     assigned_agent_name: str | None = None
@@ -302,12 +303,14 @@ async def plan_outbound_message_for_lead_record(
         cadence_step_id=context.cadence_step_id,
         channel=selected.channel,
         message_version=selected.message_version,
+        workflow_id=context.workflow_id,
     )
     message = OutboundMessage(
         message_id=(message_id_factory or uuid4)(),
         workspace_id=workspace_id,
         lead_id=lead_id,
         campaign_id=campaign_id,
+        workflow_id=context.workflow_id,
         cadence_step_id=context.cadence_step_id,
         channel=selected.channel,
         status=OutboundMessageStatus.PENDING,
@@ -385,6 +388,7 @@ async def _select_channel(
             channel=channel,
             requested_message_version=context.message_version,
             existing_messages=existing_messages,
+            workflow_id=context.workflow_id,
         )
         pre_send_decision = evaluate_pre_send_safety(
             PreSendFacts(
@@ -440,6 +444,7 @@ async def _select_channel(
             cadence_step_id=context.cadence_step_id,
             channel=channel,
             message_version=message_version,
+            workflow_id=context.workflow_id,
         )
         existing = await message_repository.get_by_idempotency_key(workspace_id, idempotency_key)
         if existing is not None:
@@ -488,6 +493,7 @@ def _message_version_for_channel(
     channel: ContactChannel,
     requested_message_version: int,
     existing_messages: tuple[OutboundMessage, ...],
+    workflow_id: UUID | None = None,
 ) -> int:
     relevant_messages = tuple(
         message
@@ -495,6 +501,7 @@ def _message_version_for_channel(
         if message.campaign_id == campaign_id
         and message.cadence_step_id == cadence_step_id
         and message.channel == channel
+        and (workflow_id is None or message.workflow_id in (None, workflow_id))
     )
     if not relevant_messages:
         return requested_message_version
@@ -516,8 +523,14 @@ def outbound_message_idempotency_key(
     cadence_step_id: str,
     channel: ContactChannel,
     message_version: int,
+    workflow_id: UUID | None = None,
 ) -> str:
+    # Scoping the key to the workflow run keeps retries within one enrollment
+    # idempotent while letting a re-enrollment (close-and-create) start the
+    # track from a clean slate instead of colliding with a prior run's sends.
+    workflow_scope = f":wf:{workflow_id}" if workflow_id is not None else ""
     return (
         "outbound:"
-        f"{workspace_id}:{campaign_id}:{lead_id}:{cadence_step_id}:{channel.value}:v{message_version}"
+        f"{workspace_id}:{campaign_id}:{lead_id}{workflow_scope}"
+        f":{cadence_step_id}:{channel.value}:v{message_version}"
     )

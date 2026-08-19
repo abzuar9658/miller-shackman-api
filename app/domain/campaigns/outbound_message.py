@@ -79,6 +79,7 @@ class OutboundMessage:
     body: str
     created_at: datetime
     updated_at: datetime
+    workflow_id: UUID | None = None
     subject: str | None = None
     html_body: str | None = None
     scheduled_for: datetime | None = None

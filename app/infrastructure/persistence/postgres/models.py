@@ -694,6 +694,7 @@ class OutboundMessageModel(Base):
     workspace_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
     lead_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
     campaign_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    workflow_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     cadence_step_id: Mapped[str] = mapped_column(String(255), nullable=False)
     channel: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False)

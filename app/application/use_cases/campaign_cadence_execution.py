@@ -734,6 +734,7 @@ async def execute_campaign_cadence_step(
         campaign_goal=step.message_goal,
         brokerage_name=workspace.name,
         cadence_step_id=str(step.cadence_step_id),
+        workflow_id=workflow.workflow_id,
         template_key=step.template_key,
         template_version=template_version,
         scheduled_for=scheduled_for,
