@@ -34,7 +34,7 @@ class PostgresLeadWorkflowRepository:
             select(LeadWorkflowModel)
             .where(LeadWorkflowModel.workspace_id == workspace_id)
             .distinct(LeadWorkflowModel.lead_id)
-            .order_by(LeadWorkflowModel.lead_id, LeadWorkflowModel.last_transition_at.desc())
+            .order_by(LeadWorkflowModel.lead_id, *_LATEST_WORKFLOW_ORDERING)
             .limit(limit),
         )
         return tuple(_model_to_workflow(model) for model in result.scalars().all())
@@ -92,7 +92,7 @@ class PostgresLeadWorkflowRepository:
             select(LeadWorkflowModel)
             .where(LeadWorkflowModel.workspace_id == workspace_id)
             .where(LeadWorkflowModel.lead_id == lead_id)
-            .order_by(LeadWorkflowModel.last_transition_at.desc())
+            .order_by(*_LATEST_WORKFLOW_ORDERING)
             .limit(limit),
         )
         return tuple(_model_to_workflow(model) for model in result.scalars().all())
@@ -187,6 +187,18 @@ class PostgresLeadWorkflowOverrideAuditLogRepository:
         return tuple(_model_to_override_audit(model) for model in result.scalars().all())
 
 
+# Ordering by last_transition_at alone is not a total order: close-and-create
+# writes the closed old run and the fresh replacement in one transaction with
+# the same timestamp, and an arbitrary winner here can make "latest" resolve to
+# the terminal row and strand the live one. created_at breaks that tie toward
+# the newer lifecycle; workflow_id keeps the result deterministic regardless.
+_LATEST_WORKFLOW_ORDERING = (
+    LeadWorkflowModel.last_transition_at.desc(),
+    LeadWorkflowModel.created_at.desc(),
+    LeadWorkflowModel.workflow_id.desc(),
+)
+
+
 def _latest_for_lead_statement(
     workspace_id: WorkspaceId,
     lead_id: LeadId,
@@ -197,7 +209,7 @@ def _latest_for_lead_statement(
         select(LeadWorkflowModel)
         .where(LeadWorkflowModel.workspace_id == workspace_id)
         .where(LeadWorkflowModel.lead_id == lead_id)
-        .order_by(LeadWorkflowModel.last_transition_at.desc())
+        .order_by(*_LATEST_WORKFLOW_ORDERING)
         .limit(1)
     )
     return statement.with_for_update() if for_update else statement
@@ -224,7 +236,7 @@ def _active_paused_search_statement(
                 )
             )
         )
-        .order_by(LeadWorkflowModel.last_transition_at.desc())
+        .order_by(*_LATEST_WORKFLOW_ORDERING)
     )
     return statement.with_for_update() if for_update else statement
 

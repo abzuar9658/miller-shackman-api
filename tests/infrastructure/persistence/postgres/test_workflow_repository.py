@@ -29,6 +29,13 @@ ENROLLMENT_ID = UUID("00000000-0000-0000-0000-000000000005")
 TRANSITION_ID = UUID("00000000-0000-0000-0000-000000000006")
 TRACK_VERSION_ID = UUID("00000000-0000-0000-0000-000000000007")
 
+# Same-timestamp writes (close-and-create) make last_transition_at alone a
+# partial order; every "latest workflow" query must carry these tie-breakers.
+_LATEST_ORDERING_SQL = (
+    "ORDER BY lead_workflows.last_transition_at DESC, "
+    "lead_workflows.created_at DESC, lead_workflows.workflow_id DESC"
+)
+
 
 class _FakeScalarSequence:
     def __init__(self, values: list[object]) -> None:
@@ -80,6 +87,7 @@ def test_get_latest_for_lead_for_update_uses_lock_and_maps_domain() -> None:
     statement = str(session.statements[0])
     assert "lead_workflows.workspace_id" in statement
     assert "lead_workflows.lead_id" in statement
+    assert _LATEST_ORDERING_SQL in statement
     assert "FOR UPDATE" in statement
 
 
@@ -95,6 +103,7 @@ def test_list_active_paused_search_for_lead_for_update_uses_lock_and_scope() -> 
     statement = str(session.statements[0])
     assert "lead_workflows.paused_search_track_version_id IS NOT NULL" in statement
     assert "lead_workflows.state IN" in statement
+    assert _LATEST_ORDERING_SQL in statement
     assert "FOR UPDATE" in statement
 
 
@@ -113,7 +122,7 @@ def test_list_recent_for_lead_orders_by_last_transition_desc_without_lock() -> N
     statement = str(session.statements[0])
     assert "lead_workflows.workspace_id" in statement
     assert "lead_workflows.lead_id" in statement
-    assert "ORDER BY lead_workflows.last_transition_at DESC" in statement
+    assert _LATEST_ORDERING_SQL in statement
     assert "LIMIT" in statement
     assert "FOR UPDATE" not in statement
 
