@@ -263,9 +263,15 @@ class LeadNurtureWorkflow:
                 return self._snapshot
             if schedule_result.status in {"review", "hold"}:
                 self._send_blocked = True
-                await workflow.wait_condition(lambda: self._closed or not self._send_blocked)
+                await workflow.wait_condition(
+                    lambda: self._closed
+                    or not self._send_blocked
+                    or self._reschedule_requested
+                )
                 if self._closed:
                     return self._snapshot
+                if self._consume_reschedule_request():
+                    self._send_blocked = False
                 continue
             if schedule_result.status != "scheduled" or schedule_result.scheduled_for is None:
                 return self._snapshot

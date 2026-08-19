@@ -316,6 +316,19 @@ def plan_paused_search_next_action(
         )
 
     targeted_step_id: UUID | None = workflow.paused_search_track_step_id
+    if targeted_step_id is not None and all(
+        step.step_id != targeted_step_id for step in steps
+    ):
+        # A cursor pointing outside the pinned track is stale state from a
+        # previous track; silently falling back to the first step would resume
+        # mid-journey on the wrong schedule. Hold for review instead.
+        return PausedSearchNextActionPlan(
+            next_action_at=None,
+            phase=phase,
+            step_id=None,
+            reason_code=PausedSearchTimingReasonCode.HOLD_FOR_REVIEW,
+            reason_detail="workflow step cursor does not belong to the pinned track",
+        )
     while True:
         assert phase is not None
         step = _resolve_step_for_phase(steps, phase, targeted_step_id)

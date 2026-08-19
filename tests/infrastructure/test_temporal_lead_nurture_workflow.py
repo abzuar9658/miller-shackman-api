@@ -721,6 +721,92 @@ async def test_lead_nurture_workflow_duplicate_reschedule_signals_recompute_once
     assert snapshot.provider_message_id == "email-dup"
 
 
+async def test_lead_nurture_workflow_hold_wakes_on_reschedule_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_instance = LeadNurtureWorkflow()
+    activity_calls: list[str] = []
+    schedule_results = [
+        ScheduleNextCadenceStepResult(
+            status="hold",
+            workflow_id=WORKFLOW_ID,
+            skip_reason="no actionable phase for current profile and track timing",
+        ),
+        ScheduleNextCadenceStepResult(
+            status="scheduled",
+            workflow_id=WORKFLOW_ID,
+            cadence_step_id=STEP_ONE_ID,
+            scheduled_for=NOW,
+        ),
+    ]
+    execute_results = [
+        ExecuteCadenceStepResult(
+            status="sent",
+            workflow_id=WORKFLOW_ID,
+            transition_id=TRANSITION_ID,
+            cadence_step_id=STEP_ONE_ID,
+            outbound_message_id=MESSAGE_ID,
+            provider_message_id="email-after-hold",
+            has_more_steps=False,
+        ),
+    ]
+    hold_waits = 0
+
+    async def fake_execute_activity(name: str, arg: object, **_: object) -> object:
+        activity_calls.append(name)
+        if name == "schedule-next-campaign-cadence-step":
+            return schedule_results.pop(0)
+        if name == "execute-campaign-cadence-step":
+            return execute_results.pop(0)
+        raise AssertionError(f"unexpected activity {name}")
+
+    async def fake_wait_condition(predicate: object, **kwargs: object) -> None:
+        nonlocal hold_waits
+        _ = (predicate, kwargs)
+        if workflow_instance._send_blocked:
+            hold_waits += 1
+            workflow_instance.reschedule_requested(
+                RescheduleWorkflowSignal(
+                    workspace_id=WORKSPACE_ID,
+                    lead_id=LEAD_ID,
+                    occurred_at=NOW.isoformat(),
+                    reason="paused_search_profile_updated",
+                )
+            )
+            return
+        workflow_instance.close()
+
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.execute_activity",
+        fake_execute_activity,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.wait_condition",
+        fake_wait_condition,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.workflows.temporal.lead_nurture.workflow.now",
+        lambda: NOW,
+    )
+
+    snapshot = await workflow_instance.run(
+        LeadNurtureWorkflowInput(
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            campaign_version_id=CAMPAIGN_VERSION_ID,
+        )
+    )
+
+    assert hold_waits == 1
+    assert activity_calls == [
+        "schedule-next-campaign-cadence-step",
+        "schedule-next-campaign-cadence-step",
+        "execute-campaign-cadence-step",
+    ]
+    assert snapshot.last_activity_status == "sent"
+    assert snapshot.provider_message_id == "email-after-hold"
+
+
 async def test_lead_nurture_workflow_recomputes_after_skipped_stale_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
