@@ -78,6 +78,10 @@ from app.domain.leads import (
 )
 from app.domain.workflows import LeadWorkflow, LeadWorkflowOverrideAuditLog, WorkflowTransition
 
+# The lead detail timeline returns the full (post-filter) conversation history;
+# 500 keeps payloads bounded while covering even long imported histories.
+LEAD_DETAIL_ACTIVITY_LIMIT = 500
+
 
 class LeadReadStatus(StrEnum):
     OK = "ok"
@@ -406,7 +410,9 @@ async def get_lead_detail_view(
             rejected_draft_reviews=await rejected_draft_review_repository.list_for_lead(
                 workspace_id, lead_id
             ),
-            activity_items=await activity_repository.list_for_lead(workspace_id, lead_id),
+            activity_items=await activity_repository.list_for_lead(
+                workspace_id, lead_id, limit=LEAD_DETAIL_ACTIVITY_LIMIT
+            ),
             inbound_messages=await inbound_message_repository.list_for_lead(workspace_id, lead_id),
             outbound_messages=outbound_messages,
             handoffs=handoffs,

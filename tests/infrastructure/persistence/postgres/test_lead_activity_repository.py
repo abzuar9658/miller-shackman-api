@@ -25,6 +25,7 @@ from app.infrastructure.persistence.postgres.models import (
     CrmConversationEventModel,
     ExternalEventModel,
     InboundMessageModel,
+    OutboundMessageModel,
     WorkspaceModel,
 )
 from app.infrastructure.persistence.postgres.workflow_models import (  # noqa: F401
@@ -191,6 +192,45 @@ async def test_list_for_lead_returns_rich_crm_conversation_event_content(
     assert items[0].transcript_segments[0].speaker_name == "Agent Ada"
 
 
+@pytest.mark.asyncio
+async def test_list_for_lead_excludes_unsent_outbound_messages(
+    postgres_session: AsyncSession,
+) -> None:
+    """Failed/cancelled outbound rows are audit data, not conversation history."""
+    await _seed_workspace(postgres_session)
+    await PostgresLeadRepository(postgres_session).upsert(_lead())
+    postgres_session.add_all(
+        [
+            _outbound_message(
+                UUID("aaaaaaa1-0000-0000-0000-000000000001"), "sent", NOW
+            ),
+            _outbound_message(
+                UUID("aaaaaaa1-0000-0000-0000-000000000002"),
+                "failed",
+                NOW.replace(minute=21),
+            ),
+            _outbound_message(
+                UUID("aaaaaaa1-0000-0000-0000-000000000003"),
+                "cancelled",
+                NOW.replace(minute=22),
+            ),
+            _outbound_message(
+                UUID("aaaaaaa1-0000-0000-0000-000000000004"),
+                "pending",
+                NOW.replace(minute=23),
+            ),
+        ]
+    )
+    await postgres_session.commit()
+
+    items = await PostgresLeadActivityRepository(postgres_session).list_for_lead(
+        WORKSPACE_ID,
+        LEAD_ID,
+    )
+
+    assert [item.status for item in items] == ["pending", "sent"]
+
+
 async def _seed_workspace(postgres_session: AsyncSession) -> None:
     postgres_session.add(
         WorkspaceModel(
@@ -255,6 +295,31 @@ def _external_event(
         failure_reason=None,
         created_at=received_at,
         updated_at=received_at,
+    )
+
+
+def _outbound_message(
+    message_id: UUID,
+    status: str,
+    occurred_at: datetime,
+) -> OutboundMessageModel:
+    return OutboundMessageModel(
+        message_id=message_id,
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=UUID("bbbbbbbb-0000-0000-0000-000000000001"),
+        cadence_step_id="step-1",
+        channel="email",
+        status=status,
+        idempotency_key=f"idem-{message_id}",
+        body=f"Outbound body ({status})",
+        scheduled_for=occurred_at,
+        sent_at=occurred_at if status == "sent" else None,
+        message_version=1,
+        provider_send_status=status,
+        provider_name="mailgun",
+        created_at=occurred_at,
+        updated_at=occurred_at,
     )
 
 

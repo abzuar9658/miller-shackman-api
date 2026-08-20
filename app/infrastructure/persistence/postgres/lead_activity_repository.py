@@ -12,6 +12,7 @@ from app.application.ports.lead_activity import (
     LeadActivitySummary,
     LeadActivityTranscriptSegment,
 )
+from app.domain.campaigns.outbound_message import OutboundMessageStatus
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.infrastructure.persistence.postgres.models import (
     CrmConversationEventModel,
@@ -22,6 +23,13 @@ from app.infrastructure.persistence.postgres.models import (
 )
 
 MAX_ACTIVITY_PREVIEW_CHARS = 140
+
+# Outbound rows in these statuses were never delivered to the lead, so they are
+# excluded from the timeline read (kept in the table for audit/reconciliation).
+_EXCLUDED_TIMELINE_OUTBOUND_STATUSES = (
+    OutboundMessageStatus.FAILED.value,
+    OutboundMessageStatus.CANCELLED.value,
+)
 
 
 class PostgresLeadActivityRepository:
@@ -85,6 +93,14 @@ class PostgresLeadActivityRepository:
         activity = _activity_union(workspace_id, (lead_id,))
         result = await self._session.execute(
             select(activity)
+            # Unsent outbound rows (provider failure storms, cancellations) are
+            # not conversation history; surfacing them buries real activity.
+            .where(
+                ~and_(
+                    activity.c.kind == LeadActivityKind.OUTBOUND_MESSAGE.value,
+                    activity.c.status.in_(_EXCLUDED_TIMELINE_OUTBOUND_STATUSES),
+                )
+            )
             .order_by(activity.c.occurred_at.desc(), activity.c.activity_id.desc())
             .limit(limit)
         )
