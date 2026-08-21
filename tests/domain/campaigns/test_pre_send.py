@@ -21,9 +21,6 @@ def _policy(
     *,
     allowed_send_start_hour: int = 10,
     allowed_send_end_hour: int = 17,
-    global_frequency_limit_hours: int | None = 24,
-    campaign_frequency_limit_hours: int | None = None,
-    channel_frequency_limit_hours: int | None = None,
     allow_simultaneous_channels: bool = False,
     simultaneous_channel_window_minutes: int = 0,
     timezone: str | None = None,
@@ -31,9 +28,6 @@ def _policy(
     return PreSendPolicy(
         allowed_send_start_hour=allowed_send_start_hour,
         allowed_send_end_hour=allowed_send_end_hour,
-        global_frequency_limit_hours=global_frequency_limit_hours,
-        campaign_frequency_limit_hours=campaign_frequency_limit_hours,
-        channel_frequency_limit_hours=channel_frequency_limit_hours,
         allow_simultaneous_channels=allow_simultaneous_channels,
         simultaneous_channel_window_minutes=simultaneous_channel_window_minutes,
         timezone=timezone,
@@ -65,9 +59,6 @@ def _facts(
     human_owned: bool = False,
     lead_replied_since_scheduled: bool = False,
     recent_human_activity: bool = False,
-    last_global_outreach_at: datetime | None = None,
-    last_campaign_outreach_at: datetime | None = None,
-    last_channel_outreach_at: datetime | None = None,
     other_channel_sent_at: datetime | None = None,
 ) -> PreSendFacts:
     resolved_contactability: ContactabilityDecision | None
@@ -96,9 +87,6 @@ def _facts(
         human_owned=human_owned,
         lead_replied_since_scheduled=lead_replied_since_scheduled,
         recent_human_activity=recent_human_activity,
-        last_global_outreach_at=last_global_outreach_at,
-        last_campaign_outreach_at=last_campaign_outreach_at,
-        last_channel_outreach_at=last_channel_outreach_at,
         other_channel_sent_at=other_channel_sent_at,
     )
 
@@ -247,77 +235,10 @@ def test_outside_allowed_hours_uses_policy_timezone() -> None:
     assert decision.next_allowed_at == datetime(2026, 7, 6, 15, 0, 0, tzinfo=UTC)
 
 
-def test_strictest_frequency_limit_blocks_and_returns_latest_retry_time() -> None:
-    decision = evaluate_pre_send_safety(
-        _facts(
-            last_global_outreach_at=NOW - timedelta(hours=23),
-            last_campaign_outreach_at=NOW - timedelta(hours=3),
-            last_channel_outreach_at=NOW - timedelta(minutes=30),
-        ),
-        _policy(
-            global_frequency_limit_hours=24,
-            campaign_frequency_limit_hours=4,
-            channel_frequency_limit_hours=2,
-        ),
-        NOW,
-    )
-
-    assert decision.allowed is False
-    assert decision.reasons == (PreSendReasonCode.FREQUENCY_LIMIT_REACHED,)
-    assert decision.next_allowed_at == NOW + timedelta(hours=1, minutes=30)
-
-def test_confirmed_frequency_override_allows_send_within_frequency_window() -> None:
-    facts = _facts(last_global_outreach_at=NOW - timedelta(hours=1))
-    blocked = evaluate_pre_send_safety(facts, _policy(), NOW)
-    assert blocked.allowed is False
-    assert blocked.reasons == (PreSendReasonCode.FREQUENCY_LIMIT_REACHED,)
-
-    decision = evaluate_pre_send_safety(
-        facts,
-        _policy(),
-        NOW,
-        confirmed_frequency_limit_override=True,
-    )
-
-    assert decision.allowed is True
-    assert decision.reasons == ()
-
-
-def test_confirmed_frequency_override_does_not_bypass_other_guards() -> None:
-    decision = evaluate_pre_send_safety(
-        _facts(
-            last_global_outreach_at=NOW - timedelta(hours=1),
-            handoff_active=True,
-        ),
-        _policy(),
-        NOW,
-        confirmed_frequency_limit_override=True,
-    )
-
-    assert decision.allowed is False
-    assert PreSendReasonCode.FREQUENCY_LIMIT_REACHED not in decision.reasons
-    assert PreSendReasonCode.HANDOFF_ACTIVE in decision.reasons
-
-
-def test_confirmed_frequency_override_does_not_bypass_allowed_hours() -> None:
-    late_evening = datetime(2026, 7, 6, 20, 0, 0)
-    decision = evaluate_pre_send_safety(
-        _facts(last_global_outreach_at=late_evening - timedelta(hours=1)),
-        _policy(),
-        late_evening,
-        confirmed_frequency_limit_override=True,
-    )
-
-    assert decision.allowed is False
-    assert decision.reasons == (PreSendReasonCode.OUTSIDE_ALLOWED_HOURS,)
-
-
-
 def test_simultaneous_channel_protection_blocks_send() -> None:
     decision = evaluate_pre_send_safety(
         _facts(other_channel_sent_at=NOW - timedelta(minutes=30)),
         _policy(
-            global_frequency_limit_hours=None,
             allow_simultaneous_channels=False,
             simultaneous_channel_window_minutes=90,
         ),
@@ -350,7 +271,6 @@ def test_multiple_blocking_reasons_follow_precedence_order() -> None:
             contactability_decision=None,
             handoff_active=True,
             preflight_vetoed=True,
-            last_global_outreach_at=NOW - timedelta(hours=23),
             other_channel_sent_at=NOW - timedelta(minutes=30),
         ),
         _policy(simultaneous_channel_window_minutes=90),
@@ -366,7 +286,6 @@ def test_multiple_blocking_reasons_follow_precedence_order() -> None:
         PreSendReasonCode.CHANNEL_NOT_ENABLED,
         PreSendReasonCode.HANDOFF_ACTIVE,
         PreSendReasonCode.PREFLIGHT_VETOED,
-        PreSendReasonCode.FREQUENCY_LIMIT_REACHED,
         PreSendReasonCode.SIMULTANEOUS_CHANNEL_NOT_ALLOWED,
     )
     assert decision.next_allowed_at is None

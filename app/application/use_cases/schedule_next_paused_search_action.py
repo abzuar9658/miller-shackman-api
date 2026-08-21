@@ -33,11 +33,13 @@ from app.domain.campaigns.paused_search_timing import (
     PausedSearchOccurrencePlan,
     PausedSearchTimingReasonCode,
     paused_search_maintenance_boundary,
+    paused_search_step_occurrence_cap,
     plan_next_paused_search_occurrence,
     plan_paused_search_next_action,
 )
 from app.domain.campaigns.paused_search_tracks import (
     PausedSearchTerminalBehavior,
+    PausedSearchTrackStep,
     PausedSearchTrackStepPhase,
     PausedSearchTrackVersion,
 )
@@ -156,6 +158,19 @@ async def schedule_next_paused_search_action(
         workflow.paused_search_track_version_id,
     )
 
+    # Steps whose occurrence cap is already consumed by closed occurrences are
+    # exhausted: the planner must advance past them instead of terminalizing
+    # the workflow while later steps remain unsent.
+    exhausted_step_ids: frozenset[UUID] = frozenset()
+    if occurrence_repository is not None:
+        exhausted_step_ids = await _exhausted_step_ids(
+            workspace_id=workspace_id,
+            workflow=workflow,
+            track_version=track_version,
+            steps=steps,
+            occurrence_repository=occurrence_repository,
+        )
+
     contact_policy = default_workspace_contact_policy(workspace_id)
     if workspace_contact_policy_repository is not None:
         contact_policy = (
@@ -170,6 +185,7 @@ async def schedule_next_paused_search_action(
         workflow=workflow,
         timezone=timezone,
         now=now,
+        exhausted_step_ids=exhausted_step_ids,
         quiet_hours_enabled=contact_policy.quiet_hours_enabled,
         quiet_hours_start=contact_policy.quiet_hours_start,
         quiet_hours_end=contact_policy.quiet_hours_end,
@@ -244,6 +260,7 @@ async def schedule_next_paused_search_action(
                 occurrence_number=occurrence_number,
                 previous_due_at=latest.due_at if latest is not None else None,
                 is_retry=is_retry,
+                exhausted_step_ids=exhausted_step_ids,
                 quiet_hours_enabled=contact_policy.quiet_hours_enabled,
                 quiet_hours_start=contact_policy.quiet_hours_start,
                 quiet_hours_end=contact_policy.quiet_hours_end,
@@ -267,6 +284,7 @@ async def schedule_next_paused_search_action(
                             workflow=workflow,
                             timezone=timezone,
                             now=maintenance_boundary,
+                            exhausted_step_ids=exhausted_step_ids,
                             quiet_hours_enabled=contact_policy.quiet_hours_enabled,
                             quiet_hours_start=contact_policy.quiet_hours_start,
                             quiet_hours_end=contact_policy.quiet_hours_end,
@@ -365,6 +383,54 @@ _OPEN_OCCURRENCE_STATUSES = frozenset(
     }
 )
 
+# Reason codes that mean the track can no longer proceed. One set shared by the
+# state transition, the phase-level result, and the occurrence-level result so
+# the same reason always produces the same schedule status.
+_TERMINAL_REASON_CODES = frozenset(
+    {
+        PausedSearchTimingReasonCode.OCCURRENCE_LIMIT_REACHED,
+        PausedSearchTimingReasonCode.TOUCH_LIMIT_REACHED,
+        PausedSearchTimingReasonCode.DURATION_EXPIRED,
+    }
+)
+
+# Closed occurrences in these statuses consumed their slot. FAILED is absent on
+# purpose: a failed send never reached the lead and is retried, not consumed.
+_SLOT_CONSUMING_OCCURRENCE_STATUSES = frozenset(
+    {
+        RecurringOccurrenceStatus.SENT,
+        RecurringOccurrenceStatus.REMINDER_CREATED,
+        RecurringOccurrenceStatus.SKIPPED,
+        RecurringOccurrenceStatus.CANCELLED,
+        RecurringOccurrenceStatus.EXPIRED,
+    }
+)
+
+
+async def _exhausted_step_ids(
+    *,
+    workspace_id: WorkspaceId,
+    workflow: LeadWorkflow,
+    track_version: PausedSearchTrackVersion,
+    steps: tuple[PausedSearchTrackStep, ...],
+    occurrence_repository: PausedSearchOccurrenceRepository,
+) -> frozenset[UUID]:
+    exhausted: set[UUID] = set()
+    for step in steps:
+        latest = await occurrence_repository.get_latest_for_step(
+            workspace_id,
+            workflow.workflow_id,
+            track_version.track_version_id,
+            step.step_id,
+        )
+        if (
+            latest is not None
+            and latest.status in _SLOT_CONSUMING_OCCURRENCE_STATUSES
+            and latest.occurrence_number >= paused_search_step_occurrence_cap(step, track_version)
+        ):
+            exhausted.add(step.step_id)
+    return frozenset(exhausted)
+
 
 async def _save_hold(
     workflow: LeadWorkflow,
@@ -392,12 +458,7 @@ async def _save_terminal_or_hold(
     campaign_enrollment_repository: CampaignEnrollmentRepository | None,
     now: datetime,
 ) -> LeadWorkflow:
-    terminal_reason_codes = {
-        PausedSearchTimingReasonCode.OCCURRENCE_LIMIT_REACHED,
-        PausedSearchTimingReasonCode.TOUCH_LIMIT_REACHED,
-        PausedSearchTimingReasonCode.DURATION_EXPIRED,
-    }
-    if reason_code not in terminal_reason_codes or workflow_transition_repository is None:
+    if reason_code not in _TERMINAL_REASON_CODES or workflow_transition_repository is None:
         return await _save_hold(workflow, lead_workflow_repository, now)
 
     target_state = {
@@ -455,7 +516,7 @@ def _hold_result(
 ) -> PausedSearchNextActionScheduleResult:
     if plan.reason_code == PausedSearchTimingReasonCode.WORKFLOW_NOT_SENDABLE:
         status = PausedSearchScheduleStatus.WORKFLOW_NOT_SENDABLE
-    elif plan.reason_code == PausedSearchTimingReasonCode.TOUCH_LIMIT_REACHED:
+    elif plan.reason_code in _TERMINAL_REASON_CODES:
         status = _terminal_schedule_status(workflow)
     else:
         status = PausedSearchScheduleStatus.HOLD
@@ -474,11 +535,7 @@ def _occurrence_hold_result(
     return PausedSearchNextActionScheduleResult(
         status=(
             _terminal_schedule_status(workflow)
-            if plan.reason_code
-            in {
-                PausedSearchTimingReasonCode.OCCURRENCE_LIMIT_REACHED,
-                PausedSearchTimingReasonCode.DURATION_EXPIRED,
-            }
+            if plan.reason_code in _TERMINAL_REASON_CODES
             else PausedSearchScheduleStatus.HOLD
         ),
         workflow=workflow,

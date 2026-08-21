@@ -141,6 +141,7 @@ class LeadWorkflowModel(Base):
     resume_reason: Mapped[str | None] = mapped_column(String(500))
     state_version: Mapped[int] = mapped_column(Integer, nullable=False)
     logical_touch_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ai_interaction_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

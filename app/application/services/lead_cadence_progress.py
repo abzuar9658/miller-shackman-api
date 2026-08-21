@@ -494,7 +494,18 @@ def build_lead_status_narrative(
     workflow: LeadWorkflow | None,
     progress_views: tuple[LeadCadenceProgressView, ...],
     now: datetime,
+    paused_search_profile: LeadPausedSearchProfile | None = None,
 ) -> str:
+    # A terminal run with a still-active paused-search profile means the lead
+    # is between runs: the previous track finished, and re-engagement will
+    # start a fresh run. Lead with the profile, not the finished run.
+    if (
+        paused_search_profile is not None
+        and paused_search_profile.paused_search_active
+        and (workflow is None or is_terminal_workflow_state(workflow.state))
+    ):
+        return _paused_search_between_runs_narrative(paused_search_profile, workflow)
+
     if workflow is None:
         return "No nurture workflow yet — the lead has not been enrolled in any campaign."
 
@@ -525,4 +536,19 @@ def build_lead_status_narrative(
         else:
             parts.append(f"next action scheduled for {when}")
 
+    return " — ".join(parts)
+
+
+def _paused_search_between_runs_narrative(
+    profile: LeadPausedSearchProfile,
+    workflow: LeadWorkflow | None,
+) -> str:
+    parts: list[str] = ["Paused — search on hold"]
+    if profile.reengagement_not_before is not None:
+        when = profile.reengagement_not_before.strftime("%b %-d, %Y")
+        parts.append(f"re-engages {when}")
+    elif profile.reengagement_window_label:
+        parts.append(f"re-engages {profile.reengagement_window_label}")
+    if workflow is not None:
+        parts.append(f"previous run {workflow.state.value.replace('_', ' ')}")
     return " — ".join(parts)

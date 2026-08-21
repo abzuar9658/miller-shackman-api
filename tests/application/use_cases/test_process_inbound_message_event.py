@@ -907,6 +907,7 @@ def _continue_ai_dependencies(
     channel: ContactChannel = ContactChannel.SMS,
     paused_search_reply_policy: PausedSearchReplyPolicy = PausedSearchReplyPolicy.END,
     restart_delay_days: int = 30,
+    paused_search_max_ai_interactions: int = 5,
 ) -> _ContinueAIDependencies:
     crm_client = FakeCRMClient()
     return {
@@ -927,6 +928,7 @@ def _continue_ai_dependencies(
         "paused_search_track_repository": _paused_search_track_repository(
             reply_policy=paused_search_reply_policy,
             restart_delay_days=restart_delay_days,
+            max_ai_interactions=paused_search_max_ai_interactions,
         ),
         "paused_search_track_assignment_repository": (
             FakePausedSearchTrackAssignmentRepository()
@@ -963,6 +965,7 @@ def _paused_search_track_repository(
     *,
     reply_policy: PausedSearchReplyPolicy = PausedSearchReplyPolicy.END,
     restart_delay_days: int = 30,
+    max_ai_interactions: int = 5,
 ) -> FakePausedSearchTrackAdminRepository:
     return FakePausedSearchTrackAdminRepository(
         tracks=(
@@ -996,6 +999,7 @@ def _paused_search_track_repository(
                 max_total_touches=6,
                 reply_policy=reply_policy,
                 restart_delay_days=restart_delay_days,
+                max_ai_interactions=max_ai_interactions,
                 created_by_user_id=UUID("00000000-0000-0000-0000-000000000043"),
                 created_at=NOW,
                 published_at=NOW,
@@ -1742,7 +1746,8 @@ async def test_continue_ai_sends_outbound_sms_and_returns_to_waiting_for_respons
     final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     final_conversation = conversation_repository.by_id[CONVERSATION_ID]
     assert final_workflow.state == WorkflowState.WAITING_FOR_RESPONSE
-    assert final_conversation.ai_interaction_count == 1
+    assert final_workflow.ai_interaction_count == 1
+    assert final_conversation.ai_interaction_count == 0
     assert final_conversation.status == ConversationStatus.ACTIVE_AI
     assert len(crm_client.notes) == 1
     assert crm_client.note_subjects == ["AI OUTBOUND · SMS"]
@@ -2252,19 +2257,20 @@ async def test_continue_ai_sends_outbound_email_and_returns_to_waiting_for_respo
     final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     final_conversation = conversation_repository.by_id[CONVERSATION_ID]
     assert final_workflow.state == WorkflowState.WAITING_FOR_RESPONSE
-    assert final_conversation.ai_interaction_count == 1
+    assert final_workflow.ai_interaction_count == 1
+    assert final_conversation.ai_interaction_count == 0
     assert final_conversation.status == ConversationStatus.ACTIVE_AI
 
 
 async def test_continue_ai_pauses_when_turn_cap_is_reached() -> None:
-    workflow = _workflow()
+    workflow = replace(_workflow(), ai_interaction_count=5)
     dependencies = _continue_ai_dependencies(workflow=workflow)
     conversation_repository = dependencies["conversation_repository"]
     lead_workflow_repository = dependencies["lead_workflow_repository"]
     workflow_transition_repository = dependencies["workflow_transition_repository"]
     sms_provider = dependencies["sms_provider"]
     email_provider = dependencies["email_provider"]
-    await conversation_repository.save(_conversation(ai_interaction_count=5))
+    await conversation_repository.save(_conversation())
 
     result = await process_inbound_message_event(
         event=_event(body="How much are your services?"),
@@ -2292,8 +2298,84 @@ async def test_continue_ai_pauses_when_turn_cap_is_reached() -> None:
     final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     final_conversation = conversation_repository.by_id[CONVERSATION_ID]
     assert final_workflow.state == WorkflowState.PAUSED
-    assert final_conversation.ai_interaction_count == 5
+    assert final_workflow.ai_interaction_count == 5
     assert final_conversation.status == ConversationStatus.PAUSED
+
+
+async def test_continue_ai_uses_track_configured_turn_cap_for_paused_search_run() -> None:
+    """A run pinned to a track uses that track's max_ai_interactions, not the
+    hardcoded default cap."""
+    workflow = replace(
+        _workflow(),
+        paused_search_track_version_id=TRACK_VERSION_ID,
+        ai_interaction_count=2,
+    )
+    dependencies = _continue_ai_dependencies(
+        workflow=workflow,
+        paused_search_max_ai_interactions=2,
+    )
+    conversation_repository = dependencies["conversation_repository"]
+    lead_workflow_repository = dependencies["lead_workflow_repository"]
+    sms_provider = dependencies["sms_provider"]
+    email_provider = dependencies["email_provider"]
+    await conversation_repository.save(_conversation())
+
+    result = await process_inbound_message_event(
+        event=_event(body="How much are your services?"),
+        llm_client=_FakeLLMClientForContinuation(
+            classification_text=_classification_json(
+                intent="general_reply",
+                summary_text="Lead asked about service pricing.",
+            ),
+            draft_text=_draft_json(),
+        ),
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        **dependencies,
+    )
+
+    assert result.continue_ai_status == ContinueAIStatus.BLOCKED
+    assert result.continue_ai_pause_reason == "ai_continuation_turn_cap_reached"
+    assert len(sms_provider.messages) == 0
+    assert len(email_provider.messages) == 0
+    final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert final_workflow.state == WorkflowState.PAUSED
+    assert final_workflow.ai_interaction_count == 2
+
+
+async def test_continue_ai_fresh_run_does_not_inherit_conversation_turn_count() -> None:
+    """Run isolation: the AI-turn budget belongs to the current run. A prior
+    journey's conversation count must not cap a fresh run."""
+    workflow = _workflow()
+    dependencies = _continue_ai_dependencies(workflow=workflow)
+    conversation_repository = dependencies["conversation_repository"]
+    lead_workflow_repository = dependencies["lead_workflow_repository"]
+    sms_provider = dependencies["sms_provider"]
+    # A previous run spent the whole legacy conversation budget.
+    await conversation_repository.save(_conversation(ai_interaction_count=5))
+
+    result = await process_inbound_message_event(
+        event=_event(body="How much are your services?"),
+        llm_client=_FakeLLMClientForContinuation(
+            classification_text=_classification_json(
+                intent="general_reply",
+                summary_text="Lead asked about service pricing.",
+            ),
+            draft_text=_draft_json(),
+        ),
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        **dependencies,
+    )
+
+    assert result.continue_ai_status == ContinueAIStatus.SENT
+    assert len(sms_provider.messages) == 1
+    final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert final_workflow.ai_interaction_count == 1
 
 
 async def test_continue_ai_falls_back_to_paused_when_dependencies_missing() -> None:
@@ -2447,7 +2529,6 @@ async def test_processing_audit_persisted_for_continue_ai_success() -> None:
     assert audit["decision"]["decision_reason"] == "general_reply"
     assert audit["decision"]["handoff_required"] is False
     assert audit["continuation"]["continue_ai_status"] == "sent"
-    assert audit["continuation"]["ai_interaction_count_increment"] == 1
     assert audit["continuation"]["outbound_message_id"] is not None
     assert audit["continuation"]["provider_message_id"] == "SM123"
     assert audit["workflow"]["workflow_id"] == str(WORKFLOW_ID)
@@ -2461,13 +2542,13 @@ async def test_processing_audit_persisted_for_continue_ai_success() -> None:
 
 
 async def test_processing_audit_persisted_for_continue_ai_blocked_at_turn_cap() -> None:
-    workflow = _workflow()
+    workflow = replace(_workflow(), ai_interaction_count=5)
     external_events = FakeExternalEventRepository()
     dependencies = _continue_ai_dependencies(
         workflow=workflow, external_event_repository=external_events
     )
     conversation_repository = dependencies["conversation_repository"]
-    await conversation_repository.save(_conversation(ai_interaction_count=5))
+    await conversation_repository.save(_conversation())
 
     result = await process_inbound_message_event(
         event=_event(body="How much are your services?"),
@@ -2492,7 +2573,6 @@ async def test_processing_audit_persisted_for_continue_ai_blocked_at_turn_cap() 
     assert audit["classifier"]["intent"] == "general_reply"
     assert audit["decision"]["inbound_action"] == "continue_ai"
     assert audit["continuation"]["continue_ai_status"] == "blocked"
-    assert audit["continuation"]["ai_interaction_count_increment"] == 0
     assert audit["continuation"]["pause_reason"] == "ai_continuation_turn_cap_reached"
     assert audit["continuation"]["send_block_reasons"] == ["turn_cap_reached"]
     assert audit["workflow"]["to_state"] == "paused"

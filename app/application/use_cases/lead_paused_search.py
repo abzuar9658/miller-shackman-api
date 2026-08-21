@@ -25,6 +25,7 @@ from app.application.services.lead_nurture_rescheduling import (
 from app.application.services.paused_search_track_assignment import (
     PausedSearchProgressHandling,
     synchronize_paused_search_track_assignment,
+    workflow_needs_terminalization_on_clear,
 )
 from app.application.use_cases.apply_workflow_state_transition import (
     WorkflowStateTransitionStatus,
@@ -211,9 +212,11 @@ async def update_lead_paused_search(
         )
         unchanged_terminalized = False
         unchanged_workflow_state: WorkflowState | None = None
-        if current_profile is None and terminal_behavior is not None:
-            assert workflow_transition_repository is not None
-            assert external_event_repository is not None
+        if (
+            current_profile is None
+            and workflow_transition_repository is not None
+            and external_event_repository is not None
+        ):
             unchanged_terminalized, unchanged_workflow_state = await _terminalize_active_workflow(
                 workspace_id=workspace_id,
                 lead_id=lead_id,
@@ -286,9 +289,11 @@ async def update_lead_paused_search(
     )
     workflow_terminalized = False
     terminal_workflow_state: WorkflowState | None = None
-    if saved_profile is None and terminal_behavior is not None:
-        assert workflow_transition_repository is not None
-        assert external_event_repository is not None
+    if (
+        saved_profile is None
+        and workflow_transition_repository is not None
+        and external_event_repository is not None
+    ):
         workflow_terminalized, terminal_workflow_state = await _terminalize_active_workflow(
             workspace_id=workspace_id,
             lead_id=lead_id,
@@ -347,7 +352,7 @@ async def _terminalize_active_workflow(
     workspace_id: WorkspaceId,
     lead_id: LeadId,
     actor: AuthenticatedActor,
-    terminal_behavior: PausedSearchTerminalBehavior,
+    terminal_behavior: PausedSearchTerminalBehavior | None,
     terminal_reason: str | None,
     lead_workflow_repository: LeadWorkflowRepository,
     workflow_transition_repository: WorkflowTransitionRepository,
@@ -362,15 +367,26 @@ async def _terminalize_active_workflow(
     plain profile clear on an idle lead never fails. The transition reuses the
     standard terminalization pathway (occurrence cancellation + enrollment
     sync), keeping DB state consistent for immediate re-enrollment.
+
+    Clearing never starts a replacement run: what happens next — dormant
+    nurture or another paused-search track — is a separate, explicit admin
+    enrollment decision. When the admin gave no explicit terminal behavior, a
+    live track-pinned run still must end (completed, re-enrollable) because its
+    track no longer exists; any other live workflow is left untouched.
     """
     workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
         workspace_id, lead_id
     )
     if workflow is None or is_terminal_workflow_state(workflow.state):
         return False, workflow.state if workflow is not None else None
+    effective_behavior = terminal_behavior
+    if effective_behavior is None:
+        if not workflow_needs_terminalization_on_clear(workflow):
+            return False, workflow.state
+        effective_behavior = PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED
     target_state = (
         WorkflowState.COMPLETED
-        if terminal_behavior is PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED
+        if effective_behavior is PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED
         else WorkflowState.CLOSED
     )
     event = await create_internal_external_event(
@@ -395,7 +411,7 @@ async def _terminalize_active_workflow(
         external_event_id=event.external_event_id,
         metadata={
             "reason": _normalized_optional_text(terminal_reason) or "profile_cleared",
-            "terminal_behavior": terminal_behavior.value,
+            "terminal_behavior": effective_behavior.value,
             "source": "paused_search_profile_clear",
         },
     )

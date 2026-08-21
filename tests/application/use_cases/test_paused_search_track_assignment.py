@@ -92,6 +92,80 @@ async def test_clear_releases_assignment_and_clears_workflow_pin() -> None:
 
 
 @pytest.mark.asyncio
+async def test_clear_with_track_pinned_workflow_never_restarts() -> None:
+    """Clearing a track is not a lifecycle restart: it releases the assignment
+    and leaves the live run pinned (so the caller can terminalize it with the
+    track still recorded). Starting the next journey — dormant or another
+    track — is a separate explicit admin enrollment decision, never a side
+    effect of the clear."""
+    assignments = FakePausedSearchTrackAssignmentRepository((_assignment(),))
+    workflows = FakeLeadWorkflowRepository()
+    await workflows.save(
+        _workflow(
+            state=WorkflowState.ACTIVE_NURTURE,
+            paused_search_track_version_id=VERSION_ID,
+        )
+    )
+    transitions = FakeWorkflowTransitionRepository()
+    enrollments = FakeCampaignEnrollmentRepository()
+    await enrollments.save(_enrollment())
+    starter = FakeTemporalWorkflowStarter()
+
+    result = await _synchronize(
+        assignments=assignments,
+        workflows=workflows,
+        clear=True,
+        workflow_transitions=transitions,
+        enrollments=enrollments,
+        starter=starter,
+    )
+
+    assert result.status is PausedSearchTrackAssignmentSyncStatus.CLEARED
+    assert result.error is None
+    assert result.assignment is None
+    assert assignments.assignments[0].released_at == NOW
+    assert result.workflow is not None
+    assert result.workflow.workflow_id == WORKFLOW_ID
+    assert result.workflow.state is WorkflowState.ACTIVE_NURTURE
+    assert result.workflow.paused_search_track_version_id == VERSION_ID
+    assert starter.calls == []
+    assert transitions.transitions == {}
+
+
+@pytest.mark.asyncio
+async def test_clear_with_dormant_workflow_is_a_noop_repin() -> None:
+    """A workflow already on the dormant journey is not restarted by a clear."""
+    assignments = FakePausedSearchTrackAssignmentRepository()
+    workflows = FakeLeadWorkflowRepository()
+    await workflows.save(
+        _workflow(
+            state=WorkflowState.ACTIVE_NURTURE,
+            paused_search_track_version_id=None,
+        )
+    )
+    transitions = FakeWorkflowTransitionRepository()
+    enrollments = FakeCampaignEnrollmentRepository()
+    await enrollments.save(_enrollment())
+    starter = FakeTemporalWorkflowStarter()
+
+    result = await _synchronize(
+        assignments=assignments,
+        workflows=workflows,
+        clear=True,
+        workflow_transitions=transitions,
+        enrollments=enrollments,
+        starter=starter,
+    )
+
+    assert result.status is PausedSearchTrackAssignmentSyncStatus.CLEARED
+    assert result.workflow is not None
+    assert result.workflow.workflow_id == WORKFLOW_ID
+    assert result.workflow.state is WorkflowState.ACTIVE_NURTURE
+    assert starter.calls == []
+    assert transitions.transitions == {}
+
+
+@pytest.mark.asyncio
 async def test_unmapped_or_retired_track_preserves_assignment_and_pin() -> None:
     assignment = _assignment()
     assignments = FakePausedSearchTrackAssignmentRepository((assignment,))
@@ -154,6 +228,85 @@ async def test_reassignment_closes_old_workflow_and_starts_fresh_run() -> None:
     assert len(start_calls) == 1
     assert start_calls[0]["temporal_workflow_id"] == new_workflow.temporal_workflow_id
     assert start_calls[0]["paused_search_track_version_id"] == VERSION_ID
+
+
+@pytest.mark.asyncio
+async def test_dormant_workflow_closes_and_starts_fresh_run_when_track_assigned() -> None:
+    """Dormant → track is a lifecycle event: old run ends, a fresh run starts at zero."""
+    assignments = FakePausedSearchTrackAssignmentRepository()
+    workflows = FakeLeadWorkflowRepository()
+    await workflows.save(
+        replace(
+            _workflow(
+                state=WorkflowState.ACTIVE_NURTURE,
+                paused_search_track_version_id=None,
+            ),
+            logical_touch_count=1,
+            ai_interaction_count=2,
+        )
+    )
+    transitions = FakeWorkflowTransitionRepository()
+    enrollments = FakeCampaignEnrollmentRepository()
+    await enrollments.save(_enrollment())
+    starter = FakeTemporalWorkflowStarter()
+
+    result = await _synchronize(
+        assignments=assignments,
+        workflows=workflows,
+        workflow_transitions=transitions,
+        enrollments=enrollments,
+        starter=starter,
+    )
+
+    assert result.status is PausedSearchTrackAssignmentSyncStatus.REASSIGNED
+    assert result.error is None
+    assert workflows.workflows[WORKFLOW_ID].state is WorkflowState.CLOSED
+    reassigned = [
+        transition
+        for transition in transitions.transitions.values()
+        if transition.reason_code is WorkflowTransitionReasonCode.TRACK_REASSIGNED
+    ]
+    assert len(reassigned) == 1
+    assert reassigned[0].metadata["previous_track_version_id"] == "dormant"
+    new_workflow = result.workflow
+    assert new_workflow is not None
+    assert new_workflow.workflow_id != WORKFLOW_ID
+    assert new_workflow.state is WorkflowState.ACTIVE_NURTURE
+    assert new_workflow.paused_search_track_version_id == VERSION_ID
+    assert new_workflow.logical_touch_count == 0
+    assert new_workflow.ai_interaction_count == 0
+
+
+@pytest.mark.asyncio
+async def test_dormant_workflow_continue_repins_instead_of_restarting() -> None:
+    assignments = FakePausedSearchTrackAssignmentRepository()
+    workflows = FakeLeadWorkflowRepository()
+    await workflows.save(
+        _workflow(
+            state=WorkflowState.ACTIVE_NURTURE,
+            paused_search_track_version_id=None,
+        )
+    )
+    transitions = FakeWorkflowTransitionRepository()
+    enrollments = FakeCampaignEnrollmentRepository()
+    await enrollments.save(_enrollment())
+    starter = FakeTemporalWorkflowStarter()
+
+    result = await _synchronize(
+        assignments=assignments,
+        workflows=workflows,
+        workflow_transitions=transitions,
+        enrollments=enrollments,
+        starter=starter,
+        progress_handling=PausedSearchProgressHandling.CONTINUE,
+    )
+
+    assert result.status is PausedSearchTrackAssignmentSyncStatus.RESOLVED
+    assert result.workflow is not None
+    assert result.workflow.workflow_id == WORKFLOW_ID
+    assert result.workflow.paused_search_track_version_id == VERSION_ID
+    assert starter.calls == []
+    assert transitions.transitions == {}
 
 
 @pytest.mark.asyncio

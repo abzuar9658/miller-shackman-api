@@ -809,33 +809,6 @@ async def test_enqueues_durable_send_before_commit_without_calling_provider() ->
     assert request.provider_payload["body"] == message_repository.message.body
 
 
-async def test_blocks_when_global_frequency_limit_is_found_in_history() -> None:
-    pending = _message()
-    previous = replace(
-        _message(),
-        message_id=UUID("55555555-5555-5555-5555-555555555555"),
-        idempotency_key="previous-message",
-        status=OutboundMessageStatus.SENT,
-        sent_at=NOW - timedelta(hours=1),
-    )
-    message_repository = FakeOutboundMessageRepository(pending, history=(previous,))
-
-    result = await send_outbound_message(
-        workspace_id=WORKSPACE_ID,
-        idempotency_key=pending.idempotency_key,
-        context=_send_context(),
-        lead_repository=FakeLeadRepository(_lead()),
-        message_repository=message_repository,
-        sms_provider=FakeSMSProvider(),
-        email_provider=FakeEmailProvider(),
-        now=NOW,
-    )
-
-    assert result.status is SendOutboundMessageStatus.REJECTED
-    assert result.pre_send_decision is not None
-    assert result.pre_send_decision.reasons == (PreSendReasonCode.FREQUENCY_LIMIT_REACHED,)
-
-
 async def test_workspace_policy_allows_sms_after_recent_email() -> None:
     pending = _message()
     previous_email = replace(
@@ -868,7 +841,9 @@ async def test_workspace_policy_allows_sms_after_recent_email() -> None:
     assert result.message.status == OutboundMessageStatus.SENT
 
 
-async def test_workspace_policy_blocks_repeat_send_on_same_channel() -> None:
+# Send spacing is owned by the track cadence (each step's delay_hours), not by a
+# pre-send frequency guard, so a recent same-channel send never blocks the next one.
+async def test_workspace_policy_allows_repeat_send_on_same_channel() -> None:
     pending = _message()
     previous_sms = replace(
         _message(),
@@ -890,14 +865,14 @@ async def test_workspace_policy_blocks_repeat_send_on_same_channel() -> None:
         context=context,
         lead_repository=FakeLeadRepository(_lead()),
         message_repository=message_repository,
-        sms_provider=FakeSMSProvider(),
+        sms_provider=FakeSMSProvider("SM123"),
         email_provider=FakeEmailProvider(),
         now=NOW,
     )
 
-    assert result.status is SendOutboundMessageStatus.REJECTED
-    assert result.pre_send_decision is not None
-    assert result.pre_send_decision.reasons == (PreSendReasonCode.FREQUENCY_LIMIT_REACHED,)
+    assert result.status is SendOutboundMessageStatus.SENT
+    assert result.message is not None
+    assert result.message.status == OutboundMessageStatus.SENT
 
 
 class FailingHistoryRepository(FakeOutboundMessageRepository):

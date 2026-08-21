@@ -951,7 +951,8 @@ async def test_business_flow_harness_runs_sync_to_continue_ai_path() -> None:
     assert inbound_result.continue_ai_outbound_message_id is not None
     final_workflow = prepared.lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     assert final_workflow.state == WorkflowState.WAITING_FOR_RESPONSE
-    assert prepared.conversations.by_id[CONVERSATION_ID].ai_interaction_count == 1
+    assert final_workflow.ai_interaction_count == 1
+    assert prepared.conversations.by_id[CONVERSATION_ID].ai_interaction_count == 0
     assert len(continuation_email_provider.messages) == 1
     assert handoffs.saved == []
 

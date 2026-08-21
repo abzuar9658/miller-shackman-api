@@ -98,19 +98,28 @@ async def synchronize_paused_search_track_assignment(
 ) -> PausedSearchTrackAssignmentSyncResult:
     """Synchronize the durable assignment and latest workflow while both rows are locked.
 
-    Assigning a different track to a lead with a live paused-search workflow is a
-    lifecycle event, not an edit: the old run is closed and a fresh enrollment,
-    workflow, and Temporal execution are started so the step cursor, touch budget,
-    and occurrence idempotency keys all reset for the new track. Re-pinning the
-    old row would resume mid-track with a spent budget. The close-and-create path
-    requires the transition/enrollment repositories and the Temporal starter;
-    callers that cannot supply them fall back to the legacy re-pin.
+    Assigning a track to a lead with a live workflow on any other journey —
+    a different paused-search track or an unpinned dormant run — is a lifecycle
+    event, not an edit: the old run is closed and a fresh enrollment, workflow,
+    and Temporal execution are started so the step cursor, touch budget, AI
+    budget, and occurrence idempotency keys all reset for the new track.
+    Re-pinning the old row would resume mid-track with a spent budget. The
+    close-and-create path requires the transition/enrollment repositories and
+    the Temporal starter; callers that cannot supply them fall back to the
+    legacy re-pin.
+
+    Clearing the assignment never starts or restarts a run: ending the cleared
+    track's live workflow is the caller's decision (see
+    ``workflow_needs_terminalization_on_clear``), and any next journey — dormant
+    or another track — is an explicit admin enrollment, not a side effect of
+    the clear.
 
     ``progress_handling`` lets the admin override that default: RESTART forces
     close-and-create even when the track is unchanged; CONTINUE keeps the
     current run and re-pins it (clearing a now-stale step cursor so the timing
     planner resumes phase-based in the new track).
     """
+
     workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
         workspace_id, lead_id
     )
@@ -127,12 +136,17 @@ async def synchronize_paused_search_track_assignment(
                 released_by=actor_user_id,
                 release_reason="paused_search_profile_cleared",
             )
-        workflow = await _pin_workflow(
-            workflow=workflow,
-            track_version_id=None,
-            lead_workflow_repository=lead_workflow_repository,
-            now=now,
-        )
+        # A live track-pinned run whose track just disappeared keeps its pin so
+        # the caller can terminalize it with the track still recorded;
+        # un-pinning it here would leave a paused-search-recurring Temporal
+        # execution with no track before the caller gets to end it.
+        if not workflow_needs_terminalization_on_clear(workflow):
+            workflow = await _pin_workflow(
+                workflow=workflow,
+                track_version_id=None,
+                lead_workflow_repository=lead_workflow_repository,
+                now=now,
+            )
         return PausedSearchTrackAssignmentSyncResult(
             status=PausedSearchTrackAssignmentSyncStatus.CLEARED,
             assignment=None,
@@ -234,17 +248,37 @@ def _should_restart_workflow(
     new_track_version_id: PausedSearchTrackVersionId,
     progress_handling: PausedSearchProgressHandling | None,
 ) -> bool:
-    if (
-        workflow is None
-        or workflow.state not in _REASSIGNABLE_STATES
-        or workflow.paused_search_track_version_id is None
-    ):
+    """A workflow restarts whenever the run it represents is not the assigned track's run.
+
+    That covers both a workflow pinned to a *different* track and an unpinned
+    (dormant-journey) workflow being moved onto a track: in either case the old
+    run ends and a fresh run starts so the step cursor, touch budget, and AI
+    budget belong entirely to the newly assigned track. CONTINUE is the one
+    explicit override that keeps the current run.
+    """
+    if workflow is None or workflow.state not in _REASSIGNABLE_STATES:
         return False
     if progress_handling is PausedSearchProgressHandling.CONTINUE:
         return False
     if progress_handling is PausedSearchProgressHandling.RESTART:
         return True
     return workflow.paused_search_track_version_id != new_track_version_id
+
+
+def workflow_needs_terminalization_on_clear(workflow: LeadWorkflow | None) -> bool:
+    """Whether clearing the paused-search profile must end this workflow.
+
+    A live, automatable workflow that is still pinned to a track cannot outlive
+    the track: its Temporal execution runs in paused-search-recurring mode, so
+    without a track it would strand pending occurrences with no valid plan.
+    Dormant (unpinned) runs are untouched by a clear, and human-pause states
+    stay under explicit human control.
+    """
+    return (
+        workflow is not None
+        and workflow.state in _REASSIGNABLE_STATES
+        and workflow.paused_search_track_version_id is not None
+    )
 
 
 async def _close_and_restart_workflow_for_reassignment(
@@ -300,7 +334,11 @@ async def _close_and_restart_workflow_for_reassignment(
         now=now,
         actor_user_id=actor_user_id,
         metadata={
-            "previous_track_version_id": str(old_workflow.paused_search_track_version_id),
+            "previous_track_version_id": (
+                str(old_workflow.paused_search_track_version_id)
+                if old_workflow.paused_search_track_version_id is not None
+                else "dormant"
+            ),
             "new_track_version_id": str(new_track_version_id),
             **(
                 {"progress_handling": progress_handling.value}
@@ -357,7 +395,11 @@ async def _close_and_restart_workflow_for_reassignment(
             "route": "paused_search",
             "track_reassignment": True,
             "previous_workflow_id": str(old_workflow.workflow_id),
-            "previous_track_version_id": str(old_workflow.paused_search_track_version_id),
+            "previous_track_version_id": (
+                str(old_workflow.paused_search_track_version_id)
+                if old_workflow.paused_search_track_version_id is not None
+                else "dormant"
+            ),
         },
         initial_workflow_state=WorkflowState.ACTIVE_NURTURE,
         paused_search_track_version_id=new_track_version_id,

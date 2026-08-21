@@ -1,10 +1,9 @@
 """Admin-confirmed send-now for deferred outbound messages.
 
-A message deferred by a timing guard (e.g. the 24h frequency limit) stays
-PENDING with a status_detail explanation. An explicit, permission-checked
-operator action may force it out immediately: the frequency limit — and only
-the frequency limit — is overridden, while consent, handoff, contactability,
-and every other pre-send guard still applies.
+A message deferred by a timing guard (quiet hours, simultaneous-channel window)
+stays PENDING with a status_detail explanation. An explicit, permission-checked
+operator action may retry it immediately, and consent, handoff, contactability,
+and every other pre-send guard still applies to that retry.
 """
 
 from datetime import UTC, datetime, time, timedelta
@@ -84,7 +83,7 @@ MESSAGE_ID = UUID("00000000-0000-0000-0000-00000000000a")
 OCCURRENCE_ID = UUID("00000000-0000-0000-0000-00000000000b")
 DEFERRAL_DETAIL = (
     "Sending blocked: pre send blocked. Pre-send checks blocked delivery: "
-    "frequency limit reached. Next eligible send time: 2026-07-11T14:00:00+00:00."
+    "outside allowed hours. Next eligible send time: 2026-07-11T14:00:00+00:00."
 )
 
 
@@ -172,8 +171,8 @@ def _deferred_message(
 
 
 def _earlier_sent_message() -> OutboundMessage:
-    # A same-channel send one hour ago trips the 24h frequency guard, so the
-    # deferred message would not send without the operator override.
+    # Prior same-channel outreach an hour earlier: send spacing is owned by the
+    # track cadence, so it must not block this send.
     return OutboundMessage(
         message_id=UUID("00000000-0000-0000-0000-000000000012"),
         workspace_id=WORKSPACE_ID,
@@ -408,8 +407,7 @@ async def test_admin_send_now_sends_deferred_message_and_advances_paused_search(
     assert result.outbound_message_id == MESSAGE_ID
     assert result.signal_queued is True
     assert harness.commits >= 1
-    # The frequency guard is the only guard overridden — the message went out
-    # even though the previous send was one hour ago.
+    # Prior same-channel outreach does not block the retry — cadence owns spacing.
     assert len(harness.email_provider.messages) == 1
 
     sent_message = harness.stored_message()
@@ -547,9 +545,9 @@ async def test_send_now_not_actionable_on_step_mismatch() -> None:
     assert result.reasons == ("step_mismatch",)
 
 
-async def test_send_now_still_blocked_by_non_frequency_guards() -> None:
-    # do_not_contact keeps blocking even with the frequency override: only the
-    # timing guard is overridable, never consent or contactability.
+async def test_send_now_still_blocked_by_safety_guards() -> None:
+    # do_not_contact keeps blocking the operator retry: consent and
+    # contactability are never bypassed by a send-now action.
     harness = _Harness(
         lead=_lead(do_not_contact=True),
         workflow=_workflow(),

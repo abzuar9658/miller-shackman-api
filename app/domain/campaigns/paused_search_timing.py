@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from enum import StrEnum
@@ -65,6 +66,7 @@ def plan_next_paused_search_occurrence(
     occurrence_number: int,
     previous_due_at: datetime | None,
     is_retry: bool = False,
+    exhausted_step_ids: Collection[UUID] = (),
     quiet_hours_enabled: bool = True,
     quiet_hours_start: time | None = time(10, 0),
     quiet_hours_end: time | None = time(17, 0),
@@ -87,6 +89,7 @@ def plan_next_paused_search_occurrence(
         workflow=workflow,
         timezone=timezone,
         now=now,
+        exhausted_step_ids=exhausted_step_ids,
         quiet_hours_enabled=quiet_hours_enabled,
         quiet_hours_start=quiet_hours_start,
         quiet_hours_end=quiet_hours_end,
@@ -255,6 +258,7 @@ def plan_paused_search_next_action(
     workflow: LeadWorkflow,
     timezone: str,
     now: datetime,
+    exhausted_step_ids: Collection[UUID] = (),
     quiet_hours_enabled: bool = True,
     quiet_hours_start: time | None = time(10, 0),
     quiet_hours_end: time | None = time(17, 0),
@@ -331,15 +335,80 @@ def plan_paused_search_next_action(
         )
     while True:
         assert phase is not None
-        step = _resolve_step_for_phase(steps, phase, targeted_step_id)
+        step = _resolve_step_for_phase(steps, phase, targeted_step_id, exhausted_step_ids)
         if step is None:
-            return PausedSearchNextActionPlan(
-                next_action_at=None,
-                phase=phase,
-                step_id=None,
-                reason_code=PausedSearchTimingReasonCode.NO_STEP_IN_PHASE,
-                reason_detail=f"no remaining step in {phase.value} phase",
+            track_fully_exhausted = bool(steps) and all(
+                candidate.step_id in exhausted_step_ids for candidate in steps
             )
+            if track_fully_exhausted:
+                # Every configured step has consumed its occurrence cap: the
+                # track is complete, regardless of the current phase.
+                return PausedSearchNextActionPlan(
+                    next_action_at=None,
+                    phase=phase,
+                    step_id=None,
+                    reason_code=PausedSearchTimingReasonCode.OCCURRENCE_LIMIT_REACHED,
+                    reason_detail="every step in the track has exhausted its occurrences",
+                )
+            if phase is PausedSearchTrackStepPhase.REACTIVATION:
+                return PausedSearchNextActionPlan(
+                    next_action_at=None,
+                    phase=phase,
+                    step_id=None,
+                    reason_code=PausedSearchTimingReasonCode.NO_STEP_IN_PHASE,
+                    reason_detail=f"no remaining step in {phase.value} phase",
+                )
+            # Maintenance has nothing left to send. Only re-anchor to the
+            # reactivation window when exhaustion removed steps from the track;
+            # a track that never configured maintenance keeps the legacy hold.
+            maintenance_exhausted = any(
+                candidate.phase is PausedSearchTrackStepPhase.MAINTENANCE
+                and candidate.step_id in exhausted_step_ids
+                for candidate in steps
+            )
+            if not maintenance_exhausted:
+                return PausedSearchNextActionPlan(
+                    next_action_at=None,
+                    phase=phase,
+                    step_id=None,
+                    reason_code=PausedSearchTimingReasonCode.NO_STEP_IN_PHASE,
+                    reason_detail=f"no remaining step in {phase.value} phase",
+                )
+            # Idle until the reactivation window instead of completing early.
+            reactivation_step = _resolve_step_for_phase(
+                steps,
+                PausedSearchTrackStepPhase.REACTIVATION,
+                None,
+                exhausted_step_ids,
+            )
+            if reactivation_step is None:
+                return PausedSearchNextActionPlan(
+                    next_action_at=None,
+                    phase=phase,
+                    step_id=None,
+                    reason_code=PausedSearchTimingReasonCode.NO_STEP_IN_PHASE,
+                    reason_detail=f"no remaining step in {phase.value} phase",
+                )
+            reactivation_date = profile.reengagement_not_before or _fallback_reactivation_date(
+                profile=profile,
+                track_version=track_version,
+                workflow=workflow,
+                timezone=timezone,
+            )
+            if reactivation_date is None:
+                return PausedSearchNextActionPlan(
+                    next_action_at=None,
+                    phase=phase,
+                    step_id=None,
+                    reason_code=PausedSearchTimingReasonCode.NO_STEP_IN_PHASE,
+                    reason_detail=(
+                        "maintenance steps are exhausted and the track has no "
+                        "reactivation date to anchor the remaining steps"
+                    ),
+                )
+            phase = PausedSearchTrackStepPhase.REACTIVATION
+            targeted_step_id = None
+            continue
 
         base_time = _base_time_for_phase(
             phase=phase,
@@ -438,10 +507,15 @@ def _resolve_step_for_phase(
     steps: tuple[PausedSearchTrackStep, ...],
     phase: PausedSearchTrackStepPhase,
     targeted_step_id: UUID | None,
+    exhausted_step_ids: Collection[UUID] = (),
 ) -> PausedSearchTrackStep | None:
     phase_steps = tuple(
         sorted(
-            (step for step in steps if step.phase == phase),
+            (
+                step
+                for step in steps
+                if step.phase == phase and step.step_id not in exhausted_step_ids
+            ),
             key=lambda step: step.step_order,
         )
     )
@@ -449,9 +523,16 @@ def _resolve_step_for_phase(
         return None
 
     if targeted_step_id is not None:
-        for step in phase_steps:
-            if step.step_id == targeted_step_id:
-                return step
+        targeted = next((step for step in steps if step.step_id == targeted_step_id), None)
+        if targeted is not None and targeted.phase == phase:
+            if targeted.step_id not in exhausted_step_ids:
+                return targeted
+            # The targeted step is exhausted: advance forward in phase order,
+            # never backwards into an earlier step's schedule.
+            following = [
+                step for step in phase_steps if step.step_order > targeted.step_order
+            ]
+            return following[0] if following else None
 
     return phase_steps[0]
 

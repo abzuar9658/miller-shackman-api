@@ -132,8 +132,8 @@ def test_does_not_reactivate_when_block_includes_other_reasons() -> None:
     transition_repo.transitions[TRANSITION_ID] = replace(
         _outside_hours_block_transition(),
         metadata={
-            "pre_send_reasons": ["outside_allowed_hours", "frequency_limit_reached"],
-            "explanation": "Outside allowed hours and frequency limit reached",
+            "pre_send_reasons": ["outside_allowed_hours", "handoff_active"],
+            "explanation": "Outside allowed hours and handoff active",
         },
     )
 
