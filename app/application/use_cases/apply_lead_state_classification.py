@@ -38,7 +38,7 @@ from app.domain.campaigns import (
     PausedSearchTrackAssignmentSource,
     PausedSearchTrackCatalogEntry,
 )
-from app.domain.campaigns.paused_search_reply_policy import has_valid_explicit_new_timing
+from app.domain.campaigns.paused_search_timing import has_valid_explicit_new_timing
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.conversations import CrmConversationEvent
 from app.domain.identity import (

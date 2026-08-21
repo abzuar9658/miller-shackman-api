@@ -427,11 +427,7 @@ class LeadNurtureWorkflow:
 
     @workflow.signal(name="inbound-processed")
     def inbound_processed(self, signal: InboundProcessedWorkflowSignal) -> None:
-        resumes_paused_search = signal.paused_search_reply_decision in {
-            "continue",
-            "reanchor",
-            "end",
-        }
+        resumes_paused_search = signal.paused_search_reply_decision == "continue"
         self._send_blocked = not resumes_paused_search
         self._reschedule_requested = True
         if self._snapshot is not None:

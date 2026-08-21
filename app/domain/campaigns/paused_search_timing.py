@@ -664,3 +664,8 @@ def _from_timezone(value: datetime, timezone: str) -> datetime:
     if value.tzinfo is None:
         return value
     return value.astimezone(UTC)
+
+
+def has_valid_explicit_new_timing(*, timing: datetime | None, now: datetime) -> bool:
+    """Accept only a timezone-aware timing boundary strictly in the future."""
+    return timing is not None and timing.tzinfo is not None and timing > now

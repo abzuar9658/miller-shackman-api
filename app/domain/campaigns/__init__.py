@@ -50,12 +50,6 @@ from app.domain.campaigns.paused_search_occurrences import (
     RecurringOccurrenceStatus,
     occurrence_idempotency_key,
 )
-from app.domain.campaigns.paused_search_reply_policy import (
-    PausedSearchReplyContext,
-    PausedSearchReplyDecision,
-    decide_paused_search_reply,
-    has_valid_explicit_new_timing,
-)
 from app.domain.campaigns.paused_search_reviews import (
     PausedSearchReview,
     PausedSearchReviewAction,
@@ -68,6 +62,7 @@ from app.domain.campaigns.paused_search_timing import (
     PausedSearchNextActionPlan,
     PausedSearchOccurrencePlan,
     PausedSearchTimingReasonCode,
+    has_valid_explicit_new_timing,
     paused_search_duration_end,
     paused_search_maintenance_boundary,
     paused_search_step_occurrence_cap,
@@ -191,8 +186,6 @@ __all__ = [
     "PausedSearchChannelSequence",
     "PausedSearchInterimContactPolicy",
     "PausedSearchReplyPolicy",
-    "PausedSearchReplyContext",
-    "PausedSearchReplyDecision",
     "PausedSearchStepAction",
     "PausedSearchTerminalBehavior",
     "PausedSearchTrack",
@@ -245,6 +238,5 @@ __all__ = [
     "apply_review_action",
     "generate_paused_search_track_key",
     "effective_paused_search_step_action",
-    "decide_paused_search_reply",
     "has_valid_explicit_new_timing",
 ]

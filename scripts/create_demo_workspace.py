@@ -44,6 +44,9 @@ from app.application.services.llm.outbound_message_drafting import (
 from app.application.services.llm.reply_classification import (
     INBOUND_REPLY_CLASSIFICATION_PROMPT_VERSION,
 )
+from app.application.services.llm.reply_route_classification import (
+    REPLY_ROUTE_CLASSIFICATION_PROMPT_VERSION,
+)
 from app.application.use_cases.apply_workflow_state_transition import (
     apply_workflow_state_transition,
 )
@@ -256,6 +259,8 @@ class DemoLLMClient:
     async def complete(self, request: LLMCompletionRequest) -> LLMResult:
         if request.prompt_version == INBOUND_REPLY_CLASSIFICATION_PROMPT_VERSION:
             text = _classification_response_for_prompt(request.prompt)
+        elif request.prompt_version.startswith(REPLY_ROUTE_CLASSIFICATION_PROMPT_VERSION):
+            text = _reply_route_response_for_prompt(request.prompt)
         elif request.prompt_version == DEMO_OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION:
             text = json.dumps(
                 {
@@ -1347,8 +1352,51 @@ def _outbound_message(
     )
 
 
+def _reply_route_response_for_prompt(prompt: str) -> str:
+    normalized = prompt.lower()
+    if "sell my condo" in normalized or "seller" in normalized:
+        return json.dumps(
+            {
+                "decision": "human_handoff",
+                "continue_percent": 15,
+                "human_handoff_percent": 80,
+                "suppressed_percent": 5,
+                "adjusted_reengagement_date": None,
+                "adjusted_reengagement_window_label": None,
+                "confidence": 0.95,
+                "summary": "Lead wants to sell and buy soon; hand to a human.",
+            }
+        )
+    return json.dumps(
+        {
+            "decision": "continue",
+            "continue_percent": 70,
+            "human_handoff_percent": 20,
+            "suppressed_percent": 10,
+            "adjusted_reengagement_date": None,
+            "adjusted_reengagement_window_label": None,
+            "confidence": 0.9,
+            "summary": "Lead is still on the current plan.",
+        }
+    )
+
+
 def _classification_response_for_prompt(prompt: str) -> str:
     normalized = prompt.lower()
+    if "call me today" in normalized or "agent call me" in normalized:
+        return json.dumps(
+            {
+                "intent": "human_requested",
+                "confidence": 0.95,
+                "asks_for_human": True,
+                "shows_buying_interest": False,
+                "shows_selling_interest": False,
+                "asks_property_or_advice": False,
+                "opt_out_detected": False,
+                "summary_text": "Lead asked for an agent callback.",
+                "preferences": {"next_action": "call_today"},
+            },
+        )
     if "stop texting" in normalized or "unsubscribe" in normalized:
         return json.dumps(
             {

@@ -239,7 +239,10 @@ def is_sendable_workflow_state(state: WorkflowState) -> bool:
 
 
 def _next_current_step_id(workflow: LeadWorkflow, to_state: WorkflowState) -> UUID | None:
-    if to_state in _terminal_states() | {WorkflowState.HUMAN_HANDOFF, WorkflowState.HUMAN_OWNED}:
+    # Only terminal states discard the cadence cursor. Human handoff/ownership
+    # must preserve it (like PAUSED) so an authorized resume continues the
+    # track from the step it was on instead of restarting from step 1.
+    if to_state in _terminal_states():
         return None
     return workflow.current_step_id
 

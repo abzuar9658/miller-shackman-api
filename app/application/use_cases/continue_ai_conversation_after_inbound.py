@@ -2,7 +2,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
-from typing import cast
 from uuid import UUID
 
 from app.application.ports.crm import CRMClient
@@ -11,18 +10,12 @@ from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.repositories import (
     CampaignExecutionRepository,
     ConversationRepository,
-    CrmConversationEventRepository,
     InboundMessageRepository,
-    LeadClassificationArtifactRepository,
-    LeadPausedSearchHistoryRepository,
     LeadRepository,
-    LeadRoutingReviewRepository,
     LeadWorkflowRepository,
     OutboundMessageCRMCompletionRepository,
     OutboundMessageRepository,
-    PausedSearchTrackAssignmentRepository,
     PausedSearchTrackRepository,
-    TemporalSignalOutboxRepository,
     WorkflowTransitionRepository,
     WorkspaceContactPolicyRepository,
     WorkspaceLLMConfigRepository,
@@ -44,11 +37,6 @@ from app.application.use_cases.plan_next_outbound_message import (
     plan_next_outbound_message_for_lead,
 )
 from app.application.use_cases.plan_outbound_message import PlanOutboundMessageStatus
-from app.application.use_cases.route_ai_nurture_lead import (
-    AiNurtureRoute,
-    AiNurtureRouteResult,
-    route_ai_nurture_lead,
-)
 from app.application.use_cases.send_outbound_message import (
     OutboundSendContext,
     SendOutboundMessageStatus,
@@ -63,10 +51,8 @@ from app.domain.compliance.contactability import (
 from app.domain.conversations import (
     Conversation,
     ConversationSummary,
-    CrmConversationEvent,
     WorkspaceHandoffConfig,
 )
-from app.domain.leads import CanonicalLeadRecord
 from app.domain.outbound_drafting import OutboundJourneyKind
 from app.domain.workflows import LeadWorkflow, WorkflowState, WorkflowTransitionReasonCode
 
@@ -95,7 +81,6 @@ class ContinueAIReasonCode(StrEnum):
     TURN_CAP_REACHED = "turn_cap_reached"
     WORKFLOW_TRANSITION_FAILED = "workflow_transition_failed"
     PLANNING_BLOCKED = "planning_blocked"
-    REPLY_REROUTED = "reply_rerouted"
     SENDING_BLOCKED = "sending_blocked"
     SENDING_FAILED = "sending_failed"
     SENDING_UNCERTAIN = "sending_uncertain"
@@ -114,7 +99,6 @@ class ContinueAIResult:
     reasons: tuple[ContinueAIReasonCode, ...] = ()
     block_explanation: str | None = None
     pause_reason: str | None = None
-    lead_state_rerouted: bool = False
 
 
 async def continue_ai_conversation_after_inbound(
@@ -142,12 +126,7 @@ async def continue_ai_conversation_after_inbound(
     sms_provider: SMSProvider,
     email_provider: EmailProvider,
     llm_client: LLMClient,
-    lead_classification_artifact_repository: LeadClassificationArtifactRepository | None = None,
-    routing_review_repository: LeadRoutingReviewRepository | None = None,
-    crm_conversation_event_repository: CrmConversationEventRepository | None = None,
     paused_search_track_repository: PausedSearchTrackRepository | None = None,
-    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None = None,
-    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None = None,
     crm_client: CRMClient | None = None,
     outbound_message_crm_completion_repository: (
         OutboundMessageCRMCompletionRepository | None
@@ -158,7 +137,6 @@ async def continue_ai_conversation_after_inbound(
     external_event_id: UUID | None = None,
     inbound_message_id: UUID | None = None,
     transition_id_factory: Callable[[], UUID] | None = None,
-    supplemental_crm_conversation_events: tuple[CrmConversationEvent, ...] = (),
 ) -> ContinueAIResult:
     lead = await lead_repository.get_by_id(workspace_id, lead_id)
     if lead is None:
@@ -199,46 +177,6 @@ async def continue_ai_conversation_after_inbound(
                 f"Cannot continue AI from workflow state {workflow.state.value}; "
                 "expected waiting_for_response."
             ),
-        )
-
-    reroute_result = await _maybe_route_reply_before_continuation(
-        workspace_id=workspace_id,
-        lead=lead,
-        inbound_body=inbound_body,
-        latest_summary=latest_summary,
-        lead_repository=lead_repository,
-        artifact_repository=lead_classification_artifact_repository,
-        routing_review_repository=routing_review_repository,
-        crm_conversation_event_repository=crm_conversation_event_repository,
-        workspace_llm_config_repository=workspace_llm_config_repository,
-        llm_client=llm_client,
-        now=now,
-        default_openrouter_model=default_openrouter_model,
-        supplemental_crm_conversation_events=supplemental_crm_conversation_events,
-        lead_workflow_repository=lead_workflow_repository,
-        paused_search_track_repository=paused_search_track_repository,
-        paused_search_track_assignment_repository=(
-            paused_search_track_assignment_repository
-        ),
-        temporal_signal_outbox_repository=temporal_signal_outbox_repository,
-    )
-    if reroute_result is not None and reroute_result.route != AiNurtureRoute.DORMANT:
-        return await _pause_after_block(
-            workspace_id=workspace_id,
-            lead_id=lead_id,
-            workflow_id=workflow.workflow_id,
-            lead_workflow_repository=lead_workflow_repository,
-            workflow_transition_repository=workflow_transition_repository,
-            reason_code=WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED,
-            pause_reason=f"ai_continuation_rerouted_to_{reroute_result.route.value}",
-            block_explanation=(
-                "Inbound reply changed the lead state before AI continuation "
-                f"to {reroute_result.route.value}."
-            ),
-            reasons=(ContinueAIReasonCode.REPLY_REROUTED,),
-            now=now,
-            transition_id_factory=transition_id_factory,
-            lead_state_rerouted=True,
         )
 
     ai_turn_cap = await _resolve_ai_turn_cap(
@@ -385,7 +323,6 @@ async def continue_ai_conversation_after_inbound(
             outbound_message_id=(
                 duplicate_message.message_id if duplicate_message is not None else None
             ),
-            lead_state_rerouted=reroute_result is not None,
         )
 
     message = plan_result.message
@@ -507,7 +444,6 @@ async def continue_ai_conversation_after_inbound(
             provider_message_id=(
                 sent_message.provider_message_id if sent_message is not None else None
             ),
-            lead_state_rerouted=reroute_result is not None,
         )
 
     return await _pause_after_block(
@@ -535,7 +471,6 @@ async def continue_ai_conversation_after_inbound(
         ),
         now=now,
         transition_id_factory=transition_id_factory,
-        lead_state_rerouted=reroute_result is not None,
     )
 
 
@@ -552,7 +487,6 @@ async def _pause_after_block(
     reasons: tuple[ContinueAIReasonCode, ...],
     now: datetime,
     transition_id_factory: Callable[[], UUID] | None = None,
-    lead_state_rerouted: bool = False,
 ) -> ContinueAIResult:
     pause_outcome = await apply_workflow_state_transition(
         workspace_id=workspace_id,
@@ -579,7 +513,6 @@ async def _pause_after_block(
         reasons=reasons,
         block_explanation=block_explanation,
         pause_reason=pause_reason,
-        lead_state_rerouted=lead_state_rerouted,
     )
 
 
@@ -605,59 +538,6 @@ async def _resolve_ai_turn_cap(
     if version is None:
         return _MAX_AI_INTERACTION_TURNS
     return version.max_ai_interactions
-
-
-async def _maybe_route_reply_before_continuation(
-    *,
-    workspace_id: WorkspaceId,
-    lead: CanonicalLeadRecord,
-    inbound_body: str,
-    latest_summary: ConversationSummary | None,
-    lead_repository: LeadRepository,
-    artifact_repository: LeadClassificationArtifactRepository | None,
-    routing_review_repository: LeadRoutingReviewRepository | None,
-    crm_conversation_event_repository: CrmConversationEventRepository | None,
-    workspace_llm_config_repository: WorkspaceLLMConfigRepository | None,
-    llm_client: LLMClient,
-    now: datetime,
-    default_openrouter_model: str,
-    supplemental_crm_conversation_events: tuple[CrmConversationEvent, ...],
-    lead_workflow_repository: LeadWorkflowRepository,
-    paused_search_track_repository: PausedSearchTrackRepository | None,
-    paused_search_track_assignment_repository: PausedSearchTrackAssignmentRepository | None,
-    temporal_signal_outbox_repository: TemporalSignalOutboxRepository | None,
-) -> AiNurtureRouteResult | None:
-    if (
-        lead is None
-        or artifact_repository is None
-        or crm_conversation_event_repository is None
-        or workspace_llm_config_repository is None
-        or lead.do_not_contact
-        or lead.sms_opted_out
-        or lead.email_unsubscribed
-    ):
-        return None
-    return await route_ai_nurture_lead(
-        workspace_id=workspace_id,
-        lead=lead,
-        lead_repository=lead_repository,
-        paused_search_history_repository=cast(LeadPausedSearchHistoryRepository, lead_repository),
-        artifact_repository=artifact_repository,
-        crm_conversation_event_repository=crm_conversation_event_repository,
-        workspace_llm_config_repository=workspace_llm_config_repository,
-        llm_client=llm_client,
-        now=now,
-        default_openrouter_model=default_openrouter_model,
-        conversation_summary=(
-            latest_summary.summary_text if latest_summary is not None else inbound_body
-        ),
-        supplemental_crm_conversation_events=supplemental_crm_conversation_events,
-        lead_workflow_repository=lead_workflow_repository,
-        paused_search_track_repository=paused_search_track_repository,
-        paused_search_track_assignment_repository=paused_search_track_assignment_repository,
-        temporal_signal_outbox_repository=temporal_signal_outbox_repository,
-        routing_review_repository=routing_review_repository,
-    )
 
 
 def _resolve_continuation_step(

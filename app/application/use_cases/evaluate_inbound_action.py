@@ -24,11 +24,11 @@ class InboundActionReasonCode(StrEnum):
     HIGH_INTEREST = "high_interest"
     SELLER_INTEREST = "seller_interest"
     SPECIFIC_PROPERTY_OR_ADVICE = "specific_property_or_advice"
-    UNCLEAR_INTENT = "unclear_intent"
     NOT_INTERESTED = "not_interested"
     GENERAL_REPLY = "general_reply"
-    PAUSED_SEARCH_REPLY_REVIEW = "paused_search_reply_review"
-    PAUSED_SEARCH_REPLY_ENDED = "paused_search_reply_ended"
+    REPLY_ROUTE_REJECTED = "reply_route_rejected"
+    REPLY_ROUTE_SUPPRESSED = "reply_route_suppressed"
+    REPLY_ROUTE_CONTINUE = "reply_route_continue"
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,14 @@ class InboundActionDecision:
 def evaluate_inbound_action(
     classification: ReplyClassificationResult,
 ) -> InboundActionDecision:
+    """First-pass deterministic gates for an inbound reply.
+
+    Consent (opt-out), explicit requests for a person, and clear disinterest are
+    decided here and never reach the journey router. Everything else — neutral,
+    uncertain, or interested replies — continues to the journey-aware reply
+    router, which scores continue / handoff / suppress against the lead's
+    current journey before anything happens.
+    """
     if classification.status == ReplyClassificationStatus.REJECTED:
         return InboundActionDecision(
             action=InboundAction.PAUSE_FOR_REVIEW,
@@ -53,18 +61,14 @@ def evaluate_inbound_action(
             reason_code=InboundActionReasonCode.OPT_OUT_DETECTED,
         )
 
-    handoff_reason = _handoff_reason_from_classification(classification)
-    if handoff_reason is not None:
+    if (
+        classification.evidence.asks_for_human
+        or classification.intent == InboundReplyIntent.HUMAN_REQUESTED
+    ):
         return InboundActionDecision(
             action=InboundAction.HUMAN_HANDOFF,
-            reason_code=_handoff_reason_to_action_reason(handoff_reason),
-            handoff_reason=handoff_reason,
-        )
-
-    if classification.intent == InboundReplyIntent.UNCLEAR:
-        return InboundActionDecision(
-            action=InboundAction.PAUSE_FOR_REVIEW,
-            reason_code=InboundActionReasonCode.UNCLEAR_INTENT,
+            reason_code=InboundActionReasonCode.HUMAN_REQUESTED,
+            handoff_reason=HandoffReasonCode.HUMAN_REQUESTED,
         )
 
     if classification.intent == InboundReplyIntent.NOT_INTERESTED:
@@ -79,7 +83,7 @@ def evaluate_inbound_action(
     )
 
 
-def _handoff_reason_to_action_reason(
+def handoff_reason_to_action_reason(
     handoff_reason: HandoffReasonCode,
 ) -> InboundActionReasonCode:
     if handoff_reason == HandoffReasonCode.HUMAN_REQUESTED:
@@ -89,26 +93,3 @@ def _handoff_reason_to_action_reason(
     if handoff_reason == HandoffReasonCode.SELLER_INTEREST:
         return InboundActionReasonCode.SELLER_INTEREST
     return InboundActionReasonCode.SPECIFIC_PROPERTY_OR_ADVICE
-
-
-def _handoff_reason_from_classification(
-    classification: ReplyClassificationResult,
-) -> HandoffReasonCode | None:
-    if (
-        classification.evidence.asks_for_human
-        or classification.intent == InboundReplyIntent.HUMAN_REQUESTED
-    ):
-        return HandoffReasonCode.HUMAN_REQUESTED
-    if classification.evidence.asks_property_or_advice:
-        return HandoffReasonCode.SPECIFIC_PROPERTY_OR_ADVICE
-    if (
-        classification.evidence.shows_selling_interest
-        or classification.intent == InboundReplyIntent.SELLER_INTEREST
-    ):
-        return HandoffReasonCode.SELLER_INTEREST
-    if (
-        classification.evidence.shows_buying_interest
-        or classification.intent == InboundReplyIntent.HIGH_INTEREST
-    ):
-        return HandoffReasonCode.HIGH_INTEREST
-    return None

@@ -105,7 +105,6 @@ from tests.application.use_cases.test_process_inbound_message_event import (
     FakeInboundMessageCRMCompletionRepository,
     _draft_json,
     _FakeLLMClientForContinuation,
-    _lead_state_classification_json,
 )
 from tests.application.use_cases.test_process_inbound_message_event import (
     FakeLLMClient as FakeInboundLLMClient,
@@ -720,6 +719,8 @@ async def test_business_flow_harness_runs_sync_to_handoff_path() -> None:
 
     final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
     assert final_workflow.state == WorkflowState.HUMAN_HANDOFF
+    # The single-step cadence already completed before the reply, so the
+    # cursor was cleared at send time; handoff itself must not clear it.
     assert final_workflow.current_step_id is None
     assert final_workflow.next_action_at is None
 
@@ -867,10 +868,6 @@ async def test_business_flow_harness_runs_crm_tag_to_paused_search_send_to_hando
                 asks_for_human=True,
             ),
             draft_text=_draft_json(),
-            lead_state_text=_lead_state_classification_json(
-                outcome="human_handoff",
-                summary="Lead explicitly wants a human agent now.",
-            ),
         ),
         now=NOW,
         lead_workflow_repository=workflow_repository,

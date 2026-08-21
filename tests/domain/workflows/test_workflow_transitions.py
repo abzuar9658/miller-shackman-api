@@ -35,7 +35,7 @@ def test_inbound_handoff_transition_pauses_pending_action_and_records_audit() ->
     )
 
     assert result.workflow.state == WorkflowState.HUMAN_HANDOFF
-    assert result.workflow.current_step_id is None
+    assert result.workflow.current_step_id == STEP_ID
     assert result.workflow.next_action_at is None
     assert result.workflow.state_version == 4
     assert result.workflow.pause_reason == "human_handoff_required"
@@ -164,6 +164,7 @@ def test_human_controlled_workflow_can_reenter_active_nurture_when_explicitly_re
     )
 
     assert result.workflow.state == WorkflowState.ACTIVE_NURTURE
+    assert result.workflow.current_step_id == STEP_ID
     assert result.workflow.resume_reason == "authorized resume"
 
 
