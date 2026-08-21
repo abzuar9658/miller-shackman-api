@@ -17,6 +17,14 @@ from app.domain.conversations.models import (
     default_workspace_handoff_config,
     is_open_handoff,
 )
+from app.domain.conversations.reply_routing import (
+    ReplyRouteAction,
+    ReplyRouteDecisionResult,
+    ReplyRouteEvidence,
+    ReplyRouteOption,
+    decide_reply_route,
+    resolve_reengagement_pull_in,
+)
 
 __all__ = [
     "Conversation",
@@ -32,8 +40,14 @@ __all__ = [
     "InboundMessageCRMCompletionRecord",
     "InboundMessage",
     "InboundMessageClassificationStatus",
+    "ReplyRouteAction",
+    "ReplyRouteDecisionResult",
+    "ReplyRouteEvidence",
+    "ReplyRouteOption",
     "WorkspaceHandoffConfig",
     "canonical_crm_event_identity",
+    "decide_reply_route",
     "default_workspace_handoff_config",
     "is_open_handoff",
+    "resolve_reengagement_pull_in",
 ]

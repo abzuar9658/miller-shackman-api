@@ -434,6 +434,8 @@ async def test_business_flow_harness_runs_against_real_postgres(
     final_workflow = await lead_workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID)
     assert final_workflow is not None
     assert final_workflow.state == WorkflowState.HUMAN_HANDOFF
+    # The single-step cadence already completed before the reply, so the
+    # cursor was cleared at send time; handoff itself must not clear it.
     assert final_workflow.current_step_id is None
     assert final_workflow.next_action_at is None
 

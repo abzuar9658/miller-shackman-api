@@ -20,7 +20,6 @@ from app.domain.campaigns.paused_search_reminders import (
     PausedSearchAgentReminder,
     PausedSearchReminderStatus,
 )
-from app.domain.campaigns.paused_search_reply_policy import PausedSearchReplyDecision
 from app.domain.campaigns.paused_search_tracks import PausedSearchTrackStepPhase
 from app.domain.workflows import LeadWorkflow, WorkflowState
 from tests.application.use_cases._campaign_cadence_fakes import (
@@ -126,7 +125,7 @@ async def test_inbound_pause_cancels_pending_agent_reminders() -> None:
         workspace_id=WORKSPACE_ID,
         lead_id=LEAD_ID,
         action=InboundAction.PAUSE_FOR_REVIEW,
-        decision_reason=InboundActionReasonCode.UNCLEAR_INTENT,
+        decision_reason=InboundActionReasonCode.REPLY_ROUTE_REJECTED,
         lead_workflow_repository=FakeWorkflowRepository(workflow),
         workflow_transition_repository=FakeTransitionRepository(),
         paused_search_reminder_repository=reminder_repository,
@@ -180,33 +179,30 @@ def _pending_occurrence() -> RecurringOccurrence:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("decision", "action", "expected_state"),
+    ("resume_paused_search", "action", "initial_state", "expected_state"),
     [
         (
-            PausedSearchReplyDecision.END,
+            False,
             InboundAction.COMPLETE_AUTOMATION,
+            WorkflowState.ACTIVE_NURTURE,
             WorkflowState.COMPLETED,
         ),
         (
-            PausedSearchReplyDecision.RESTART,
+            True,
             InboundAction.CONTINUE_AI,
+            WorkflowState.WAITING_FOR_RESPONSE,
             WorkflowState.ACTIVE_NURTURE,
         ),
     ],
 )
-async def test_end_and_restart_preserve_counters_and_cancel_pending_work(
-    decision: PausedSearchReplyDecision,
+async def test_end_and_resume_preserve_counters_and_cancel_pending_work(
+    resume_paused_search: bool,
     action: InboundAction,
+    initial_state: WorkflowState,
     expected_state: WorkflowState,
 ) -> None:
     workflow_repository = FakeWorkflowRepository(
-        _workflow_with_touch_count(
-            state=(
-                WorkflowState.WAITING_FOR_RESPONSE
-                if decision is PausedSearchReplyDecision.RESTART
-                else WorkflowState.ACTIVE_NURTURE
-            )
-        )
+        _workflow_with_touch_count(state=initial_state)
     )
     transition_repository = FakeTransitionRepository()
     occurrence_repository = FakePausedSearchOccurrenceRepository(_pending_occurrence())
@@ -230,12 +226,13 @@ async def test_end_and_restart_preserve_counters_and_cancel_pending_work(
         workspace_id=WORKSPACE_ID,
         lead_id=LEAD_ID,
         action=action,
-        decision_reason=InboundActionReasonCode.PAUSED_SEARCH_REPLY_REVIEW,
+        decision_reason=InboundActionReasonCode.REPLY_ROUTE_CONTINUE,
         lead_workflow_repository=workflow_repository,
         workflow_transition_repository=transition_repository,
         paused_search_occurrence_repository=occurrence_repository,
         paused_search_reminder_repository=reminder_repository,
-        paused_search_reply_decision=decision,
+        resume_paused_search=resume_paused_search,
+        reply_route="continue" if resume_paused_search else None,
         now=NOW,
     )
 

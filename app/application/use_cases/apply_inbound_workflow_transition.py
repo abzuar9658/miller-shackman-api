@@ -12,7 +12,6 @@ from app.application.ports.repositories import (
 )
 from app.application.services.llm.reply_classification import InboundReplyIntent
 from app.application.use_cases.evaluate_inbound_action import InboundAction, InboundActionReasonCode
-from app.domain.campaigns.paused_search_reply_policy import PausedSearchReplyDecision
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.workflows import (
     LeadWorkflow,
@@ -54,25 +53,21 @@ async def apply_inbound_workflow_transition(
     handoff_id: UUID | None = None,
     intent: InboundReplyIntent | None = None,
     classification_reasons: tuple[str, ...] = (),
-    paused_search_reply_decision: PausedSearchReplyDecision | None = None,
+    resume_paused_search: bool = False,
+    reply_route: str | None = None,
     transition_id_factory: Callable[[], UUID] | None = None,
 ) -> InboundWorkflowTransitionOutcome:
     workflow = await lead_workflow_repository.get_latest_for_lead_for_update(workspace_id, lead_id)
     if workflow is None:
         return InboundWorkflowTransitionOutcome(status=InboundWorkflowTransitionStatus.NO_WORKFLOW)
 
-    resumes_paused_search = paused_search_reply_decision in {
-        PausedSearchReplyDecision.CONTINUE,
-        PausedSearchReplyDecision.RESTART,
-    }
-    if resumes_paused_search:
-        assert paused_search_reply_decision is not None
+    if resume_paused_search:
         if paused_search_occurrence_repository is not None:
             await paused_search_occurrence_repository.cancel_open_for_workflow(
                 workspace_id=workspace_id,
                 workflow_id=workflow.workflow_id,
                 now=now,
-                reason=paused_search_reply_decision.value,
+                reason="reply_route_continue",
             )
         if paused_search_reminder_repository is not None:
             await paused_search_reminder_repository.cancel_open_for_workflow(
@@ -80,7 +75,7 @@ async def apply_inbound_workflow_transition(
                 workflow_id=workflow.workflow_id,
                 now=now,
             )
-    to_state = WorkflowState.ACTIVE_NURTURE if resumes_paused_search else _to_state(action)
+    to_state = WorkflowState.ACTIVE_NURTURE if resume_paused_search else _to_state(action)
     reason_code = _reason_code(action=action, decision_reason=decision_reason)
     metadata = _metadata(
         conversation_id=conversation_id,
@@ -90,7 +85,7 @@ async def apply_inbound_workflow_transition(
         action=action,
         decision_reason=decision_reason,
         classification_reasons=classification_reasons,
-        paused_search_reply_decision=paused_search_reply_decision,
+        reply_route=reply_route,
     )
     try:
         result = transition_workflow(
@@ -177,7 +172,7 @@ def _metadata(
     action: InboundAction | None,
     decision_reason: InboundActionReasonCode | None,
     classification_reasons: tuple[str, ...],
-    paused_search_reply_decision: PausedSearchReplyDecision | None,
+    reply_route: str | None,
 ) -> Mapping[str, object]:
     values: dict[str, object] = {}
     if conversation_id is not None:
@@ -192,8 +187,8 @@ def _metadata(
         values["inbound_action"] = action.value
     if decision_reason is not None:
         values["decision_reason"] = decision_reason.value
-    if paused_search_reply_decision is not None:
-        values["paused_search_reply_decision"] = paused_search_reply_decision.value
+    if reply_route is not None:
+        values["reply_route"] = reply_route
     if classification_reasons:
         values["classification_reasons"] = list(classification_reasons)
     return values

@@ -55,7 +55,8 @@ def test_human_request_evidence_controls_human_handoff() -> None:
     assert decision.handoff_reason == HandoffReasonCode.HUMAN_REQUESTED
 
 
-def test_unclear_intent_requires_review() -> None:
+def test_unclear_intent_continues_to_journey_router() -> None:
+    """A confused reply never interrupts a human: it flows to the journey router."""
     decision = evaluate_inbound_action(
         ReplyClassificationResult(
             status=ReplyClassificationStatus.CLASSIFIED,
@@ -65,8 +66,8 @@ def test_unclear_intent_requires_review() -> None:
         )
     )
 
-    assert decision.action == InboundAction.PAUSE_FOR_REVIEW
-    assert decision.reason_code == InboundActionReasonCode.UNCLEAR_INTENT
+    assert decision.action == InboundAction.CONTINUE_AI
+    assert decision.reason_code == InboundActionReasonCode.GENERAL_REPLY
 
 
 def test_general_reply_is_marked_for_future_ai_continuation() -> None:
@@ -97,7 +98,9 @@ def test_not_interested_stops_automation_without_suppression() -> None:
     assert decision.reason_code == InboundActionReasonCode.NOT_INTERESTED
 
 
-def test_property_or_advice_evidence_forces_handoff_even_when_intent_is_general_reply() -> None:
+def test_property_or_advice_evidence_goes_to_journey_router() -> None:
+    """Interest/advice evidence alone no longer hands off; the journey router must
+    agree (gated in domain.conversations.reply_routing)."""
     decision = evaluate_inbound_action(
         ReplyClassificationResult(
             status=ReplyClassificationStatus.CLASSIFIED,
@@ -108,9 +111,8 @@ def test_property_or_advice_evidence_forces_handoff_even_when_intent_is_general_
         )
     )
 
-    assert decision.action == InboundAction.HUMAN_HANDOFF
-    assert decision.reason_code == InboundActionReasonCode.SPECIFIC_PROPERTY_OR_ADVICE
-    assert decision.handoff_reason == HandoffReasonCode.SPECIFIC_PROPERTY_OR_ADVICE
+    assert decision.action == InboundAction.CONTINUE_AI
+    assert decision.reason_code == InboundActionReasonCode.GENERAL_REPLY
 
 
 def test_human_request_takes_precedence_over_unclear_intent() -> None:
@@ -128,7 +130,9 @@ def test_human_request_takes_precedence_over_unclear_intent() -> None:
     assert decision.reason_code == InboundActionReasonCode.HUMAN_REQUESTED
 
 
-def test_property_or_advice_takes_precedence_over_high_interest() -> None:
+def test_high_interest_goes_to_journey_router() -> None:
+    """High interest no longer hands off at the gate; the journey router decides
+    with the evidence as input (precedence covered by reply-routing domain tests)."""
     decision = evaluate_inbound_action(
         ReplyClassificationResult(
             status=ReplyClassificationStatus.CLASSIFIED,
@@ -142,5 +146,5 @@ def test_property_or_advice_takes_precedence_over_high_interest() -> None:
         )
     )
 
-    assert decision.action == InboundAction.HUMAN_HANDOFF
-    assert decision.reason_code == InboundActionReasonCode.SPECIFIC_PROPERTY_OR_ADVICE
+    assert decision.action == InboundAction.CONTINUE_AI
+    assert decision.reason_code == InboundActionReasonCode.GENERAL_REPLY
