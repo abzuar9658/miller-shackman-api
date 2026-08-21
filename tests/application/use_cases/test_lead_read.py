@@ -889,6 +889,67 @@ def test_status_narrative_paused_includes_reason() -> None:
     assert "Agent activity detected" in narrative
 
 
+def test_status_narrative_between_runs_shows_reengagement_date() -> None:
+    """A terminal run with an active paused-search profile leads with the
+    profile's re-engagement plan, not the finished run."""
+    workflow = replace(_workflow(), state=WorkflowState.COMPLETED)
+    profile = LeadPausedSearchProfile(
+        paused_search_active=True,
+        paused_search_track_key="rates-watch",
+        paused_search_track_version_id=TRACK_VERSION_ID,
+        reengagement_not_before=datetime(2030, 6, 1, tzinfo=UTC),
+    )
+
+    narrative = build_lead_status_narrative(
+        workflow=workflow,
+        progress_views=(),
+        now=NOW,
+        paused_search_profile=profile,
+    )
+
+    assert "Paused — search on hold" in narrative
+    assert "re-engages Jun 1, 2030" in narrative
+    assert "previous run completed" in narrative
+
+
+def test_status_narrative_between_runs_with_window_label() -> None:
+    profile = LeadPausedSearchProfile(
+        paused_search_active=True,
+        paused_search_track_key="rates-watch",
+        paused_search_track_version_id=TRACK_VERSION_ID,
+        reengagement_window_label="in the spring",
+    )
+
+    narrative = build_lead_status_narrative(
+        workflow=None,
+        progress_views=(),
+        now=NOW,
+        paused_search_profile=profile,
+    )
+
+    assert "Paused — search on hold" in narrative
+    assert "re-engages in the spring" in narrative
+
+
+def test_status_narrative_active_run_ignores_paused_search_profile() -> None:
+    """An active run's narrative is not overridden by a lingering profile."""
+    profile = LeadPausedSearchProfile(
+        paused_search_active=True,
+        paused_search_track_key="rates-watch",
+        paused_search_track_version_id=TRACK_VERSION_ID,
+    )
+
+    narrative = build_lead_status_narrative(
+        workflow=_workflow(),
+        progress_views=(),
+        now=NOW,
+        paused_search_profile=profile,
+    )
+
+    assert "Waiting for the lead to respond" in narrative
+    assert "search on hold" not in narrative
+
+
 def test_get_lead_detail_view_includes_cadence_progress_and_narrative() -> None:
     result = asyncio.run(
         get_lead_detail_view(

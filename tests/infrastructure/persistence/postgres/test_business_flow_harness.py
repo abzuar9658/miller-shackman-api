@@ -681,9 +681,11 @@ async def test_business_flow_harness_runs_continue_ai_path_against_real_postgres
     assert final_workflow is not None
     assert final_workflow.state == WorkflowState.WAITING_FOR_RESPONSE
 
+    assert final_workflow.ai_interaction_count == 1
+
     final_conversation = await conversation_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID)
     assert final_conversation is not None
-    assert final_conversation.ai_interaction_count == 1
+    assert final_conversation.ai_interaction_count == 0
 
     continuation_message = await message_repository.get_by_id(
         WORKSPACE_ID,

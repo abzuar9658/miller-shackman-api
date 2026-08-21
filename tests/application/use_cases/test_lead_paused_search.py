@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -6,6 +7,11 @@ from app.application.use_cases.lead_paused_search import (
     LeadPausedSearchActionReasonCode,
     LeadPausedSearchActionStatus,
     update_lead_paused_search,
+)
+from app.domain.campaigns.enrollment import (
+    CampaignEnrollment,
+    CampaignEnrollmentSource,
+    CampaignEnrollmentStatus,
 )
 from app.domain.campaigns.paused_search_tracks import PausedSearchTerminalBehavior
 from app.domain.crm_sync import ExternalEvent
@@ -23,7 +29,9 @@ from app.domain.leads import (
 )
 from app.domain.workflows import LeadWorkflow, TemporalSignalName, WorkflowState
 from tests.application.use_cases._campaign_enrollment_fakes import (
+    FakeCampaignEnrollmentRepository,
     FakeTemporalSignalOutboxRepository,
+    FakeTemporalWorkflowStarter,
 )
 from tests.application.use_cases._lead_read_fakes import (
     FakeLeadPausedSearchHistoryRepository,
@@ -228,6 +236,201 @@ def test_clear_with_terminal_behavior_terminalizes_active_workflow() -> None:
     assert not signal_outbox_repository.entries
 
 
+def test_clear_with_terminal_behavior_completes_track_run_without_restarting() -> None:
+    """Clearing a track ends its run and stops there: no fresh dormant run, no
+    automatic send. What happens next is a separate explicit admin enrollment."""
+    lead_repository = FakeLeadRepository((_paused_search_lead(),))
+    workflow_repository = FakeLeadWorkflowRepository(
+        (
+            replace(
+                _workflow(paused_search_track_version_id=TRACK_VERSION_ID),
+                state=WorkflowState.ACTIVE_NURTURE,
+            ),
+        )
+    )
+    transition_repository = FakeWorkflowTransitionRepository(())
+    enrollment_repository = FakeCampaignEnrollmentRepository()
+    asyncio.run(enrollment_repository.save(_enrollment()))
+    starter = FakeTemporalWorkflowStarter()
+
+    result = asyncio.run(
+        update_lead_paused_search(
+            actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            active=False,
+            selected_track_key=None,
+            reason_note=None,
+            reengagement_not_before=None,
+            reengagement_window_label=None,
+            lead_repository=lead_repository,
+            paused_search_history_repository=FakeLeadPausedSearchHistoryRepository(()),
+            lead_workflow_repository=workflow_repository,
+            paused_search_track_repository=_track_repository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
+            temporal_signal_outbox_repository=FakeTemporalSignalOutboxRepository(),
+            terminal_behavior=PausedSearchTerminalBehavior.COMPLETE_KEEP_PAUSED,
+            terminal_reason="Switching to dormant path",
+            workflow_transition_repository=transition_repository,
+            campaign_enrollment_repository=enrollment_repository,
+            temporal_workflow_starter=starter,
+            external_event_repository=FakeExternalEventRepository(),
+            now=NOW,
+        )
+    )
+
+    assert result.status == LeadPausedSearchActionStatus.CLEARED
+    assert result.workflow_terminalized is True
+    assert result.workflow_state == WorkflowState.COMPLETED
+    workflow = asyncio.run(workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID))
+    assert workflow is not None
+    assert workflow.workflow_id == WORKFLOW_ID
+    assert workflow.state == WorkflowState.COMPLETED
+    assert starter.calls == []
+
+
+def test_clear_without_terminal_behavior_completes_orphaned_track_run() -> None:
+    """Even without an explicit choice, a live track-pinned run must end on clear:
+    its track is gone, so the paused-search execution has no valid plan left.
+    The run is completed (re-enrollable), never restarted."""
+    lead_repository = FakeLeadRepository((_paused_search_lead(),))
+    workflow_repository = FakeLeadWorkflowRepository(
+        (
+            replace(
+                _workflow(paused_search_track_version_id=TRACK_VERSION_ID),
+                state=WorkflowState.ACTIVE_NURTURE,
+            ),
+        )
+    )
+    transition_repository = FakeWorkflowTransitionRepository(())
+    enrollment_repository = FakeCampaignEnrollmentRepository()
+    asyncio.run(enrollment_repository.save(_enrollment()))
+    starter = FakeTemporalWorkflowStarter()
+
+    result = asyncio.run(
+        update_lead_paused_search(
+            actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            active=False,
+            selected_track_key=None,
+            reason_note=None,
+            reengagement_not_before=None,
+            reengagement_window_label=None,
+            lead_repository=lead_repository,
+            paused_search_history_repository=FakeLeadPausedSearchHistoryRepository(()),
+            lead_workflow_repository=workflow_repository,
+            paused_search_track_repository=_track_repository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
+            terminal_behavior=None,
+            workflow_transition_repository=transition_repository,
+            campaign_enrollment_repository=enrollment_repository,
+            temporal_workflow_starter=starter,
+            external_event_repository=FakeExternalEventRepository(),
+            now=NOW,
+        )
+    )
+
+    assert result.status == LeadPausedSearchActionStatus.CLEARED
+    assert result.workflow_terminalized is True
+    assert result.workflow_state == WorkflowState.COMPLETED
+    workflow = asyncio.run(workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID))
+    assert workflow is not None
+    assert workflow.workflow_id == WORKFLOW_ID
+    assert workflow.state == WorkflowState.COMPLETED
+    assert starter.calls == []
+
+
+def test_clear_without_terminal_behavior_leaves_dormant_run_alone() -> None:
+    """A live dormant (unpinned) run is not the cleared track's run, so a plain
+    clear does not touch it."""
+    lead_repository = FakeLeadRepository((_paused_search_lead(),))
+    workflow_repository = FakeLeadWorkflowRepository(
+        (replace(_workflow(), state=WorkflowState.ACTIVE_NURTURE),)
+    )
+
+    result = asyncio.run(
+        update_lead_paused_search(
+            actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            active=False,
+            selected_track_key=None,
+            reason_note=None,
+            reengagement_not_before=None,
+            reengagement_window_label=None,
+            lead_repository=lead_repository,
+            paused_search_history_repository=FakeLeadPausedSearchHistoryRepository(()),
+            lead_workflow_repository=workflow_repository,
+            paused_search_track_repository=_track_repository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
+            terminal_behavior=None,
+            workflow_transition_repository=FakeWorkflowTransitionRepository(()),
+            external_event_repository=FakeExternalEventRepository(),
+            now=NOW,
+        )
+    )
+
+    assert result.status == LeadPausedSearchActionStatus.CLEARED
+    assert result.workflow_terminalized is False
+    assert result.workflow_state == WorkflowState.ACTIVE_NURTURE
+    workflow = asyncio.run(workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID))
+    assert workflow is not None
+    assert workflow.workflow_id == WORKFLOW_ID
+    assert workflow.state == WorkflowState.ACTIVE_NURTURE
+
+
+def test_clear_with_close_automation_terminalizes_without_restart() -> None:
+    """Close-automation is an explicit stop intent: no fresh dormant run starts."""
+    lead_repository = FakeLeadRepository((_paused_search_lead(),))
+    workflow_repository = FakeLeadWorkflowRepository(
+        (
+            replace(
+                _workflow(paused_search_track_version_id=TRACK_VERSION_ID),
+                state=WorkflowState.ACTIVE_NURTURE,
+            ),
+        )
+    )
+    transition_repository = FakeWorkflowTransitionRepository(())
+    enrollment_repository = FakeCampaignEnrollmentRepository()
+    asyncio.run(enrollment_repository.save(_enrollment()))
+    starter = FakeTemporalWorkflowStarter()
+
+    result = asyncio.run(
+        update_lead_paused_search(
+            actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            lead_id=LEAD_ID,
+            active=False,
+            selected_track_key=None,
+            reason_note=None,
+            reengagement_not_before=None,
+            reengagement_window_label=None,
+            lead_repository=lead_repository,
+            paused_search_history_repository=FakeLeadPausedSearchHistoryRepository(()),
+            lead_workflow_repository=workflow_repository,
+            paused_search_track_repository=_track_repository(),
+            paused_search_track_assignment_repository=FakePausedSearchTrackAssignmentRepository(),
+            terminal_behavior=PausedSearchTerminalBehavior.CLOSE_AUTOMATION,
+            terminal_reason="Stop automation",
+            workflow_transition_repository=transition_repository,
+            campaign_enrollment_repository=enrollment_repository,
+            temporal_workflow_starter=starter,
+            external_event_repository=FakeExternalEventRepository(),
+            now=NOW,
+        )
+    )
+
+    assert result.status == LeadPausedSearchActionStatus.CLEARED
+    assert result.workflow_terminalized is True
+    assert result.workflow_state == WorkflowState.CLOSED
+    workflow = asyncio.run(workflow_repository.get_latest_for_lead(WORKSPACE_ID, LEAD_ID))
+    assert workflow is not None
+    assert workflow.workflow_id == WORKFLOW_ID
+    assert workflow.state == WorkflowState.CLOSED
+    assert starter.calls == []
+
+
 def test_clear_with_terminal_behavior_skips_already_terminal_workflow() -> None:
     lead_repository = FakeLeadRepository((_paused_search_lead(),))
     workflow = LeadWorkflow(
@@ -430,6 +633,26 @@ def _workflow(*, paused_search_track_version_id: UUID | None = None) -> LeadWork
         created_at=NOW,
         updated_at=NOW,
         paused_search_track_version_id=paused_search_track_version_id,
+    )
+
+
+def _enrollment() -> CampaignEnrollment:
+    return CampaignEnrollment(
+        campaign_enrollment_id=ENROLLMENT_ID,
+        workspace_id=WORKSPACE_ID,
+        campaign_id=CAMPAIGN_ID,
+        campaign_version_id=UUID("00000000-0000-0000-0000-000000000009"),
+        lead_id=LEAD_ID,
+        source=CampaignEnrollmentSource.MANUAL_ADMIN,
+        status=CampaignEnrollmentStatus.ACTIVE,
+        eligible_at=NOW,
+        enrolled_at=NOW,
+        started_at=NOW,
+        ended_at=None,
+        created_by_user_id=USER_ID,
+        reason_codes=("manual",),
+        created_at=NOW,
+        updated_at=NOW,
     )
 
 

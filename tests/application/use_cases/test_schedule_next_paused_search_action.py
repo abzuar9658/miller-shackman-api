@@ -25,6 +25,7 @@ from app.domain.campaigns.enrollment import (
     CampaignEnrollmentStatus,
 )
 from app.domain.campaigns.execution import CampaignVersionStatus
+from app.domain.campaigns.outbound_message import ProviderDeliveryStatus
 from app.domain.common.ids import PausedSearchTrackVersionId
 from app.domain.compliance.contactability import (
     ContactChannel as DomainContactChannel,
@@ -146,6 +147,100 @@ class _FakeOccurrenceRepository:
             return existing
         self.saved.append(occurrence)
         return occurrence
+
+    async def get_by_id(
+        self,
+        workspace_id: UUID,
+        occurrence_id: UUID,
+    ) -> RecurringOccurrence | None:
+        return next(
+            (
+                occurrence
+                for occurrence in self.saved
+                if occurrence.workspace_id == workspace_id
+                and occurrence.occurrence_id == occurrence_id
+            ),
+            None,
+        )
+
+    async def get_by_provider_message_id_for_update(
+        self,
+        workspace_id: UUID,
+        provider_message_id: str,
+    ) -> RecurringOccurrence | None:
+        return next(
+            (
+                occurrence
+                for occurrence in self.saved
+                if occurrence.workspace_id == workspace_id
+                and occurrence.provider_message_id == provider_message_id
+            ),
+            None,
+        )
+
+    async def update_status(
+        self,
+        *,
+        workspace_id: UUID,
+        occurrence_id: UUID,
+        status: str,
+        now: datetime,
+        provider_message_id: str | None = None,
+        provider_delivery_status: ProviderDeliveryStatus | None = None,
+        failure_reason: str | None = None,
+        fallback_used: bool | None = None,
+    ) -> RecurringOccurrence | None:
+        for index, occurrence in enumerate(self.saved):
+            if (
+                occurrence.workspace_id == workspace_id
+                and occurrence.occurrence_id == occurrence_id
+            ):
+                updated = replace(
+                    occurrence,
+                    status=RecurringOccurrenceStatus(status),
+                    closed_at=now,
+                )
+                self.saved[index] = updated
+                return updated
+        return None
+
+    async def cancel_open_for_workflow(
+        self,
+        *,
+        workspace_id: UUID,
+        workflow_id: UUID,
+        now: datetime,
+        reason: str,
+    ) -> int:
+        return 0
+
+    async def resolve_uncertain(
+        self,
+        *,
+        workspace_id: UUID,
+        occurrence_id: UUID,
+        status: str,
+        now: datetime,
+        reason: str,
+    ) -> RecurringOccurrence | None:
+        return None
+
+    async def reschedule_open(
+        self,
+        *,
+        workspace_id: UUID,
+        occurrence_id: UUID,
+        scheduled_for: datetime,
+        now: datetime,
+    ) -> RecurringOccurrence | None:
+        return None
+
+    async def get_by_id_for_update(
+        self,
+        workspace_id: UUID,
+        occurrence_id: UUID,
+    ) -> RecurringOccurrence | None:
+        return await self.get_by_id(workspace_id, occurrence_id)
 
     async def reopen_failed_for_retry(
         self,
@@ -334,11 +429,164 @@ async def test_failed_occurrence_is_retried_without_consuming_cap() -> None:
     assert terminal.reason_code == PausedSearchTimingReasonCode.OCCURRENCE_LIMIT_REACHED
 
 
+def _sent_occurrence(step_id: UUID, workflow_id: UUID) -> RecurringOccurrence:
+    return RecurringOccurrence(
+        occurrence_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        workflow_id=workflow_id,
+        track_version_id=TRACK_VERSION_ID,
+        step_id=step_id,
+        phase=PausedSearchTrackStepPhase.MAINTENANCE,
+        occurrence_number=1,
+        scheduled_for=NOW - timedelta(hours=1),
+        due_at=NOW - timedelta(hours=1),
+        status=RecurringOccurrenceStatus.SENT,
+        idempotency_key=f"occ-{uuid4()}",
+        created_at=NOW - timedelta(hours=1),
+        logical_touch_count=1,
+    )
+
+
+def _single_fire_maintenance_step() -> PausedSearchTrackStep:
+    return replace(_step(), delay_hours=0, interval_days=None, max_occurrences=1)
+
+
+async def test_sent_single_fire_step_advances_to_next_step() -> None:
+    """A single-fire step (interval=None, max_occurrences=1) that was sent must
+    advance the track to the next step, not terminalize the workflow.
+
+    Reproduces the production failure where send-now on step 1 of a multi-step
+    track completed the workflow with occurrence_limit_reached while steps 2-5
+    remained unsent.
+    """
+    step_two_id = uuid4()
+    workflow_repo = FakeLeadWorkflowRepository()
+    workflow = await workflow_repo.save(_workflow())
+    occurrence_repo = _FakeOccurrenceRepository()
+    occurrence_repo.saved.append(_sent_occurrence(STEP_ONE_ID, workflow.workflow_id))
+    track_repo = FakePausedSearchTrackAdminRepository(
+        versions=(_track_version(),),
+        steps=(
+            _single_fire_maintenance_step(),
+            replace(
+                _step(),
+                step_id=step_two_id,
+                step_order=2,
+                channel=DomainContactChannel.SMS,
+                delay_hours=24,
+                interval_days=None,
+                max_occurrences=1,
+                message_goal="Second maintenance touch",
+                template_key="paused-search-maintenance-2",
+            ),
+        ),
+    )
+
+    result = await schedule_next_paused_search_action(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        lead_repository=FakeLeadRepository(_lead()),
+        paused_search_track_repository=track_repo,
+        lead_workflow_repository=workflow_repo,
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        timezone=TIMEZONE,
+        now=NOW,
+        occurrence_repository=occurrence_repo,
+    )
+
+    assert result.status == PausedSearchScheduleStatus.SCHEDULED
+    assert result.step_id == step_two_id
+    saved_workflow = await workflow_repo.get_latest_for_lead(WORKSPACE_ID, LEAD_ID)
+    assert saved_workflow is not None
+    assert saved_workflow.state != WorkflowState.COMPLETED
+
+
+async def test_exhausted_maintenance_waits_for_reactivation_window() -> None:
+    """When maintenance steps are exhausted before the reactivation window, the
+    track idles until the window opens instead of completing early."""
+    reactivation_step = replace(
+        _step(),
+        step_id=uuid4(),
+        step_order=2,
+        phase=PausedSearchTrackStepPhase.REACTIVATION,
+        delay_hours=0,
+        timing_basis=PausedSearchTimingBasis.CUSTOMER_REENGAGEMENT_DATE,
+        interval_days=None,
+        max_occurrences=1,
+    )
+    workflow_repo = FakeLeadWorkflowRepository()
+    workflow = await workflow_repo.save(_workflow())
+    occurrence_repo = _FakeOccurrenceRepository()
+    occurrence_repo.saved.append(_sent_occurrence(STEP_ONE_ID, workflow.workflow_id))
+
+    result = await schedule_next_paused_search_action(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        lead_repository=FakeLeadRepository(_lead()),
+        paused_search_track_repository=FakePausedSearchTrackAdminRepository(
+            versions=(_track_version(),),
+            steps=(_single_fire_maintenance_step(), reactivation_step),
+        ),
+        lead_workflow_repository=workflow_repo,
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        timezone=TIMEZONE,
+        now=NOW,
+        occurrence_repository=occurrence_repo,
+    )
+
+    assert result.status == PausedSearchScheduleStatus.SCHEDULED
+    assert result.step_id == reactivation_step.step_id
+    assert result.phase == PausedSearchTrackStepPhase.REACTIVATION
+    # Anchored at the reactivation window start (reengagement minus window),
+    # not immediately.
+    assert result.next_action_at is not None
+    assert result.next_action_at >= NOW + timedelta(days=90)
+
+
+async def test_fully_exhausted_track_terminalizes() -> None:
+    """When every step in the track is exhausted, the track is complete."""
+    step_two_id = uuid4()
+    workflow_repo = FakeLeadWorkflowRepository()
+    workflow = await workflow_repo.save(_workflow())
+    occurrence_repo = _FakeOccurrenceRepository()
+    occurrence_repo.saved.append(_sent_occurrence(STEP_ONE_ID, workflow.workflow_id))
+    occurrence_repo.saved.append(_sent_occurrence(step_two_id, workflow.workflow_id))
+
+    result = await schedule_next_paused_search_action(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        lead_repository=FakeLeadRepository(_lead()),
+        paused_search_track_repository=FakePausedSearchTrackAdminRepository(
+            versions=(_track_version(),),
+            steps=(
+                _single_fire_maintenance_step(),
+                replace(
+                    _step(),
+                    step_id=step_two_id,
+                    step_order=2,
+                    delay_hours=24,
+                    interval_days=None,
+                    max_occurrences=1,
+                ),
+            ),
+        ),
+        lead_workflow_repository=workflow_repo,
+        workflow_transition_repository=FakeWorkflowTransitionRepository(),
+        timezone=TIMEZONE,
+        now=NOW,
+        occurrence_repository=occurrence_repo,
+    )
+
+    assert result.status == PausedSearchScheduleStatus.TERMINAL
+    assert result.reason_code == PausedSearchTimingReasonCode.OCCURRENCE_LIMIT_REACHED
+
+
 async def test_pre_send_blocked_occurrence_is_retried_after_resume() -> None:
     """A pre-send-rejected occurrence never reached the lead, so a manual
     resume must retry the same slot instead of terminalizing the workflow.
 
-    Reproduces the production failure where resume-after-frequency-block went
+    Reproduces the production failure where resume-after-pre-send-block went
     straight to COMPLETED with occurrence_limit_reached.
     """
     workflow_repo = FakeLeadWorkflowRepository()
@@ -365,9 +613,9 @@ async def test_pre_send_blocked_occurrence_is_retried_after_resume() -> None:
     assert first.occurrence is not None
     assert first.occurrence.occurrence_number == 1
 
-    # Pre-send checks rejected the send (e.g. same-channel frequency limit):
-    # the cadence executor pauses the workflow but leaves the occurrence open
-    # (PLANNED) — it never reached the lead. The operator then manually resumes.
+    # Pre-send checks rejected the send (e.g. quiet hours): the cadence executor
+    # pauses the workflow but leaves the occurrence open (PLANNED) — it never
+    # reached the lead. The operator then manually resumes.
     blocked = occurrence_repo.saved[0]
     assert blocked.status is RecurringOccurrenceStatus.PLANNED
 

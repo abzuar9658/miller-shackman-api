@@ -93,7 +93,7 @@ class OutboundMessage:
     delivered_at: datetime | None = None
     failure_reason: str | None = None
     # Human-readable explanation set while the message stays PENDING because a
-    # timing guard (frequency limit, quiet hours, simultaneous-channel window)
+    # timing guard (quiet hours, simultaneous-channel window)
     # deferred it; cleared once the message leaves PENDING. Lets operators see
     # why a message has not sent instead of an unexplained "pending" state.
     status_detail: str | None = None

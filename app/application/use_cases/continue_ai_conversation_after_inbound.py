@@ -31,6 +31,7 @@ from app.application.ports.repositories import (
     WorkspaceRepository,
 )
 from app.application.services.email_threading import resolve_reply_email_subject
+from app.application.services.pre_send_policy import build_pre_send_policy
 from app.application.use_cases.apply_workflow_state_transition import (
     WorkflowStateTransitionStatus,
     apply_workflow_state_transition,
@@ -54,11 +55,9 @@ from app.application.use_cases.send_outbound_message import (
     send_outbound_message,
 )
 from app.domain.campaigns.execution import CampaignCadenceStep, CampaignExecutionConfig
-from app.domain.campaigns.pre_send import PreSendPolicy
 from app.domain.common.ids import CampaignId, LeadId, WorkspaceId
 from app.domain.compliance.contactability import (
     ContactChannel,
-    WorkspaceContactPolicy,
     default_workspace_contact_policy,
 )
 from app.domain.conversations import (
@@ -108,7 +107,6 @@ class ContinueAIResult:
     workflow: LeadWorkflow | None = None
     conversation: Conversation | None = None
     workflow_state: WorkflowState | None = None
-    ai_interaction_count_increment: int = 0
     workflow_id: UUID | None = None
     transition_id: UUID | None = None
     outbound_message_id: UUID | None = None
@@ -243,7 +241,12 @@ async def continue_ai_conversation_after_inbound(
             lead_state_rerouted=True,
         )
 
-    if conversation.ai_interaction_count >= _MAX_AI_INTERACTION_TURNS:
+    ai_turn_cap = await _resolve_ai_turn_cap(
+        workspace_id=workspace_id,
+        workflow=workflow,
+        paused_search_track_repository=paused_search_track_repository,
+    )
+    if workflow.ai_interaction_count >= ai_turn_cap:
         return await _pause_after_block(
             workspace_id=workspace_id,
             lead_id=lead_id,
@@ -253,7 +256,7 @@ async def continue_ai_conversation_after_inbound(
             reason_code=WorkflowTransitionReasonCode.OUTBOUND_MESSAGE_BLOCKED,
             pause_reason="ai_continuation_turn_cap_reached",
             block_explanation=(
-                f"AI continuation capped at {_MAX_AI_INTERACTION_TURNS} turns for V1 safety."
+                f"AI continuation capped at {ai_turn_cap} turns per nurture run."
             ),
             reasons=(ContinueAIReasonCode.TURN_CAP_REACHED,),
             now=now,
@@ -334,7 +337,10 @@ async def continue_ai_conversation_after_inbound(
             cadence_step_id=cadence_step_id,
             workflow_id=response_processing_workflow_id,
             scheduled_for=now,
-            pre_send_policy=_pre_send_policy(workspace_contact_policy, workspace.default_timezone),
+            pre_send_policy=build_pre_send_policy(
+                workspace_contact_policy,
+                workspace.default_timezone,
+            ),
             journey_kind=OutboundJourneyKind.DORMANT,
             drafting_config=config.outbound_drafting_config,
             conversation_summary=(
@@ -403,10 +409,9 @@ async def continue_ai_conversation_after_inbound(
         enabled_channels=(inbound_channel,),
         workspace_contact_policy=workspace_contact_policy,
         current_message_version=message.message_version,
-        pre_send_policy=_pre_send_policy(
+        pre_send_policy=build_pre_send_policy(
             workspace_contact_policy,
             workspace.default_timezone,
-            global_frequency_limit_hours=None,
         ),
     )
     send_result = await send_outbound_message(
@@ -462,20 +467,15 @@ async def continue_ai_conversation_after_inbound(
                 transition_id_factory=transition_id_factory,
             )
         sent_message = send_result.message
-        updated_conversation: Conversation | None = None
-        if send_result.status == SendOutboundMessageStatus.SENT:
-            updated_conversation = await conversation_repository.save(
-                Conversation(
-                    conversation_id=conversation.conversation_id,
-                    workspace_id=conversation.workspace_id,
-                    lead_id=conversation.lead_id,
-                    created_at=conversation.created_at,
+        updated_workflow = waiting_outcome.workflow
+        if send_result.status == SendOutboundMessageStatus.SENT and updated_workflow is not None:
+            # The AI-turn budget is consumed on the run, not the conversation:
+            # a new track enrollment starts with a fresh budget.
+            updated_workflow = await lead_workflow_repository.save(
+                replace(
+                    updated_workflow,
+                    ai_interaction_count=updated_workflow.ai_interaction_count + 1,
                     updated_at=now,
-                    campaign_id=conversation.campaign_id,
-                    workflow_id=conversation.workflow_id,
-                    status=conversation.status,
-                    ai_interaction_count=conversation.ai_interaction_count + 1,
-                    last_message_at=conversation.last_message_at,
                 )
             )
         if (
@@ -499,12 +499,8 @@ async def continue_ai_conversation_after_inbound(
         )
         return ContinueAIResult(
             status=ContinueAIStatus.SENT,
-            workflow=waiting_outcome.workflow,
-            conversation=updated_conversation,
+            workflow=updated_workflow,
             workflow_state=WorkflowState.WAITING_FOR_RESPONSE,
-            ai_interaction_count_increment=(
-                1 if send_result.status == SendOutboundMessageStatus.SENT else 0
-            ),
             workflow_id=waiting_workflow_id,
             transition_id=waiting_outcome.transition_id,
             outbound_message_id=sent_message.message_id if sent_message is not None else None,
@@ -587,6 +583,30 @@ async def _pause_after_block(
     )
 
 
+async def _resolve_ai_turn_cap(
+    *,
+    workspace_id: WorkspaceId,
+    workflow: LeadWorkflow,
+    paused_search_track_repository: PausedSearchTrackRepository | None,
+) -> int:
+    """Resolve the AI turn cap for this run from its pinned track version.
+
+    Dormant runs have no pinned track, and a missing/unloadable version must
+    not disable the cap, so both fall back to the V1 default.
+    """
+    if (
+        workflow.paused_search_track_version_id is None
+        or paused_search_track_repository is None
+    ):
+        return _MAX_AI_INTERACTION_TURNS
+    version = await paused_search_track_repository.get_version(
+        workspace_id, workflow.paused_search_track_version_id
+    )
+    if version is None:
+        return _MAX_AI_INTERACTION_TURNS
+    return version.max_ai_interactions
+
+
 async def _maybe_route_reply_before_continuation(
     *,
     workspace_id: WorkspaceId,
@@ -649,29 +669,6 @@ def _resolve_continuation_step(
             if step.cadence_step_id == current_step_id:
                 return step
     return config.cadence_steps[0] if config.cadence_steps else None
-
-
-def _pre_send_policy(
-    workspace_contact_policy: WorkspaceContactPolicy,
-    timezone: str,
-    *,
-    global_frequency_limit_hours: int | None = 24,
-) -> PreSendPolicy:
-    if not workspace_contact_policy.quiet_hours_enabled:
-        return PreSendPolicy(
-            allowed_send_start_hour=0,
-            allowed_send_end_hour=24,
-            global_frequency_limit_hours=global_frequency_limit_hours,
-            timezone=timezone,
-        )
-    quiet_hours_start = workspace_contact_policy.quiet_hours_start
-    quiet_hours_end = workspace_contact_policy.quiet_hours_end
-    return PreSendPolicy(
-        allowed_send_start_hour=quiet_hours_start.hour if quiet_hours_start else 10,
-        allowed_send_end_hour=quiet_hours_end.hour if quiet_hours_end else 17,
-        global_frequency_limit_hours=global_frequency_limit_hours,
-        timezone=timezone,
-    )
 
 
 def _reason_values(reasons: tuple[StrEnum, ...]) -> str:

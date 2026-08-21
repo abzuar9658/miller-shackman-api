@@ -120,9 +120,6 @@ class OutboundPlanningContext:
     human_owned: bool = False
     lead_replied_since_scheduled: bool = False
     recent_human_activity: bool = False
-    last_global_outreach_at: datetime | None = None
-    last_campaign_outreach_at: datetime | None = None
-    last_channel_outreach_at: datetime | None = None
     other_channel_sent_at: datetime | None = None
     drafting_config: WorkspaceOutboundDraftingConfig | None = None
     template_profile: DormantStepTemplateProfile | None = None
@@ -406,9 +403,6 @@ async def _select_channel(
                 human_owned=context.human_owned,
                 lead_replied_since_scheduled=context.lead_replied_since_scheduled,
                 recent_human_activity=context.recent_human_activity,
-                last_global_outreach_at=context.last_global_outreach_at,
-                last_campaign_outreach_at=context.last_campaign_outreach_at,
-                last_channel_outreach_at=context.last_channel_outreach_at,
                 other_channel_sent_at=context.other_channel_sent_at,
             ),
             context.pre_send_policy,

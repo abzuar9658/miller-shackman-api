@@ -391,6 +391,7 @@ async def get_lead_detail_view(
         workflow=latest_workflow,
         progress_views=cadence_progress,
         now=now if now is not None else datetime.now(UTC),
+        paused_search_profile=lead_paused_search_profile(lead),
     )
     return LeadDetailResult(
         status=LeadReadStatus.OK,

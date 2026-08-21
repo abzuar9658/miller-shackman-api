@@ -1293,7 +1293,7 @@ async def _defer_after_timing_block(
     message: OutboundMessage | None = None,
     message_repository: OutboundMessageRepository | None = None,
 ) -> CadenceStepExecutionResult:
-    # A timing-only block (frequency limit, quiet hours, simultaneous-channel
+    # A timing-only block (quiet hours, simultaneous-channel
     # window) clears on its own at next_allowed_at, so the workflow stays in
     # active nurture and the same step is retried then — pausing would strand
     # the lead until a human resumes it.

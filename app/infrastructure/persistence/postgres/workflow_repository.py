@@ -259,6 +259,7 @@ def _workflow_to_values(workflow: LeadWorkflow) -> dict[str, object]:
         "resume_reason": workflow.resume_reason,
         "state_version": workflow.state_version,
         "logical_touch_count": workflow.logical_touch_count,
+        "ai_interaction_count": workflow.ai_interaction_count,
         "created_at": workflow.created_at,
         "updated_at": workflow.updated_at,
     }
@@ -282,6 +283,7 @@ def _model_to_workflow(model: LeadWorkflowModel) -> LeadWorkflow:
         resume_reason=model.resume_reason,
         state_version=model.state_version,
         logical_touch_count=getattr(model, "logical_touch_count", 0) or 0,
+        ai_interaction_count=getattr(model, "ai_interaction_count", 0) or 0,
         created_at=model.created_at,
         updated_at=model.updated_at,
     )

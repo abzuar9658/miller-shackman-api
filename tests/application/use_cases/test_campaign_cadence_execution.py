@@ -1004,159 +1004,6 @@ async def test_execute_campaign_cadence_step_sends_paused_search_step_and_advanc
     assert len(email_provider.messages) == 1
 
 
-async def test_pre_send_frequency_block_defers_step_and_retries_after_window() -> None:
-    """A timing-only pre-send block (24h same-channel frequency limit) defers
-    the step to next_allowed_at instead of pausing — the workflow stays in
-    active nurture, the occurrence slot stays open, and the retry after the
-    window sends normally without any human resume."""
-    workflow_repository = FakeLeadWorkflowRepository()
-    transition_repository = FakeWorkflowTransitionRepository()
-    send_now = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
-    await workflow_repository.save(
-        replace(
-            _paused_search_workflow(),
-            paused_search_track_step_id=PAUSED_SEARCH_STEP_ONE_ID,
-            next_action_at=send_now,
-        )
-    )
-    message_repository = FakeOutboundMessageRepository()
-    # A same-channel send one hour earlier trips the frequency-limit pre-send check.
-    await message_repository.save(
-        OutboundMessage(
-            message_id=UUID("00000000-0000-0000-0000-000000000098"),
-            workspace_id=WORKSPACE_ID,
-            lead_id=LEAD_ID,
-            campaign_id=CAMPAIGN_ID,
-            cadence_step_id=str(STEP_ONE_ID),
-            channel=ContactChannel.EMAIL,
-            status=OutboundMessageStatus.SENT,
-            idempotency_key="previous-email-send",
-            body="Earlier outreach",
-            subject="Earlier outreach",
-            created_at=NOW,
-            updated_at=NOW,
-            planned_at=NOW,
-            scheduled_for=send_now - timedelta(hours=1),
-            sent_at=send_now - timedelta(hours=1),
-            message_version=1,
-            provider_send_status=ProviderSendStatus.ACCEPTED,
-            provider_name="mailgun",
-        )
-    )
-    email_provider = FakeEmailProvider("must-not-send")
-    occurrence_repository = FakePausedSearchOccurrenceRepository()
-
-    result = await execute_campaign_cadence_step(
-        workspace_id=WORKSPACE_ID,
-        lead_id=LEAD_ID,
-        campaign_version_id=CAMPAIGN_VERSION_ID,
-        cadence_step_id=PAUSED_SEARCH_STEP_ONE_ID,
-        scheduled_for=send_now,
-        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
-        paused_search_track_repository=_paused_search_track_repository(),
-        paused_search_occurrence_repository=occurrence_repository,
-        workspace_repository=FakeWorkspaceRepository(_workspace()),
-        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
-            _workspace_contact_policy()
-        ),
-        workspace_outbound_drafting_config_repository=(
-            FakeWorkspaceOutboundDraftingConfigRepository(
-                default_workspace_outbound_drafting_config(WORKSPACE_ID)
-            )
-        ),
-        lead_repository=FakeLeadRepository(_paused_search_lead()),
-        lead_workflow_repository=workflow_repository,
-        workflow_transition_repository=transition_repository,
-        message_repository=message_repository,
-        llm_client=FakeLLMClient(),
-        sms_provider=FakeSMSProvider(),
-        email_provider=email_provider,
-        now=send_now,
-    )
-
-    # Frequency window opened at send_now - 1h and clears 24h later (14:00 UTC),
-    # but that is 9 AM Chicago — before allowed hours — so the retry lands at
-    # 10 AM Chicago = 15:00 UTC.
-    retry_at = send_now + timedelta(hours=24)
-    assert result.status == CadenceStepExecutionStatus.DEFERRED
-    assert result.workflow is not None
-    assert result.workflow.state == WorkflowState.ACTIVE_NURTURE
-    assert result.workflow.next_action_at == retry_at
-    assert result.workflow.paused_search_track_step_id == PAUSED_SEARCH_STEP_ONE_ID
-    assert email_provider.messages == []
-    # The occurrence slot must remain open and move to the retry time so the
-    # blocked attempt never counts against the occurrence cap.
-    assert occurrence_repository.occurrence is not None
-    assert occurrence_repository.occurrence.status is RecurringOccurrenceStatus.PLANNED
-    assert occurrence_repository.occurrence.scheduled_for == retry_at
-    assert occurrence_repository.occurrence.logical_touch_count == 0
-    assert result.workflow.logical_touch_count == 0
-    # The still-pending message carries the deferral so operators can see why
-    # it has not sent and when it will be retried, instead of looking stuck.
-    pending_messages = [
-        message
-        for message in message_repository.messages_by_idempotency_key.values()
-        if message.status == OutboundMessageStatus.PENDING
-    ]
-    assert len(pending_messages) == 1
-    assert pending_messages[0].scheduled_for == retry_at
-    assert pending_messages[0].status_detail is not None
-    assert "frequency limit" in pending_messages[0].status_detail
-    # No pause transition is recorded for a timing-only deferral.
-    assert all(
-        transition.to_state != WorkflowState.PAUSED
-        for transition in transition_repository.transitions.values()
-    )
-
-    # Once the frequency window passes, the retried step sends normally.
-    second_result = await execute_campaign_cadence_step(
-        workspace_id=WORKSPACE_ID,
-        lead_id=LEAD_ID,
-        campaign_version_id=CAMPAIGN_VERSION_ID,
-        cadence_step_id=PAUSED_SEARCH_STEP_ONE_ID,
-        scheduled_for=retry_at,
-        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
-        paused_search_track_repository=_paused_search_track_repository(),
-        paused_search_occurrence_repository=occurrence_repository,
-        workspace_repository=FakeWorkspaceRepository(_workspace()),
-        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
-            _workspace_contact_policy()
-        ),
-        workspace_outbound_drafting_config_repository=(
-            FakeWorkspaceOutboundDraftingConfigRepository(
-                default_workspace_outbound_drafting_config(WORKSPACE_ID)
-            )
-        ),
-        lead_repository=FakeLeadRepository(_paused_search_lead()),
-        lead_workflow_repository=workflow_repository,
-        workflow_transition_repository=transition_repository,
-        message_repository=message_repository,
-        llm_client=FakeLLMClient(),
-        sms_provider=FakeSMSProvider(),
-        email_provider=email_provider,
-        now=retry_at,
-    )
-
-    assert second_result.status in {
-        CadenceStepExecutionStatus.SENT,
-        CadenceStepExecutionStatus.DISPATCH_PENDING,
-    }
-    assert len(email_provider.messages) == 1
-    final_occurrence = occurrence_repository.occurrence
-    assert final_occurrence is not None
-    assert final_occurrence.status is RecurringOccurrenceStatus.SENT
-    assert final_occurrence.logical_touch_count == 1
-    # The deferral annotation is cleared once the message actually sends.
-    sent_messages = [
-        message
-        for message in message_repository.messages_by_idempotency_key.values()
-        if message.status == OutboundMessageStatus.SENT
-        and message.idempotency_key != "previous-email-send"
-    ]
-    assert len(sent_messages) == 1
-    assert sent_messages[0].status_detail is None
-
-
 async def test_execute_campaign_cadence_step_holds_review_required_message() -> None:
     workflow_repository = FakeLeadWorkflowRepository()
     send_now = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
@@ -2142,6 +1989,14 @@ async def test_execute_campaign_cadence_step_respects_authored_sms_step_when_bot
 async def test_execute_campaign_cadence_step_respects_persisted_quiet_hours() -> None:
     workflow_repository = FakeLeadWorkflowRepository()
     transition_repository = FakeWorkflowTransitionRepository()
+    message_repository = FakeOutboundMessageRepository()
+    email_provider = FakeEmailProvider("must-not-send")
+    contact_policy_repository = FakeWorkspaceContactPolicyRepository(
+        _workspace_contact_policy(
+            quiet_hours_start=time(10, 0),
+            quiet_hours_end=time(17, 0),
+        )
+    )
     await workflow_repository.save(_workflow())
     schedule_result = await schedule_next_campaign_cadence_step(
         workspace_id=WORKSPACE_ID,
@@ -2160,33 +2015,65 @@ async def test_execute_campaign_cadence_step_respects_persisted_quiet_hours() ->
         scheduled_for=schedule_result.scheduled_for or NOW,
         campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
         workspace_repository=FakeWorkspaceRepository(_workspace()),
-        workspace_contact_policy_repository=FakeWorkspaceContactPolicyRepository(
-            _workspace_contact_policy(
-                quiet_hours_start=time(10, 0),
-                quiet_hours_end=time(17, 0),
-            )
-        ),
+        workspace_contact_policy_repository=contact_policy_repository,
         lead_repository=FakeLeadRepository(_lead()),
         lead_workflow_repository=workflow_repository,
         workflow_transition_repository=transition_repository,
-        message_repository=FakeOutboundMessageRepository(),
+        message_repository=message_repository,
         llm_client=FakeLLMClient(),
         sms_provider=FakeSMSProvider(),
-        email_provider=FakeEmailProvider(),
+        email_provider=email_provider,
         now=datetime(2026, 7, 10, 13, 0, tzinfo=UTC),
     )
 
     # Quiet hours are a timing-only block: the step defers itself to the next
     # allowed window instead of pausing the workflow for a human resume.
+    retry_at = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
     assert result.status == CadenceStepExecutionStatus.DEFERRED
     assert result.workflow is not None
     assert result.workflow.state == WorkflowState.ACTIVE_NURTURE
-    assert result.workflow.next_action_at == datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
+    assert result.workflow.next_action_at == retry_at
     assert result.workflow.current_step_id == STEP_ONE_ID
+    assert email_provider.messages == []
     assert all(
         transition.to_state != WorkflowState.PAUSED
         for transition in transition_repository.transitions.values()
     )
+    # Quiet hours block at planning, so no draft is persisted for the blocked attempt.
+    assert message_repository.messages_by_idempotency_key == {}
+
+    # Once the allowed window opens the retried step sends without a human resume.
+    second_result = await execute_campaign_cadence_step(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_version_id=CAMPAIGN_VERSION_ID,
+        cadence_step_id=STEP_ONE_ID,
+        scheduled_for=retry_at,
+        campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        workspace_repository=FakeWorkspaceRepository(_workspace()),
+        workspace_contact_policy_repository=contact_policy_repository,
+        lead_repository=FakeLeadRepository(_lead()),
+        lead_workflow_repository=workflow_repository,
+        workflow_transition_repository=transition_repository,
+        message_repository=message_repository,
+        llm_client=FakeLLMClient(),
+        sms_provider=FakeSMSProvider(),
+        email_provider=email_provider,
+        now=retry_at,
+    )
+
+    assert second_result.status in {
+        CadenceStepExecutionStatus.SENT,
+        CadenceStepExecutionStatus.DISPATCH_PENDING,
+    }
+    assert len(email_provider.messages) == 1
+    sent_messages = [
+        message
+        for message in message_repository.messages_by_idempotency_key.values()
+        if message.status == OutboundMessageStatus.SENT
+    ]
+    assert len(sent_messages) == 1
+    assert sent_messages[0].status_detail is None
 
 
 async def test_execute_campaign_cadence_step_ignores_quiet_hour_window_when_disabled() -> None:

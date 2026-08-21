@@ -244,7 +244,6 @@ async def revalidate_outbound_send_request(
     history = await load_pre_send_history_facts(
         workspace_id=request.workspace_id,
         lead_id=request.lead_id,
-        campaign_id=message.campaign_id,
         message=message,
         message_repository=message_repository,
         inbound_message_repository=inbound_message_repository,
@@ -275,9 +274,6 @@ async def revalidate_outbound_send_request(
                 recent_human_activity
                 or _recent_human_activity(lead.last_agent_activity_at, message)
             ),
-            last_global_outreach_at=history.last_global_outreach_at if history else None,
-            last_campaign_outreach_at=history.last_campaign_outreach_at if history else None,
-            last_channel_outreach_at=history.last_channel_outreach_at if history else None,
             other_channel_sent_at=history.other_channel_sent_at if history else None,
             history_facts_available=history is not None,
         ),

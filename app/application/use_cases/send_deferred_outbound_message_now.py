@@ -252,7 +252,6 @@ async def send_deferred_outbound_message_now(
             temporal_signal_outbox_repository=temporal_signal_outbox_repository,
         ),
         now=now,
-        confirmed_frequency_limit_override=True,
     )
     if send_result.status == SendOutboundMessageStatus.REJECTED:
         pre_send_reasons = (

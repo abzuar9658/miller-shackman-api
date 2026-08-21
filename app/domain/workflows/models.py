@@ -75,6 +75,10 @@ class LeadWorkflow:
     created_at: datetime
     updated_at: datetime
     logical_touch_count: int = 0
+    # AI reply-continuation budget consumed by THIS run. Runs are isolated:
+    # a new track enrollment starts with a fresh budget instead of inheriting
+    # the lead's lifetime conversation count.
+    ai_interaction_count: int = 0
     current_step_id: UUID | None = None
     next_action_at: datetime | None = None
     pause_reason: str | None = None

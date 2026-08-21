@@ -810,15 +810,6 @@ async def process_inbound_message_event(
         )
         if continue_ai_result.conversation is not None:
             conversation = continue_ai_result.conversation
-        elif continue_ai_result.ai_interaction_count_increment:
-            conversation = replace(
-                conversation,
-                ai_interaction_count=(
-                    conversation.ai_interaction_count
-                    + continue_ai_result.ai_interaction_count_increment
-                ),
-                updated_at=now,
-            )
         workflow_transition = _workflow_transition_outcome_from_continue_ai_result(
             continue_ai_result,
         )
@@ -1949,7 +1940,6 @@ def _handoff_acknowledgment_pre_send_policy(
             sendable_workflow_states=frozenset({WorkflowState.HUMAN_HANDOFF}),
             allowed_send_start_hour=0,
             allowed_send_end_hour=24,
-            global_frequency_limit_hours=None,
             allow_simultaneous_channels=True,
             timezone=timezone,
         )
@@ -1957,7 +1947,6 @@ def _handoff_acknowledgment_pre_send_policy(
         sendable_workflow_states=frozenset({WorkflowState.HUMAN_HANDOFF}),
         allowed_send_start_hour=(policy.quiet_hours_start.hour if policy.quiet_hours_start else 10),
         allowed_send_end_hour=(policy.quiet_hours_end.hour if policy.quiet_hours_end else 17),
-        global_frequency_limit_hours=None,
         allow_simultaneous_channels=True,
         timezone=timezone,
     )
@@ -2521,11 +2510,6 @@ def _build_inbound_processing_audit(
         "continuation": {
             "continue_ai_status": (
                 continue_ai_result.status.value if continue_ai_result is not None else None
-            ),
-            "ai_interaction_count_increment": (
-                continue_ai_result.ai_interaction_count_increment
-                if continue_ai_result is not None
-                else 0
             ),
             "pause_reason": (
                 continue_ai_result.pause_reason if continue_ai_result is not None else None

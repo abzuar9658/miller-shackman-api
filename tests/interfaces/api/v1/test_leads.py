@@ -491,8 +491,8 @@ def test_admin_can_send_deferred_message_now() -> None:
         workflow_state=WorkflowState.ACTIVE_NURTURE,
     )
 
-    # The previous send was one hour earlier, so only the operator-confirmed
-    # frequency override lets this deferred message go out now.
+    # The operator-confirmed send-now retries the deferred message immediately,
+    # inside the allowed hours window.
     with time_machine.travel("2030-01-01T18:00:00Z"):
         response = client.client.post(
             f"/api/v1/workspaces/{WORKSPACE_ID}/leads/{LEAD_ID}/outbound-messages/{DEFERRED_MESSAGE_ID}/send-now",
@@ -1519,8 +1519,8 @@ DEFERRED_TRACK_VERSION_ID = UUID("00000000-0000-0000-0000-000000000052")
 
 
 def _deferred_outbound_message() -> OutboundMessage:
-    # Mirrors a message whose send was vetoed by the 24h frequency guard:
-    # still pending, annotated with the reason, retry scheduled a day out.
+    # Mirrors a message whose send was vetoed by a timing guard: still pending,
+    # annotated with the reason, retry scheduled for the next allowed window.
     return OutboundMessage(
         message_id=DEFERRED_MESSAGE_ID,
         workspace_id=WORKSPACE_ID,
@@ -1541,7 +1541,7 @@ def _deferred_outbound_message() -> OutboundMessage:
         provider_send_status=ProviderSendStatus.NOT_ATTEMPTED,
         status_detail=(
             "Sending blocked: pre send blocked. Pre-send checks blocked delivery: "
-            "frequency limit reached. Next eligible send time: 2030-01-02T17:00:00+00:00."
+            "outside allowed hours. Next eligible send time: 2030-01-02T17:00:00+00:00."
         ),
     )
 

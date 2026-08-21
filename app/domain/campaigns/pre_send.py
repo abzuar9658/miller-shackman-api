@@ -37,7 +37,6 @@ class PreSendReasonCode(StrEnum):
     LEAD_REPLIED_SINCE_SCHEDULED = "lead_replied_since_scheduled"
     RECENT_HUMAN_ACTIVITY = "recent_human_activity"
     OUTSIDE_ALLOWED_HOURS = "outside_allowed_hours"
-    FREQUENCY_LIMIT_REACHED = "frequency_limit_reached"
     SIMULTANEOUS_CHANNEL_NOT_ALLOWED = "simultaneous_channel_not_allowed"
 
 
@@ -47,7 +46,6 @@ class PreSendReasonCode(StrEnum):
 TIMING_PRE_SEND_REASON_CODES: frozenset[PreSendReasonCode] = frozenset(
     {
         PreSendReasonCode.OUTSIDE_ALLOWED_HOURS,
-        PreSendReasonCode.FREQUENCY_LIMIT_REACHED,
         PreSendReasonCode.SIMULTANEOUS_CHANNEL_NOT_ALLOWED,
     }
 )
@@ -70,9 +68,6 @@ class PreSendPolicy:
     )
     allowed_send_start_hour: int = 10
     allowed_send_end_hour: int = 17
-    global_frequency_limit_hours: int | None = 24
-    campaign_frequency_limit_hours: int | None = None
-    channel_frequency_limit_hours: int | None = None
     allow_simultaneous_channels: bool = False
     simultaneous_channel_window_minutes: int = 0
     timezone: str | None = None
@@ -95,9 +90,6 @@ class PreSendFacts:
     human_owned: bool = False
     lead_replied_since_scheduled: bool = False
     recent_human_activity: bool = False
-    last_global_outreach_at: datetime | None = None
-    last_campaign_outreach_at: datetime | None = None
-    last_channel_outreach_at: datetime | None = None
     other_channel_sent_at: datetime | None = None
     history_facts_available: bool = True
 
@@ -115,14 +107,7 @@ def evaluate_pre_send_safety(
     facts: PreSendFacts,
     policy: PreSendPolicy,
     now: datetime,
-    *,
-    confirmed_frequency_limit_override: bool = False,
 ) -> PreSendDecision:
-    # confirmed_frequency_limit_override may only be set by an explicit,
-    # permission-checked operator action (admin-confirmed "send now" on a
-    # deferred message). Automation never sets it, and consent, suppression,
-    # handoff, contactability, and every other guard still apply even when the
-    # frequency limit is overridden.
     reasons: list[PreSendReasonCode] = []
     local_now = _to_policy_timezone(now, policy.timezone)
 
@@ -145,14 +130,6 @@ def evaluate_pre_send_safety(
     if _is_outside_allowed_hours(local_now, policy):
         reasons.append(PreSendReasonCode.OUTSIDE_ALLOWED_HOURS)
 
-    frequency_block_until = _frequency_block_until(facts, policy)
-    if (
-        frequency_block_until is not None
-        and now < frequency_block_until
-        and not confirmed_frequency_limit_override
-    ):
-        reasons.append(PreSendReasonCode.FREQUENCY_LIMIT_REACHED)
-
     simultaneous_block_until = _simultaneous_block_until(facts, policy)
     if simultaneous_block_until is not None and now < simultaneous_block_until:
         reasons.append(PreSendReasonCode.SIMULTANEOUS_CHANNEL_NOT_ALLOWED)
@@ -167,7 +144,6 @@ def evaluate_pre_send_safety(
             policy=policy,
             now=now,
             local_now=local_now,
-            frequency_block_until=frequency_block_until,
             simultaneous_block_until=simultaneous_block_until,
         ),
     )
@@ -231,24 +207,6 @@ def _human_control_reasons(facts: PreSendFacts) -> list[PreSendReasonCode]:
     return reasons
 
 
-def _frequency_block_until(
-    facts: PreSendFacts,
-    policy: PreSendPolicy,
-) -> datetime | None:
-    candidates = (
-        _limit_until(facts.last_global_outreach_at, policy.global_frequency_limit_hours),
-        _limit_until(facts.last_campaign_outreach_at, policy.campaign_frequency_limit_hours),
-        _limit_until(facts.last_channel_outreach_at, policy.channel_frequency_limit_hours),
-    )
-    return max((candidate for candidate in candidates if candidate is not None), default=None)
-
-
-def _limit_until(last_outreach_at: datetime | None, limit_hours: int | None) -> datetime | None:
-    if last_outreach_at is None or limit_hours is None:
-        return None
-    return last_outreach_at + timedelta(hours=limit_hours)
-
-
 def _simultaneous_block_until(
     facts: PreSendFacts,
     policy: PreSendPolicy,
@@ -274,7 +232,6 @@ def _next_allowed_at(
     policy: PreSendPolicy,
     now: datetime,
     local_now: datetime,
-    frequency_block_until: datetime | None,
     simultaneous_block_until: datetime | None,
 ) -> datetime | None:
     if not reasons or any(
@@ -283,8 +240,6 @@ def _next_allowed_at(
         return None
 
     candidate = now
-    if frequency_block_until is not None and candidate < frequency_block_until:
-        candidate = frequency_block_until
     if simultaneous_block_until is not None and candidate < simultaneous_block_until:
         candidate = simultaneous_block_until
     local_candidate = _to_policy_timezone(candidate, policy.timezone)

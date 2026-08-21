@@ -113,9 +113,6 @@ class OutboundSendContext:
     human_owned: bool = False
     lead_replied_since_scheduled: bool = False
     recent_human_activity: bool = False
-    last_global_outreach_at: datetime | None = None
-    last_campaign_outreach_at: datetime | None = None
-    last_channel_outreach_at: datetime | None = None
     other_channel_sent_at: datetime | None = None
 
 
@@ -154,12 +151,7 @@ async def send_outbound_message(
     temporal_workflow_id: str | None = None,
     email_thread_anchor_inbound_message_id: UUID | None = None,
     before_provider_dispatch: Callable[[], Awaitable[None]] | None = None,
-    confirmed_frequency_limit_override: bool = False,
 ) -> SendOutboundMessageResult:
-    # confirmed_frequency_limit_override is forwarded to the pre-send domain
-    # check and may only be set by an explicit, permission-checked operator
-    # action. Every automated caller (cadence, dispatcher, webhooks) must keep
-    # the default so the frequency cap always applies to machine-driven sends.
     message = await message_repository.get_by_idempotency_key(
         workspace_id,
         idempotency_key,
@@ -295,7 +287,6 @@ async def send_outbound_message(
     history_facts = await load_pre_send_history_facts(
         workspace_id=workspace_id,
         lead_id=message.lead_id,
-        campaign_id=message.campaign_id,
         message=message,
         message_repository=message_repository,
         inbound_message_repository=inbound_message_repository,
@@ -330,21 +321,6 @@ async def send_outbound_message(
                 or (history_facts.lead_replied_since_scheduled if history_facts else False)
             ),
             recent_human_activity=effective_context.recent_human_activity,
-            last_global_outreach_at=(
-                history_facts.last_global_outreach_at
-                if history_facts is not None
-                else effective_context.last_global_outreach_at
-            ),
-            last_campaign_outreach_at=(
-                history_facts.last_campaign_outreach_at
-                if history_facts is not None
-                else effective_context.last_campaign_outreach_at
-            ),
-            last_channel_outreach_at=(
-                history_facts.last_channel_outreach_at
-                if history_facts is not None
-                else effective_context.last_channel_outreach_at
-            ),
             other_channel_sent_at=(
                 history_facts.other_channel_sent_at
                 if history_facts is not None
@@ -354,7 +330,6 @@ async def send_outbound_message(
         ),
         effective_context.pre_send_policy,
         now,
-        confirmed_frequency_limit_override=confirmed_frequency_limit_override,
     )
     if not pre_send_decision.allowed:
         return SendOutboundMessageResult(

@@ -84,9 +84,6 @@ class PlanNextOutboundMessageContext:
     human_owned: bool = False
     lead_replied_since_scheduled: bool = False
     recent_human_activity: bool = False
-    last_global_outreach_at: datetime | None = None
-    last_campaign_outreach_at: datetime | None = None
-    last_channel_outreach_at: datetime | None = None
     other_channel_sent_at: datetime | None = None
     conversation_summary: str | None = None
     latest_lead_request: str | None = None
@@ -184,9 +181,6 @@ async def plan_next_outbound_message_for_lead(
         human_owned=context.human_owned,
         lead_replied_since_scheduled=context.lead_replied_since_scheduled,
         recent_human_activity=context.recent_human_activity,
-        last_global_outreach_at=context.last_global_outreach_at,
-        last_campaign_outreach_at=context.last_campaign_outreach_at,
-        last_channel_outreach_at=context.last_channel_outreach_at,
         other_channel_sent_at=context.other_channel_sent_at,
     )
     selected = await _select_channel(
@@ -271,9 +265,6 @@ async def plan_next_outbound_message_for_lead(
         human_owned=context.human_owned,
         lead_replied_since_scheduled=context.lead_replied_since_scheduled,
         recent_human_activity=context.recent_human_activity,
-        last_global_outreach_at=context.last_global_outreach_at,
-        last_campaign_outreach_at=context.last_campaign_outreach_at,
-        last_channel_outreach_at=context.last_channel_outreach_at,
         other_channel_sent_at=context.other_channel_sent_at,
     )
 
