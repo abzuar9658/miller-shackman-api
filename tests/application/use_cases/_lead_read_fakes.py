@@ -140,6 +140,11 @@ class FakeLeadRepository:
             paused_stale=len(
                 self._scoped_leads(workspace_id, owner_user_id, search, LeadSavedView.PAUSED_STALE)
             ),
+            not_enrolled=sum(
+                1
+                for lead in self._scoped_leads(workspace_id, owner_user_id, search, None)
+                if (lead.workspace_id, lead.lead_id) not in self._latest_workflows
+            ),
         )
 
     def _scoped_leads(

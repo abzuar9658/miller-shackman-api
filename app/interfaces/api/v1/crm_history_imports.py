@@ -3,8 +3,13 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 
+from app.application.services.crm_lead_refresh import (
+    CrmLeadRefreshStatus,
+    refresh_lead_from_crm,
+)
 from app.application.use_cases.crm_history_imports import (
     CrmHistoryImportMutationStatus,
     CrmHistoryImportReadStatus,
@@ -22,7 +27,7 @@ from app.domain.crm_history_imports import (
     CrmHistoryImportJob,
 )
 from app.domain.identity import AuthenticatedActor, AuthenticatedExtensionDevice
-from app.domain.leads import CRMProvider
+from app.domain.leads import CanonicalLeadRecord, CRMProvider
 from app.infrastructure.crm.follow_up_boss.history_import_parser import (
     parse_fub_people_response,
 )
@@ -46,6 +51,7 @@ from app.interfaces.api.schemas.crm_history_imports import (
 
 router = APIRouter(tags=["crm-history-imports"])
 _TOKEN_HEADER = Header(alias="X-CRM-History-Import-Token", min_length=1)
+logger = structlog.get_logger(__name__)
 
 
 @router.post(
@@ -102,10 +108,10 @@ async def _export_crm_history(
     bundle: CrmHistoryImportBundle,
     extension_device: AuthenticatedExtensionDevice | None,
 ) -> CreateCrmHistoryImportResponse:
-    lead = await bundle.lead_repository.get_by_crm_id(
-        workspace_id,
-        CRMProvider.FOLLOW_UP_BOSS,
-        request.crm_lead_id,
+    lead = await _refreshed_or_local_lead(
+        workspace_id=workspace_id,
+        crm_lead_id=request.crm_lead_id,
+        bundle=bundle,
     )
     if lead is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=["lead_not_found"])
@@ -306,6 +312,44 @@ async def complete_crm_history_import_upload_route(
         status=result.status.value,
         job=_job_response(result.job),
     )
+
+
+async def _refreshed_or_local_lead(
+    *,
+    workspace_id: UUID,
+    crm_lead_id: str,
+    bundle: CrmHistoryImportBundle,
+) -> CanonicalLeadRecord | None:
+    """Resolve the lead for an export, refreshing it from the CRM best-effort.
+
+    When the CRM refresh source is available, the latest FUB snapshot is
+    upserted (creating the lead if it is unknown locally) and tag enrollment is
+    re-evaluated. Any CRM failure falls back to the locally stored lead so the
+    history export never breaks on a CRM outage.
+    """
+    if bundle.lead_refresh_source is None:
+        return await bundle.lead_repository.get_by_crm_id(
+            workspace_id,
+            CRMProvider.FOLLOW_UP_BOSS,
+            crm_lead_id,
+        )
+    result = await refresh_lead_from_crm(
+        workspace_id=workspace_id,
+        crm_provider=CRMProvider.FOLLOW_UP_BOSS,
+        crm_lead_id=crm_lead_id,
+        lead_refresh_source=bundle.lead_refresh_source,
+        lead_repository=bundle.lead_repository,
+        now=datetime.now(UTC),
+        enrollment_deps=bundle.enrollment_dependencies,
+    )
+    if result.status is CrmLeadRefreshStatus.FAILED:
+        logger.warning(
+            "crm_history_export_lead_refresh_failed",
+            workspace_id=str(workspace_id),
+            crm_lead_id=crm_lead_id,
+            reason=result.failure_reason,
+        )
+    return result.lead
 
 
 def _job_response(job: CrmHistoryImportJob) -> CrmHistoryImportJobResponse:

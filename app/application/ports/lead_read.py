@@ -53,6 +53,10 @@ class LeadWorkspaceViewCounts:
     blocked: int = 0
     no_owner: int = 0
     paused_stale: int = 0
+    # Not a filterable saved view: workspace-wide count of leads with no
+    # workflow at all (mirrors the UI's "not enrolled" journey node, where
+    # latest_workflow is null), consumed by the home dashboards' inventory.
+    not_enrolled: int = 0
 
 
 class LeadReadLeadRepository(Protocol):

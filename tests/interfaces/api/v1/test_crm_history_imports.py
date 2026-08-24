@@ -1,7 +1,10 @@
+from dataclasses import replace
 from typing import cast
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from app.application.ports.crm_sync import CanonicalLeadRefreshSource
 from app.application.ports.repositories import (
     AuthAuditLogRepository,
     CrmConversationEventRepository,
@@ -9,6 +12,7 @@ from app.application.ports.repositories import (
 )
 from app.core.config import Settings
 from app.domain.identity import AuthenticatedExtensionDevice, WorkspaceMembershipRole
+from app.domain.leads import CanonicalLeadRecord
 from app.interfaces.api.dependencies.crm_history_imports import (
     CrmHistoryImportBundle,
     get_crm_history_import_bundle,
@@ -18,6 +22,7 @@ from app.interfaces.api.dependencies.membership import get_workspace_actor
 from app.main import app
 from tests.application.use_cases._crm_history_import_fakes import (
     FakeAuthAuditLogRepository,
+    FakeCanonicalLeadRefreshSource,
     FakeCrmConversationEventRepository,
     FakeCrmHistoryImportEventRepository,
     FakeCrmHistoryImportJobRepository,
@@ -247,6 +252,92 @@ def test_device_extension_export_allows_unassigned_lead_and_deduplicates_batch()
         app.dependency_overrides.clear()
 
 
+def test_export_refreshes_lead_from_crm_before_import() -> None:
+    stale = _lead()
+    fresh = replace(stale, lead_id=uuid4(), lead_source="Zillow")
+    refresh_source = FakeCanonicalLeadRefreshSource({stale.crm_lead_id: fresh})
+    bundle = _bundle(enabled=True, lead_refresh_source=refresh_source)
+    app.dependency_overrides[get_workspace_actor] = lambda: _actor(
+        WorkspaceMembershipRole.MANAGER
+    )
+    app.dependency_overrides[get_crm_history_import_bundle] = lambda: bundle
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/workspaces/{WORKSPACE_ID}/crm-history-imports/export",
+                json={"crm_lead_id": stale.crm_lead_id, "events": [_event_body()]},
+            )
+        assert response.status_code == 201
+        assert refresh_source.calls == [(WORKSPACE_ID, stale.crm_lead_id, ())]
+        repo = cast(FakeLeadRepository, bundle.lead_repository)
+        stored = repo.leads[(WORKSPACE_ID, stale.lead_id)]
+        assert stored.lead_source == "Zillow"
+        assert stored.lead_id == stale.lead_id
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_export_creates_unknown_lead_from_crm_snapshot() -> None:
+    fresh = _lead()
+    refresh_source = FakeCanonicalLeadRefreshSource({fresh.crm_lead_id: fresh})
+    bundle = _bundle(enabled=True, lead_refresh_source=refresh_source, leads=())
+    app.dependency_overrides[get_workspace_actor] = lambda: _actor(
+        WorkspaceMembershipRole.MANAGER
+    )
+    app.dependency_overrides[get_crm_history_import_bundle] = lambda: bundle
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/workspaces/{WORKSPACE_ID}/crm-history-imports/export",
+                json={"crm_lead_id": fresh.crm_lead_id, "events": [_event_body()]},
+            )
+        assert response.status_code == 201
+        repo = cast(FakeLeadRepository, bundle.lead_repository)
+        assert (WORKSPACE_ID, fresh.lead_id) in repo.leads
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_export_returns_404_when_lead_unknown_in_crm_and_locally() -> None:
+    refresh_source = FakeCanonicalLeadRefreshSource({})
+    bundle = _bundle(enabled=True, lead_refresh_source=refresh_source, leads=())
+    app.dependency_overrides[get_workspace_actor] = lambda: _actor(
+        WorkspaceMembershipRole.MANAGER
+    )
+    app.dependency_overrides[get_crm_history_import_bundle] = lambda: bundle
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/workspaces/{WORKSPACE_ID}/crm-history-imports/export",
+                json={"crm_lead_id": "missing-lead", "events": [_event_body()]},
+            )
+        assert response.status_code == 404
+        assert response.json()["detail"] == ["lead_not_found"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_export_falls_back_to_local_lead_when_crm_refresh_fails() -> None:
+    stale = _lead()
+    refresh_source = FakeCanonicalLeadRefreshSource(error=RuntimeError("fub down"))
+    bundle = _bundle(enabled=True, lead_refresh_source=refresh_source)
+    app.dependency_overrides[get_workspace_actor] = lambda: _actor(
+        WorkspaceMembershipRole.MANAGER
+    )
+    app.dependency_overrides[get_crm_history_import_bundle] = lambda: bundle
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/workspaces/{WORKSPACE_ID}/crm-history-imports/export",
+                json={"crm_lead_id": stale.crm_lead_id, "events": [_event_body()]},
+            )
+        assert response.status_code == 201
+        repo = cast(FakeLeadRepository, bundle.lead_repository)
+        assert repo.leads[(WORKSPACE_ID, stale.lead_id)].lead_source == "unknown"
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_event_schema_rejects_nested_or_unbounded_details() -> None:
     bundle = _bundle(enabled=True)
     app.dependency_overrides[get_crm_history_import_bundle] = lambda: bundle
@@ -262,17 +353,27 @@ def test_event_schema_rejects_nested_or_unbounded_details() -> None:
         app.dependency_overrides.clear()
 
 
-def _bundle(*, enabled: bool) -> CrmHistoryImportBundle:
+def _bundle(
+    *,
+    enabled: bool,
+    lead_refresh_source: FakeCanonicalLeadRefreshSource | None = None,
+    leads: tuple[CanonicalLeadRecord, ...] | None = None,
+) -> CrmHistoryImportBundle:
     return CrmHistoryImportBundle(
         session=_FakeSession(),
         settings=Settings(fub_history_import_enabled=enabled),
         job_repository=FakeCrmHistoryImportJobRepository(),
         event_repository=FakeCrmHistoryImportEventRepository(),
-        lead_repository=cast(LeadRepository, FakeLeadRepository((_lead(),))),
+        lead_repository=cast(
+            LeadRepository, FakeLeadRepository(leads if leads is not None else (_lead(),))
+        ),
         conversation_event_repository=cast(
             CrmConversationEventRepository, FakeCrmConversationEventRepository()
         ),
         audit_log_repository=cast(AuthAuditLogRepository, FakeAuthAuditLogRepository()),
+        lead_refresh_source=cast(CanonicalLeadRefreshSource, lead_refresh_source)
+        if lead_refresh_source is not None
+        else None,
     )
 
 

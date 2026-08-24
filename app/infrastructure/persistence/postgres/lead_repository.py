@@ -110,16 +110,18 @@ class PostgresLeadRepository:
             func.count().filter(_saved_view_clause(LeadSavedView.BLOCKED, now=now)),
             func.count().filter(_saved_view_clause(LeadSavedView.NO_OWNER, now=now)),
             func.count().filter(_saved_view_clause(LeadSavedView.PAUSED_STALE, now=now)),
+            func.count().filter(not_(_any_workflow_exists_clause())),
         ).select_from(LeadModel)
         statement = statement.where(*_workspace_scope_clauses(workspace_id, owner_user_id, search))
         result = await self._session.execute(statement)
-        total, needs_human, blocked, no_owner, paused_stale = result.one()
+        total, needs_human, blocked, no_owner, paused_stale, not_enrolled = result.one()
         return LeadWorkspaceViewCounts(
             total=int(total),
             needs_human=int(needs_human),
             blocked=int(blocked),
             no_owner=int(no_owner),
             paused_stale=int(paused_stale),
+            not_enrolled=int(not_enrolled),
         )
 
     async def get_by_id(
@@ -706,6 +708,20 @@ def _latest_workflow_transition_at_subquery() -> ColumnElement[datetime]:
         .order_by(*_latest_workflow_ordering())
         .limit(1)
         .scalar_subquery()
+    )
+
+
+def _any_workflow_exists_clause() -> ColumnElement[bool]:
+    # Mirrors the UI's "not enrolled" journey node (getLeadWorkflowState falls
+    # back to not_enrolled when latest_workflow is null): a lead counts as not
+    # enrolled only when it has no workflow rows at all, terminal or otherwise.
+    return (
+        select(LeadWorkflowModel.workflow_id)
+        .where(
+            LeadWorkflowModel.workspace_id == LeadModel.workspace_id,
+            LeadWorkflowModel.lead_id == LeadModel.lead_id,
+        )
+        .exists()
     )
 
 

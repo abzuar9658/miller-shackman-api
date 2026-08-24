@@ -151,6 +151,38 @@ class FakeLeadRepository:
             None,
         )
 
+    async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
+        existing = await self.get_by_crm_id(
+            record.workspace_id, record.crm_provider, record.crm_lead_id
+        )
+        stored = record if existing is None else replace(record, lead_id=existing.lead_id)
+        self.leads[(stored.workspace_id, stored.lead_id)] = stored
+        return stored
+
+
+class FakeCanonicalLeadRefreshSource:
+    def __init__(
+        self,
+        snapshots: dict[str, CanonicalLeadRecord] | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.snapshots = snapshots or {}
+        self.error = error
+        self.calls: list[tuple[UUID, str, tuple[str, ...]]] = []
+
+    async def get_lead_snapshot(
+        self,
+        *,
+        workspace_id: UUID,
+        crm_lead_id: str,
+        mapped_custom_field_keys: tuple[str, ...] = (),
+    ) -> CanonicalLeadRecord | None:
+        self.calls.append((workspace_id, crm_lead_id, mapped_custom_field_keys))
+        if self.error is not None:
+            raise self.error
+        return self.snapshots.get(crm_lead_id)
+
 
 class FakeCrmConversationEventRepository:
     def __init__(self) -> None:

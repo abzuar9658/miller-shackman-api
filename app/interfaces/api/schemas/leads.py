@@ -372,6 +372,7 @@ class LeadWorkspaceViewCountsResponse(BaseModel):
     blocked: int = 0
     no_owner: int = 0
     paused_stale: int = 0
+    not_enrolled: int = 0
 
 
 class LeadListResponse(BaseModel):

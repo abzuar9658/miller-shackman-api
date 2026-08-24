@@ -39,6 +39,7 @@ from app.application.ports.repositories import (
     WorkspaceOperationalControlRepository,
 )
 from app.application.ports.temporal import TemporalWorkflowStarter
+from app.application.services.crm_lead_refresh import crm_tag_enrollment_observed_at
 from app.application.services.lead_assignment_resolution import (
     WorkspaceLeadAssignmentContext,
     apply_lead_assignment_resolution,
@@ -345,7 +346,7 @@ async def run_follow_up_boss_lead_snapshot_sync(
                         await process_crm_tag_campaign_enrollment(
                             workspace_id=workspace_id,
                             lead=upserted_lead,
-                            observed_at=_crm_tag_enrollment_observed_at(upserted_lead),
+                            observed_at=crm_tag_enrollment_observed_at(upserted_lead),
                             now=now,
                             campaign_execution_repository=campaign_execution_repository,
                             workspace_contact_policy_repository=workspace_contact_policy_repository,
@@ -1140,10 +1141,6 @@ def _resolve_lead_assignment(
         context=assignment_context,
         now=now,
     )
-
-
-def _crm_tag_enrollment_observed_at(lead: CanonicalLeadRecord) -> datetime:
-    return lead.source_updated_at or lead.crm_updated_at or lead.facts_derived_at
 
 
 def _normalize_recent_limit(

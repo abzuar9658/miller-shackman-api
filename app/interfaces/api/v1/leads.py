@@ -257,6 +257,7 @@ async def list_leads_route(
             blocked=result.view_counts.blocked,
             no_owner=result.view_counts.no_owner,
             paused_stale=result.view_counts.paused_stale,
+            not_enrolled=result.view_counts.not_enrolled,
         ),
     )
 
