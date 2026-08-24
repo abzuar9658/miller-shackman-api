@@ -128,6 +128,10 @@ class DormantSignOff(StrEnum):
     NONE = "none"
     BEST_BROKERAGE = "best_brokerage"
     REGARDS_AGENT = "regards_agent"
+    CUSTOM = "custom"
+
+
+MAX_CUSTOM_SIGN_OFF_LENGTH = 300
 
 
 class DormantListingContextBehavior(StrEnum):
@@ -171,6 +175,7 @@ class DormantStepTemplateProfile:
         default_factory=_default_dormant_personalization_fields
     )
     custom_instructions: str | None = None
+    custom_sign_off_text: str | None = None
 
 
 def _default_enabled_extraction_fields() -> tuple[str, ...]:
@@ -237,6 +242,7 @@ def dormant_step_template_profile_to_mapping(
         "listing_context": profile.listing_context.value,
         "personalization_fields": [value.value for value in profile.personalization_fields],
         "custom_instructions": profile.custom_instructions,
+        "custom_sign_off_text": profile.custom_sign_off_text,
     }
 
 
@@ -258,6 +264,12 @@ def dormant_step_template_profile_from_mapping(
             if raw_custom_instructions is not None
             else None
         )
+        raw_custom_sign_off = value.get("custom_sign_off_text")
+        custom_sign_off_text = (
+            str(raw_custom_sign_off).strip() or None
+            if raw_custom_sign_off is not None
+            else None
+        )
         return DormantStepTemplateProfile(
             tone=DormantMessageTone(str(value["tone"])),
             style=DormantMessageStyle(str(value["style"])),
@@ -268,6 +280,7 @@ def dormant_step_template_profile_from_mapping(
             listing_context=DormantListingContextBehavior(str(value["listing_context"])),
             personalization_fields=fields,
             custom_instructions=custom_instructions,
+            custom_sign_off_text=custom_sign_off_text,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -282,7 +295,21 @@ def dormant_template_profile_is_valid_for_channel(
         return True
     if channel == "sms" and profile.length == DormantMessageLength.DETAILED:
         return False
-    return len(profile.custom_instructions or "") <= 1000
+    if len(profile.custom_instructions or "") > 1000:
+        return False
+    return _custom_sign_off_is_valid(profile)
+
+
+def _custom_sign_off_is_valid(profile: DormantStepTemplateProfile) -> bool:
+    if profile.sign_off != DormantSignOff.CUSTOM:
+        return True
+    text = (profile.custom_sign_off_text or "").strip()
+    if not text or len(text) > MAX_CUSTOM_SIGN_OFF_LENGTH:
+        return False
+    allowed = {"agent_name", "brokerage_name", "lead_first_name"}
+    return all(
+        placeholder in allowed for placeholder in extract_template_placeholders(text)
+    )
 
 
 def _dormant_profile_prompt(profile: DormantStepTemplateProfile) -> str:
@@ -347,6 +374,7 @@ def _dormant_profile_template(profile: DormantStepTemplateProfile) -> str:
         DormantSignOff.NONE: "",
         DormantSignOff.BEST_BROKERAGE: "Best,\n{{brokerage_name}}",
         DormantSignOff.REGARDS_AGENT: "Regards,\n{{agent_name}}",
+        DormantSignOff.CUSTOM: (profile.custom_sign_off_text or "").strip(),
     }[profile.sign_off]
     return "\n\n".join(part for part in (greeting, "{{message_body}}", sign_off) if part)
 

@@ -391,6 +391,22 @@ async def run_follow_up_boss_lead_snapshot_sync(
                 last_heartbeat_at=page_updated_at,
                 updated_at=page_updated_at,
             )
+            # Persist progress and commit after every page so a long sync does
+            # not hold lead row locks (blocking webhook updates) in one giant
+            # transaction, and a crash loses at most one page of work.
+            persisted_page_job = await crm_sync_job_repository.save_if_running(job)
+            if persisted_page_job is None:
+                return await _lost_lease_result(
+                    workspace_id=workspace_id,
+                    crm_sync_job_repository=crm_sync_job_repository,
+                    job=job,
+                    sync_type=sync_type,
+                    page_count=page_count,
+                    phase="page_progress_save",
+                )
+            job = persisted_page_job
+            if commit is not None:
+                await commit()
             logger.info(
                 "crm_sync_page_processed",
                 workspace_id=str(workspace_id),

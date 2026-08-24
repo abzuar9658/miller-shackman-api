@@ -54,3 +54,63 @@ def test_detailed_length_is_rejected_for_sms() -> None:
 
     assert dormant_template_profile_is_valid_for_channel(profile, channel="sms") is False
     assert dormant_template_profile_is_valid_for_channel(profile, channel="email") is True
+
+
+def test_custom_sign_off_renders_admin_text_in_template() -> None:
+    profile = DormantStepTemplateProfile(
+        greeting=DormantGreeting.HI_THERE,
+        sign_off=DormantSignOff.CUSTOM,
+        custom_sign_off_text="Best regards,\nThe Miller Schackman Team",
+    )
+
+    result = apply_dormant_step_template_profile(
+        WorkspaceOutboundDraftingConfig(workspace_id=WORKSPACE_ID),
+        profile,
+        channel="email",
+    )
+
+    assert result.email_template == (
+        "Hi there,\n\n{{message_body}}\n\nBest regards,\nThe Miller Schackman Team"
+    )
+
+
+def test_custom_sign_off_mapping_round_trip_is_stable() -> None:
+    profile = DormantStepTemplateProfile(
+        sign_off=DormantSignOff.CUSTOM,
+        custom_sign_off_text="Warmly,\n{{agent_name}}",
+    )
+
+    result = dormant_step_template_profile_from_mapping(
+        dormant_step_template_profile_to_mapping(profile)
+    )
+
+    assert result == profile
+
+
+def test_custom_sign_off_requires_text() -> None:
+    profile = DormantStepTemplateProfile(sign_off=DormantSignOff.CUSTOM)
+
+    assert dormant_template_profile_is_valid_for_channel(profile, channel="email") is False
+    assert dormant_template_profile_is_valid_for_channel(profile, channel="sms") is False
+
+
+def test_custom_sign_off_rejects_oversized_or_unknown_placeholders() -> None:
+    too_long = DormantStepTemplateProfile(
+        sign_off=DormantSignOff.CUSTOM,
+        custom_sign_off_text="x" * 301,
+    )
+    unknown_placeholder = DormantStepTemplateProfile(
+        sign_off=DormantSignOff.CUSTOM,
+        custom_sign_off_text="Bye,\n{{message_body}}",
+    )
+    valid = DormantStepTemplateProfile(
+        sign_off=DormantSignOff.CUSTOM,
+        custom_sign_off_text="Best,\n{{brokerage_name}}",
+    )
+
+    assert dormant_template_profile_is_valid_for_channel(too_long, channel="email") is False
+    assert (
+        dormant_template_profile_is_valid_for_channel(unknown_placeholder, channel="email")
+        is False
+    )
+    assert dormant_template_profile_is_valid_for_channel(valid, channel="email") is True

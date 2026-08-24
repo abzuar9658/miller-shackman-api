@@ -1,7 +1,7 @@
 from datetime import datetime, time
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.outbound_drafting import (
@@ -11,6 +11,7 @@ from app.domain.outbound_drafting import (
     DEFAULT_PROMPT_TEXT,
     DEFAULT_SMS_PROMPT_TEXT,
     DEFAULT_SMS_TEMPLATE,
+    MAX_CUSTOM_SIGN_OFF_LENGTH,
     SUPPORTED_QUERY_EXTRACTION_FIELDS,
     DormantCallToAction,
     DormantGreeting,
@@ -48,6 +49,19 @@ class DormantStepTemplateProfileSchema(BaseModel):
         ]
     )
     custom_instructions: str | None = Field(default=None, max_length=1000)
+    custom_sign_off_text: str | None = Field(
+        default=None, max_length=MAX_CUSTOM_SIGN_OFF_LENGTH
+    )
+
+    @model_validator(mode="after")
+    def require_custom_sign_off_text(self) -> "DormantStepTemplateProfileSchema":
+        if self.sign_off == DormantSignOff.CUSTOM and not (
+            self.custom_sign_off_text or ""
+        ).strip():
+            raise ValueError(
+                "custom_sign_off_text is required when sign_off is 'custom'"
+            )
+        return self
 
 
 class CampaignCadenceStepRequest(BaseModel):

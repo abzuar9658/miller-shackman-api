@@ -1379,7 +1379,7 @@ async def test_sync_starts_matching_campaign_when_pulled_lead_has_configured_tag
     assert len(workflow_repository.workflows) == 1
     assert len(transition_repository.transitions) == 1
     assert len(temporal.calls) == 1
-    assert commit_calls == ["commit"]
+    assert commit_calls == ["commit", "commit"]
 
 
 @pytest.mark.parametrize("outcome", ["review_hold", "blocked"])
@@ -1443,7 +1443,7 @@ async def test_sync_does_not_start_campaign_for_non_dormant_tag_route(outcome: s
     assert workflow_repository.workflows == {}
     assert transition_repository.transitions == {}
     assert temporal.calls == []
-    assert commit_calls == []
+    assert commit_calls == ["commit"]
 
 
 async def test_sync_completes_tag_time_human_handoff_without_starting_campaign() -> None:

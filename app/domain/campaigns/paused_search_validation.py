@@ -18,6 +18,7 @@ from app.domain.campaigns.template_registry import (
     TemplateStatus,
     TemplateVersion,
 )
+from app.domain.outbound_drafting import dormant_template_profile_is_valid_for_channel
 
 MAX_AI_TOUCHES_PER_TRACK = 5
 MAX_PAUSED_SEARCH_CYCLES = 12
@@ -63,6 +64,7 @@ class PausedSearchValidationCode(StrEnum):
     EMPTY_MESSAGE_GOAL = "empty_message_goal"
     EMPTY_TEMPLATE_KEY = "empty_template_key"
     INVALID_MAX_ATTEMPTS = "invalid_max_attempts"
+    INVALID_TEMPLATE_PROFILE = "invalid_template_profile"
     INVALID_MAX_OCCURRENCES = "invalid_max_occurrences"
     INVALID_RECURRING_INTERVAL = "invalid_recurring_interval"
     VERSION_DISABLED = "version_disabled"
@@ -277,6 +279,15 @@ def _validate_steps(
         if step.max_attempts <= 0:
             _error(
                 findings, PausedSearchValidationCode.INVALID_MAX_ATTEMPTS, f"{field}.max_attempts"
+            )
+        if not dormant_template_profile_is_valid_for_channel(
+            step.template_profile,
+            channel=step.channel.value,
+        ):
+            _error(
+                findings,
+                PausedSearchValidationCode.INVALID_TEMPLATE_PROFILE,
+                f"{field}.template_profile",
             )
         if step.max_occurrences <= 0:
             _error(

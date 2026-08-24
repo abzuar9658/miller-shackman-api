@@ -1225,6 +1225,7 @@ def _template_profile_from_schema(
         listing_context=profile.listing_context,
         personalization_fields=tuple(profile.personalization_fields),
         custom_instructions=profile.custom_instructions,
+        custom_sign_off_text=profile.custom_sign_off_text,
     )
 
 
@@ -1243,6 +1244,7 @@ def _template_profile_schema(
         listing_context=profile.listing_context,
         personalization_fields=list(profile.personalization_fields),
         custom_instructions=profile.custom_instructions,
+        custom_sign_off_text=profile.custom_sign_off_text,
     )
 
 
