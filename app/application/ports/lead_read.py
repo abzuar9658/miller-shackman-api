@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
@@ -33,6 +34,27 @@ class LeadReadConversationSummary:
     latest_inbound_preview: str
 
 
+class LeadSavedView(StrEnum):
+    NEEDS_HUMAN = "needs_human"
+    BLOCKED = "blocked"
+    NO_OWNER = "no_owner"
+    PAUSED_STALE = "paused_stale"
+
+
+# A paused workflow older than this is considered stale and needs intervention;
+# mirrored by the saved-view tabs in the web lead workspace.
+PAUSED_STALE_THRESHOLD_HOURS = 24
+
+
+@dataclass(frozen=True)
+class LeadWorkspaceViewCounts:
+    total: int = 0
+    needs_human: int = 0
+    blocked: int = 0
+    no_owner: int = 0
+    paused_stale: int = 0
+
+
 class LeadReadLeadRepository(Protocol):
     async def get_by_id(
         self,
@@ -53,7 +75,30 @@ class LeadReadLeadRepository(Protocol):
         workspace_id: WorkspaceId,
         *,
         limit: int = 100,
+        offset: int = 0,
+        owner_user_id: UUID | None = None,
+        search: str | None = None,
+        view: LeadSavedView | None = None,
     ) -> tuple[CanonicalLeadRecord, ...]:
+        raise NotImplementedError
+
+    async def count_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        owner_user_id: UUID | None = None,
+        search: str | None = None,
+        view: LeadSavedView | None = None,
+    ) -> int:
+        raise NotImplementedError
+
+    async def count_views_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        owner_user_id: UUID | None = None,
+        search: str | None = None,
+    ) -> LeadWorkspaceViewCounts:
         raise NotImplementedError
 
 
@@ -106,6 +151,13 @@ class LeadReadWorkflowRepository(Protocol):
         workspace_id: WorkspaceId,
         *,
         limit: int = 100,
+    ) -> tuple[LeadWorkflow, ...]:
+        raise NotImplementedError
+
+    async def list_latest_for_leads(
+        self,
+        workspace_id: WorkspaceId,
+        lead_ids: tuple[LeadId, ...],
     ) -> tuple[LeadWorkflow, ...]:
         raise NotImplementedError
 
@@ -166,6 +218,13 @@ class LeadReadHandoffRepository(Protocol):
         workspace_id: WorkspaceId,
         *,
         limit: int = 100,
+    ) -> tuple[Handoff, ...]:
+        raise NotImplementedError
+
+    async def list_latest_for_leads(
+        self,
+        workspace_id: WorkspaceId,
+        lead_ids: tuple[LeadId, ...],
     ) -> tuple[Handoff, ...]:
         raise NotImplementedError
 

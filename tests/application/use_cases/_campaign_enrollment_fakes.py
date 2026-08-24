@@ -196,6 +196,17 @@ class FakeLeadWorkflowRepository:
         )
         return matches[:limit]
 
+    async def list_latest_for_leads(
+        self,
+        workspace_id: WorkspaceId,
+        lead_ids: tuple[LeadId, ...],
+    ) -> tuple[LeadWorkflow, ...]:
+        return tuple(
+            workflow
+            for workflow in self.latest_by_lead.values()
+            if workflow.workspace_id == workspace_id and workflow.lead_id in lead_ids
+        )
+
     async def save(self, workflow: LeadWorkflow) -> LeadWorkflow:
         self.workflows[workflow.workflow_id] = workflow
         self.latest_by_lead[(workflow.workspace_id, workflow.lead_id)] = workflow

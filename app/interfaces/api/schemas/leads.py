@@ -366,9 +366,21 @@ class LeadListItemResponse(BaseModel):
     latest_inbound_preview: str | None = None
 
 
+class LeadWorkspaceViewCountsResponse(BaseModel):
+    total: int = 0
+    needs_human: int = 0
+    blocked: int = 0
+    no_owner: int = 0
+    paused_stale: int = 0
+
+
 class LeadListResponse(BaseModel):
     status: str
     leads: list[LeadListItemResponse]
+    total_count: int = 0
+    limit: int = 0
+    offset: int = 0
+    view_counts: LeadWorkspaceViewCountsResponse = LeadWorkspaceViewCountsResponse()
 
 
 class PendingRoutingReviewItemResponse(BaseModel):

@@ -2,10 +2,10 @@ from datetime import UTC, datetime
 from typing import Annotated, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.application.ports.lead_activity import LeadActivityItem
-from app.application.ports.lead_read import LeadReadLeadRepository
+from app.application.ports.lead_read import LeadReadLeadRepository, LeadSavedView
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
 from app.application.services.lead_cadence_progress import LeadCadenceProgressView
 from app.application.services.lead_decision_tree import LeadDecisionTreeView
@@ -173,6 +173,7 @@ from app.interfaces.api.schemas.leads import (
     LeadSendabilityResponse,
     LeadWorkflowOverrideAuditLogResponse,
     LeadWorkflowResponse,
+    LeadWorkspaceViewCountsResponse,
     OutboundMessageResponse,
     OverridePausedSearchTimingRequest,
     OverridePausedSearchTimingResponse,
@@ -209,6 +210,10 @@ async def list_leads_route(
     workspace_id: UUID,
     actor: Annotated[AuthenticatedActor, Depends(get_workspace_actor)],
     bundle: Annotated[LeadReadBundle, Depends(get_lead_read_bundle)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    view: Annotated[LeadSavedView | None, Query()] = None,
 ) -> LeadListResponse:
     result = await list_lead_views(
         actor=actor,
@@ -221,6 +226,10 @@ async def list_leads_route(
         handoff_repository=bundle.handoff_repository,
         user_repository=bundle.user_repository,
         crm_agent_repository=bundle.crm_agent_repository,
+        limit=limit,
+        offset=offset,
+        search=search,
+        view=view,
     )
     if result.status == LeadReadStatus.REJECTED:
         raise HTTPException(
@@ -234,11 +243,21 @@ async def list_leads_route(
         status=result.status.value,
         leads=[
             _lead_list_item_response(
-                view,
+                view_item,
                 contact_policy or WorkspaceContactPolicy(workspace_id=workspace_id),
             )
-            for view in result.views
+            for view_item in result.views
         ],
+        total_count=result.total_count,
+        limit=result.limit,
+        offset=result.offset,
+        view_counts=LeadWorkspaceViewCountsResponse(
+            total=result.view_counts.total,
+            needs_human=result.view_counts.needs_human,
+            blocked=result.view_counts.blocked,
+            no_owner=result.view_counts.no_owner,
+            paused_stale=result.view_counts.paused_stale,
+        ),
     )
 
 

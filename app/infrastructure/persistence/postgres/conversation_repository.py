@@ -268,6 +268,27 @@ class PostgresHandoffRepository:
         models = result.scalars().all()
         return tuple(_model_to_handoff(model) for model in models)
 
+    async def list_latest_for_leads(
+        self,
+        workspace_id: WorkspaceId,
+        lead_ids: tuple[LeadId, ...],
+    ) -> tuple[Handoff, ...]:
+        if not lead_ids:
+            return ()
+        result = await self._session.execute(
+            select(HandoffModel)
+            .where(HandoffModel.workspace_id == workspace_id)
+            .where(HandoffModel.lead_id.in_(lead_ids))
+            .distinct(HandoffModel.lead_id)
+            .order_by(
+                HandoffModel.lead_id,
+                HandoffModel.created_at.desc(),
+                HandoffModel.handoff_id.desc(),
+            ),
+        )
+        models = result.scalars().all()
+        return tuple(_model_to_handoff(model) for model in models)
+
     async def get_by_id(
         self,
         workspace_id: WorkspaceId,

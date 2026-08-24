@@ -22,6 +22,8 @@ from app.application.ports.lead_read import (
     LeadReadWorkflowOverrideAuditRepository,
     LeadReadWorkflowRepository,
     LeadReadWorkflowTransitionRepository,
+    LeadSavedView,
+    LeadWorkspaceViewCounts,
 )
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
 from app.application.ports.repositories import (
@@ -115,6 +117,10 @@ class LeadListResult:
     status: LeadReadStatus
     views: tuple[LeadReadView, ...] = ()
     reasons: tuple[LeadReadReasonCode, ...] = ()
+    total_count: int = 0
+    limit: int = 0
+    offset: int = 0
+    view_counts: LeadWorkspaceViewCounts = LeadWorkspaceViewCounts()
 
 
 @dataclass(frozen=True)
@@ -182,6 +188,9 @@ async def list_lead_views(
     user_repository: LeadReadUserRepository,
     crm_agent_repository: CRMAgentRepository,
     limit: int = 100,
+    offset: int = 0,
+    search: str | None = None,
+    view: LeadSavedView | None = None,
 ) -> LeadListResult:
     scoped_actor: AuthenticatedActor | None
     if _can_view_workspace_leads(actor):
@@ -194,26 +203,48 @@ async def list_lead_views(
             reasons=(LeadReadReasonCode.PERMISSION_DENIED,),
         )
 
-    leads = await lead_repository.list_for_workspace(workspace_id, limit=limit)
-    latest_workflows = {
-        workflow.lead_id: workflow
-        for workflow in await workflow_repository.list_latest_for_workspace(
-            workspace_id, limit=limit
+    owner_user_id = scoped_actor.user_id if scoped_actor is not None else None
+    normalized_search = search.strip() if search is not None else None
+    if not normalized_search:
+        normalized_search = None
+    view_counts = await lead_repository.count_views_for_workspace(
+        workspace_id, owner_user_id=owner_user_id, search=normalized_search
+    )
+    total_count = (
+        view_counts.total
+        if view is None
+        else await lead_repository.count_for_workspace(
+            workspace_id, owner_user_id=owner_user_id, search=normalized_search, view=view
         )
-    }
-    latest_handoffs: dict[LeadId, Handoff] = {}
-    for handoff in await handoff_repository.list_handoffs(workspace_id, limit=limit * 3):
-        latest_handoffs.setdefault(handoff.lead_id, handoff)
+    )
+    leads = await lead_repository.list_for_workspace(
+        workspace_id,
+        limit=limit,
+        offset=offset,
+        owner_user_id=owner_user_id,
+        search=normalized_search,
+        view=view,
+    )
     visible_leads = tuple(
         lead
         for lead in leads
         if scoped_actor is None or _can_view_assigned_lead(scoped_actor, lead)
     )
+    page_lead_ids = tuple(lead.lead_id for lead in visible_leads)
+    latest_workflows = {
+        workflow.lead_id: workflow
+        for workflow in await workflow_repository.list_latest_for_leads(
+            workspace_id, page_lead_ids
+        )
+    }
+    latest_handoffs: dict[LeadId, Handoff] = {}
+    for handoff in await handoff_repository.list_latest_for_leads(workspace_id, page_lead_ids):
+        latest_handoffs.setdefault(handoff.lead_id, handoff)
     activity_summaries = {
         summary.lead_id: summary
         for summary in await activity_repository.list_summaries(
             workspace_id,
-            tuple(lead.lead_id for lead in visible_leads),
+            page_lead_ids,
         )
     }
     user_name_cache: dict[UserId, str | None] = {}
@@ -236,7 +267,14 @@ async def list_lead_views(
         )
         for lead in visible_leads
     ]
-    return LeadListResult(status=LeadReadStatus.OK, views=tuple(views))
+    return LeadListResult(
+        status=LeadReadStatus.OK,
+        views=tuple(views),
+        total_count=total_count,
+        limit=limit,
+        offset=offset,
+        view_counts=view_counts,
+    )
 
 
 async def get_lead_detail_view(

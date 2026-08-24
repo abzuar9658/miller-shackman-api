@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from app.application.ports.lead_activity import (
@@ -5,9 +6,22 @@ from app.application.ports.lead_activity import (
     LeadActivityKind,
     LeadActivitySummary,
 )
-from app.application.ports.lead_read import LeadReadConversationSummary
+from app.application.ports.lead_read import (
+    PAUSED_STALE_THRESHOLD_HOURS,
+    LeadReadConversationSummary,
+    LeadSavedView,
+    LeadWorkspaceViewCounts,
+)
+from app.application.services.canonical_lead_inputs import (
+    contactability_facts_from_canonical_lead,
+)
+from app.application.services.lead_assignment import (
+    lead_assigned_agent_user_id,
+    lead_effective_owner_user_id,
+)
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.campaigns.rejected_draft_review import RejectedDraftReview
+from app.domain.compliance.contactability import ContactChannel, evaluate_contactability
 from app.domain.conversations import CrmConversationEvent, Handoff, InboundMessage
 from app.domain.crm_agent_mapping import CRMAgent
 from app.domain.identity import User, WorkspaceMembershipRole
@@ -26,8 +40,18 @@ from app.domain.workflows import (
 
 
 class FakeLeadRepository:
-    def __init__(self, leads: tuple[CanonicalLeadRecord, ...]) -> None:
+    def __init__(
+        self,
+        leads: tuple[CanonicalLeadRecord, ...],
+        *,
+        latest_workflows: tuple[LeadWorkflow, ...] = (),
+        known_user_ids: frozenset[UUID] | None = None,
+    ) -> None:
         self._leads = {(lead.workspace_id, lead.lead_id): lead for lead in leads}
+        self._latest_workflows = {
+            (workflow.workspace_id, workflow.lead_id): workflow for workflow in latest_workflows
+        }
+        self._known_user_ids = known_user_ids
 
     async def get_by_id(
         self,
@@ -76,8 +100,91 @@ class FakeLeadRepository:
         workspace_id: UUID,
         *,
         limit: int = 100,
+        offset: int = 0,
+        owner_user_id: UUID | None = None,
+        search: str | None = None,
+        view: LeadSavedView | None = None,
     ) -> tuple[CanonicalLeadRecord, ...]:
-        return tuple(lead for (wid, _), lead in self._leads.items() if wid == workspace_id)[:limit]
+        return self._scoped_leads(workspace_id, owner_user_id, search, view)[
+            offset : offset + limit
+        ]
+
+    async def count_for_workspace(
+        self,
+        workspace_id: UUID,
+        *,
+        owner_user_id: UUID | None = None,
+        search: str | None = None,
+        view: LeadSavedView | None = None,
+    ) -> int:
+        return len(self._scoped_leads(workspace_id, owner_user_id, search, view))
+
+    async def count_views_for_workspace(
+        self,
+        workspace_id: UUID,
+        *,
+        owner_user_id: UUID | None = None,
+        search: str | None = None,
+    ) -> LeadWorkspaceViewCounts:
+        return LeadWorkspaceViewCounts(
+            total=len(self._scoped_leads(workspace_id, owner_user_id, search, None)),
+            needs_human=len(
+                self._scoped_leads(workspace_id, owner_user_id, search, LeadSavedView.NEEDS_HUMAN)
+            ),
+            blocked=len(
+                self._scoped_leads(workspace_id, owner_user_id, search, LeadSavedView.BLOCKED)
+            ),
+            no_owner=len(
+                self._scoped_leads(workspace_id, owner_user_id, search, LeadSavedView.NO_OWNER)
+            ),
+            paused_stale=len(
+                self._scoped_leads(workspace_id, owner_user_id, search, LeadSavedView.PAUSED_STALE)
+            ),
+        )
+
+    def _scoped_leads(
+        self,
+        workspace_id: UUID,
+        owner_user_id: UUID | None,
+        search: str | None = None,
+        view: LeadSavedView | None = None,
+    ) -> tuple[CanonicalLeadRecord, ...]:
+        return tuple(
+            lead
+            for (wid, _), lead in self._leads.items()
+            if wid == workspace_id
+            and (owner_user_id is None or lead_effective_owner_user_id(lead) == owner_user_id)
+            and _matches_search(lead, search)
+            and self._matches_view(lead, view)
+        )
+
+    def _matches_view(self, lead: CanonicalLeadRecord, view: LeadSavedView | None) -> bool:
+        if view is None:
+            return True
+        workflow = self._latest_workflows.get((lead.workspace_id, lead.lead_id))
+        if view is LeadSavedView.NEEDS_HUMAN:
+            return workflow is not None and workflow.state in {
+                WorkflowState.PAUSED,
+                WorkflowState.HUMAN_HANDOFF,
+                WorkflowState.HUMAN_OWNED,
+            }
+        if view is LeadSavedView.BLOCKED:
+            facts = contactability_facts_from_canonical_lead(lead)
+            return not (
+                evaluate_contactability(facts, ContactChannel.SMS).allowed
+                and evaluate_contactability(facts, ContactChannel.EMAIL).allowed
+            )
+        if view is LeadSavedView.NO_OWNER:
+            mapped_user_id = lead_assigned_agent_user_id(lead)
+            if mapped_user_id is None:
+                return True
+            return self._known_user_ids is not None and mapped_user_id not in self._known_user_ids
+        stale_before = datetime.now(UTC) - timedelta(hours=PAUSED_STALE_THRESHOLD_HOURS)
+        return (
+            workflow is not None
+            and workflow.state == WorkflowState.PAUSED
+            and workflow.last_transition_at <= stale_before
+        )
 
     async def get_by_primary_phone(
         self,
@@ -274,6 +381,17 @@ class FakeLeadWorkflowRepository:
         limit: int = 100,
     ) -> tuple[LeadWorkflow, ...]:
         return tuple(wf for (wid, _), wf in self._latest.items() if wid == workspace_id)[:limit]
+
+    async def list_latest_for_leads(
+        self,
+        workspace_id: UUID,
+        lead_ids: tuple[UUID, ...],
+    ) -> tuple[LeadWorkflow, ...]:
+        return tuple(
+            wf
+            for (wid, lid), wf in self._latest.items()
+            if wid == workspace_id and lid in lead_ids
+        )
 
     async def list_paused_for_workspace(
         self,
@@ -513,6 +631,17 @@ class FakeHandoffRepository:
     ) -> tuple[Handoff, ...]:
         return tuple(item for item in self._handoffs if item.workspace_id == workspace_id)[:limit]
 
+    async def list_latest_for_leads(
+        self,
+        workspace_id: UUID,
+        lead_ids: tuple[UUID, ...],
+    ) -> tuple[Handoff, ...]:
+        return tuple(
+            item
+            for item in self._handoffs
+            if item.workspace_id == workspace_id and item.lead_id in lead_ids
+        )
+
     async def list_for_lead(
         self,
         workspace_id: UUID,
@@ -597,6 +726,26 @@ def _count_kind(
     kind: LeadActivityKind,
 ) -> int:
     return sum(1 for item in items if item.kind == kind)
+
+
+def _matches_search(lead: CanonicalLeadRecord, search: str | None) -> bool:
+    if search is None:
+        return True
+    normalized = search.strip().lower()
+    if not normalized:
+        return True
+    haystack = " ".join(
+        value
+        for value in (
+            lead.mapped_custom_fields.get("display_name"),
+            lead.primary_email,
+            lead.primary_phone,
+            lead.lead_source,
+            lead.lead_stage,
+        )
+        if value
+    ).lower()
+    return normalized in haystack
 
 
 def _normalized_phone(phone_number: str | None) -> str | None:

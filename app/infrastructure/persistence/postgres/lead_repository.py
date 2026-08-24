@@ -1,9 +1,26 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import (
+    ColumnElement,
+    Select,
+    String,
+    UnaryExpression,
+    and_,
+    cast,
+    func,
+    not_,
+    or_,
+    select,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.ports.lead_read import (
+    PAUSED_STALE_THRESHOLD_HOURS,
+    LeadSavedView,
+    LeadWorkspaceViewCounts,
+)
 from app.domain.common.ids import LeadId, WorkspaceId
 from app.domain.compliance.contactability import ContactPermissionStatus, SuppressionType
 from app.domain.leads import (
@@ -23,11 +40,14 @@ from app.domain.leads import (
     PausedSearchSource,
     PropertyEventType,
 )
+from app.domain.workflows import WorkflowState
 from app.infrastructure.persistence.postgres.models import (
     CustomerTimingModel,
     LeadModel,
     LeadPausedSearchHistoryModel,
+    UserModel,
 )
+from app.infrastructure.persistence.postgres.workflow_models import LeadWorkflowModel
 
 
 class PostgresLeadRepository:
@@ -39,16 +59,68 @@ class PostgresLeadRepository:
         workspace_id: WorkspaceId,
         *,
         limit: int = 100,
+        offset: int = 0,
+        owner_user_id: UUID | None = None,
+        search: str | None = None,
+        view: LeadSavedView | None = None,
     ) -> tuple[CanonicalLeadRecord, ...]:
-        result = await self._session.execute(
+        statement = (
             select(LeadModel)
-            .where(LeadModel.workspace_id == workspace_id)
+            .where(*_workspace_scope_clauses(workspace_id, owner_user_id, search))
             .order_by(
                 LeadModel.last_activity_at.desc().nulls_last(), LeadModel.facts_derived_at.desc()
             )
-            .limit(limit),
+            .limit(limit)
+            .offset(offset)
         )
+        if view is not None:
+            statement = statement.where(_saved_view_clause(view, now=datetime.now(UTC)))
+        result = await self._session.execute(statement)
         return tuple(_model_to_record(model) for model in result.scalars().all())
+
+    async def count_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        owner_user_id: UUID | None = None,
+        search: str | None = None,
+        view: LeadSavedView | None = None,
+    ) -> int:
+        statement = (
+            select(func.count())
+            .select_from(LeadModel)
+            .where(*_workspace_scope_clauses(workspace_id, owner_user_id, search))
+        )
+        if view is not None:
+            statement = statement.where(_saved_view_clause(view, now=datetime.now(UTC)))
+        result = await self._session.execute(statement)
+        return int(result.scalar_one())
+
+    async def count_views_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        owner_user_id: UUID | None = None,
+        search: str | None = None,
+    ) -> LeadWorkspaceViewCounts:
+        now = datetime.now(UTC)
+        statement = select(
+            func.count(),
+            func.count().filter(_saved_view_clause(LeadSavedView.NEEDS_HUMAN, now=now)),
+            func.count().filter(_saved_view_clause(LeadSavedView.BLOCKED, now=now)),
+            func.count().filter(_saved_view_clause(LeadSavedView.NO_OWNER, now=now)),
+            func.count().filter(_saved_view_clause(LeadSavedView.PAUSED_STALE, now=now)),
+        ).select_from(LeadModel)
+        statement = statement.where(*_workspace_scope_clauses(workspace_id, owner_user_id, search))
+        result = await self._session.execute(statement)
+        total, needs_human, blocked, no_owner, paused_stale = result.one()
+        return LeadWorkspaceViewCounts(
+            total=int(total),
+            needs_human=int(needs_human),
+            blocked=int(blocked),
+            no_owner=int(no_owner),
+            paused_stale=int(paused_stale),
+        )
 
     async def get_by_id(
         self,
@@ -563,6 +635,181 @@ def _phone_match_candidates(phone_number: str) -> tuple[str, ...]:
 def _normalized_email(email_address: str) -> str | None:
     normalized = email_address.strip().lower()
     return normalized or None
+
+
+def _workspace_scope_clauses(
+    workspace_id: WorkspaceId,
+    owner_user_id: UUID | None,
+    search: str | None,
+) -> list[ColumnElement[bool]]:
+    clauses: list[ColumnElement[bool]] = [LeadModel.workspace_id == workspace_id]
+    if owner_user_id is not None:
+        clauses.append(_owner_scope_clause(owner_user_id))
+    search_clause = _search_clause(search)
+    if search_clause is not None:
+        clauses.append(search_clause)
+    return clauses
+
+
+def _saved_view_clause(view: LeadSavedView, *, now: datetime) -> ColumnElement[bool]:
+    if view is LeadSavedView.NEEDS_HUMAN:
+        return _latest_workflow_state_subquery().in_(
+            (
+                WorkflowState.PAUSED.value,
+                WorkflowState.HUMAN_HANDOFF.value,
+                WorkflowState.HUMAN_OWNED.value,
+            )
+        )
+    if view is LeadSavedView.BLOCKED:
+        return _blocked_outreach_clause()
+    if view is LeadSavedView.NO_OWNER:
+        return not_(_mapped_app_user_exists_clause())
+    stale_before = now - timedelta(hours=PAUSED_STALE_THRESHOLD_HOURS)
+    return and_(
+        _latest_workflow_state_subquery() == WorkflowState.PAUSED.value,
+        _latest_workflow_transition_at_subquery() <= stale_before,
+    )
+
+
+def _latest_workflow_ordering() -> tuple[
+    UnaryExpression[datetime], UnaryExpression[datetime], UnaryExpression[UUID]
+]:
+    # Mirrors _LATEST_WORKFLOW_ORDERING in workflow_repository so the saved
+    # views agree with the latest_workflow shown on each lead row.
+    return (
+        LeadWorkflowModel.last_transition_at.desc(),
+        LeadWorkflowModel.created_at.desc(),
+        LeadWorkflowModel.workflow_id.desc(),
+    )
+
+
+def _latest_workflow_state_subquery() -> ColumnElement[str]:
+    return (
+        select(LeadWorkflowModel.state)
+        .where(
+            LeadWorkflowModel.workspace_id == LeadModel.workspace_id,
+            LeadWorkflowModel.lead_id == LeadModel.lead_id,
+        )
+        .order_by(*_latest_workflow_ordering())
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
+def _latest_workflow_transition_at_subquery() -> ColumnElement[datetime]:
+    return (
+        select(LeadWorkflowModel.last_transition_at)
+        .where(
+            LeadWorkflowModel.workspace_id == LeadModel.workspace_id,
+            LeadWorkflowModel.lead_id == LeadModel.lead_id,
+        )
+        .order_by(*_latest_workflow_ordering())
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
+def _blocked_outreach_clause() -> ColumnElement[bool]:
+    # SQL mirror of evaluate_contactability (without explicit automated
+    # permission) applied to both channels: a lead is "blocked" when at least
+    # one channel is currently unsendable. Kept in parity with the domain rule
+    # by tests in tests/infrastructure/persistence/postgres/test_lead_repository.py.
+    has_sms_destination = and_(
+        LeadModel.has_sms_capable_phone.is_(True),
+        LeadModel.primary_phone.is_not(None),
+    )
+    has_email_destination = and_(
+        LeadModel.has_email.is_(True),
+        LeadModel.primary_email.is_not(None),
+    )
+    has_any_contact_destination = or_(
+        has_email_destination,
+        and_(LeadModel.has_phone.is_(True), LeadModel.primary_phone.is_not(None)),
+    )
+    effective_do_not_contact = func.coalesce(
+        LeadModel.do_not_contact,
+        not_(has_any_contact_destination),
+    )
+    sms_blocked = or_(
+        LeadModel.suppression_types.contains([SuppressionType.SMS_OPT_OUT.value]),
+        not_(has_sms_destination),
+    )
+    email_blocked = or_(
+        LeadModel.suppression_types.contains([SuppressionType.EMAIL_UNSUBSCRIBED.value]),
+        not_(has_email_destination),
+    )
+    return or_(effective_do_not_contact.is_(True), sms_blocked, email_blocked)
+
+
+def _mapped_app_user_exists_clause() -> ColumnElement[bool]:
+    # Mirrors lead_assigned_agent_user_id + user lookup: the UI's "owner gap"
+    # means no app user could be resolved for the lead's assigned agent.
+    legacy_user_id_text = LeadModel.mapped_custom_fields["assigned_agent_user_id"].astext
+    return (
+        select(UserModel.user_id)
+        .where(
+            or_(
+                and_(
+                    LeadModel.assigned_agent_user_id.is_not(None),
+                    UserModel.user_id == LeadModel.assigned_agent_user_id,
+                ),
+                and_(
+                    LeadModel.assigned_agent_user_id.is_(None),
+                    legacy_user_id_text.is_not(None),
+                    legacy_user_id_text != "",
+                    cast(UserModel.user_id, String) == legacy_user_id_text,
+                ),
+            )
+        )
+        .exists()
+    )
+
+
+def _owner_scope_clause(owner_user_id: UUID) -> ColumnElement[bool]:
+    # Mirrors lead_effective_owner_user_id precedence: effective owner wins,
+    # then assigned agent, then the legacy mapped custom field.
+    owner_text = str(owner_user_id)
+    return or_(
+        LeadModel.effective_owner_user_id == owner_user_id,
+        and_(
+            LeadModel.effective_owner_user_id.is_(None),
+            LeadModel.assigned_agent_user_id == owner_user_id,
+        ),
+        and_(
+            LeadModel.effective_owner_user_id.is_(None),
+            LeadModel.assigned_agent_user_id.is_(None),
+            LeadModel.mapped_custom_fields["assigned_agent_user_id"].astext == owner_text,
+        ),
+    )
+
+
+def _search_clause(search: str | None) -> ColumnElement[bool] | None:
+    if search is None:
+        return None
+    normalized = search.strip()
+    if not normalized:
+        return None
+    pattern = f"%{_escape_like(normalized)}%"
+    # The UI's display name falls back to crm_lead_id when the mapped
+    # display_name custom field is absent, so search must cover both.
+    clauses: list[ColumnElement[bool]] = [
+        LeadModel.mapped_custom_fields["display_name"].astext.ilike(pattern, escape="\\"),
+        LeadModel.crm_lead_id.ilike(pattern, escape="\\"),
+        LeadModel.primary_email.ilike(pattern, escape="\\"),
+        LeadModel.lead_source.ilike(pattern, escape="\\"),
+        LeadModel.lead_stage.ilike(pattern, escape="\\"),
+    ]
+    digits_only = "".join(character for character in normalized if character.isdigit())
+    if len(digits_only) >= 4:
+        normalized_phone = func.regexp_replace(LeadModel.primary_phone, "[^0-9]", "", "g")
+        clauses.append(normalized_phone.like(f"%{digits_only}%"))
+    else:
+        clauses.append(LeadModel.primary_phone.ilike(pattern, escape="\\"))
+    return or_(*clauses)
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _by_id_statement(

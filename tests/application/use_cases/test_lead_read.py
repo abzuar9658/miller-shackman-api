@@ -16,6 +16,7 @@ from app.application.services.lead_decision_tree import (
     build_lead_decision_tree,
 )
 from app.application.use_cases.lead_read import (
+    LeadListResult,
     LeadReadReasonCode,
     LeadReadStatus,
     _paused_search_plan_view,
@@ -405,6 +406,87 @@ def test_assigned_agent_list_lead_views_returns_only_owned_leads() -> None:
     assert result.status == LeadReadStatus.OK
     assert len(result.views) == 1
     assert result.views[0].lead.lead_id == LEAD_ID
+
+
+def test_list_lead_views_paginates_and_reports_total_count() -> None:
+    leads = tuple(
+        replace(_lead(), lead_id=UUID(int=1000 + index), crm_lead_id=f"crm-{index}")
+        for index in range(5)
+    )
+
+    def _list(offset: int) -> LeadListResult:
+        return asyncio.run(
+            list_lead_views(
+                actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+                workspace_id=WORKSPACE_ID,
+                lead_repository=FakeLeadRepository(leads),
+                workflow_repository=FakeLeadWorkflowRepository(()),
+                activity_repository=FakeLeadActivityRepository(()),
+                rejected_draft_review_repository=FakeRejectedDraftReviewRepository(()),
+                inbound_message_repository=FakeInboundMessageRepository(()),
+                handoff_repository=FakeHandoffRepository(()),
+                user_repository=FakeUserRepository({USER_ID: _user()}),
+                crm_agent_repository=FakeCRMAgentRepository(()),
+                limit=2,
+                offset=offset,
+            )
+        )
+
+    first_page = _list(offset=0)
+    second_page = _list(offset=2)
+    last_page = _list(offset=4)
+
+    assert first_page.status == LeadReadStatus.OK
+    assert len(first_page.views) == 2
+    assert first_page.total_count == 5
+    assert first_page.limit == 2
+    assert first_page.offset == 0
+    assert len(second_page.views) == 2
+    assert second_page.offset == 2
+    assert len(last_page.views) == 1
+    first_ids = {view.lead.lead_id for view in first_page.views}
+    second_ids = {view.lead.lead_id for view in second_page.views}
+    assert not first_ids & second_ids
+
+
+def test_list_lead_views_search_filters_and_recounts_across_pages() -> None:
+    matching = replace(
+        _lead(),
+        lead_id=UUID(int=2001),
+        crm_lead_id="crm-match",
+        primary_email="casey.match@example.com",
+        mapped_custom_fields={"display_name": "Casey Match"},
+    )
+    other = replace(
+        _lead(),
+        lead_id=UUID(int=2002),
+        crm_lead_id="crm-other",
+        primary_email="drew.other@example.com",
+        mapped_custom_fields={"display_name": "Drew Other"},
+    )
+
+    result = asyncio.run(
+        list_lead_views(
+            actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+            workspace_id=WORKSPACE_ID,
+            lead_repository=FakeLeadRepository((matching, other)),
+            workflow_repository=FakeLeadWorkflowRepository(()),
+            activity_repository=FakeLeadActivityRepository(()),
+            rejected_draft_review_repository=FakeRejectedDraftReviewRepository(()),
+            inbound_message_repository=FakeInboundMessageRepository(()),
+            handoff_repository=FakeHandoffRepository(()),
+            user_repository=FakeUserRepository({USER_ID: _user()}),
+            crm_agent_repository=FakeCRMAgentRepository(()),
+            limit=50,
+            offset=0,
+            search="casey",
+        )
+    )
+
+    assert result.status == LeadReadStatus.OK
+    assert result.total_count == 1
+    assert len(result.views) == 1
+    assert result.views[0].lead.lead_id == matching.lead_id
 
 
 def test_assigned_agent_list_lead_views_uses_effective_owner_visibility() -> None:

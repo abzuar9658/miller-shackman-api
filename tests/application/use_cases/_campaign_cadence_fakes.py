@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
 
+from app.application.ports.lead_read import LeadSavedView, LeadWorkspaceViewCounts
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
 from app.application.ports.messaging import EmailMessage, SMSMessage
 from app.domain.campaigns.execution import CampaignExecutionConfig, CampaignVersionStatus
@@ -644,13 +645,41 @@ class FakeLeadRepository:
         workspace_id: WorkspaceId,
         *,
         limit: int = 100,
+        offset: int = 0,
+        owner_user_id: UUID | None = None,
+        search: str | None = None,
+        view: LeadSavedView | None = None,
     ) -> tuple[CanonicalLeadRecord, ...]:
+        _ = (owner_user_id, search, view)
         matches = tuple(
             lead
             for (lead_workspace_id, _), lead in self.by_id.items()
             if lead_workspace_id == workspace_id
         )
-        return matches[:limit]
+        return matches[offset : offset + limit]
+
+    async def count_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        owner_user_id: UUID | None = None,
+        search: str | None = None,
+        view: LeadSavedView | None = None,
+    ) -> int:
+        _ = (owner_user_id, search, view)
+        return sum(1 for (lead_workspace_id, _) in self.by_id if lead_workspace_id == workspace_id)
+
+    async def count_views_for_workspace(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        owner_user_id: UUID | None = None,
+        search: str | None = None,
+    ) -> LeadWorkspaceViewCounts:
+        total = await self.count_for_workspace(
+            workspace_id, owner_user_id=owner_user_id, search=search
+        )
+        return LeadWorkspaceViewCounts(total=total)
 
 
 def _normalized_phone(phone_number: str | None) -> str | None:
@@ -752,6 +781,17 @@ class FakeLeadWorkflowRepository:
             if workflow.workspace_id == workspace_id
         )
         return matches[:limit]
+
+    async def list_latest_for_leads(
+        self,
+        workspace_id: WorkspaceId,
+        lead_ids: tuple[LeadId, ...],
+    ) -> tuple[LeadWorkflow, ...]:
+        return tuple(
+            workflow
+            for workflow in self.latest_by_lead.values()
+            if workflow.workspace_id == workspace_id and workflow.lead_id in lead_ids
+        )
 
     async def list_paused_for_workspace(
         self,

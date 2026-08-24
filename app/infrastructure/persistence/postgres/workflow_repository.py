@@ -39,6 +39,22 @@ class PostgresLeadWorkflowRepository:
         )
         return tuple(_model_to_workflow(model) for model in result.scalars().all())
 
+    async def list_latest_for_leads(
+        self,
+        workspace_id: WorkspaceId,
+        lead_ids: tuple[LeadId, ...],
+    ) -> tuple[LeadWorkflow, ...]:
+        if not lead_ids:
+            return ()
+        result = await self._session.execute(
+            select(LeadWorkflowModel)
+            .where(LeadWorkflowModel.workspace_id == workspace_id)
+            .where(LeadWorkflowModel.lead_id.in_(lead_ids))
+            .distinct(LeadWorkflowModel.lead_id)
+            .order_by(LeadWorkflowModel.lead_id, *_LATEST_WORKFLOW_ORDERING),
+        )
+        return tuple(_model_to_workflow(model) for model in result.scalars().all())
+
     async def get_latest_for_lead(
         self,
         workspace_id: WorkspaceId,
