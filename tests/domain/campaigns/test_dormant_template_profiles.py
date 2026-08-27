@@ -39,6 +39,39 @@ def test_profile_composes_validated_prompt_and_wrapper() -> None:
     )
 
 
+def test_detailed_length_overrides_default_brevity_prompt() -> None:
+    profile = DormantStepTemplateProfile(length=DormantMessageLength.DETAILED)
+
+    result = apply_dormant_step_template_profile(
+        WorkspaceOutboundDraftingConfig(workspace_id=WORKSPACE_ID),
+        profile,
+        channel="email",
+    )
+
+    assert "keep it to a few short sentences" not in result.email_prompt_text
+    assert "MINIMUM of 180 words" in result.email_prompt_text
+    assert "overrides any earlier instruction" in result.email_prompt_text
+    assert "Final length check" in result.email_prompt_text
+    assert "under 180 words" in result.email_prompt_text
+
+
+def test_customized_channel_prompt_is_preserved() -> None:
+    profile = DormantStepTemplateProfile(length=DormantMessageLength.DETAILED)
+    custom_prompt = "Always write in the brokerage house style."
+
+    result = apply_dormant_step_template_profile(
+        WorkspaceOutboundDraftingConfig(
+            workspace_id=WORKSPACE_ID,
+            email_prompt_text=custom_prompt,
+        ),
+        profile,
+        channel="email",
+    )
+
+    assert result.email_prompt_text.startswith(custom_prompt)
+    assert "MINIMUM of 180 words" in result.email_prompt_text
+
+
 def test_profile_mapping_round_trip_is_stable() -> None:
     profile = DormantStepTemplateProfile(custom_instructions="Avoid exclamation marks.")
 

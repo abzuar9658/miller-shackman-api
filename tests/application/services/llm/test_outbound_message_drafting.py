@@ -1,6 +1,6 @@
 import json
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
 from app.application.services.llm.outbound_message_drafting import (
@@ -42,7 +42,7 @@ class FakeLLMClient:
         )
 
 
-def _lead() -> CanonicalLeadRecord:
+def _lead(*, display_name: str | None = None) -> CanonicalLeadRecord:
     return CanonicalLeadRecord(
         workspace_id=uuid4(),
         lead_id=uuid4(),
@@ -52,6 +52,7 @@ def _lead() -> CanonicalLeadRecord:
         source_payload_version="test:v1",
         lead_source="website",
         lead_stage="long_term_nurture",
+        mapped_custom_fields=({"display_name": display_name} if display_name else {}),
     )
 
 
@@ -61,6 +62,7 @@ def _draft_json(
     subject: str | None = None,
     confidence: float = 0.91,
     safety_flags: tuple[str, ...] = (),
+    lead_first_name: str | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -69,6 +71,7 @@ def _draft_json(
             "confidence": confidence,
             "personalization_notes": ["Used safe lead stage context."],
             "safety_flags": list(safety_flags),
+            "lead_first_name": lead_first_name,
         },
     )
 
@@ -115,7 +118,7 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
     assert result.body == "Hi there,\n\nare you still thinking about making a move this year?"
     assert result.model == "openai/gpt-4o-mini"
     assert result.usage_tokens == 42
-    assert llm.requests[0].prompt_version == "outbound_message_draft:v16:r1"
+    assert llm.requests[0].prompt_version == "outbound_message_draft:v17:r1"
     assert "Austin" in llm.requests[0].prompt
     assert "Journey: dormant" in llm.requests[0].prompt
     assert "lease-end timing changed" in llm.requests[0].prompt
@@ -753,3 +756,160 @@ async def test_strips_inline_duplicate_sms_greeting() -> None:
         "2-bedroom apartment in Queens under $2k/month.\n"
         "Would you like me to have your assigned agent send over a few current options?"
     )
+
+
+async def test_requests_name_extraction_when_crm_name_missing() -> None:
+    llm = FakeLLMClient(_draft_json())
+
+    await draft_outbound_message(
+        lead=_lead(),
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(),
+        llm_client=llm,
+    )
+
+    prompt = llm.requests[0].prompt
+    assert "The CRM record has no usable name for this lead." in prompt
+    assert "lead_first_name (string or null)" in prompt
+
+
+def _greeting_config(workspace_id: UUID) -> WorkspaceOutboundDraftingConfig:
+    return WorkspaceOutboundDraftingConfig(
+        workspace_id=workspace_id,
+        sms_template="Hi {{lead_first_name}},\n\n{{message_body}}",
+    )
+
+
+async def test_does_not_request_name_extraction_when_crm_name_present() -> None:
+    llm = FakeLLMClient(_draft_json())
+    lead = _lead(display_name="Jordan Sample")
+
+    result = await draft_outbound_message(
+        lead=lead,
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(),
+        llm_client=llm,
+        drafting_config=_greeting_config(lead.workspace_id),
+    )
+
+    prompt = llm.requests[0].prompt
+    assert "The CRM record has no usable name for this lead." not in prompt
+    assert "Return only JSON" in prompt
+    assert ", lead_first_name (string or null)" not in prompt
+    assert result.body is not None
+    assert result.body.startswith("Hi Jordan,")
+
+
+async def test_uses_extracted_name_when_it_appears_in_approved_context() -> None:
+    lead = _lead()
+    result = await draft_outbound_message(
+        lead=lead,
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(
+            latest_lead_request=(
+                "My name is Punej and i am looking for 2 bedroom apartments in Queens."
+            ),
+        ),
+        llm_client=FakeLLMClient(_draft_json(lead_first_name="Punej")),
+        drafting_config=_greeting_config(lead.workspace_id),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.DRAFTED
+    assert result.body is not None
+    assert result.body.startswith("Hi Punej,")
+
+
+async def test_uses_extracted_name_found_in_recent_conversation_items() -> None:
+    lead = _lead()
+    result = await draft_outbound_message(
+        lead=lead,
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(
+            recent_conversation_items=(
+                ApprovedOutboundConversationItem(
+                    occurred_at=NOW.isoformat(),
+                    title="Inbound message",
+                    content="Hi, this is marcus. Still looking in Riverdale.",
+                    direction="inbound",
+                ),
+            ),
+        ),
+        llm_client=FakeLLMClient(_draft_json(lead_first_name="marcus")),
+        drafting_config=_greeting_config(lead.workspace_id),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.DRAFTED
+    assert result.body is not None
+    assert result.body.startswith("Hi Marcus,")
+
+
+async def test_discards_extracted_name_not_present_in_context() -> None:
+    lead = _lead()
+    result = await draft_outbound_message(
+        lead=lead,
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(
+            latest_lead_request="Looking for 2 bedroom apartments in Queens.",
+        ),
+        llm_client=FakeLLMClient(_draft_json(lead_first_name="Punej")),
+        drafting_config=_greeting_config(lead.workspace_id),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.DRAFTED
+    assert result.body is not None
+    assert result.body.startswith("Hi there,")
+
+
+async def test_discards_extracted_name_that_is_not_name_shaped() -> None:
+    lead = _lead()
+    result = await draft_outbound_message(
+        lead=lead,
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(
+            latest_lead_request="Reach me at punej@example.com about Queens apartments.",
+        ),
+        llm_client=FakeLLMClient(_draft_json(lead_first_name="punej@example.com")),
+        drafting_config=_greeting_config(lead.workspace_id),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.DRAFTED
+    assert result.body is not None
+    assert result.body.startswith("Hi there,")
+
+
+async def test_crm_name_takes_precedence_over_extracted_name() -> None:
+    lead = _lead(display_name="Jordan Sample")
+    result = await draft_outbound_message(
+        lead=lead,
+        channel=ContactChannel.SMS,
+        campaign_goal="Re-engage dormant buyer leads.",
+        brokerage_name="Miller Schackman",
+        assigned_agent_name=None,
+        lead_context=ApprovedOutboundLeadContext(
+            latest_lead_request="My name is Punej.",
+        ),
+        llm_client=FakeLLMClient(_draft_json(lead_first_name="Punej")),
+        drafting_config=_greeting_config(lead.workspace_id),
+    )
+
+    assert result.status == OutboundMessageDraftStatus.DRAFTED
+    assert result.body is not None
+    assert result.body.startswith("Hi Jordan,")

@@ -26,7 +26,7 @@ from app.domain.outbound_drafting import (
 
 logger = structlog.get_logger(__name__)
 
-OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v16"
+OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v17"
 MIN_DRAFT_CONFIDENCE = 0.7
 MAX_SMS_BODY_LENGTH = 320
 MAX_EMAIL_BODY_LENGTH = 4000
@@ -167,6 +167,7 @@ class _LLMOutboundMessageDraft(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     personalization_notes: tuple[str, ...] = ()
     safety_flags: tuple[str, ...] = ()
+    lead_first_name: str | None = None
 
     @field_validator("confidence", mode="before")
     @classmethod
@@ -177,6 +178,13 @@ class _LLMOutboundMessageDraft(BaseModel):
     @classmethod
     def _coerce_string_collections(cls, value: object) -> object:
         return coerce_string_tuple(value)
+
+    @field_validator("lead_first_name", mode="before")
+    @classmethod
+    def _coerce_lead_first_name(cls, value: object) -> object:
+        if value is None or isinstance(value, str):
+            return value
+        return None
 
 
 async def draft_outbound_message(
@@ -200,7 +208,7 @@ async def draft_outbound_message(
         lead.workspace_id,
     )
     resolved_agent_name = _resolved_assigned_agent_name(assigned_agent_name)
-    resolved_lead_first_name = _resolved_lead_first_name(lead)
+    crm_lead_first_name = _crm_lead_first_name(lead)
     prompt_version = _prompt_version_for_config(resolved_config)
     prompt = _build_prompt(
         lead=lead,
@@ -213,6 +221,7 @@ async def draft_outbound_message(
         journey_change=journey_change,
         message_purpose=message_purpose,
         drafting_config=resolved_config,
+        request_lead_name_extraction=crm_lead_first_name is None,
     )
     logger.info(
         "outbound_message_draft_prompt",
@@ -231,7 +240,7 @@ async def draft_outbound_message(
             provider=provider,
             task=LLMTaskKind.DRAFTING,
             temperature=0.4,
-            max_tokens=700,
+            max_tokens=1000,
         ),
     )
 
@@ -261,6 +270,13 @@ async def draft_outbound_message(
             reasons=(OutboundMessageDraftReasonCode.INVALID_LLM_RESPONSE,),
         )
 
+    resolved_lead_first_name = crm_lead_first_name or (
+        _validated_extracted_lead_first_name(
+            draft.lead_first_name,
+            lead_context=lead_context,
+        )
+        or "there"
+    )
     reasons = _validation_reasons(draft, channel=channel, min_confidence=min_confidence)
     status = OutboundMessageDraftStatus.DRAFTED
     if reasons:
@@ -359,6 +375,7 @@ def _build_prompt(
     journey_change: OutboundJourneyChange | None,
     message_purpose: str | None,
     drafting_config: WorkspaceOutboundDraftingConfig,
+    request_lead_name_extraction: bool = False,
 ) -> str:
     channel_template = _channel_template_for_config(drafting_config, channel=channel)
     channel_prompt_text = _channel_prompt_text_for_config(
@@ -554,10 +571,30 @@ def _build_prompt(
         "For email, the application may also apply the admin-configured subject template "
         "after you respond. Provide a concise, natural subject that works well when inserted "
         "into that subject template.",
+    ])
+
+    if request_lead_name_extraction:
+        sections.extend([
+            "",
+            "The CRM record has no usable name for this lead. If the lead explicitly "
+            "stated their own first name in the approved lead context above (for example "
+            "'my name is ...' or 'this is ...'), return that exact name as "
+            "lead_first_name. Copy it verbatim from the context. If the lead never "
+            "stated their own name, return null for lead_first_name. Never guess, "
+            "infer, or invent a name, and never use another person's name (agent, "
+            "spouse, reference).",
+        ])
+
+    sections.extend([
         "",
         "Return only JSON with keys: body (string), subject (string), confidence (a "
         "number between 0.0 and 1.0), personalization_notes (an array of strings), "
-        "safety_flags (an array of strings; use an empty array [] when there are none).",
+        "safety_flags (an array of strings; use an empty array [] when there are none)"
+        + (
+            ", lead_first_name (string or null)."
+            if request_lead_name_extraction
+            else "."
+        ),
     ])
 
     return "\n".join(sections)
@@ -628,12 +665,39 @@ def _resolved_assigned_agent_name(assigned_agent_name: str | None) -> str | None
     return normalized or None
 
 
-def _resolved_lead_first_name(lead: CanonicalLeadRecord) -> str:
+def _crm_lead_first_name(lead: CanonicalLeadRecord) -> str | None:
     raw_name = str(lead.mapped_custom_fields.get("display_name") or "").strip()
     if not raw_name or "@" in raw_name:
-        return "there"
+        return None
     first_name = raw_name.split()[0].strip(",.!? ")
-    return first_name or "there"
+    return first_name or None
+
+
+_EXTRACTED_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z'\-]{0,29}$")
+
+
+def _validated_extracted_lead_first_name(
+    extracted_name: str | None,
+    *,
+    lead_context: ApprovedOutboundLeadContext,
+) -> str | None:
+    """Accept an LLM-extracted lead name only when it appears verbatim in the
+    approved context we sent, so the model cannot invent or guess a name."""
+    if extracted_name is None:
+        return None
+    candidate = extracted_name.strip().strip(",.!? ")
+    if not candidate or not _EXTRACTED_NAME_PATTERN.fullmatch(candidate):
+        return None
+    context_texts = [
+        lead_context.latest_lead_request or "",
+        lead_context.conversation_summary or "",
+        lead_context.conversation_memory_summary or "",
+        *(item.content for item in lead_context.recent_conversation_items),
+    ]
+    pattern = re.compile(rf"\b{re.escape(candidate)}\b", re.IGNORECASE)
+    if not any(pattern.search(text) for text in context_texts):
+        return None
+    return candidate.capitalize() if candidate.islower() else candidate
 
 
 def _normalized_message_body_fragment(body: str) -> str:

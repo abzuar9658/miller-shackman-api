@@ -52,6 +52,25 @@ DEFAULT_EMAIL_PROMPT_TEXT = (
     "recent outbound phrasing. Do not add a greeting, sign-off, sender name, or "
     "brokerage name when the templates already provide that formatting."
 )
+_LENGTH_NEUTRAL_SMS_PROMPT_TEXT = (
+    "Write an SMS that reads like a casual text from a real person. Use "
+    "contractions and everyday words, keep each sentence to a single thought, "
+    "and ask at most one easy question. No marketing phrases, no forced "
+    "enthusiasm, no emojis, and nothing that sounds automated. Personalize only "
+    "from the approved context and don't repeat recent outbound phrasing. Do "
+    "not add a greeting or sign-off when the template already provides that "
+    "formatting."
+)
+_LENGTH_NEUTRAL_EMAIL_PROMPT_TEXT = (
+    "Write a natural follow-up email body with a short, plain subject line, "
+    "like an agent typing a personal note. Use contractions and everyday "
+    "words, and ask at most one easy question. Avoid marketing language, "
+    "filler openers like 'I hope you're doing well' or 'I wanted to reach "
+    "out', and anything that sounds automated or templated. Personalize only "
+    "from the approved context and don't repeat recent outbound phrasing. Do "
+    "not add a greeting, sign-off, sender name, or brokerage name when the "
+    "templates already provide that formatting."
+)
 LEGACY_SMS_INSTRUCTION_TEMPLATE = (
     "Write a short, conversational SMS. Acknowledge the lead's latest request, "
     "use approved listing context only when it is present, and end with a clear "
@@ -203,17 +222,30 @@ def default_workspace_outbound_drafting_config(
     return WorkspaceOutboundDraftingConfig(workspace_id=workspace_id)
 
 
+def _length_neutral_channel_prompt(
+    drafting_config: WorkspaceOutboundDraftingConfig,
+    *,
+    channel: str,
+) -> str:
+    # When the workspace still uses the stock channel prompt, swap it for the
+    # length-neutral variant so its built-in brevity language cannot contradict
+    # the step profile's Length directive. Admin-customized prompts are kept.
+    if channel == "sms":
+        if drafting_config.sms_prompt_text == DEFAULT_SMS_PROMPT_TEXT:
+            return _LENGTH_NEUTRAL_SMS_PROMPT_TEXT
+        return drafting_config.sms_prompt_text
+    if drafting_config.email_prompt_text == DEFAULT_EMAIL_PROMPT_TEXT:
+        return _LENGTH_NEUTRAL_EMAIL_PROMPT_TEXT
+    return drafting_config.email_prompt_text
+
+
 def apply_dormant_step_template_profile(
     drafting_config: WorkspaceOutboundDraftingConfig,
     profile: DormantStepTemplateProfile,
     *,
     channel: str,
 ) -> WorkspaceOutboundDraftingConfig:
-    channel_prompt = (
-        drafting_config.sms_prompt_text
-        if channel == "sms"
-        else drafting_config.email_prompt_text
-    )
+    channel_prompt = _length_neutral_channel_prompt(drafting_config, channel=channel)
     profiled_prompt = f"{channel_prompt}\n\n{_dormant_profile_prompt(profile)}"
     template = _dormant_profile_template(profile)
     if channel == "sms":
@@ -320,7 +352,9 @@ def _dormant_profile_prompt(profile: DormantStepTemplateProfile) -> str:
         "Apply this validated dormant-step writing profile:",
         f"- Tone: {profile.tone.value.replace('_', ' ')}.",
         f"- Style: {profile.style.value.replace('_', ' ')}.",
-        f"- Length: {_length_directive(profile.length)}.",
+        f"- Length: {_length_directive(profile.length)}. This length requirement "
+        "overrides any earlier instruction in this prompt about how short or long "
+        "the message should be.",
         f"- Call to action: {_cta_directive(profile.call_to_action)}.",
         f"- Personalize only with these categories when present: {personalization or 'none'}.",
         f"- Listing context: {_listing_context_directive(profile.listing_context)}.",
@@ -328,16 +362,48 @@ def _dormant_profile_prompt(profile: DormantStepTemplateProfile) -> str:
     ]
     if profile.custom_instructions:
         directives.append(f"- Additional admin guidance: {profile.custom_instructions.strip()}")
+    length_check = _length_self_check(profile.length)
+    if length_check:
+        directives.append(length_check)
     return "\n".join(directives)
 
 
 def _length_directive(length: DormantMessageLength) -> str:
     return {
-        DormantMessageLength.VERY_SHORT: "one or two brief sentences",
-        DormantMessageLength.SHORT: "two or three concise sentences",
-        DormantMessageLength.MODERATE: "one short paragraph",
-        DormantMessageLength.DETAILED: "two short email paragraphs",
+        DormantMessageLength.VERY_SHORT: (
+            "one or two brief sentences, around 25 words total"
+        ),
+        DormantMessageLength.SHORT: (
+            "two or three concise sentences, around 50 words total"
+        ),
+        DormantMessageLength.MODERATE: (
+            "one solid paragraph of at least 90 words, up to about 130 words"
+        ),
+        DormantMessageLength.DETAILED: (
+            "a MINIMUM of 180 words, up to about 280 words, written as three full "
+            "paragraphs. A body under 180 words is too short and violates this "
+            "profile. Use the room to acknowledge their situation in detail, recap "
+            "their search criteria and every relevant piece of approved context, "
+            "and close with the call to action — never compress this into one or "
+            "two short paragraphs, even if other instructions ask for a concise "
+            "message"
+        ),
     }[length]
+
+
+def _length_self_check(length: DormantMessageLength) -> str | None:
+    minimum_words = {
+        DormantMessageLength.MODERATE: 90,
+        DormantMessageLength.DETAILED: 180,
+    }.get(length)
+    if minimum_words is None:
+        return None
+    return (
+        f"- Final length check: before returning JSON, count the words in your "
+        f"body. If it is under {minimum_words} words, expand it using only the "
+        "approved context until it meets the Length directive. Do not return a "
+        "shorter body."
+    )
 
 
 def _cta_directive(call_to_action: DormantCallToAction) -> str:
