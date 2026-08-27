@@ -41,6 +41,7 @@ def map_follow_up_boss_person_to_canonical_lead(
         payload.get("assignedTo"),
     )
     assigned_agent_name = _text(payload.get("assignedTo"))
+    display_name = _display_name(payload)
     sms_permission_status = _contact_permission_status(
         payload,
         custom_fields,
@@ -89,6 +90,7 @@ def map_follow_up_boss_person_to_canonical_lead(
             custom_fields,
             mapped_custom_field_keys,
             assigned_agent_name=assigned_agent_name,
+            display_name=display_name,
         ),
         primary_email=_primary_email(emails),
         primary_phone=_primary_phone(phones),
@@ -219,6 +221,7 @@ def _mapped_custom_fields(
     allowed_keys: Iterable[str],
     *,
     assigned_agent_name: str | None,
+    display_name: str | None,
 ) -> dict[str, str]:
     if not isinstance(raw, Mapping):
         fields: dict[str, str] = {}
@@ -231,7 +234,19 @@ def _mapped_custom_fields(
         }
     if assigned_agent_name:
         fields.setdefault("assigned_agent_name", assigned_agent_name)
+    if display_name:
+        fields.setdefault("display_name", display_name)
     return fields
+
+
+def _display_name(payload: Mapping[str, Any]) -> str | None:
+    name = _text(payload.get("name"))
+    if name:
+        return name
+    parts = [
+        part for part in (_text(payload.get("firstName")), _text(payload.get("lastName"))) if part
+    ]
+    return " ".join(parts) or None
 
 
 def _custom_fields(payload: Mapping[str, Any]) -> Mapping[str, Any]:

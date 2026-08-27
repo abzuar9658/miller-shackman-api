@@ -80,6 +80,9 @@ async def test_get_lead_snapshot_maps_payload_to_canonical_record(
 ) -> None:
     payload = {
         "id": 123,
+        "name": "Ada Lovelace",
+        "firstName": "Ada",
+        "lastName": "Lovelace",
         "assignedUserId": 42,
         "assignedTo": "Agent Name",
         "type": "Buyer",
@@ -115,6 +118,7 @@ async def test_get_lead_snapshot_maps_payload_to_canonical_record(
     assert lead.mapped_custom_fields == {
         "budget": "650000",
         "assigned_agent_name": "Agent Name",
+        "display_name": "Ada Lovelace",
     }
 
 

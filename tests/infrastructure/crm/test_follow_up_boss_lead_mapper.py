@@ -20,6 +20,9 @@ def test_maps_buyer_payload_to_canonical_lead_facts() -> None:
     lead_id = uuid4()
     payload = {
         "id": 123,
+        "name": "Jordan Rivera",
+        "firstName": "Jordan",
+        "lastName": "Rivera",
         "assignedUserId": 42,
         "assignedTo": "Agent Name",
         "type": "Buyer",
@@ -59,6 +62,7 @@ def test_maps_buyer_payload_to_canonical_lead_facts() -> None:
     assert lead.mapped_custom_fields == {
         "budget": "750000",
         "assigned_agent_name": "Agent Name",
+        "display_name": "Jordan Rivera",
     }
     assert lead.primary_email == "lead@example.com"
     assert lead.primary_phone == "+15551234567"
@@ -96,6 +100,21 @@ def test_missing_type_and_partial_activity_fail_safe() -> None:
     assert lead.has_sms_capable_phone is False
     assert lead.last_meaningful_communication_at is None
     assert lead.activity_reliability == ActivityReliability.PARTIAL
+    assert "display_name" not in lead.mapped_custom_fields
+
+
+def test_display_name_falls_back_to_first_and_last_name_when_name_missing() -> None:
+    lead = map_follow_up_boss_person_to_canonical_lead(
+        workspace_id=uuid4(),
+        payload={
+            "id": 123,
+            "firstName": "Jordan",
+            "lastName": "Rivera",
+        },
+        now=NOW,
+    )
+
+    assert lead.mapped_custom_fields["display_name"] == "Jordan Rivera"
 
 
 def test_primary_phone_prefers_sms_capable_number_when_multiple_numbers_exist() -> None:
