@@ -373,6 +373,10 @@ class LeadWorkspaceViewCountsResponse(BaseModel):
     no_owner: int = 0
     paused_stale: int = 0
     not_enrolled: int = 0
+    default_nurture: int = 0
+    paused_search: int = 0
+    human_path: int = 0
+    finished: int = 0
 
 
 class LeadListResponse(BaseModel):

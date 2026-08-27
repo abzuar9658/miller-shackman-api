@@ -23,6 +23,7 @@ from app.application.ports.lead_read import (
     LeadReadWorkflowRepository,
     LeadReadWorkflowTransitionRepository,
     LeadSavedView,
+    LeadWorkflowStageFilter,
     LeadWorkspaceViewCounts,
 )
 from app.application.ports.rejected_draft_review import RejectedDraftReviewRepository
@@ -191,6 +192,7 @@ async def list_lead_views(
     offset: int = 0,
     search: str | None = None,
     view: LeadSavedView | None = None,
+    workflow_stage: LeadWorkflowStageFilter | None = None,
 ) -> LeadListResult:
     scoped_actor: AuthenticatedActor | None
     if _can_view_workspace_leads(actor):
@@ -212,9 +214,13 @@ async def list_lead_views(
     )
     total_count = (
         view_counts.total
-        if view is None
+        if view is None and workflow_stage is None
         else await lead_repository.count_for_workspace(
-            workspace_id, owner_user_id=owner_user_id, search=normalized_search, view=view
+            workspace_id,
+            owner_user_id=owner_user_id,
+            search=normalized_search,
+            view=view,
+            workflow_stage=workflow_stage,
         )
     )
     leads = await lead_repository.list_for_workspace(
@@ -224,6 +230,7 @@ async def list_lead_views(
         owner_user_id=owner_user_id,
         search=normalized_search,
         view=view,
+        workflow_stage=workflow_stage,
     )
     visible_leads = tuple(
         lead

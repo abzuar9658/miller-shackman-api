@@ -39,6 +39,35 @@ class LeadSavedView(StrEnum):
     BLOCKED = "blocked"
     NO_OWNER = "no_owner"
     PAUSED_STALE = "paused_stale"
+    # Journey-track views: mirror the web's lead journey path keys so the
+    # dashboard track pills can deep-link into a server-filtered leads list.
+    NOT_ENROLLED = "not_enrolled"
+    DEFAULT_NURTURE = "default_nurture"
+    PAUSED_SEARCH = "paused_search"
+    HUMAN_PATH = "human_path"
+    FINISHED = "finished"
+
+
+class LeadWorkflowStageFilter(StrEnum):
+    """Journey-stage filter keyed by the lead's latest workflow state.
+
+    Mirrors the web's LeadJourneyNodeKey values so the dashboard stage tiles
+    can deep-link into a server-filtered leads list; ``not_enrolled`` matches
+    leads with no workflow rows at all.
+    """
+
+    NOT_ENROLLED = "not_enrolled"
+    ELIGIBLE = "eligible"
+    QUEUED = "queued"
+    ACTIVE_NURTURE = "active_nurture"
+    WAITING_FOR_RESPONSE = "waiting_for_response"
+    RESPONSE_PROCESSING = "response_processing"
+    PAUSED = "paused"
+    HUMAN_HANDOFF = "human_handoff"
+    HUMAN_OWNED = "human_owned"
+    COMPLETED = "completed"
+    SUPPRESSED = "suppressed"
+    CLOSED = "closed"
 
 
 # A paused workflow older than this is considered stale and needs intervention;
@@ -53,10 +82,14 @@ class LeadWorkspaceViewCounts:
     blocked: int = 0
     no_owner: int = 0
     paused_stale: int = 0
-    # Not a filterable saved view: workspace-wide count of leads with no
-    # workflow at all (mirrors the UI's "not enrolled" journey node, where
-    # latest_workflow is null), consumed by the home dashboards' inventory.
+    # Journey-track counts: one per LeadSavedView track view, so dashboards
+    # show authoritative workspace-wide numbers per track and each count
+    # agrees exactly with the list the matching saved view returns.
     not_enrolled: int = 0
+    default_nurture: int = 0
+    paused_search: int = 0
+    human_path: int = 0
+    finished: int = 0
 
 
 class LeadReadLeadRepository(Protocol):
@@ -83,6 +116,7 @@ class LeadReadLeadRepository(Protocol):
         owner_user_id: UUID | None = None,
         search: str | None = None,
         view: LeadSavedView | None = None,
+        workflow_stage: LeadWorkflowStageFilter | None = None,
     ) -> tuple[CanonicalLeadRecord, ...]:
         raise NotImplementedError
 
@@ -93,6 +127,7 @@ class LeadReadLeadRepository(Protocol):
         owner_user_id: UUID | None = None,
         search: str | None = None,
         view: LeadSavedView | None = None,
+        workflow_stage: LeadWorkflowStageFilter | None = None,
     ) -> int:
         raise NotImplementedError
 

@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from app.application.ports.lead_activity import LeadActivityItem, LeadActivityKind
+from app.application.ports.lead_read import LeadSavedView, LeadWorkflowStageFilter
 from app.application.services.lead_cadence_progress import (
     CadenceStepProgressStatus,
     LeadCadenceJourney,
@@ -487,6 +488,148 @@ def test_list_lead_views_search_filters_and_recounts_across_pages() -> None:
     assert result.total_count == 1
     assert len(result.views) == 1
     assert result.views[0].lead.lead_id == matching.lead_id
+
+
+def test_list_lead_views_track_views_filter_and_count() -> None:
+    not_enrolled = replace(
+        _lead(), lead_id=UUID(int=3001), crm_lead_id="crm-track-1", paused_search_active=False
+    )
+    default_nurture = replace(
+        _lead(), lead_id=UUID(int=3002), crm_lead_id="crm-track-2", paused_search_active=False
+    )
+    paused_search = replace(_lead(), lead_id=UUID(int=3003), crm_lead_id="crm-track-3")
+    human = replace(
+        _lead(), lead_id=UUID(int=3004), crm_lead_id="crm-track-4", paused_search_active=False
+    )
+    finished = replace(_lead(), lead_id=UUID(int=3005), crm_lead_id="crm-track-5")
+    workflows = (
+        replace(
+            _workflow(),
+            workflow_id=UUID(int=4002),
+            lead_id=default_nurture.lead_id,
+            state=WorkflowState.ACTIVE_NURTURE,
+        ),
+        replace(
+            _workflow(),
+            workflow_id=UUID(int=4003),
+            lead_id=paused_search.lead_id,
+            state=WorkflowState.WAITING_FOR_RESPONSE,
+        ),
+        replace(
+            _workflow(),
+            workflow_id=UUID(int=4004),
+            lead_id=human.lead_id,
+            state=WorkflowState.HUMAN_HANDOFF,
+        ),
+        replace(
+            _workflow(),
+            workflow_id=UUID(int=4005),
+            lead_id=finished.lead_id,
+            state=WorkflowState.COMPLETED,
+        ),
+    )
+    repository = FakeLeadRepository(
+        (not_enrolled, default_nurture, paused_search, human, finished),
+        latest_workflows=workflows,
+    )
+
+    def _list(view: str) -> LeadListResult:
+        return asyncio.run(
+            list_lead_views(
+                actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+                workspace_id=WORKSPACE_ID,
+                lead_repository=repository,
+                workflow_repository=FakeLeadWorkflowRepository(workflows),
+                activity_repository=FakeLeadActivityRepository(()),
+                rejected_draft_review_repository=FakeRejectedDraftReviewRepository(()),
+                inbound_message_repository=FakeInboundMessageRepository(()),
+                handoff_repository=FakeHandoffRepository(()),
+                user_repository=FakeUserRepository({USER_ID: _user()}),
+                crm_agent_repository=FakeCRMAgentRepository(()),
+                view=LeadSavedView(view),
+            )
+        )
+
+    counts = _list("not_enrolled").view_counts
+    assert counts.not_enrolled == 1
+    assert counts.default_nurture == 1
+    assert counts.paused_search == 1
+    assert counts.human_path == 1
+    assert counts.finished == 1
+
+    expectations = {
+        "not_enrolled": not_enrolled.lead_id,
+        "default_nurture": default_nurture.lead_id,
+        "paused_search": paused_search.lead_id,
+        "human_path": human.lead_id,
+        "finished": finished.lead_id,
+    }
+    for view_key, expected_lead_id in expectations.items():
+        result = _list(view_key)
+        assert result.total_count == 1, view_key
+        assert [item.lead.lead_id for item in result.views] == [expected_lead_id], view_key
+
+
+def test_list_lead_views_workflow_stage_filters_and_recounts() -> None:
+    not_enrolled = replace(
+        _lead(), lead_id=UUID(int=5001), crm_lead_id="crm-stage-1", paused_search_active=False
+    )
+    nurturing = replace(
+        _lead(), lead_id=UUID(int=5002), crm_lead_id="crm-stage-2", paused_search_active=False
+    )
+    handed_off = replace(
+        _lead(), lead_id=UUID(int=5003), crm_lead_id="crm-stage-3", paused_search_active=False
+    )
+    workflows = (
+        replace(
+            _workflow(),
+            workflow_id=UUID(int=6002),
+            lead_id=nurturing.lead_id,
+            state=WorkflowState.ACTIVE_NURTURE,
+        ),
+        replace(
+            _workflow(),
+            workflow_id=UUID(int=6003),
+            lead_id=handed_off.lead_id,
+            state=WorkflowState.HUMAN_HANDOFF,
+        ),
+    )
+    repository = FakeLeadRepository(
+        (not_enrolled, nurturing, handed_off),
+        latest_workflows=workflows,
+    )
+
+    def _list(stage: str) -> LeadListResult:
+        return asyncio.run(
+            list_lead_views(
+                actor=_actor(WorkspaceMembershipRole.BROKERAGE_ADMIN),
+                workspace_id=WORKSPACE_ID,
+                lead_repository=repository,
+                workflow_repository=FakeLeadWorkflowRepository(workflows),
+                activity_repository=FakeLeadActivityRepository(()),
+                rejected_draft_review_repository=FakeRejectedDraftReviewRepository(()),
+                inbound_message_repository=FakeInboundMessageRepository(()),
+                handoff_repository=FakeHandoffRepository(()),
+                user_repository=FakeUserRepository({USER_ID: _user()}),
+                crm_agent_repository=FakeCRMAgentRepository(()),
+                workflow_stage=LeadWorkflowStageFilter(stage),
+            )
+        )
+
+    expectations = {
+        "not_enrolled": not_enrolled.lead_id,
+        "active_nurture": nurturing.lead_id,
+        "human_handoff": handed_off.lead_id,
+    }
+    for stage_key, expected_lead_id in expectations.items():
+        result = _list(stage_key)
+        assert result.status == LeadReadStatus.OK, stage_key
+        assert result.total_count == 1, stage_key
+        assert [item.lead.lead_id for item in result.views] == [expected_lead_id], stage_key
+
+    empty = _list("queued")
+    assert empty.total_count == 0
+    assert empty.views == ()
 
 
 def test_assigned_agent_list_lead_views_uses_effective_owner_visibility() -> None:

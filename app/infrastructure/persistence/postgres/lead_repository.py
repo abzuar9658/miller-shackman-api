@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.ports.lead_read import (
     PAUSED_STALE_THRESHOLD_HOURS,
     LeadSavedView,
+    LeadWorkflowStageFilter,
     LeadWorkspaceViewCounts,
 )
 from app.domain.common.ids import LeadId, WorkspaceId
@@ -63,6 +64,7 @@ class PostgresLeadRepository:
         owner_user_id: UUID | None = None,
         search: str | None = None,
         view: LeadSavedView | None = None,
+        workflow_stage: LeadWorkflowStageFilter | None = None,
     ) -> tuple[CanonicalLeadRecord, ...]:
         statement = (
             select(LeadModel)
@@ -75,6 +77,8 @@ class PostgresLeadRepository:
         )
         if view is not None:
             statement = statement.where(_saved_view_clause(view, now=datetime.now(UTC)))
+        if workflow_stage is not None:
+            statement = statement.where(_workflow_stage_clause(workflow_stage))
         result = await self._session.execute(statement)
         return tuple(_model_to_record(model) for model in result.scalars().all())
 
@@ -85,6 +89,7 @@ class PostgresLeadRepository:
         owner_user_id: UUID | None = None,
         search: str | None = None,
         view: LeadSavedView | None = None,
+        workflow_stage: LeadWorkflowStageFilter | None = None,
     ) -> int:
         statement = (
             select(func.count())
@@ -93,6 +98,8 @@ class PostgresLeadRepository:
         )
         if view is not None:
             statement = statement.where(_saved_view_clause(view, now=datetime.now(UTC)))
+        if workflow_stage is not None:
+            statement = statement.where(_workflow_stage_clause(workflow_stage))
         result = await self._session.execute(statement)
         return int(result.scalar_one())
 
@@ -110,11 +117,26 @@ class PostgresLeadRepository:
             func.count().filter(_saved_view_clause(LeadSavedView.BLOCKED, now=now)),
             func.count().filter(_saved_view_clause(LeadSavedView.NO_OWNER, now=now)),
             func.count().filter(_saved_view_clause(LeadSavedView.PAUSED_STALE, now=now)),
-            func.count().filter(not_(_any_workflow_exists_clause())),
+            func.count().filter(_saved_view_clause(LeadSavedView.NOT_ENROLLED, now=now)),
+            func.count().filter(_saved_view_clause(LeadSavedView.DEFAULT_NURTURE, now=now)),
+            func.count().filter(_saved_view_clause(LeadSavedView.PAUSED_SEARCH, now=now)),
+            func.count().filter(_saved_view_clause(LeadSavedView.HUMAN_PATH, now=now)),
+            func.count().filter(_saved_view_clause(LeadSavedView.FINISHED, now=now)),
         ).select_from(LeadModel)
         statement = statement.where(*_workspace_scope_clauses(workspace_id, owner_user_id, search))
         result = await self._session.execute(statement)
-        total, needs_human, blocked, no_owner, paused_stale, not_enrolled = result.one()
+        (
+            total,
+            needs_human,
+            blocked,
+            no_owner,
+            paused_stale,
+            not_enrolled,
+            default_nurture,
+            paused_search,
+            human_path,
+            finished,
+        ) = result.one()
         return LeadWorkspaceViewCounts(
             total=int(total),
             needs_human=int(needs_human),
@@ -122,6 +144,10 @@ class PostgresLeadRepository:
             no_owner=int(no_owner),
             paused_stale=int(paused_stale),
             not_enrolled=int(not_enrolled),
+            default_nurture=int(default_nurture),
+            paused_search=int(paused_search),
+            human_path=int(human_path),
+            finished=int(finished),
         )
 
     async def get_by_id(
@@ -653,6 +679,18 @@ def _workspace_scope_clauses(
     return clauses
 
 
+_HUMAN_PATH_STATES = (
+    WorkflowState.HUMAN_HANDOFF.value,
+    WorkflowState.HUMAN_OWNED.value,
+)
+
+_FINISHED_STATES = (
+    WorkflowState.COMPLETED.value,
+    WorkflowState.SUPPRESSED.value,
+    WorkflowState.CLOSED.value,
+)
+
+
 def _saved_view_clause(view: LeadSavedView, *, now: datetime) -> ColumnElement[bool]:
     if view is LeadSavedView.NEEDS_HUMAN:
         return _latest_workflow_state_subquery().in_(
@@ -666,11 +704,40 @@ def _saved_view_clause(view: LeadSavedView, *, now: datetime) -> ColumnElement[b
         return _blocked_outreach_clause()
     if view is LeadSavedView.NO_OWNER:
         return not_(_mapped_app_user_exists_clause())
+    # Track views mirror getLeadJourneyPathKey in the web app: finished and
+    # human are decided by the latest workflow state; the remaining enrolled
+    # leads split on the paused-search flag.
+    if view is LeadSavedView.NOT_ENROLLED:
+        return not_(_any_workflow_exists_clause())
+    if view is LeadSavedView.FINISHED:
+        return _latest_workflow_state_subquery().in_(_FINISHED_STATES)
+    if view is LeadSavedView.HUMAN_PATH:
+        return _latest_workflow_state_subquery().in_(_HUMAN_PATH_STATES)
+    if view is LeadSavedView.PAUSED_SEARCH:
+        return and_(
+            _any_workflow_exists_clause(),
+            _latest_workflow_state_subquery().not_in(_FINISHED_STATES + _HUMAN_PATH_STATES),
+            LeadModel.paused_search_active.is_(True),
+        )
+    if view is LeadSavedView.DEFAULT_NURTURE:
+        return and_(
+            _any_workflow_exists_clause(),
+            _latest_workflow_state_subquery().not_in(_FINISHED_STATES + _HUMAN_PATH_STATES),
+            LeadModel.paused_search_active.is_(False),
+        )
     stale_before = now - timedelta(hours=PAUSED_STALE_THRESHOLD_HOURS)
     return and_(
         _latest_workflow_state_subquery() == WorkflowState.PAUSED.value,
         _latest_workflow_transition_at_subquery() <= stale_before,
     )
+
+
+def _workflow_stage_clause(stage: LeadWorkflowStageFilter) -> ColumnElement[bool]:
+    # Mirrors the web's getLeadJourneyNodeKey: the stage is the state of the
+    # lead's latest workflow, falling back to not_enrolled when none exists.
+    if stage is LeadWorkflowStageFilter.NOT_ENROLLED:
+        return not_(_any_workflow_exists_clause())
+    return _latest_workflow_state_subquery() == stage.value
 
 
 def _latest_workflow_ordering() -> tuple[

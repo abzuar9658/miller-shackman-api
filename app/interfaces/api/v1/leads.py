@@ -5,7 +5,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.application.ports.lead_activity import LeadActivityItem
-from app.application.ports.lead_read import LeadReadLeadRepository, LeadSavedView
+from app.application.ports.lead_read import (
+    LeadReadLeadRepository,
+    LeadSavedView,
+    LeadWorkflowStageFilter,
+)
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
 from app.application.services.lead_cadence_progress import LeadCadenceProgressView
 from app.application.services.lead_decision_tree import LeadDecisionTreeView
@@ -214,6 +218,7 @@ async def list_leads_route(
     offset: Annotated[int, Query(ge=0)] = 0,
     search: Annotated[str | None, Query(max_length=200)] = None,
     view: Annotated[LeadSavedView | None, Query()] = None,
+    workflow_stage: Annotated[LeadWorkflowStageFilter | None, Query()] = None,
 ) -> LeadListResponse:
     result = await list_lead_views(
         actor=actor,
@@ -230,6 +235,7 @@ async def list_leads_route(
         offset=offset,
         search=search,
         view=view,
+        workflow_stage=workflow_stage,
     )
     if result.status == LeadReadStatus.REJECTED:
         raise HTTPException(
@@ -258,6 +264,10 @@ async def list_leads_route(
             no_owner=result.view_counts.no_owner,
             paused_stale=result.view_counts.paused_stale,
             not_enrolled=result.view_counts.not_enrolled,
+            default_nurture=result.view_counts.default_nurture,
+            paused_search=result.view_counts.paused_search,
+            human_path=result.view_counts.human_path,
+            finished=result.view_counts.finished,
         ),
     )
 

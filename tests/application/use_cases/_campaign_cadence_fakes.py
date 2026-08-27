@@ -3,7 +3,11 @@ from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
 
-from app.application.ports.lead_read import LeadSavedView, LeadWorkspaceViewCounts
+from app.application.ports.lead_read import (
+    LeadSavedView,
+    LeadWorkflowStageFilter,
+    LeadWorkspaceViewCounts,
+)
 from app.application.ports.llm import LLMCompletionRequest, LLMResult
 from app.application.ports.messaging import EmailMessage, SMSMessage
 from app.domain.campaigns.execution import CampaignExecutionConfig, CampaignVersionStatus
@@ -649,8 +653,9 @@ class FakeLeadRepository:
         owner_user_id: UUID | None = None,
         search: str | None = None,
         view: LeadSavedView | None = None,
+        workflow_stage: LeadWorkflowStageFilter | None = None,
     ) -> tuple[CanonicalLeadRecord, ...]:
-        _ = (owner_user_id, search, view)
+        _ = (owner_user_id, search, view, workflow_stage)
         matches = tuple(
             lead
             for (lead_workspace_id, _), lead in self.by_id.items()
@@ -665,8 +670,9 @@ class FakeLeadRepository:
         owner_user_id: UUID | None = None,
         search: str | None = None,
         view: LeadSavedView | None = None,
+        workflow_stage: LeadWorkflowStageFilter | None = None,
     ) -> int:
-        _ = (owner_user_id, search, view)
+        _ = (owner_user_id, search, view, workflow_stage)
         return sum(1 for (lead_workspace_id, _) in self.by_id if lead_workspace_id == workspace_id)
 
     async def count_views_for_workspace(

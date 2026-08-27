@@ -10,6 +10,7 @@ from app.application.ports.lead_read import (
     PAUSED_STALE_THRESHOLD_HOURS,
     LeadReadConversationSummary,
     LeadSavedView,
+    LeadWorkflowStageFilter,
     LeadWorkspaceViewCounts,
 )
 from app.application.services.canonical_lead_inputs import (
@@ -36,6 +37,11 @@ from app.domain.workflows import (
     LeadWorkflowOverrideAuditLog,
     WorkflowState,
     WorkflowTransition,
+)
+
+_HUMAN_PATH_STATES = frozenset({WorkflowState.HUMAN_HANDOFF, WorkflowState.HUMAN_OWNED})
+_FINISHED_STATES = frozenset(
+    {WorkflowState.COMPLETED, WorkflowState.SUPPRESSED, WorkflowState.CLOSED}
 )
 
 
@@ -104,8 +110,9 @@ class FakeLeadRepository:
         owner_user_id: UUID | None = None,
         search: str | None = None,
         view: LeadSavedView | None = None,
+        workflow_stage: LeadWorkflowStageFilter | None = None,
     ) -> tuple[CanonicalLeadRecord, ...]:
-        return self._scoped_leads(workspace_id, owner_user_id, search, view)[
+        return self._scoped_leads(workspace_id, owner_user_id, search, view, workflow_stage)[
             offset : offset + limit
         ]
 
@@ -116,8 +123,9 @@ class FakeLeadRepository:
         owner_user_id: UUID | None = None,
         search: str | None = None,
         view: LeadSavedView | None = None,
+        workflow_stage: LeadWorkflowStageFilter | None = None,
     ) -> int:
-        return len(self._scoped_leads(workspace_id, owner_user_id, search, view))
+        return len(self._scoped_leads(workspace_id, owner_user_id, search, view, workflow_stage))
 
     async def count_views_for_workspace(
         self,
@@ -140,10 +148,24 @@ class FakeLeadRepository:
             paused_stale=len(
                 self._scoped_leads(workspace_id, owner_user_id, search, LeadSavedView.PAUSED_STALE)
             ),
-            not_enrolled=sum(
-                1
-                for lead in self._scoped_leads(workspace_id, owner_user_id, search, None)
-                if (lead.workspace_id, lead.lead_id) not in self._latest_workflows
+            not_enrolled=len(
+                self._scoped_leads(workspace_id, owner_user_id, search, LeadSavedView.NOT_ENROLLED)
+            ),
+            default_nurture=len(
+                self._scoped_leads(
+                    workspace_id, owner_user_id, search, LeadSavedView.DEFAULT_NURTURE
+                )
+            ),
+            paused_search=len(
+                self._scoped_leads(
+                    workspace_id, owner_user_id, search, LeadSavedView.PAUSED_SEARCH
+                )
+            ),
+            human_path=len(
+                self._scoped_leads(workspace_id, owner_user_id, search, LeadSavedView.HUMAN_PATH)
+            ),
+            finished=len(
+                self._scoped_leads(workspace_id, owner_user_id, search, LeadSavedView.FINISHED)
             ),
         )
 
@@ -153,6 +175,7 @@ class FakeLeadRepository:
         owner_user_id: UUID | None,
         search: str | None = None,
         view: LeadSavedView | None = None,
+        workflow_stage: LeadWorkflowStageFilter | None = None,
     ) -> tuple[CanonicalLeadRecord, ...]:
         return tuple(
             lead
@@ -161,7 +184,20 @@ class FakeLeadRepository:
             and (owner_user_id is None or lead_effective_owner_user_id(lead) == owner_user_id)
             and _matches_search(lead, search)
             and self._matches_view(lead, view)
+            and self._matches_workflow_stage(lead, workflow_stage)
         )
+
+    def _matches_workflow_stage(
+        self,
+        lead: CanonicalLeadRecord,
+        workflow_stage: LeadWorkflowStageFilter | None,
+    ) -> bool:
+        if workflow_stage is None:
+            return True
+        workflow = self._latest_workflows.get((lead.workspace_id, lead.lead_id))
+        if workflow_stage is LeadWorkflowStageFilter.NOT_ENROLLED:
+            return workflow is None
+        return workflow is not None and workflow.state.value == workflow_stage.value
 
     def _matches_view(self, lead: CanonicalLeadRecord, view: LeadSavedView | None) -> bool:
         if view is None:
@@ -184,6 +220,24 @@ class FakeLeadRepository:
             if mapped_user_id is None:
                 return True
             return self._known_user_ids is not None and mapped_user_id not in self._known_user_ids
+        if view is LeadSavedView.NOT_ENROLLED:
+            return workflow is None
+        if view is LeadSavedView.FINISHED:
+            return workflow is not None and workflow.state in _FINISHED_STATES
+        if view is LeadSavedView.HUMAN_PATH:
+            return workflow is not None and workflow.state in _HUMAN_PATH_STATES
+        if view is LeadSavedView.PAUSED_SEARCH:
+            return (
+                workflow is not None
+                and workflow.state not in _FINISHED_STATES | _HUMAN_PATH_STATES
+                and lead.paused_search_active
+            )
+        if view is LeadSavedView.DEFAULT_NURTURE:
+            return (
+                workflow is not None
+                and workflow.state not in _FINISHED_STATES | _HUMAN_PATH_STATES
+                and not lead.paused_search_active
+            )
         stale_before = datetime.now(UTC) - timedelta(hours=PAUSED_STALE_THRESHOLD_HOURS)
         return (
             workflow is not None
