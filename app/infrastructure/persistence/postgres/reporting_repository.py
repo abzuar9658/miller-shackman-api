@@ -213,7 +213,29 @@ class PostgresReportingRepository(ReportingRepository):
         return {str(status): int(count) for status, count in result.all() if status is not None}
 
     async def _workflow_counts(self, filters: Sequence[_FilterClause]) -> WorkflowStateCounts:
-        counts = await self._counts_by_status(LeadWorkflowModel.state, filters)
+        # Dashboard tiles deep-link to /leads?workflow=<state>, which filters
+        # leads on their *latest* workflow state, so count each lead once by
+        # that latest state (ordering mirrors _latest_workflow_ordering in
+        # lead_repository) instead of counting historical workflow rows.
+        row_number = (
+            func.row_number()
+            .over(
+                partition_by=(LeadWorkflowModel.workspace_id, LeadWorkflowModel.lead_id),
+                order_by=(
+                    LeadWorkflowModel.last_transition_at.desc(),
+                    LeadWorkflowModel.created_at.desc(),
+                    LeadWorkflowModel.workflow_id.desc(),
+                ),
+            )
+            .label("row_number")
+        )
+        latest = select(LeadWorkflowModel.state, row_number).where(and_(*filters)).subquery()
+        result = await self._session.execute(
+            select(latest.c.state, func.count())
+            .where(latest.c.row_number == 1)
+            .group_by(latest.c.state)
+        )
+        counts = {str(state): int(count) for state, count in result.all() if state is not None}
         return WorkflowStateCounts(**{state: counts.get(state, 0) for state in _WORKFLOW_STATES})
 
     async def _enrollment_counts(self, filters: Sequence[_FilterClause]) -> EnrollmentStatusCounts:

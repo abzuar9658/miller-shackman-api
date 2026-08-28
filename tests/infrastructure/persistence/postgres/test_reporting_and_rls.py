@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from uuid import UUID
 
 import pytest
@@ -45,6 +45,7 @@ VERSION_ID = UUID("55555555-5555-5555-5555-555555555555")
 LEAD_ID = UUID("66666666-6666-6666-6666-666666666666")
 ENROLLMENT_ID = UUID("77777777-7777-7777-7777-777777777777")
 WORKFLOW_ID = UUID("88888888-8888-8888-8888-888888888888")
+EARLIER_WORKFLOW_ID = UUID("89898989-8989-8989-8989-898989898989")
 MESSAGE_ID = UUID("99999999-9999-9999-9999-999999999999")
 TRACK_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 TRACK_VERSION_ID = UUID("abababab-abab-abab-abab-abababababab")
@@ -69,6 +70,10 @@ async def test_reporting_repository_builds_workspace_and_campaign_summaries(
 
     assert workspace_report.active_campaigns == 1
     assert workspace_report.workflow_counts.waiting_for_response == 1
+    # The lead's earlier completed workflow must not be counted: workflow
+    # counts reflect each lead's latest workflow state only, matching the
+    # /leads?workflow=<state> filter the dashboard tiles link to.
+    assert workspace_report.workflow_counts.completed == 0
     assert workspace_report.message_counts.sent == 1
     assert workspace_report.message_counts.delivered == 1
     assert workspace_report.handoff_counts.notified == 0
@@ -341,6 +346,23 @@ async def _seed_reporting_fixture(session: AsyncSession) -> None:
                 created_by_user_id=USER_ID,
                 published_at=NOW,
                 created_at=NOW,
+            ),
+            LeadWorkflowModel(
+                workflow_id=EARLIER_WORKFLOW_ID,
+                temporal_workflow_id="workflow-0",
+                workspace_id=WORKSPACE_ID,
+                campaign_enrollment_id=ENROLLMENT_ID,
+                campaign_id=CAMPAIGN_ID,
+                lead_id=LEAD_ID,
+                state="completed",
+                current_step_id=None,
+                next_action_at=None,
+                last_transition_at=NOW - timedelta(days=30),
+                pause_reason=None,
+                resume_reason=None,
+                state_version=1,
+                created_at=NOW - timedelta(days=30),
+                updated_at=NOW - timedelta(days=30),
             ),
             LeadWorkflowModel(
                 workflow_id=WORKFLOW_ID,
