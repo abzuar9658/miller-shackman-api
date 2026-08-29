@@ -31,7 +31,7 @@ class PausedSearchTrackStepRequest(BaseModel):
     phase: PausedSearchTrackStepPhase
     channel: ContactChannel
     delay_hours: int = Field(ge=0)
-    message_goal: str = Field(min_length=1, max_length=500)
+    message_goal: str = Field(min_length=1, max_length=1000)
     template_key: str = Field(min_length=1, max_length=255)
     max_attempts: int = Field(ge=1)
     action: PausedSearchStepAction | None = None
@@ -102,7 +102,7 @@ class PausedSearchTrackDraftPreviewRequest(PausedSearchTrackDraftRequest):
 class PausedSearchTrackStepPreviewRequest(BaseModel):
     query: str = Field(min_length=1, max_length=1000)
     channel: ContactChannel
-    message_goal: str = Field(min_length=1, max_length=500)
+    message_goal: str = Field(min_length=1, max_length=1000)
     template_profile: DormantStepTemplateProfileSchema | None = None
 
 
