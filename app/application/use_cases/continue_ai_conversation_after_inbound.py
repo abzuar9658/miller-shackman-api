@@ -8,6 +8,7 @@ from app.application.ports.crm import CRMClient
 from app.application.ports.llm import LLMClient
 from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     CampaignExecutionRepository,
     ConversationRepository,
     InboundMessageRepository,
@@ -24,6 +25,7 @@ from app.application.ports.repositories import (
     WorkspaceRepository,
 )
 from app.application.services.email_threading import resolve_reply_email_subject
+from app.application.services.pinned_campaign_version import resolve_pinned_campaign_config
 from app.application.services.pre_send_policy import build_pre_send_policy
 from app.application.use_cases.apply_workflow_state_transition import (
     WorkflowStateTransitionStatus,
@@ -114,6 +116,7 @@ async def continue_ai_conversation_after_inbound(
     conversation_repository: ConversationRepository,
     lead_repository: LeadRepository,
     campaign_execution_repository: CampaignExecutionRepository,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
     workspace_repository: WorkspaceRepository,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository,
     workspace_llm_config_repository: WorkspaceLLMConfigRepository | None,
@@ -152,18 +155,26 @@ async def continue_ai_conversation_after_inbound(
             reasons=(ContinueAIReasonCode.WORKSPACE_NOT_FOUND,),
         )
 
-    config = await campaign_execution_repository.get_active_for_campaign(workspace_id, campaign_id)
-    if config is None:
-        return ContinueAIResult(
-            status=ContinueAIStatus.NO_CAMPAIGN_CONFIG,
-            reasons=(ContinueAIReasonCode.CAMPAIGN_CONFIG_NOT_FOUND,),
-        )
-
     workflow = await lead_workflow_repository.get_latest_for_lead_for_update(workspace_id, lead_id)
     if workflow is None:
         return ContinueAIResult(
             status=ContinueAIStatus.NO_WORKFLOW,
             reasons=(ContinueAIReasonCode.WORKFLOW_NOT_FOUND,),
+        )
+
+    # The continuation must be drafted from the cadence step this lead is
+    # actually on. Publishing a new version regenerates step ids, so reading the
+    # active version here would silently redraft mid-track leads from step one.
+    config = await resolve_pinned_campaign_config(
+        workspace_id=workspace_id,
+        workflow=workflow,
+        campaign_execution_repository=campaign_execution_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
+    )
+    if config is None:
+        return ContinueAIResult(
+            status=ContinueAIStatus.NO_CAMPAIGN_CONFIG,
+            reasons=(ContinueAIReasonCode.CAMPAIGN_CONFIG_NOT_FOUND,),
         )
 
     if workflow.state != WorkflowState.WAITING_FOR_RESPONSE:

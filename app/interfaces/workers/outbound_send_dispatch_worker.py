@@ -28,6 +28,9 @@ from app.core.database import (
 )
 from app.core.logging import configure_logging
 from app.core.metrics import outbound_send_dispatch_metrics
+from app.infrastructure.persistence.postgres.campaign_enrollment_repository import (
+    PostgresCampaignEnrollmentRepository,
+)
 from app.infrastructure.persistence.postgres.campaign_execution_repository import (
     PostgresCampaignExecutionRepository,
 )
@@ -209,6 +212,7 @@ async def _run_once(
                 ),
                 contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),
                 inbound_message_repository=PostgresInboundMessageRepository(session),
+                campaign_enrollment_repository=PostgresCampaignEnrollmentRepository(session),
             ),
             sms_provider=sms_provider,
             email_provider=email_provider,

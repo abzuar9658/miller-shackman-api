@@ -16,6 +16,11 @@ from app.application.use_cases.send_deferred_outbound_message_now import (
 )
 from app.domain.campaigns import PausedSearchTrackStepPhase
 from app.domain.campaigns.admin import CampaignAdminCampaign, CampaignAdminVersion
+from app.domain.campaigns.enrollment import (
+    CampaignEnrollment,
+    CampaignEnrollmentSource,
+    CampaignEnrollmentStatus,
+)
 from app.domain.campaigns.execution import (
     CampaignCadenceStep,
     CampaignExecutionConfig,
@@ -63,6 +68,7 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeWorkspaceRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
+    FakeCampaignEnrollmentRepository,
     FakeLeadWorkflowRepository,
     FakeTemporalSignalOutboxRepository,
     FakeWorkflowTransitionRepository,
@@ -309,7 +315,13 @@ class _Harness:
         occurrence: RecurringOccurrence | None,
         allow_assigned_agent_manual_enrollment: bool = True,
         include_earlier_send: bool = True,
+        campaign_execution_repository: FakeCampaignExecutionRepository | None = None,
+        campaign_enrollment_repository: FakeCampaignEnrollmentRepository | None = None,
     ) -> None:
+        self.campaign_execution_repository = campaign_execution_repository or (
+            FakeCampaignExecutionRepository(_config())
+        )
+        self.campaign_enrollment_repository = campaign_enrollment_repository
         self.lead_repository = FakeLeadRepository(lead)
         self.workflow_repository = FakeLeadWorkflowRepository()
         self.workflow_repository.workflows[workflow.workflow_id] = workflow
@@ -354,7 +366,8 @@ class _Harness:
             workflow_transition_repository=self.transition_repository,
             message_repository=self.message_repository,
             campaign_admin_repository=self.campaign_admin_repository,
-            campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+            campaign_execution_repository=self.campaign_execution_repository,
+            campaign_enrollment_repository=self.campaign_enrollment_repository,
             paused_search_occurrence_repository=self.occurrence_repository,
             workspace_repository=FakeWorkspaceRepository(
                 Workspace(
@@ -577,4 +590,96 @@ async def test_send_now_is_idempotent_for_already_sent_message() -> None:
 
     assert result.status == SendDeferredMessageNowStatus.ALREADY_SENT
     assert harness.email_provider.messages == []
+
+
+async def test_send_now_advances_via_pinned_version_after_republish() -> None:
+    # A republish retires the enrolled version and regenerates every step id.
+    # The deferred message must still send and the workflow must advance to
+    # the pinned version's next step — not silently terminate because the
+    # step id is absent from the newly active version.
+    republished_version_id = UUID("00000000-0000-0000-0000-0000000000f0")
+    republished_config = CampaignExecutionConfig(
+        campaign_id=CAMPAIGN_ID,
+        campaign_version_id=republished_version_id,
+        workspace_id=WORKSPACE_ID,
+        campaign_name="Paused Search",
+        campaign_status=CampaignStatus.ACTIVE,
+        version_status=CampaignVersionStatus.PUBLISHED,
+        enabled_channels=(ContactChannel.EMAIL,),
+        daily_start_cap=50,
+        dormant_threshold_days=60,
+        quiet_hours_start=time(10, 0),
+        quiet_hours_end=time(17, 0),
+        timezone="America/Chicago",
+        preflight_digest_enabled=False,
+        crm_enrollment_tag=None,
+        prompt_version="v1",
+        approved_model="openai/gpt-4o-mini",
+        cadence_steps=(
+            _cadence_step(UUID("00000000-0000-0000-0000-0000000000f1"), 1),
+            _cadence_step(UUID("00000000-0000-0000-0000-0000000000f2"), 2),
+        ),
+        created_at=NOW,
+        published_at=NOW,
+    )
+    pinned_config = CampaignExecutionConfig(
+        campaign_id=CAMPAIGN_ID,
+        campaign_version_id=VERSION_ID,
+        workspace_id=WORKSPACE_ID,
+        campaign_name="Paused Search",
+        campaign_status=CampaignStatus.ACTIVE,
+        version_status=CampaignVersionStatus.RETIRED,
+        enabled_channels=(ContactChannel.EMAIL,),
+        daily_start_cap=50,
+        dormant_threshold_days=60,
+        quiet_hours_start=time(10, 0),
+        quiet_hours_end=time(17, 0),
+        timezone="America/Chicago",
+        preflight_digest_enabled=False,
+        crm_enrollment_tag=None,
+        prompt_version="v1",
+        approved_model="openai/gpt-4o-mini",
+        cadence_steps=(_cadence_step(STEP_ONE_ID, 1), _cadence_step(STEP_TWO_ID, 2)),
+        created_at=NOW,
+        published_at=NOW,
+    )
+    workflow = _workflow(paused_search=False)
+    enrollment_repository = FakeCampaignEnrollmentRepository()
+    enrollment_repository.enrollments[(WORKSPACE_ID, LEAD_ID, CAMPAIGN_ID)] = CampaignEnrollment(
+        campaign_enrollment_id=workflow.campaign_enrollment_id,
+        workspace_id=WORKSPACE_ID,
+        campaign_id=CAMPAIGN_ID,
+        campaign_version_id=VERSION_ID,
+        lead_id=LEAD_ID,
+        source=CampaignEnrollmentSource.MANUAL_ADMIN,
+        status=CampaignEnrollmentStatus.ACTIVE,
+        eligible_at=NOW,
+        enrolled_at=NOW,
+        started_at=NOW,
+        ended_at=None,
+        created_by_user_id=USER_ID,
+        reason_codes=(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    harness = _Harness(
+        lead=_lead(),
+        workflow=workflow,
+        message=_deferred_message(),
+        occurrence=None,
+        campaign_execution_repository=FakeCampaignExecutionRepository(
+            (republished_config, pinned_config)
+        ),
+        campaign_enrollment_repository=enrollment_repository,
+    )
+
+    result = await harness.run()
+
+    assert result.status == SendDeferredMessageNowStatus.SENT
+    assert len(harness.email_provider.messages) == 1
+    advanced = harness.workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert advanced.state == WorkflowState.WAITING_FOR_RESPONSE
+    # The cursor advances to the pinned version's second step instead of
+    # being cleared (silent cadence termination).
+    assert advanced.current_step_id == STEP_TWO_ID
 

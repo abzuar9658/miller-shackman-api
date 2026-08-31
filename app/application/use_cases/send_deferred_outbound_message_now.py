@@ -8,6 +8,7 @@ from app.application.ports.crm import CRMClient
 from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.repositories import (
     CampaignAdminRepository,
+    CampaignEnrollmentRepository,
     CampaignExecutionRepository,
     CRMAgentRepository,
     CrmConversationEventRepository,
@@ -32,6 +33,7 @@ from app.application.services.internal_external_events import create_internal_ex
 from app.application.services.lead_nurture_rescheduling import (
     enqueue_lead_nurture_reschedule_signal,
 )
+from app.application.services.pinned_campaign_version import resolve_pinned_campaign_config
 from app.application.services.pre_send_crm_refresh import build_pre_send_crm_refresh_context
 from app.application.services.pre_send_policy import build_pre_send_policy
 from app.application.use_cases.campaign_cadence_execution import (
@@ -93,6 +95,7 @@ async def send_deferred_outbound_message_now(
     message_repository: OutboundMessageRepository,
     campaign_admin_repository: CampaignAdminRepository,
     campaign_execution_repository: CampaignExecutionRepository,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository,
     workspace_repository: WorkspaceRepository,
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository,
@@ -205,9 +208,14 @@ async def send_deferred_outbound_message_now(
             reasons=("step_mismatch",),
         )
 
-    config = await campaign_execution_repository.get_active_for_campaign(
-        workspace_id,
-        message.campaign_id,
+    # Resolve the version the workflow is pinned to: after a republish the
+    # active version carries regenerated step ids, and advancing against it
+    # would silently terminate the cadence (current_step_id set to None).
+    config = await resolve_pinned_campaign_config(
+        workspace_id=workspace_id,
+        workflow=workflow,
+        campaign_execution_repository=campaign_execution_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
     )
     workspace = await workspace_repository.get_by_id(workspace_id)
     workspace_contact_policy = await workspace_contact_policy_repository.get_by_workspace_id(

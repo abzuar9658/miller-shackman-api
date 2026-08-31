@@ -86,7 +86,7 @@ async def test_drafts_sms_acknowledgment_with_default_prompt_and_context() -> No
 
     assert result.status == HandoffAcknowledgmentDraftStatus.DRAFTED
     assert result.body == "Thanks for reaching out — a team member will follow up shortly."
-    assert llm.requests[0].prompt_version.startswith("handoff_acknowledgment_draft:v2:p")
+    assert llm.requests[0].prompt_version.startswith("handoff_acknowledgment_draft:v3:p")
     assert "Lead asked for a callback today." in llm.requests[0].prompt
     assert "brokerage [sms]: Thanks for reaching out about moving." in llm.requests[0].prompt
     assert "human_requested" in llm.requests[0].prompt

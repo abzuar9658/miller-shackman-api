@@ -1234,6 +1234,7 @@ async def send_deferred_message_now_route(
         message_repository=bundle.message_repository,
         campaign_admin_repository=bundle.campaign_admin_repository,
         campaign_execution_repository=bundle.campaign_execution_repository,
+        campaign_enrollment_repository=bundle.campaign_enrollment_repository,
         paused_search_occurrence_repository=bundle.paused_search_occurrence_repository,
         workspace_repository=bundle.workspace_repository,
         workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,

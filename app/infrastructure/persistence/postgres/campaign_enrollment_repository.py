@@ -55,6 +55,19 @@ class PostgresCampaignEnrollmentRepository:
         model = result.scalar_one_or_none()
         return _model_to_enrollment(model) if model is not None else None
 
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        campaign_enrollment_id: UUID,
+    ) -> CampaignEnrollment | None:
+        result = await self._session.execute(
+            select(CampaignEnrollmentModel)
+            .where(CampaignEnrollmentModel.workspace_id == workspace_id)
+            .where(CampaignEnrollmentModel.campaign_enrollment_id == campaign_enrollment_id),
+        )
+        model = result.scalar_one_or_none()
+        return _model_to_enrollment(model) if model is not None else None
+
     async def count_started_today(
         self,
         workspace_id: WorkspaceId,

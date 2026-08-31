@@ -55,6 +55,34 @@ def test_detailed_length_overrides_default_brevity_prompt() -> None:
     assert "under 180 words" in result.email_prompt_text
 
 
+def test_moderate_length_is_capped_for_sms() -> None:
+    profile = DormantStepTemplateProfile(length=DormantMessageLength.MODERATE)
+
+    result = apply_dormant_step_template_profile(
+        WorkspaceOutboundDraftingConfig(workspace_id=WORKSPACE_ID),
+        profile,
+        channel="sms",
+    )
+
+    assert "90 words" not in result.sms_prompt_text
+    assert "45 words" in result.sms_prompt_text
+    assert "under 320 characters" in result.sms_prompt_text
+    assert "expand it" not in result.sms_prompt_text
+
+
+def test_moderate_length_keeps_word_minimum_for_email() -> None:
+    profile = DormantStepTemplateProfile(length=DormantMessageLength.MODERATE)
+
+    result = apply_dormant_step_template_profile(
+        WorkspaceOutboundDraftingConfig(workspace_id=WORKSPACE_ID),
+        profile,
+        channel="email",
+    )
+
+    assert "at least 90 words" in result.email_prompt_text
+    assert "under 90 words" in result.email_prompt_text
+
+
 def test_customized_channel_prompt_is_preserved() -> None:
     profile = DormantStepTemplateProfile(length=DormantMessageLength.DETAILED)
     custom_prompt = "Always write in the brokerage house style."

@@ -28,6 +28,11 @@ from app.domain.campaigns import (
     PausedSearchTrackStatus,
     PausedSearchTrackVersion,
 )
+from app.domain.campaigns.enrollment import (
+    CampaignEnrollment,
+    CampaignEnrollmentSource,
+    CampaignEnrollmentStatus,
+)
 from app.domain.campaigns.execution import (
     CampaignCadenceStep,
     CampaignExecutionConfig,
@@ -88,6 +93,7 @@ from tests.application.use_cases._campaign_cadence_fakes import (
     FakeWorkspaceRepository,
 )
 from tests.application.use_cases._campaign_enrollment_fakes import (
+    FakeCampaignEnrollmentRepository,
     FakeTemporalSignalOutboxRepository,
 )
 from tests.application.use_cases._lead_read_fakes import FakeUserRepository
@@ -1862,6 +1868,100 @@ async def test_dormant_reply_continue_sends_ai_reply() -> None:
     assert final_workflow.state == WorkflowState.WAITING_FOR_RESPONSE
     assert final_workflow.paused_search_track_version_id is None
     assert final_conversation.status == ConversationStatus.ACTIVE_AI
+
+
+async def test_continue_ai_drafts_from_pinned_version_after_republish() -> None:
+    """A republish retires the enrolled version and regenerates every step id.
+    A reply arriving afterwards must be drafted from the pinned version's
+    current step — not silently redrafted from step one of the new version."""
+    pinned_version_id = UUID("60000000-0000-0000-0000-000000000002")
+    pinned_step_two_id = UUID("60000000-0000-0000-0000-0000000000a2")
+    republished_version_id = UUID("60000000-0000-0000-0000-0000000000f0")
+    pinned_base = _campaign_execution_config()
+    pinned_config = replace(
+        pinned_base,
+        version_status=CampaignVersionStatus.RETIRED,
+        cadence_steps=(
+            pinned_base.cadence_steps[0],
+            replace(
+                pinned_base.cadence_steps[0],
+                cadence_step_id=pinned_step_two_id,
+                step_order=2,
+                message_goal="Pinned step two: revisit the earlier conversation.",
+            ),
+        ),
+    )
+    republished_config = replace(
+        pinned_base,
+        campaign_version_id=republished_version_id,
+        cadence_steps=(
+            replace(
+                pinned_base.cadence_steps[0],
+                cadence_step_id=UUID("60000000-0000-0000-0000-0000000000f1"),
+                campaign_version_id=republished_version_id,
+                message_goal="Republished step one: introduce the campaign.",
+            ),
+        ),
+    )
+    workflow = replace(_workflow(), current_step_id=pinned_step_two_id)
+    dependencies = _continue_ai_dependencies(workflow=workflow)
+    # Active lookup resolves to the republished version; only the enrollment
+    # pin can lead back to the retired version the lead is mid-way through.
+    dependencies["campaign_execution_repository"] = FakeCampaignExecutionRepository(
+        (republished_config, pinned_config)
+    )
+    enrollment_repository = FakeCampaignEnrollmentRepository()
+    enrollment_repository.enrollments[(WORKSPACE_ID, LEAD_ID, CAMPAIGN_ID)] = CampaignEnrollment(
+        campaign_enrollment_id=ENROLLMENT_ID,
+        workspace_id=WORKSPACE_ID,
+        campaign_id=CAMPAIGN_ID,
+        campaign_version_id=pinned_version_id,
+        lead_id=LEAD_ID,
+        source=CampaignEnrollmentSource.DORMANT_SELECTOR,
+        status=CampaignEnrollmentStatus.ACTIVE,
+        eligible_at=NOW,
+        enrolled_at=NOW,
+        started_at=NOW,
+        ended_at=None,
+        created_by_user_id=None,
+        reason_codes=(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    lead_workflow_repository = dependencies["lead_workflow_repository"]
+    sms_provider = dependencies["sms_provider"]
+    llm = _FakeLLMClientForContinuation(
+        classification_text=_classification_json(
+            intent="general_reply",
+            summary_text="Lead asked a follow-up question.",
+        ),
+        draft_text=_draft_json(),
+    )
+
+    result = await process_inbound_message_event(
+        event=_event(body="Sounds interesting, tell me more."),
+        llm_client=llm,
+        campaign_enrollment_repository=enrollment_repository,
+        now=NOW,
+        external_event_id_factory=lambda: EXTERNAL_EVENT_ID,
+        conversation_id_factory=lambda: CONVERSATION_ID,
+        inbound_message_id_factory=lambda: INBOUND_MESSAGE_ID,
+        **dependencies,
+    )
+
+    assert result.status == ProcessInboundMessageEventStatus.PROCESSED
+    assert result.inbound_action == InboundAction.CONTINUE_AI
+    assert result.continue_ai_status == ContinueAIStatus.SENT
+    assert len(sms_provider.messages) == 1
+    draft_request = next(
+        request for request in llm.requests if request.task is LLMTaskKind.DRAFTING
+    )
+    # Drafted from the pinned version's current step, not v-new's step one.
+    assert "Pinned step two: revisit the earlier conversation." in draft_request.prompt
+    assert "Republished step one" not in draft_request.prompt
+    final_workflow = lead_workflow_repository.latest_by_lead[(WORKSPACE_ID, LEAD_ID)]
+    assert final_workflow.state == WorkflowState.WAITING_FOR_RESPONSE
+    assert final_workflow.current_step_id == pinned_step_two_id
 
 
 @pytest.mark.asyncio

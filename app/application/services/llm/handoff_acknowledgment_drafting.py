@@ -14,15 +14,16 @@ from app.application.services.llm.structured_json import (
 from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord
 from app.domain.llm import LLMProviderKind, LLMTaskKind
+from app.domain.outbound_drafting import SMS_RENDERED_BODY_CHARACTER_LIMIT
 
-HANDOFF_ACKNOWLEDGMENT_DRAFT_PROMPT_VERSION_PREFIX = "handoff_acknowledgment_draft:v2"
+HANDOFF_ACKNOWLEDGMENT_DRAFT_PROMPT_VERSION_PREFIX = "handoff_acknowledgment_draft:v3"
 DEFAULT_LEAD_ACKNOWLEDGMENT_PROMPT_TEXT = (
     "You are the brokerage's acknowledgment drafting assistant. Draft a short, warm "
     "message that confirms receipt, acknowledges the lead's message in a natural way, "
     "and clearly says that a human agent or team member will follow up soon."
 )
 MIN_DRAFT_CONFIDENCE = 0.7
-MAX_SMS_BODY_LENGTH = 320
+MAX_SMS_BODY_LENGTH = SMS_RENDERED_BODY_CHARACTER_LIMIT
 MAX_EMAIL_BODY_LENGTH = 4000
 PROHIBITED_MESSAGE_TERMS = (
     "guarantee",
@@ -256,7 +257,8 @@ def _build_prompt(
         "or investment advice.\n"
         "- Do not invent facts, availability, or promises about timing beyond a general "
         "follow-up expectation.\n"
-        "- Keep SMS concise. Keep email concise and natural.\n"
+        f"- Keep SMS under {MAX_SMS_BODY_LENGTH} characters — a longer SMS body is "
+        "rejected. Keep email concise and natural.\n"
         "- If this is a threaded email reply, the application will preserve the existing "
         "subject line.\n\n"
         "Return JSON only with this shape:\n"

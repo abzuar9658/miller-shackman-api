@@ -8,6 +8,7 @@ from app.application.ports.crm import CRMClient
 from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.repositories import (
     CampaignAdminRepository,
+    CampaignEnrollmentRepository,
     CampaignExecutionRepository,
     CRMAgentRepository,
     CrmConversationEventRepository,
@@ -32,6 +33,9 @@ from app.core.config import Settings, get_settings
 from app.core.database import get_session
 from app.infrastructure.persistence.postgres.campaign_admin_repository import (
     PostgresCampaignAdminRepository,
+)
+from app.infrastructure.persistence.postgres.campaign_enrollment_repository import (
+    PostgresCampaignEnrollmentRepository,
 )
 from app.infrastructure.persistence.postgres.campaign_execution_repository import (
     PostgresCampaignExecutionRepository,
@@ -97,6 +101,7 @@ class LeadDeferredSendBundle:
     message_repository: OutboundMessageRepository
     campaign_admin_repository: CampaignAdminRepository
     campaign_execution_repository: CampaignExecutionRepository
+    campaign_enrollment_repository: CampaignEnrollmentRepository
     paused_search_occurrence_repository: PausedSearchOccurrenceRepository
     workspace_repository: WorkspaceRepository
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository
@@ -128,6 +133,7 @@ async def get_lead_deferred_send_bundle(
         message_repository=PostgresOutboundMessageRepository(session),
         campaign_admin_repository=PostgresCampaignAdminRepository(session),
         campaign_execution_repository=PostgresCampaignExecutionRepository(session),
+        campaign_enrollment_repository=PostgresCampaignEnrollmentRepository(session),
         paused_search_occurrence_repository=PostgresPausedSearchOccurrenceRepository(session),
         workspace_repository=PostgresWorkspaceRepository(session),
         workspace_contact_policy_repository=PostgresWorkspaceContactPolicyRepository(session),

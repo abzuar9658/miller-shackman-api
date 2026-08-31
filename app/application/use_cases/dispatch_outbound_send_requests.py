@@ -209,6 +209,7 @@ async def dispatch_outbound_send_requests(
                 reconciliation_repository=reconciliation_repository,
                 temporal_signal_outbox_repository=temporal_signal_outbox_repository,
                 now=now,
+                request_reschedule=not revalidation.permanently_rejected,
             )
             policy_rejected_count += 1
             await commit()
@@ -528,6 +529,7 @@ async def _record_policy_rejected(
     reconciliation_repository: OutboundSendReconciliationRepository,
     temporal_signal_outbox_repository: TemporalSignalOutboxRepository,
     now: datetime,
+    request_reschedule: bool = True,
 ) -> None:
     failure_kind = "policy_rejected"
     if request.status is OutboundSendRequestStatus.DISPATCHING:
@@ -577,6 +579,12 @@ async def _record_policy_rejected(
             failure_reason=reason,
             now=now,
         )
+    if not request_reschedule:
+        # A permanent rejection cannot be cleared by re-planning. Rescheduling
+        # would bump message_version, mint a fresh idempotency key, and fail the
+        # same way, so the workflow is left waiting for operator intervention
+        # instead of looping.
+        return
     await _append_reschedule_signal(
         request=request,
         outcome=OutboundSendRequestStatus.FAILED,

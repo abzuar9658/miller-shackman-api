@@ -222,6 +222,7 @@ async def process_inbound_message_event_with_bundle(
         workspace_contact_policy_repository=bundle.workspace_contact_policy_repository,
         workspace_repository=bundle.workspace_repository,
         campaign_execution_repository=bundle.campaign_execution_repository,
+        campaign_enrollment_repository=bundle.campaign_enrollment_repository,
         workspace_operational_control_repository=bundle.workspace_operational_control_repository,
         workspace_outbound_drafting_config_repository=(
             bundle.workspace_outbound_drafting_config_repository

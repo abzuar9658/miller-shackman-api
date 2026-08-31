@@ -32,6 +32,7 @@ from app.application.services.llm.workspace_model_resolution import (
     resolve_workspace_llm_selection,
 )
 from app.application.services.paused_search_track_assignment import (
+    resolve_effective_paused_search_track_version_id,
     synchronize_paused_search_track_assignment,
 )
 from app.domain.campaigns import (
@@ -290,6 +291,25 @@ async def _apply_paused_search(
             reasons=("human_profile_blocks_ai_overwrite",),
         )
 
+    # The classifier selects a track *key*; the catalog resolves that to the
+    # track's active version. A lead already on that track keeps the version it
+    # was assigned, so a republish does not silently move it onto a new script.
+    effective_track_version_id = classification_result.track_version_id
+    if (
+        lead_workflow_repository is not None
+        and paused_search_track_repository is not None
+        and paused_search_track_assignment_repository is not None
+        and classification_result.track_version_id is not None
+    ):
+        effective_track_version_id = await resolve_effective_paused_search_track_version_id(
+            workspace_id=lead.workspace_id,
+            lead_id=lead.lead_id,
+            catalog_track_version_id=classification_result.track_version_id,
+            assignment_repository=paused_search_track_assignment_repository,
+            track_repository=paused_search_track_repository,
+            lead_workflow_repository=lead_workflow_repository,
+        )
+
     if (
         lead_workflow_repository is None
         or paused_search_track_repository is None
@@ -297,7 +317,7 @@ async def _apply_paused_search(
         or not await _synchronize_track_assignment(
             workspace_id=lead.workspace_id,
             lead_id=lead.lead_id,
-            track_version_id=classification_result.track_version_id,
+            track_version_id=effective_track_version_id,
             actor_user_id=actor_user_id,
             lead_workflow_repository=lead_workflow_repository,
             paused_search_track_repository=paused_search_track_repository,
@@ -331,7 +351,7 @@ async def _apply_paused_search(
     current_profile = LeadPausedSearchProfile(
         paused_search_active=True,
         paused_search_track_key=classification_result.selected_track_key,
-        paused_search_track_version_id=classification_result.track_version_id,
+        paused_search_track_version_id=effective_track_version_id,
         pause_reason_note=None,
         reengagement_not_before=_validated_reengagement_not_before(
             classification_result=classification_result,
@@ -357,7 +377,7 @@ async def _apply_paused_search(
             await _synchronize_track_assignment(
                 workspace_id=lead.workspace_id,
                 lead_id=lead.lead_id,
-                track_version_id=classification_result.track_version_id,
+                track_version_id=effective_track_version_id,
                 actor_user_id=actor_user_id,
                 lead_workflow_repository=lead_workflow_repository,
                 paused_search_track_repository=paused_search_track_repository,
@@ -400,7 +420,7 @@ async def _apply_paused_search(
         await _synchronize_track_assignment(
             workspace_id=lead.workspace_id,
             lead_id=lead.lead_id,
-            track_version_id=classification_result.track_version_id,
+            track_version_id=effective_track_version_id,
             actor_user_id=actor_user_id,
             lead_workflow_repository=lead_workflow_repository,
             paused_search_track_repository=paused_search_track_repository,

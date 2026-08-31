@@ -5,6 +5,7 @@ from uuid import UUID
 
 from app.application.ports.messaging import EmailMessage, SMSMessage
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     CampaignExecutionRepository,
     InboundMessageRepository,
     LeadRepository,
@@ -19,6 +20,11 @@ from app.application.use_cases.revalidate_outbound_send_request import (
     LockingOutboundSendRequestRepository,
     OutboundSendRevalidationReason,
     revalidate_outbound_send_request,
+)
+from app.domain.campaigns.enrollment import (
+    CampaignEnrollment,
+    CampaignEnrollmentSource,
+    CampaignEnrollmentStatus,
 )
 from app.domain.campaigns.execution import (
     CampaignCadenceStep,
@@ -57,6 +63,9 @@ RECONCILIATION_ID = UUID("66666666-6666-6666-6666-666666666666")
 CAMPAIGN_ID = UUID("77777777-7777-7777-7777-777777777777")
 CAMPAIGN_VERSION_ID = UUID("88888888-8888-8888-8888-888888888888")
 CADENCE_STEP_ID = UUID("99999999-9999-9999-9999-999999999999")
+ENROLLMENT_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+NEW_CAMPAIGN_VERSION_ID = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+NEW_CADENCE_STEP_ID = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
 
 
 class FakeRepositories:
@@ -68,6 +77,9 @@ class FakeRepositories:
         self.request = _request()
         self.reconciliation = _reconciliation()
         self.campaign = _campaign()
+        self.versions: dict[UUID, CampaignExecutionConfig] = {
+            CAMPAIGN_VERSION_ID: _campaign(),
+        }
 
     async def get_by_id_for_update(self, workspace_id: UUID, object_id: UUID) -> object | None:
         _ = workspace_id
@@ -108,11 +120,36 @@ class FakeRepositories:
         _ = (workspace_id, campaign_id)
         return self.campaign
 
+    async def get_by_version_id(
+        self,
+        workspace_id: UUID,
+        version_id: UUID,
+    ) -> CampaignExecutionConfig | None:
+        _ = workspace_id
+        return self.versions.get(version_id)
+
     async def get_latest_sent_at_for_lead(self, *args: object, **kwargs: object) -> None:
         _ = (args, kwargs)
 
     async def get_latest_received_at_for_lead(self, workspace_id: UUID, lead_id: UUID) -> None:
         _ = (workspace_id, lead_id)
+
+
+class FakeEnrollmentRepository:
+    def __init__(self, pinned_config: CampaignExecutionConfig) -> None:
+        self.enrollment = _enrollment(pinned_config.campaign_version_id)
+
+    async def get_by_id(
+        self,
+        workspace_id: UUID,
+        campaign_enrollment_id: UUID,
+    ) -> CampaignEnrollment | None:
+        if (
+            workspace_id != self.enrollment.workspace_id
+            or campaign_enrollment_id != self.enrollment.campaign_enrollment_id
+        ):
+            return None
+        return self.enrollment
 
 
 class FakeContactPolicyRepository:
@@ -303,6 +340,105 @@ async def test_sms_with_denied_consent_is_rejected() -> None:
     assert PreSendReasonCode.CHANNEL_NOT_CONTACTABLE in result.pre_send_decision.reasons
 
 
+async def test_lead_pinned_to_retired_version_is_allowed_after_republish() -> None:
+    # An admin republished the campaign: the active version has regenerated step
+    # ids and the version this lead was enrolled on is now RETIRED. The lead must
+    # keep running the track it was enrolled on.
+    repositories = FakeRepositories()
+    repositories.lead = _lead(sms_opted_out=False)
+    repositories.campaign = _republished_campaign()
+    pinned = _pinned_campaign()
+    repositories.versions[pinned.campaign_version_id] = pinned
+
+    result = await revalidate_outbound_send_request(
+        request=repositories.request,
+        lead_repository=cast(LeadRepository, repositories),
+        workflow_repository=cast(LeadWorkflowRepository, repositories),
+        message_repository=cast(LockingOutboundMessageRepository, repositories),
+        request_repository=cast(LockingOutboundSendRequestRepository, repositories),
+        reconciliation_repository=cast(OutboundSendReconciliationRepository, repositories),
+        campaign_repository=cast(CampaignExecutionRepository, repositories),
+        workspace_repository=cast(WorkspaceRepository, repositories),
+        workspace_control_repository=cast(WorkspaceOperationalControlRepository, repositories),
+        contact_policy_repository=cast(
+            WorkspaceContactPolicyRepository,
+            FakeContactPolicyRepository(),
+        ),
+        inbound_message_repository=cast(InboundMessageRepository, repositories),
+        campaign_enrollment_repository=cast(
+            CampaignEnrollmentRepository,
+            FakeEnrollmentRepository(pinned),
+        ),
+        now=NOW,
+    )
+
+    assert result.allowed is True
+
+
+async def test_republish_rejects_in_flight_lead_without_pinned_enrollment() -> None:
+    # Without the enrollment pin the step id cannot be found in the active
+    # version, which is the production failure this fix removes.
+    repositories = FakeRepositories()
+    repositories.lead = _lead(sms_opted_out=False)
+    repositories.campaign = _republished_campaign()
+
+    result = await revalidate_outbound_send_request(
+        request=repositories.request,
+        lead_repository=cast(LeadRepository, repositories),
+        workflow_repository=cast(LeadWorkflowRepository, repositories),
+        message_repository=cast(LockingOutboundMessageRepository, repositories),
+        request_repository=cast(LockingOutboundSendRequestRepository, repositories),
+        reconciliation_repository=cast(OutboundSendReconciliationRepository, repositories),
+        campaign_repository=cast(CampaignExecutionRepository, repositories),
+        workspace_repository=cast(WorkspaceRepository, repositories),
+        workspace_control_repository=cast(WorkspaceOperationalControlRepository, repositories),
+        contact_policy_repository=cast(
+            WorkspaceContactPolicyRepository,
+            FakeContactPolicyRepository(),
+        ),
+        inbound_message_repository=cast(InboundMessageRepository, repositories),
+        now=NOW,
+    )
+
+    assert result.allowed is False
+    assert result.reasons == (OutboundSendRevalidationReason.CADENCE_STEP_MISMATCH,)
+    assert result.permanently_rejected is True
+
+
+async def test_paused_campaign_still_rejects_pinned_lead() -> None:
+    # Pinning the version must not weaken the campaign-level veto.
+    repositories = FakeRepositories()
+    repositories.lead = _lead(sms_opted_out=False)
+    pinned = replace(_pinned_campaign(), campaign_status=CampaignStatus.PAUSED)
+    repositories.versions[pinned.campaign_version_id] = pinned
+
+    result = await revalidate_outbound_send_request(
+        request=repositories.request,
+        lead_repository=cast(LeadRepository, repositories),
+        workflow_repository=cast(LeadWorkflowRepository, repositories),
+        message_repository=cast(LockingOutboundMessageRepository, repositories),
+        request_repository=cast(LockingOutboundSendRequestRepository, repositories),
+        reconciliation_repository=cast(OutboundSendReconciliationRepository, repositories),
+        campaign_repository=cast(CampaignExecutionRepository, repositories),
+        workspace_repository=cast(WorkspaceRepository, repositories),
+        workspace_control_repository=cast(WorkspaceOperationalControlRepository, repositories),
+        contact_policy_repository=cast(
+            WorkspaceContactPolicyRepository,
+            FakeContactPolicyRepository(),
+        ),
+        inbound_message_repository=cast(InboundMessageRepository, repositories),
+        campaign_enrollment_repository=cast(
+            CampaignEnrollmentRepository,
+            FakeEnrollmentRepository(pinned),
+        ),
+        now=NOW,
+    )
+
+    assert result.allowed is False
+    assert result.reasons == (OutboundSendRevalidationReason.CAMPAIGN_NOT_ACTIVE,)
+    assert result.permanently_rejected is False
+
+
 def _configure_email(
     repositories: FakeRepositories,
     *,
@@ -455,6 +591,48 @@ def _workspace() -> Workspace:
         name="Test Brokerage",
         status=WorkspaceStatus.ACTIVE,
         default_timezone="UTC",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _pinned_campaign() -> CampaignExecutionConfig:
+    """The version this lead was enrolled on, retired by a later publish."""
+    return replace(_campaign(), version_status=CampaignVersionStatus.RETIRED)
+
+
+def _republished_campaign() -> CampaignExecutionConfig:
+    """The newly published active version, whose step ids were regenerated."""
+    config = _campaign()
+    return replace(
+        config,
+        campaign_version_id=NEW_CAMPAIGN_VERSION_ID,
+        cadence_steps=tuple(
+            replace(
+                step,
+                cadence_step_id=NEW_CADENCE_STEP_ID,
+                campaign_version_id=NEW_CAMPAIGN_VERSION_ID,
+            )
+            for step in config.cadence_steps
+        ),
+    )
+
+
+def _enrollment(campaign_version_id: UUID) -> CampaignEnrollment:
+    return CampaignEnrollment(
+        campaign_enrollment_id=ENROLLMENT_ID,
+        workspace_id=WORKSPACE_ID,
+        campaign_id=CAMPAIGN_ID,
+        campaign_version_id=campaign_version_id,
+        lead_id=LEAD_ID,
+        source=CampaignEnrollmentSource.DORMANT_SELECTOR,
+        status=CampaignEnrollmentStatus.ACTIVE,
+        eligible_at=NOW,
+        enrolled_at=NOW,
+        started_at=NOW,
+        ended_at=None,
+        created_by_user_id=None,
+        reason_codes=(),
         created_at=NOW,
         updated_at=NOW,
     )

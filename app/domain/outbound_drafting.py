@@ -30,6 +30,9 @@ DEFAULT_PROMPT_TEXT = (
     "sentences, one thought at a time. Never sound like marketing copy or an AI "
     "assistant."
 )
+# Hard cap enforced on the fully rendered SMS (template greeting/sign-off included);
+# prompt length directives must never ask for more than fits within this budget.
+SMS_RENDERED_BODY_CHARACTER_LIMIT = 320
 DEFAULT_SMS_TEMPLATE = "Hi there,\n\n{{message_body}}"
 DEFAULT_EMAIL_TEMPLATE = "Hi there,\n\n{{message_body}}\n\nBest,\n{{brokerage_name}}"
 DEFAULT_EMAIL_SUBJECT_TEMPLATE = "{{message_subject}} | {{brokerage_name}}"
@@ -246,7 +249,7 @@ def apply_dormant_step_template_profile(
     channel: str,
 ) -> WorkspaceOutboundDraftingConfig:
     channel_prompt = _length_neutral_channel_prompt(drafting_config, channel=channel)
-    profiled_prompt = f"{channel_prompt}\n\n{_dormant_profile_prompt(profile)}"
+    profiled_prompt = f"{channel_prompt}\n\n{_dormant_profile_prompt(profile, channel=channel)}"
     template = _dormant_profile_template(profile)
     if channel == "sms":
         return replace(
@@ -344,7 +347,7 @@ def _custom_sign_off_is_valid(profile: DormantStepTemplateProfile) -> bool:
     )
 
 
-def _dormant_profile_prompt(profile: DormantStepTemplateProfile) -> str:
+def _dormant_profile_prompt(profile: DormantStepTemplateProfile, *, channel: str) -> str:
     personalization = ", ".join(
         value.value.replace("_", " ") for value in profile.personalization_fields
     )
@@ -352,9 +355,9 @@ def _dormant_profile_prompt(profile: DormantStepTemplateProfile) -> str:
         "Apply this validated dormant-step writing profile:",
         f"- Tone: {profile.tone.value.replace('_', ' ')}.",
         f"- Style: {profile.style.value.replace('_', ' ')}.",
-        f"- Length: {_length_directive(profile.length)}. This length requirement "
-        "overrides any earlier instruction in this prompt about how short or long "
-        "the message should be.",
+        f"- Length: {_length_directive(profile.length, channel=channel)}. This length "
+        "requirement overrides any earlier instruction in this prompt about how short "
+        "or long the message should be.",
         f"- Call to action: {_cta_directive(profile.call_to_action)}.",
         f"- Personalize only with these categories when present: {personalization or 'none'}.",
         f"- Listing context: {_listing_context_directive(profile.listing_context)}.",
@@ -362,13 +365,34 @@ def _dormant_profile_prompt(profile: DormantStepTemplateProfile) -> str:
     ]
     if profile.custom_instructions:
         directives.append(f"- Additional admin guidance: {profile.custom_instructions.strip()}")
-    length_check = _length_self_check(profile.length)
+    length_check = _length_self_check(profile.length, channel=channel)
     if length_check:
         directives.append(length_check)
     return "\n".join(directives)
 
 
-def _length_directive(length: DormantMessageLength) -> str:
+def _length_directive(length: DormantMessageLength, *, channel: str) -> str:
+    if channel == "sms":
+        # SMS bodies are hard-capped at SMS_RENDERED_BODY_CHARACTER_LIMIT after
+        # template rendering, so every SMS directive must stay word-budgeted well
+        # inside that cap — a 90+ word paragraph cannot fit and would be rejected
+        # with body_too_long at draft time.
+        return {
+            DormantMessageLength.VERY_SHORT: (
+                "one or two brief sentences, around 25 words total"
+            ),
+            DormantMessageLength.SHORT: (
+                "two or three concise sentences, around 40 words total"
+            ),
+            DormantMessageLength.MODERATE: (
+                "three or four concise sentences, up to about 45 words total — this "
+                "is the most an SMS can carry, so never write a long paragraph"
+            ),
+            DormantMessageLength.DETAILED: (
+                "three or four concise sentences, up to about 45 words total — this "
+                "is the most an SMS can carry, so never write a long paragraph"
+            ),
+        }[length]
     return {
         DormantMessageLength.VERY_SHORT: (
             "one or two brief sentences, around 25 words total"
@@ -391,7 +415,15 @@ def _length_directive(length: DormantMessageLength) -> str:
     }[length]
 
 
-def _length_self_check(length: DormantMessageLength) -> str | None:
+def _length_self_check(length: DormantMessageLength, *, channel: str) -> str | None:
+    if channel == "sms":
+        return (
+            "- Final length check: before returning JSON, make sure your body is "
+            f"short enough that the fully rendered SMS stays under "
+            f"{SMS_RENDERED_BODY_CHARACTER_LIMIT} characters including the "
+            "template greeting and sign-off. If it is longer, shorten it. Do not "
+            "expand the body to hit a word count."
+        )
     minimum_words = {
         DormantMessageLength.MODERATE: 90,
         DormantMessageLength.DETAILED: 180,

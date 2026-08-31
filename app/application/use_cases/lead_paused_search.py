@@ -24,6 +24,7 @@ from app.application.services.lead_nurture_rescheduling import (
 )
 from app.application.services.paused_search_track_assignment import (
     PausedSearchProgressHandling,
+    resolve_effective_paused_search_track_version_id,
     synchronize_paused_search_track_assignment,
     workflow_needs_terminalization_on_clear,
 )
@@ -167,16 +168,24 @@ async def update_lead_paused_search(
             )
         selected_track = matches[0]
 
+    effective_track_version_id: UUID | None = None
     if active:
         assert selected_track is not None
+        effective_track_version_id = await resolve_effective_paused_search_track_version_id(
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            catalog_track_version_id=selected_track.track_version_id,
+            assignment_repository=paused_search_track_assignment_repository,
+            track_repository=paused_search_track_repository,
+            lead_workflow_repository=lead_workflow_repository,
+            progress_handling=progress_handling,
+        )
     previous_profile = lead_paused_search_profile(lead)
     current_profile = (
         LeadPausedSearchProfile(
             paused_search_active=True,
             paused_search_track_key=selected_track.track_key if selected_track else None,
-            paused_search_track_version_id=(
-                selected_track.track_version_id if selected_track else None
-            ),
+            paused_search_track_version_id=effective_track_version_id,
             pause_reason_note=_normalized_optional_text(reason_note),
             reengagement_not_before=reengagement_not_before,
             reengagement_window_label=_normalized_optional_text(reengagement_window_label),

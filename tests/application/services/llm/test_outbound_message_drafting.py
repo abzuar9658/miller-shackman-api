@@ -118,7 +118,7 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
     assert result.body == "Hi there,\n\nare you still thinking about making a move this year?"
     assert result.model == "openai/gpt-4o-mini"
     assert result.usage_tokens == 42
-    assert llm.requests[0].prompt_version == "outbound_message_draft:v17:r1"
+    assert llm.requests[0].prompt_version == "outbound_message_draft:v18:r1"
     assert "Austin" in llm.requests[0].prompt
     assert "Journey: dormant" in llm.requests[0].prompt
     assert "lease-end timing changed" in llm.requests[0].prompt

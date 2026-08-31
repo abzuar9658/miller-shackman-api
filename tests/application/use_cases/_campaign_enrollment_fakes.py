@@ -53,6 +53,21 @@ class FakeCampaignEnrollmentRepository:
     ) -> CampaignEnrollment | None:
         return self.enrollments.get((workspace_id, lead_id, campaign_id))
 
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        campaign_enrollment_id: UUID,
+    ) -> CampaignEnrollment | None:
+        return next(
+            (
+                enrollment
+                for enrollment in self.enrollments.values()
+                if enrollment.workspace_id == workspace_id
+                and enrollment.campaign_enrollment_id == campaign_enrollment_id
+            ),
+            None,
+        )
+
     async def save(self, enrollment: CampaignEnrollment) -> CampaignEnrollment:
         self.enrollments[(enrollment.workspace_id, enrollment.lead_id, enrollment.campaign_id)] = (
             enrollment

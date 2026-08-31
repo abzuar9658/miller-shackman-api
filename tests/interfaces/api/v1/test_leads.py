@@ -1096,6 +1096,7 @@ def _client_for_role(
             allow_agent_manual_enrollment=allow_agent_manual_enrollment
         ),
         campaign_execution_repository=FakeCampaignExecutionRepository(_config()),
+        campaign_enrollment_repository=FakeCampaignEnrollmentRepository(),
         paused_search_occurrence_repository=FakePausedSearchOccurrenceRepository(
             _deferred_occurrence()
         ),

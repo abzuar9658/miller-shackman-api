@@ -16,6 +16,7 @@ from app.domain.compliance.contactability import ContactChannel
 from app.domain.leads import CanonicalLeadRecord
 from app.domain.llm import LLMProviderKind, LLMTaskKind
 from app.domain.outbound_drafting import (
+    SMS_RENDERED_BODY_CHARACTER_LIMIT,
     OutboundJourneyChange,
     OutboundJourneyKind,
     WorkspaceOutboundDraftingConfig,
@@ -26,9 +27,9 @@ from app.domain.outbound_drafting import (
 
 logger = structlog.get_logger(__name__)
 
-OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v17"
+OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v18"
 MIN_DRAFT_CONFIDENCE = 0.7
-MAX_SMS_BODY_LENGTH = 320
+MAX_SMS_BODY_LENGTH = SMS_RENDERED_BODY_CHARACTER_LIMIT
 MAX_EMAIL_BODY_LENGTH = 4000
 DEFAULT_LISTING_SEARCH_BASIS = "the lead's stated preferences"
 PROHIBITED_MESSAGE_TERMS = (
@@ -562,7 +563,14 @@ def _build_prompt(
         f"For {channel.value}, keep the generated body short enough that the final rendered "
         f"{channel.value.upper()} remains under "
         f"{MAX_SMS_BODY_LENGTH if channel == ContactChannel.SMS else MAX_EMAIL_BODY_LENGTH} "
-        "characters.",
+        "characters."
+        + (
+            " This character limit is a hard platform constraint: it takes precedence "
+            "over every length, style, or word-count instruction anywhere in this "
+            "prompt. A body that renders over the limit will be rejected."
+            if channel == ContactChannel.SMS
+            else ""
+        ),
         "",
         "If the channel template contains {{message_body}}, your generated body will replace "
         "that placeholder.",

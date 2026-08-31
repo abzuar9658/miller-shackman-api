@@ -1464,6 +1464,21 @@ class CampaignEnrollmentRepository(Protocol):
         """Return the newest enrollment for the campaign regardless of status."""
         raise NotImplementedError
 
+    async def get_by_id(
+        self,
+        workspace_id: WorkspaceId,
+        campaign_enrollment_id: UUID,
+    ) -> Any | None:
+        """Return the enrollment a workflow was created from, regardless of status.
+
+        An in-flight workflow must resolve the campaign version it was enrolled
+        on, not the campaign's currently active version: republishing mints new
+        cadence step ids. Lead+campaign lookups are unsafe for this because a
+        re-enrollment would return a newer enrollment than the one that owns
+        this workflow.
+        """
+        raise NotImplementedError
+
     async def count_started_today(
         self,
         workspace_id: WorkspaceId,

@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from enum import StrEnum
-from typing import cast
 
 from app.application.ports.lead_activity import (
     LeadActivityItem,
@@ -52,6 +51,7 @@ from app.application.services.lead_decision_tree import (
     PausedSearchTrackOptionSpec,
     build_lead_decision_tree,
 )
+from app.application.services.pinned_campaign_version import resolve_pinned_campaign_config
 from app.domain.campaigns.execution import CampaignExecutionConfig, CampaignVersionStatus
 from app.domain.campaigns.outbound_message import OutboundMessage
 from app.domain.campaigns.paused_search_tracks import (
@@ -543,29 +543,14 @@ async def _dormant_campaign_config(
     campaign_enrollment_repository: CampaignEnrollmentRepository | None,
     campaign_execution_repository: CampaignExecutionRepository | None,
 ) -> CampaignExecutionConfig | None:
-    if (
-        workflow is None
-        or campaign_enrollment_repository is None
-        or campaign_execution_repository is None
-    ):
+    if workflow is None or campaign_execution_repository is None:
         return None
-    enrollment = await campaign_enrollment_repository.get_latest_by_lead_and_campaign(
-        workspace_id,
-        workflow.lead_id,
-        workflow.campaign_id,
+    return await resolve_pinned_campaign_config(
+        workspace_id=workspace_id,
+        workflow=workflow,
+        campaign_execution_repository=campaign_execution_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
     )
-    if enrollment is not None and enrollment.campaign_version_id is not None:
-        config = await campaign_execution_repository.get_by_version_id(
-            workspace_id,
-            enrollment.campaign_version_id,
-        )
-        if config is not None:
-            return cast(CampaignExecutionConfig, config)
-    fallback = await campaign_execution_repository.get_active_for_campaign(
-        workspace_id,
-        workflow.campaign_id,
-    )
-    return cast("CampaignExecutionConfig | None", fallback)
 
 
 async def _paused_search_plan_view(

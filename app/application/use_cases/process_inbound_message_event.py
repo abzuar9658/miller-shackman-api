@@ -14,6 +14,7 @@ from app.application.ports.llm import LLMClient
 from app.application.ports.messaging import EmailProvider, SMSProvider
 from app.application.ports.notifications import NotificationProvider, ReviewNotification
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     CampaignExecutionRepository,
     ConversationRepository,
     ConversationSummaryRepository,
@@ -84,6 +85,9 @@ from app.application.services.llm.workspace_model_resolution import (
     WorkspaceLLMSelection,
     resolve_workspace_llm_config,
     workspace_llm_selection_for_task,
+)
+from app.application.services.pinned_campaign_version import (
+    resolve_pinned_campaign_config_for_campaign,
 )
 from app.application.use_cases.apply_inbound_workflow_transition import (
     InboundWorkflowTransitionOutcome,
@@ -308,6 +312,7 @@ async def process_inbound_message_event(
     workspace_contact_policy_repository: WorkspaceContactPolicyRepository | None = None,
     workspace_repository: WorkspaceRepository | None = None,
     campaign_execution_repository: CampaignExecutionRepository | None = None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
     workspace_operational_control_repository: WorkspaceOperationalControlRepository | None = None,
     workspace_outbound_drafting_config_repository: (
         WorkspaceOutboundDraftingConfigRepository | None
@@ -487,6 +492,7 @@ async def process_inbound_message_event(
             lead_workflow_repository=lead_workflow_repository,
             paused_search_track_repository=paused_search_track_repository,
             campaign_execution_repository=campaign_execution_repository,
+            campaign_enrollment_repository=campaign_enrollment_repository,
         )
         reply_route_result = await _classify_reply_route(
             event=event,
@@ -805,6 +811,7 @@ async def process_inbound_message_event(
             conversation_repository=conversation_repository,
             lead_repository=lead_repository,
             campaign_execution_repository=campaign_execution_repository,
+            campaign_enrollment_repository=campaign_enrollment_repository,
             workspace_repository=workspace_repository,
             workspace_contact_policy_repository=workspace_contact_policy_repository,
             workspace_llm_config_repository=workspace_llm_config_repository,
@@ -1191,6 +1198,7 @@ async def _build_reply_route_journey_context(
     lead_workflow_repository: LeadWorkflowRepository | None,
     paused_search_track_repository: PausedSearchTrackRepository | None,
     campaign_execution_repository: CampaignExecutionRepository | None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
 ) -> ReplyRouteJourneyContext:
     """Snapshot the lead's current journey so the router decides in context."""
     profile = lead_paused_search_profile(lead)
@@ -1211,6 +1219,7 @@ async def _build_reply_route_journey_context(
             lead=lead,
             workflow=workflow,
             campaign_execution_repository=campaign_execution_repository,
+            campaign_enrollment_repository=campaign_enrollment_repository,
         )
         return ReplyRouteJourneyContext(
             journey=ReplyRouteJourneyKind.DORMANT,
@@ -1256,13 +1265,16 @@ async def _dormant_next_step_goal(
     lead: CanonicalLeadRecord,
     workflow: LeadWorkflow | None,
     campaign_execution_repository: CampaignExecutionRepository | None,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
 ) -> str | None:
     if workflow is None or campaign_execution_repository is None:
         return None
-    config: CampaignExecutionConfig | None = (
-        await campaign_execution_repository.get_active_for_campaign(
-            lead.workspace_id, workflow.campaign_id
-        )
+    config: CampaignExecutionConfig | None = await resolve_pinned_campaign_config_for_campaign(
+        workspace_id=lead.workspace_id,
+        campaign_id=workflow.campaign_id,
+        workflow=workflow,
+        campaign_execution_repository=campaign_execution_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
     )
     if config is None or not config.cadence_steps:
         return None

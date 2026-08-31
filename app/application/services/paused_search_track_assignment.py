@@ -155,8 +155,14 @@ async def synchronize_paused_search_track_assignment(
 
     resolved = await _resolve_assignment_snapshot(
         workspace_id=workspace_id,
+        assignment=assignment,
         target_track_version_id=target_track_version_id,
         track_repository=track_repository,
+        pin_applies=_version_pin_applies(
+            assignment=assignment,
+            workflow=workflow,
+            progress_handling=progress_handling,
+        ),
     )
     if resolved is None:
         return PausedSearchTrackAssignmentSyncResult(
@@ -427,26 +433,137 @@ async def _close_and_restart_workflow_for_reassignment(
     )
 
 
+async def resolve_effective_paused_search_track_version_id(
+    *,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    catalog_track_version_id: PausedSearchTrackVersionId,
+    assignment_repository: PausedSearchTrackAssignmentRepository,
+    track_repository: PausedSearchTrackRepository,
+    lead_workflow_repository: LeadWorkflowRepository,
+    progress_handling: PausedSearchProgressHandling | None = None,
+) -> PausedSearchTrackVersionId:
+    """The version a lead should be recorded against for a catalog selection.
+
+    Callers that persist ``lead.paused_search_track_version_id`` must record the
+    same version the assignment will hold, otherwise the start path rejects the
+    lead on a pin mismatch. This applies the pinning rule described on
+    ``_resolve_assignment_snapshot`` and falls back to the catalog version
+    whenever no pin applies.
+    """
+    assignment = await assignment_repository.get_active_for_lead(workspace_id, lead_id)
+    workflow = await lead_workflow_repository.get_latest_for_lead_for_update(
+        workspace_id, lead_id
+    )
+    if not _version_pin_applies(
+        assignment=assignment,
+        workflow=workflow,
+        progress_handling=progress_handling,
+    ):
+        return catalog_track_version_id
+    target_version = await track_repository.get_version(workspace_id, catalog_track_version_id)
+    if target_version is None:
+        return catalog_track_version_id
+    pinned = await _pinned_version_for_same_track(
+        workspace_id=workspace_id,
+        assignment=assignment,
+        target_version=target_version,
+        track_repository=track_repository,
+    )
+    return pinned.track_version_id if pinned is not None else catalog_track_version_id
+
+
+def _version_pin_applies(
+    *,
+    assignment: PausedSearchTrackAssignment | None,
+    workflow: LeadWorkflow | None,
+    progress_handling: PausedSearchProgressHandling | None,
+) -> bool:
+    """Whether the lead's assigned version should override the catalog's.
+
+    The pin exists to protect a journey that is still running. An admin who
+    chose how to handle progress (RESTART/CONTINUE) is deliberately asking for
+    the named version, and a lead whose run already ended is starting a new
+    journey — both must take the track's current version instead.
+    """
+    if progress_handling is not None:
+        return False
+    if assignment is None:
+        return False
+    return workflow is not None and not is_terminal_workflow_state(workflow.state)
+
+
 async def _resolve_assignment_snapshot(
     *,
     workspace_id: WorkspaceId,
+    assignment: PausedSearchTrackAssignment | None,
     target_track_version_id: PausedSearchTrackVersionId | None,
     track_repository: PausedSearchTrackRepository,
+    pin_applies: bool,
 ) -> tuple[PausedSearchTrack, PausedSearchTrackVersion] | None:
-    track_version_id = target_track_version_id
-    if track_version_id is None:
+    """Resolve the version this lead should be assigned to.
+
+    Callers resolve a track from the catalog, which always names the track's
+    *currently active* version. For a lead already assigned to that same track
+    with a live run that is the wrong answer: republishing mints a new version
+    id, and treating it as the target would re-point the assignment and restart
+    the run, silently moving an in-flight lead onto a new script at step one. So
+    when the target names the same track the lead is already on, its pinned
+    version wins (see ``_version_pin_applies``). A target naming a *different*
+    track is a genuine reassignment and always resolves normally.
+    """
+    if target_track_version_id is None:
         return None
-    version = await track_repository.get_version(workspace_id, track_version_id)
-    if (
-        version is None
-        or version.status is not CampaignVersionStatus.PUBLISHED
-        or not version.enabled
-    ):
+    target_version = await track_repository.get_version(workspace_id, target_track_version_id)
+    if target_version is None:
+        return None
+    pinned = (
+        await _pinned_version_for_same_track(
+            workspace_id=workspace_id,
+            assignment=assignment,
+            target_version=target_version,
+            track_repository=track_repository,
+        )
+        if pin_applies
+        else None
+    )
+    version = pinned or (target_version if _is_assignable_active_version(target_version) else None)
+    if version is None:
         return None
     track = await track_repository.get_track(workspace_id, version.track_id)
     if track is None or track.status is PausedSearchTrackStatus.RETIRED:
         return None
     return track, version
+
+
+async def _pinned_version_for_same_track(
+    *,
+    workspace_id: WorkspaceId,
+    assignment: PausedSearchTrackAssignment | None,
+    target_version: PausedSearchTrackVersion,
+    track_repository: PausedSearchTrackRepository,
+) -> PausedSearchTrackVersion | None:
+    if assignment is None or assignment.track_version_id is None:
+        return None
+    if assignment.track_version_id == target_version.track_version_id:
+        return None
+    if assignment.track_id != target_version.track_id:
+        return None
+    pinned = await track_repository.get_version(workspace_id, assignment.track_version_id)
+    # A pinned version is retired once a newer one is published, so RETIRED is
+    # expected here; DRAFT never is, and a disabled version must not keep
+    # driving sends.
+    if (
+        pinned is None
+        or pinned.status is CampaignVersionStatus.DRAFT
+        or not pinned.enabled
+    ):
+        return None
+    return pinned
+
+
+def _is_assignable_active_version(version: PausedSearchTrackVersion) -> bool:
+    return version.status is CampaignVersionStatus.PUBLISHED and version.enabled
 
 
 def _assignment_matches(

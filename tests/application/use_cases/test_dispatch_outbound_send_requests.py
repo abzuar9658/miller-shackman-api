@@ -523,6 +523,42 @@ async def test_workflow_pause_after_enqueue_rejects_without_calling_provider() -
     assert len(signals.entries) == 1
 
 
+async def test_permanent_policy_rejection_does_not_request_reschedule() -> None:
+    # A reschedule would bump message_version and mint a fresh idempotency key,
+    # producing an identical rejection on every cycle. That loop is what grew
+    # the outbound tables without bound in production.
+    request_repository = FakeRequestRepository(_request())
+    provider = FakeSMSProvider(["must-not-be-used"])
+
+    async def reject_permanently(
+        *,
+        request: OutboundSendRequest,
+        now: datetime,
+        recent_human_activity: bool,
+    ) -> OutboundSendRevalidationResult:
+        _ = (now, recent_human_activity)
+        return OutboundSendRevalidationResult(
+            allowed=False,
+            request=request,
+            message=_message(),
+            reasons=(OutboundSendRevalidationReason.CADENCE_STEP_MISMATCH,),
+        )
+
+    messages, reconciliations, failures, signals = await _run(
+        request_repository,
+        provider,
+        revalidate_request=reject_permanently,
+    )
+
+    assert provider.messages == []
+    assert request_repository.request.status is OutboundSendRequestStatus.FAILED
+    assert request_repository.request.failure_kind == "policy_rejected"
+    assert messages.message.status is OutboundMessageStatus.FAILED
+    assert reconciliations.reconciliation.status is OutboundSendReconciliationStatus.FAILED
+    assert not failures.failures
+    assert signals.entries == []
+
+
 async def test_live_crm_activity_after_enqueue_rejects_without_calling_provider() -> None:
     request_repository = FakeRequestRepository(_request())
     provider = FakeSMSProvider(["must-not-be-used"])

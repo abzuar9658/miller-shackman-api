@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from app.application.ports.messaging import EmailMessage, SMSMessage
 from app.application.ports.repositories import (
+    CampaignEnrollmentRepository,
     CampaignExecutionRepository,
     InboundMessageRepository,
     LeadRepository,
@@ -20,10 +21,10 @@ from app.application.ports.repositories import (
     WorkspaceRepository,
 )
 from app.application.services.canonical_lead_inputs import contactability_facts_from_canonical_lead
+from app.application.services.pinned_campaign_version import resolve_pinned_campaign_config
 from app.application.services.pre_send_facts import load_pre_send_history_facts
 from app.application.services.pre_send_policy import build_pre_send_policy
 from app.application.services.workspace_automation_control import workspace_automation_is_active
-from app.domain.campaigns.execution import CampaignVersionStatus
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
 from app.domain.campaigns.outbound_send_reconciliation import (
     OutboundSendReconciliation,
@@ -84,6 +85,20 @@ class OutboundSendRevalidationReason(StrEnum):
     PRE_SEND_BLOCKED = "pre_send_blocked"
 
 
+# Rejections that re-planning cannot clear: the scheduled message can never
+# satisfy them, so asking the workflow to reschedule only mints another message
+# version that fails identically. Every other reason reflects transient state
+# (workspace paused, quiet hours, a lead reply) that a later attempt may clear.
+_PERMANENT_REVALIDATION_REASONS = frozenset(
+    {
+        OutboundSendRevalidationReason.CADENCE_STEP_MISMATCH,
+        OutboundSendRevalidationReason.DURABLE_PAYLOAD_MISMATCH,
+        OutboundSendRevalidationReason.MESSAGE_NOT_FOUND,
+        OutboundSendRevalidationReason.WORKFLOW_MISMATCH,
+    }
+)
+
+
 @dataclass(frozen=True)
 class OutboundSendRevalidationResult:
     allowed: bool
@@ -99,6 +114,11 @@ class OutboundSendRevalidationResult:
             reasons.extend(reason.value for reason in self.pre_send_decision.reasons)
         return "pre_provider_policy_rejected:" + ",".join(reasons)
 
+    @property
+    def permanently_rejected(self) -> bool:
+        """True when rescheduling this send cannot produce a different verdict."""
+        return any(reason in _PERMANENT_REVALIDATION_REASONS for reason in self.reasons)
+
 
 async def revalidate_outbound_send_request(
     *,
@@ -113,6 +133,7 @@ async def revalidate_outbound_send_request(
     workspace_control_repository: WorkspaceOperationalControlRepository,
     contact_policy_repository: WorkspaceContactPolicyRepository,
     inbound_message_repository: InboundMessageRepository,
+    campaign_enrollment_repository: CampaignEnrollmentRepository | None = None,
     now: datetime,
     recent_human_activity: bool = False,
 ) -> OutboundSendRevalidationResult:
@@ -205,15 +226,17 @@ async def revalidate_outbound_send_request(
             OutboundSendRevalidationReason.CONTACT_POLICY_UNAVAILABLE,
             message,
         )
-    campaign = await campaign_repository.get_active_for_campaign(
-        request.workspace_id,
-        message.campaign_id,
+    campaign = await resolve_pinned_campaign_config(
+        workspace_id=request.workspace_id,
+        workflow=workflow,
+        campaign_execution_repository=campaign_repository,
+        campaign_enrollment_repository=campaign_enrollment_repository,
     )
-    if (
-        campaign is None
-        or campaign.campaign_status is not CampaignStatus.ACTIVE
-        or campaign.version_status is not CampaignVersionStatus.PUBLISHED
-    ):
+    # Only the campaign-level status may veto a send in flight. The pinned
+    # version is RETIRED as soon as a newer version is published, and an
+    # already-enrolled lead must keep running the version it was enrolled on,
+    # so asserting PUBLISHED here would block every lead on every republish.
+    if campaign is None or campaign.campaign_status is not CampaignStatus.ACTIVE:
         return _blocked(
             current_request,
             OutboundSendRevalidationReason.CAMPAIGN_NOT_ACTIVE,

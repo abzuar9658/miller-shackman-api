@@ -8,6 +8,7 @@ from app.application.services.paused_search_track_assignment import (
     PausedSearchProgressHandling,
     PausedSearchTrackAssignmentSyncResult,
     PausedSearchTrackAssignmentSyncStatus,
+    resolve_effective_paused_search_track_version_id,
     synchronize_paused_search_track_assignment,
 )
 from app.domain.campaigns import (
@@ -48,6 +49,9 @@ USER_ID = UUID("00000000-0000-0000-0000-000000000003")
 TRACK_ID = UUID("00000000-0000-0000-0000-000000000004")
 VERSION_ID = UUID("00000000-0000-0000-0000-000000000005")
 OTHER_VERSION_ID = UUID("00000000-0000-0000-0000-000000000009")
+NEXT_VERSION_ID = UUID("00000000-0000-0000-0000-000000000030")
+OTHER_TRACK_ID = UUID("00000000-0000-0000-0000-000000000031")
+OTHER_TRACK_VERSION_ID = UUID("00000000-0000-0000-0000-000000000032")
 CAMPAIGN_ID = UUID("00000000-0000-0000-0000-000000000010")
 ENROLLMENT_ID = UUID("00000000-0000-0000-0000-000000000008")
 WORKFLOW_ID = UUID("00000000-0000-0000-0000-000000000007")
@@ -495,6 +499,252 @@ async def test_same_track_without_progress_handling_is_a_noop_repin() -> None:
     assert transitions.transitions == {}
 
 
+@pytest.mark.asyncio
+async def test_republished_track_keeps_pinned_version_and_live_run() -> None:
+    """Editing a track must not move a lead already on it.
+
+    Publishing v2 retires v1 and makes the catalog resolve to v2, but a lead
+    assigned to v1 follows v1 until an explicit migration. Re-pointing the
+    assignment would restart the run and drop the lead onto step one of the new
+    script mid-journey.
+    """
+    assignments = FakePausedSearchTrackAssignmentRepository((_assignment(),))
+    workflows = FakeLeadWorkflowRepository()
+    await workflows.save(
+        replace(
+            _workflow(
+                state=WorkflowState.ACTIVE_NURTURE,
+                paused_search_track_version_id=VERSION_ID,
+            ),
+            logical_touch_count=3,
+        )
+    )
+    transitions = FakeWorkflowTransitionRepository()
+    enrollments = FakeCampaignEnrollmentRepository()
+    await enrollments.save(_enrollment())
+    starter = FakeTemporalWorkflowStarter()
+
+    result = await _synchronize(
+        assignments=assignments,
+        workflows=workflows,
+        repository=_republished_track_repository(),
+        target_track_version_id=NEXT_VERSION_ID,
+        workflow_transitions=transitions,
+        enrollments=enrollments,
+        starter=starter,
+    )
+
+    assert result.status is PausedSearchTrackAssignmentSyncStatus.RESOLVED
+    assert result.resolved_track_version_id == VERSION_ID
+    assert len(assignments.assignments) == 1
+    assert assignments.assignments[0].track_version_id == VERSION_ID
+    assert assignments.assignments[0].released_at is None
+    assert result.workflow is not None
+    assert result.workflow.workflow_id == WORKFLOW_ID
+    assert result.workflow.paused_search_track_version_id == VERSION_ID
+    assert result.workflow.logical_touch_count == 3
+    assert starter.calls == []
+    assert transitions.transitions == {}
+
+
+@pytest.mark.asyncio
+async def test_explicit_migration_to_new_version_restarts_run() -> None:
+    """RESTART is the deliberate path onto a republished version."""
+    assignments = FakePausedSearchTrackAssignmentRepository((_assignment(),))
+    workflows = FakeLeadWorkflowRepository()
+    await workflows.save(
+        _workflow(
+            state=WorkflowState.ACTIVE_NURTURE,
+            paused_search_track_version_id=VERSION_ID,
+        )
+    )
+    transitions = FakeWorkflowTransitionRepository()
+    enrollments = FakeCampaignEnrollmentRepository()
+    await enrollments.save(_enrollment())
+    starter = FakeTemporalWorkflowStarter()
+
+    result = await _synchronize(
+        assignments=assignments,
+        workflows=workflows,
+        repository=_republished_track_repository(),
+        target_track_version_id=NEXT_VERSION_ID,
+        workflow_transitions=transitions,
+        enrollments=enrollments,
+        starter=starter,
+        progress_handling=PausedSearchProgressHandling.RESTART,
+    )
+
+    assert result.status is PausedSearchTrackAssignmentSyncStatus.REASSIGNED
+    assert result.resolved_track_version_id == NEXT_VERSION_ID
+    assert assignments.assignments[-1].track_version_id == NEXT_VERSION_ID
+    assert workflows.workflows[WORKFLOW_ID].state is WorkflowState.CLOSED
+    new_workflow = result.workflow
+    assert new_workflow is not None
+    assert new_workflow.workflow_id != WORKFLOW_ID
+    assert new_workflow.paused_search_track_version_id == NEXT_VERSION_ID
+
+
+@pytest.mark.asyncio
+async def test_unassigned_lead_gets_the_active_version() -> None:
+    """Pinning only protects an existing assignment; new journeys start current."""
+    assignments = FakePausedSearchTrackAssignmentRepository()
+    workflows = FakeLeadWorkflowRepository()
+
+    result = await _synchronize(
+        assignments=assignments,
+        workflows=workflows,
+        repository=_republished_track_repository(),
+        target_track_version_id=NEXT_VERSION_ID,
+    )
+
+    assert result.status is PausedSearchTrackAssignmentSyncStatus.RESOLVED
+    assert result.resolved_track_version_id == NEXT_VERSION_ID
+    assert assignments.assignments[-1].track_version_id == NEXT_VERSION_ID
+
+
+@pytest.mark.asyncio
+async def test_disabled_pinned_version_falls_back_to_active_version() -> None:
+    """A version an admin disabled must stop driving sends."""
+    assignments = FakePausedSearchTrackAssignmentRepository((_assignment(),))
+    workflows = FakeLeadWorkflowRepository()
+    await workflows.save(
+        _workflow(
+            state=WorkflowState.ACTIVE_NURTURE,
+            paused_search_track_version_id=VERSION_ID,
+        )
+    )
+
+    result = await _synchronize(
+        assignments=assignments,
+        workflows=workflows,
+        repository=_republished_track_repository(pinned_enabled=False),
+        target_track_version_id=NEXT_VERSION_ID,
+    )
+
+    assert result.status is PausedSearchTrackAssignmentSyncStatus.RESOLVED
+    assert result.resolved_track_version_id == NEXT_VERSION_ID
+    assert assignments.assignments[-1].track_version_id == NEXT_VERSION_ID
+
+
+@pytest.mark.asyncio
+async def test_ended_journey_takes_the_current_version() -> None:
+    """The pin protects a live run; a finished lead re-enrolls on today's script."""
+    assignments = FakePausedSearchTrackAssignmentRepository((_assignment(),))
+    workflows = FakeLeadWorkflowRepository()
+    await workflows.save(
+        _workflow(
+            state=WorkflowState.COMPLETED,
+            paused_search_track_version_id=VERSION_ID,
+        )
+    )
+
+    result = await _synchronize(
+        assignments=assignments,
+        workflows=workflows,
+        repository=_republished_track_repository(),
+        target_track_version_id=NEXT_VERSION_ID,
+    )
+
+    assert result.status is PausedSearchTrackAssignmentSyncStatus.RESOLVED
+    assert result.resolved_track_version_id == NEXT_VERSION_ID
+    assert assignments.assignments[-1].track_version_id == NEXT_VERSION_ID
+
+
+@pytest.mark.asyncio
+async def test_different_track_still_reassigns_despite_pin() -> None:
+    """Pinning is per track: another track is a genuine reassignment."""
+    assignments = FakePausedSearchTrackAssignmentRepository((_assignment(),))
+    workflows = FakeLeadWorkflowRepository()
+    await workflows.save(
+        _workflow(
+            state=WorkflowState.ACTIVE_NURTURE,
+            paused_search_track_version_id=VERSION_ID,
+        )
+    )
+    transitions = FakeWorkflowTransitionRepository()
+    enrollments = FakeCampaignEnrollmentRepository()
+    await enrollments.save(_enrollment())
+    starter = FakeTemporalWorkflowStarter()
+
+    result = await _synchronize(
+        assignments=assignments,
+        workflows=workflows,
+        repository=_two_track_repository(),
+        target_track_version_id=OTHER_TRACK_VERSION_ID,
+        workflow_transitions=transitions,
+        enrollments=enrollments,
+        starter=starter,
+    )
+
+    assert result.status is PausedSearchTrackAssignmentSyncStatus.REASSIGNED
+    assert result.resolved_track_version_id == OTHER_TRACK_VERSION_ID
+    assert workflows.workflows[WORKFLOW_ID].state is WorkflowState.CLOSED
+    new_workflow = result.workflow
+    assert new_workflow is not None
+    assert new_workflow.paused_search_track_version_id == OTHER_TRACK_VERSION_ID
+
+
+@pytest.mark.asyncio
+async def test_effective_version_prefers_pinned_version_for_same_track() -> None:
+    assignments = FakePausedSearchTrackAssignmentRepository((_assignment(),))
+    workflows = FakeLeadWorkflowRepository()
+    await workflows.save(
+        _workflow(
+            state=WorkflowState.ACTIVE_NURTURE,
+            paused_search_track_version_id=VERSION_ID,
+        )
+    )
+
+    resolved = await resolve_effective_paused_search_track_version_id(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        catalog_track_version_id=NEXT_VERSION_ID,
+        assignment_repository=assignments,
+        track_repository=_republished_track_repository(),
+        lead_workflow_repository=workflows,
+    )
+
+    assert resolved == VERSION_ID
+
+
+@pytest.mark.asyncio
+async def test_effective_version_uses_catalog_version_without_assignment() -> None:
+    resolved = await resolve_effective_paused_search_track_version_id(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        catalog_track_version_id=NEXT_VERSION_ID,
+        assignment_repository=FakePausedSearchTrackAssignmentRepository(),
+        track_repository=_republished_track_repository(),
+        lead_workflow_repository=FakeLeadWorkflowRepository(),
+    )
+
+    assert resolved == NEXT_VERSION_ID
+
+
+@pytest.mark.asyncio
+async def test_effective_version_uses_catalog_version_for_explicit_migration() -> None:
+    assignments = FakePausedSearchTrackAssignmentRepository((_assignment(),))
+    workflows = FakeLeadWorkflowRepository()
+    await workflows.save(
+        _workflow(
+            state=WorkflowState.ACTIVE_NURTURE,
+            paused_search_track_version_id=VERSION_ID,
+        )
+    )
+
+    resolved = await resolve_effective_paused_search_track_version_id(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        catalog_track_version_id=NEXT_VERSION_ID,
+        assignment_repository=assignments,
+        track_repository=_republished_track_repository(),
+        lead_workflow_repository=workflows,
+        progress_handling=PausedSearchProgressHandling.RESTART,
+    )
+
+    assert resolved == NEXT_VERSION_ID
+
+
 async def _synchronize(
     *,
     assignments: FakePausedSearchTrackAssignmentRepository,
@@ -505,6 +755,7 @@ async def _synchronize(
     enrollments: FakeCampaignEnrollmentRepository | None = None,
     starter: FakeTemporalWorkflowStarter | None = None,
     progress_handling: PausedSearchProgressHandling | None = None,
+    target_track_version_id: UUID = VERSION_ID,
 ) -> PausedSearchTrackAssignmentSyncResult:
     return await synchronize_paused_search_track_assignment(
         workspace_id=WORKSPACE_ID,
@@ -516,11 +767,52 @@ async def _synchronize(
         track_repository=repository or _track_repository(),
         lead_workflow_repository=workflows,
         now=NOW,
-        target_track_version_id=None if clear else VERSION_ID,
+        target_track_version_id=None if clear else target_track_version_id,
         workflow_transition_repository=workflow_transitions,
         campaign_enrollment_repository=enrollments,
         temporal_workflow_starter=starter,
         progress_handling=progress_handling,
+    )
+
+
+def _republished_track_repository(
+    *,
+    pinned_enabled: bool = True,
+) -> FakePausedSearchTrackAdminRepository:
+    """One track whose v1 was retired by publishing v2, as a republish leaves it."""
+    return FakePausedSearchTrackAdminRepository(
+        tracks=(replace(_track(), active_version_id=NEXT_VERSION_ID),),
+        versions=(
+            replace(
+                _version(),
+                status=CampaignVersionStatus.RETIRED,
+                enabled=pinned_enabled,
+            ),
+            replace(_version(), track_version_id=NEXT_VERSION_ID, version_number=2),
+        ),
+    )
+
+
+def _two_track_repository() -> FakePausedSearchTrackAdminRepository:
+    return FakePausedSearchTrackAdminRepository(
+        tracks=(
+            _track(),
+            replace(
+                _track(),
+                track_id=OTHER_TRACK_ID,
+                track_key="relocating",
+                display_name="Relocating",
+                active_version_id=OTHER_TRACK_VERSION_ID,
+            ),
+        ),
+        versions=(
+            _version(),
+            replace(
+                _version(),
+                track_version_id=OTHER_TRACK_VERSION_ID,
+                track_id=OTHER_TRACK_ID,
+            ),
+        ),
     )
 
 
