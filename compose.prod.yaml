@@ -87,6 +87,9 @@ services:
   temporal-worker:
     <<: *app-service
     command: ["uv", "run", "python", "-m", "app.interfaces.workers.temporal_worker"]
+    # Runs many concurrent activities; 512m caused OOM-kill loops mid-send,
+    # leaving outbound sends in uncertain/pending reconciliation states.
+    mem_limit: 1024m
 
   temporal-signal-dispatcher:
     <<: *app-service
