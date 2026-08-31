@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from secrets import token_hex
 from uuid import UUID, uuid4
@@ -60,6 +60,12 @@ from app.domain.outbound_drafting import (
     OutboundJourneyKind,
     WorkspaceOutboundDraftingConfig,
 )
+
+# A retry caused by a failure that never reached the provider (policy
+# rejection, dispatch crash) reuses the prior draft instead of paying for a
+# new LLM call — unless the draft is older than this, in which case content
+# freshness wins and we redraft.
+PRIOR_DRAFT_REUSE_MAX_AGE = timedelta(hours=48)
 
 
 class PlanOutboundMessageStatus(StrEnum):
@@ -222,6 +228,30 @@ async def plan_outbound_message_for_lead_record(
             channel_evaluations=selected.evaluations,
         )
 
+    if selected.reusable_prior_draft is not None:
+        # The previous version failed before the provider was ever called
+        # (policy rejection, dispatch crash), so the draft content was never
+        # the problem. Reuse it instead of billing another LLM call.
+        message = _message_from_reused_draft(
+            prior=selected.reusable_prior_draft,
+            workspace_id=workspace_id,
+            lead_id=lead_id,
+            campaign_id=campaign_id,
+            context=context,
+            channel=selected.channel,
+            message_version=selected.message_version,
+            now=now,
+            message_id_factory=message_id_factory,
+        )
+        saved = await message_repository.save(message)
+        return PlanOutboundMessageResult(
+            status=PlanOutboundMessageStatus.PLANNED,
+            message=saved,
+            selected_channel=selected.channel,
+            pre_send_decision=selected.pre_send_decision,
+            channel_evaluations=selected.evaluations,
+        )
+
     llm_selection = await resolve_workspace_llm_selection(
         workspace_id=workspace_id,
         task=LLMTaskKind.DRAFTING,
@@ -346,6 +376,7 @@ class _ChannelSelection:
     message_version: int = 1
     pre_send_decision: PreSendDecision | None = None
     duplicate_message: OutboundMessage | None = None
+    reusable_prior_draft: OutboundMessage | None = None
     reasons: tuple[PlanOutboundMessageReasonCode, ...] = ()
     evaluations: tuple[ChannelEvaluation, ...] = ()
 
@@ -379,13 +410,16 @@ async def _select_channel(
             contactability_facts,
             channel,
         )
-        message_version = _message_version_for_channel(
+        latest_message = _latest_message_for_channel(
             campaign_id=campaign_id,
             cadence_step_id=context.cadence_step_id,
             channel=channel,
-            requested_message_version=context.message_version,
             existing_messages=existing_messages,
             workflow_id=context.workflow_id,
+        )
+        message_version = _message_version_for_channel(
+            requested_message_version=context.message_version,
+            latest_message=latest_message,
         )
         pre_send_decision = evaluate_pre_send_safety(
             PreSendFacts(
@@ -462,6 +496,7 @@ async def _select_channel(
             channel=channel,
             message_version=message_version,
             pre_send_decision=pre_send_decision,
+            reusable_prior_draft=_reusable_prior_draft(latest_message, now),
             evaluations=tuple(
                 [
                     *evaluations,
@@ -480,15 +515,14 @@ async def _select_channel(
     )
 
 
-def _message_version_for_channel(
+def _latest_message_for_channel(
     *,
     campaign_id: CampaignId,
     cadence_step_id: str,
     channel: ContactChannel,
-    requested_message_version: int,
     existing_messages: tuple[OutboundMessage, ...],
     workflow_id: UUID | None = None,
-) -> int:
+) -> OutboundMessage | None:
     relevant_messages = tuple(
         message
         for message in existing_messages
@@ -498,15 +532,99 @@ def _message_version_for_channel(
         and (workflow_id is None or message.workflow_id in (None, workflow_id))
     )
     if not relevant_messages:
-        return requested_message_version
-
-    latest_message = max(
+        return None
+    return max(
         relevant_messages,
         key=lambda message: (message.message_version, message.updated_at, message.created_at),
     )
+
+
+def _message_version_for_channel(
+    *,
+    requested_message_version: int,
+    latest_message: OutboundMessage | None,
+) -> int:
+    if latest_message is None:
+        return requested_message_version
     if latest_message.status == OutboundMessageStatus.FAILED:
         return max(requested_message_version, latest_message.message_version + 1)
     return max(requested_message_version, latest_message.message_version)
+
+
+def _reusable_prior_draft(
+    latest_message: OutboundMessage | None,
+    now: datetime,
+) -> OutboundMessage | None:
+    """Return the prior draft to reuse for a retry, if the LLM call can be skipped.
+
+    A FAILED message with provider_send_status NOT_ATTEMPTED failed before the
+    provider was ever called (policy rejection, dispatch crash) — the draft
+    content played no part in the failure, so a retry can reuse it instead of
+    paying for another LLM call. Provider-related failures (bounces, rejections)
+    still redraft, and stale drafts redraft for content freshness.
+    """
+    if latest_message is None:
+        return None
+    if latest_message.status is not OutboundMessageStatus.FAILED:
+        return None
+    if latest_message.provider_send_status is not ProviderSendStatus.NOT_ATTEMPTED:
+        return None
+    drafted_at = latest_message.planned_at or latest_message.created_at
+    if now - drafted_at > PRIOR_DRAFT_REUSE_MAX_AGE:
+        return None
+    return latest_message
+
+
+def _message_from_reused_draft(
+    *,
+    prior: OutboundMessage,
+    workspace_id: WorkspaceId,
+    lead_id: LeadId,
+    campaign_id: CampaignId,
+    context: OutboundPlanningContext,
+    channel: ContactChannel,
+    message_version: int,
+    now: datetime,
+    message_id_factory: Callable[[], UUID] | None,
+) -> OutboundMessage:
+    idempotency_key = outbound_message_idempotency_key(
+        workspace_id=workspace_id,
+        campaign_id=campaign_id,
+        lead_id=lead_id,
+        cadence_step_id=context.cadence_step_id,
+        channel=channel,
+        message_version=message_version,
+        workflow_id=context.workflow_id,
+    )
+    return OutboundMessage(
+        message_id=(message_id_factory or uuid4)(),
+        workspace_id=workspace_id,
+        lead_id=lead_id,
+        campaign_id=campaign_id,
+        workflow_id=context.workflow_id,
+        cadence_step_id=context.cadence_step_id,
+        channel=channel,
+        status=OutboundMessageStatus.PENDING,
+        idempotency_key=idempotency_key,
+        body=prior.body,
+        subject=prior.subject,
+        html_body=prior.html_body,
+        scheduled_for=context.scheduled_for,
+        planned_at=now,
+        created_at=now,
+        updated_at=now,
+        message_version=message_version,
+        # A fresh token keeps the per-workspace uniqueness constraint intact;
+        # the prior message's token was never sent to the lead.
+        reply_routing_token=(token_hex(16) if channel == ContactChannel.EMAIL else None),
+        draft_prompt_version=prior.draft_prompt_version,
+        draft_model=prior.draft_model,
+        draft_latency_ms=prior.draft_latency_ms,
+        draft_usage_tokens=prior.draft_usage_tokens,
+        draft_confidence=prior.draft_confidence,
+        draft_personalization_notes=prior.draft_personalization_notes,
+        draft_safety_flags=prior.draft_safety_flags,
+    )
 
 
 def outbound_message_idempotency_key(

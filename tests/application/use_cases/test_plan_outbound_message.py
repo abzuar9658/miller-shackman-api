@@ -475,22 +475,43 @@ async def test_re_enrollment_workflow_plans_fresh_message_despite_prior_run_send
     assert llm.requests != []
 
 
-async def test_failed_existing_message_plans_new_retry_version() -> None:
-    messages = FakeOutboundMessageRepository()
-    failed = OutboundMessage(
+def _failed_message(
+    *,
+    provider_send_status: ProviderSendStatus = ProviderSendStatus.NOT_ATTEMPTED,
+    planned_at: datetime = NOW,
+    body: str = "Existing failed draft",
+    channel: ContactChannel = ContactChannel.SMS,
+    subject: str | None = None,
+    html_body: str | None = None,
+    reply_routing_token: str | None = None,
+) -> OutboundMessage:
+    return OutboundMessage(
         message_id=MESSAGE_ID,
         workspace_id=WORKSPACE_ID,
         lead_id=LEAD_ID,
         campaign_id=CAMPAIGN_ID,
         cadence_step_id="step-1",
-        channel=ContactChannel.SMS,
+        channel=channel,
         status=OutboundMessageStatus.FAILED,
-        idempotency_key=f"outbound:{WORKSPACE_ID}:{CAMPAIGN_ID}:{LEAD_ID}:step-1:sms:v1",
-        body="Existing failed draft",
-        created_at=NOW,
-        updated_at=NOW,
+        idempotency_key=(
+            f"outbound:{WORKSPACE_ID}:{CAMPAIGN_ID}:{LEAD_ID}:step-1:{channel.value}:v1"
+        ),
+        body=body,
+        subject=subject,
+        html_body=html_body,
+        reply_routing_token=reply_routing_token,
+        provider_send_status=provider_send_status,
+        planned_at=planned_at,
+        created_at=planned_at,
+        updated_at=planned_at,
+        draft_model="openai/gpt-4o-mini",
+        draft_prompt_version="v1",
     )
-    await messages.save(failed)
+
+
+async def test_internal_failure_retry_reuses_prior_draft_without_calling_llm() -> None:
+    messages = FakeOutboundMessageRepository()
+    await messages.save(_failed_message(provider_send_status=ProviderSendStatus.NOT_ATTEMPTED))
     messages.saved.clear()
     llm = FakeLLMClient(_draft_json())
 
@@ -509,6 +530,126 @@ async def test_failed_existing_message_plans_new_retry_version() -> None:
     assert result.message is not None
     assert result.message.message_version == 2
     assert result.message.idempotency_key.endswith(f":{ContactChannel.SMS.value}:v2")
+    assert result.message.body == "Existing failed draft"
+    assert result.message.draft_model == "openai/gpt-4o-mini"
     assert len(messages.saved) == 1
     assert messages.saved[0].status == OutboundMessageStatus.PENDING
+    assert llm.requests == []
+
+
+async def test_provider_failure_retry_redrafts_with_llm() -> None:
+    messages = FakeOutboundMessageRepository()
+    await messages.save(_failed_message(provider_send_status=ProviderSendStatus.ACCEPTED))
+    messages.saved.clear()
+    llm = FakeLLMClient(_draft_json())
+
+    result = await plan_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        context=_planning_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=messages,
+        llm_client=llm,
+        now=NOW,
+    )
+
+    assert result.status == PlanOutboundMessageStatus.PLANNED
+    assert result.message is not None
+    assert result.message.message_version == 2
+    assert result.message.body != "Existing failed draft"
+    assert len(messages.saved) == 1
+    assert messages.saved[0].status == OutboundMessageStatus.PENDING
+    assert llm.requests != []
+
+
+async def test_uncertain_provider_send_retry_redrafts_with_llm() -> None:
+    messages = FakeOutboundMessageRepository()
+    await messages.save(_failed_message(provider_send_status=ProviderSendStatus.UNCERTAIN))
+    messages.saved.clear()
+    llm = FakeLLMClient(_draft_json())
+
+    result = await plan_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        context=_planning_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=messages,
+        llm_client=llm,
+        now=NOW,
+    )
+
+    assert result.status == PlanOutboundMessageStatus.PLANNED
+    assert result.message is not None
+    assert result.message.message_version == 2
+    assert result.message.body != "Existing failed draft"
+    assert len(messages.saved) == 1
+    assert llm.requests != []
+
+
+async def test_internal_failure_email_reuse_copies_content_with_fresh_routing_token() -> None:
+    messages = FakeOutboundMessageRepository()
+    await messages.save(
+        _failed_message(
+            channel=ContactChannel.EMAIL,
+            subject="Checking in",
+            html_body="<p>Existing failed draft</p>",
+            reply_routing_token="prior-token",
+        )
+    )
+    messages.saved.clear()
+    llm = FakeLLMClient(_draft_json())
+
+    result = await plan_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        context=_planning_context(enabled_channels=(ContactChannel.EMAIL,)),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=messages,
+        llm_client=llm,
+        now=NOW,
+    )
+
+    assert result.status == PlanOutboundMessageStatus.PLANNED
+    assert result.message is not None
+    assert result.message.message_version == 2
+    assert result.message.body == "Existing failed draft"
+    assert result.message.subject == "Checking in"
+    assert result.message.html_body == "<p>Existing failed draft</p>"
+    assert result.message.reply_routing_token is not None
+    assert result.message.reply_routing_token != "prior-token"
+    assert len(messages.saved) == 1
+    assert messages.saved[0].status == OutboundMessageStatus.PENDING
+    assert llm.requests == []
+
+
+async def test_stale_internal_failure_retry_redrafts_with_llm() -> None:
+    messages = FakeOutboundMessageRepository()
+    await messages.save(
+        _failed_message(
+            provider_send_status=ProviderSendStatus.NOT_ATTEMPTED,
+            planned_at=NOW - timedelta(hours=49),
+        )
+    )
+    messages.saved.clear()
+    llm = FakeLLMClient(_draft_json())
+
+    result = await plan_outbound_message(
+        workspace_id=WORKSPACE_ID,
+        lead_id=LEAD_ID,
+        campaign_id=CAMPAIGN_ID,
+        context=_planning_context(),
+        lead_repository=FakeLeadRepository(_lead()),
+        message_repository=messages,
+        llm_client=llm,
+        now=NOW,
+    )
+
+    assert result.status == PlanOutboundMessageStatus.PLANNED
+    assert result.message is not None
+    assert result.message.message_version == 2
+    assert result.message.body != "Existing failed draft"
+    assert len(messages.saved) == 1
     assert llm.requests != []
