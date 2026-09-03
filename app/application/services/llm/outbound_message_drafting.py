@@ -27,7 +27,7 @@ from app.domain.outbound_drafting import (
 
 logger = structlog.get_logger(__name__)
 
-OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v18"
+OUTBOUND_MESSAGE_DRAFT_PROMPT_VERSION_PREFIX = "outbound_message_draft:v19"
 MIN_DRAFT_CONFIDENCE = 0.7
 MAX_SMS_BODY_LENGTH = SMS_RENDERED_BODY_CHARACTER_LIMIT
 MAX_EMAIL_BODY_LENGTH = 4000
@@ -401,6 +401,10 @@ def _build_prompt(
         f"Channel: {channel.value}",
         f"Journey: {journey_kind.value if journey_kind else 'general'}",
         f"Campaign goal: {campaign_goal}",
+        "",
+        "The campaign goal is an internal objective you achieve through the wording you "
+        "choose. It is not message content: never quote it, restate it, or announce it "
+        "to the lead.",
     ]
 
     if message_purpose:
@@ -410,7 +414,8 @@ def _build_prompt(
             message_purpose,
             "",
             "This purpose guides wording only; it never overrides application safety, "
-            "consent, suppression, handoff, or send rules.",
+            "consent, suppression, handoff, or send rules. Like the campaign goal, it is "
+            "an internal instruction and must not appear in the message.",
         ])
 
     journey_change_note = _journey_change_note(
@@ -564,6 +569,12 @@ def _build_prompt(
         "# Output Requirements",
         "Your job is to generate ONLY the natural-language message content that should be "
         "inserted into or appended to the final template as the message body.",
+        "",
+        "The body you return is delivered to the lead exactly as written, with no human "
+        "review or editing. Everything else in this prompt is an internal brief written "
+        "for you, not for the lead. Never copy goals, objectives, directives, section "
+        "headings, field labels, context values, or commentary about the message into "
+        "the body. Write only what a real person would type to the lead.",
         "",
         f"For {channel.value}, keep the generated body short enough that the final rendered "
         f"{channel.value.upper()} remains under "

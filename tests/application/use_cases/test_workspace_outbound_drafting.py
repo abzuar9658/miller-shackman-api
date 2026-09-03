@@ -209,7 +209,7 @@ def test_preview_workspace_outbound_drafting_uses_saved_config_and_live_search()
     assert result.email_preview.subject == "Preview subject | Taylor Brokerage"
     assert result.email_preview.body is not None
     assert result.email_preview.body == "Regards,\nTaylor Brokerage\n\nEmail preview body"
-    assert result.sms_preview.prompt_version == "outbound_message_draft:v18:r2"
+    assert result.sms_preview.prompt_version == "outbound_message_draft:v19:r2"
     assert len(llm_client.requests) == 3
     assert len(listing_search_client.search_calls) == 1
     assert listing_search_client.search_calls[0].search_type.value == "rent"

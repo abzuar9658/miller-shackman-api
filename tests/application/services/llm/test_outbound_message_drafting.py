@@ -118,7 +118,7 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
     assert result.body == "Hi there,\n\nare you still thinking about making a move this year?"
     assert result.model == "openai/gpt-4o-mini"
     assert result.usage_tokens == 42
-    assert llm.requests[0].prompt_version == "outbound_message_draft:v18:r1"
+    assert llm.requests[0].prompt_version == "outbound_message_draft:v19:r1"
     assert "Austin" in llm.requests[0].prompt
     assert "Journey: dormant" in llm.requests[0].prompt
     assert "lease-end timing changed" in llm.requests[0].prompt
@@ -137,6 +137,14 @@ async def test_drafts_sms_with_versioned_prompt_and_approved_context() -> None:
     assert (
         "generate ONLY the natural-language message content that should be inserted into or "
         "appended to the final template as the message body" in llm.requests[0].prompt
+    )
+    assert (
+        "The body you return is delivered to the lead exactly as written"
+        in llm.requests[0].prompt
+    )
+    assert (
+        "The campaign goal is an internal objective you achieve through the wording you "
+        "choose" in llm.requests[0].prompt
     )
     assert (
         "Otherwise, the application will append your generated body after the template."
