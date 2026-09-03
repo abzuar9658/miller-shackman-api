@@ -12,6 +12,7 @@ from app.domain.outbound_drafting import (
     dormant_step_template_profile_from_mapping,
     dormant_step_template_profile_to_mapping,
     dormant_template_profile_is_valid_for_channel,
+    render_outbound_template,
 )
 
 WORKSPACE_ID = UUID("11111111-1111-1111-1111-111111111111")
@@ -175,3 +176,114 @@ def test_custom_sign_off_rejects_oversized_or_unknown_placeholders() -> None:
         is False
     )
     assert dormant_template_profile_is_valid_for_channel(valid, channel="email") is True
+
+
+RENDER_VALUES = {
+    "agent_name": "Alex Agent",
+    "brokerage_name": "My Brokerage",
+    "lead_first_name": "Jordan",
+}
+
+
+def test_model_signature_is_stripped_when_template_supplies_sign_off() -> None:
+    rendered = render_outbound_template(
+        "Hi {{lead_first_name}},\n\n{{message_body}}\n\nBest,\n{{brokerage_name}}",
+        RENDER_VALUES
+        | {
+            "message_body": (
+                "Just checking whether your plans changed.\n\n"
+                "Miller Schackman\n"
+                "AI Lead Nurturing for Real Estate\n"
+                "Helping brokers turn old leads into conversations"
+            )
+        },
+    )
+
+    assert rendered == (
+        "Hi Jordan,\n\nJust checking whether your plans changed.\n\nBest,\nMy Brokerage"
+    )
+
+
+def test_model_sign_off_is_stripped_when_template_sign_off_is_none() -> None:
+    rendered = render_outbound_template(
+        "Hi {{lead_first_name}},\n\n{{message_body}}",
+        RENDER_VALUES
+        | {"message_body": "Are you still looking?\n\nRegards,\nAlex Agent"},
+    )
+
+    assert rendered == "Hi Jordan,\n\nAre you still looking?"
+
+
+def test_body_ending_in_a_sentence_is_left_intact() -> None:
+    rendered = render_outbound_template(
+        "{{message_body}}\n\nBest,\n{{brokerage_name}}",
+        RENDER_VALUES
+        | {"message_body": "Thanks for the update. Should I send over a few options?"},
+    )
+
+    assert rendered == (
+        "Thanks for the update. Should I send over a few options?\n\nBest,\nMy Brokerage"
+    )
+
+
+def test_body_that_is_only_a_sign_off_is_left_intact() -> None:
+    rendered = render_outbound_template(
+        "{{message_body}}",
+        RENDER_VALUES | {"message_body": "Regards,\nAlex Agent"},
+    )
+
+    assert rendered == "Regards,\nAlex Agent"
+
+
+def test_single_line_signature_is_stripped() -> None:
+    rendered = render_outbound_template(
+        "Hi {{lead_first_name}},\n\n{{message_body}}\n\nBest,\n{{brokerage_name}}",
+        RENDER_VALUES
+        | {
+            "message_body": (
+                "Just checking in.\n\nMiller Schackman / AI Lead Nurturing for Real Estate"
+            )
+        },
+    )
+
+    assert rendered == "Hi Jordan,\n\nJust checking in.\n\nBest,\nMy Brokerage"
+
+
+def test_model_greeting_is_stripped_when_template_greeting_is_none() -> None:
+    rendered = render_outbound_template(
+        "{{message_body}}\n\nBest,\n{{brokerage_name}}",
+        RENDER_VALUES | {"message_body": "Hi Jordan,\n\nAre you still looking?"},
+    )
+
+    assert rendered == "Are you still looking?\n\nBest,\nMy Brokerage"
+
+
+def test_model_greeting_opening_a_sentence_keeps_the_sentence() -> None:
+    rendered = render_outbound_template(
+        "Hi {{lead_first_name}},\n\n{{message_body}}",
+        RENDER_VALUES | {"message_body": "Hi Jordan, are you still looking?"},
+    )
+
+    assert rendered == "Hi Jordan,\n\nAre you still looking?"
+
+
+def test_body_that_is_only_a_greeting_is_left_intact() -> None:
+    rendered = render_outbound_template(
+        "{{message_body}}",
+        RENDER_VALUES | {"message_body": "Hi Jordan,"},
+    )
+
+    assert rendered == "Hi Jordan,"
+
+
+def test_trailing_list_without_signature_signal_is_preserved() -> None:
+    rendered = render_outbound_template(
+        "Hi {{lead_first_name}},\n\n{{message_body}}\n\nBest,\n{{brokerage_name}}",
+        RENDER_VALUES
+        | {"message_body": "Here are the areas we cover:\n\nOakland\nBerkeley\nAlameda"},
+    )
+
+    assert rendered == (
+        "Hi Jordan,\n\nHere are the areas we cover:\n\n"
+        "Oakland\nBerkeley\nAlameda\n\nBest,\nMy Brokerage"
+    )

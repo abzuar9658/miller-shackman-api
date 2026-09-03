@@ -42,8 +42,8 @@ DEFAULT_SMS_PROMPT_TEXT = (
     "with a single thought, and ask at most one easy question. No marketing "
     "phrases, no forced enthusiasm, no emojis, and nothing that sounds automated. "
     "Personalize only from the approved context and don't repeat recent outbound "
-    "phrasing. Do not add a greeting or sign-off when the template already "
-    "provides that formatting."
+    "phrasing. Never add a greeting or sign-off — the application renders both "
+    "from the channel template."
 )
 DEFAULT_EMAIL_PROMPT_TEXT = (
     "Write a brief, natural follow-up email body with a short, plain subject "
@@ -52,17 +52,17 @@ DEFAULT_EMAIL_PROMPT_TEXT = (
     "question. Avoid marketing language, filler openers like 'I hope you're doing "
     "well' or 'I wanted to reach out', and anything that sounds automated or "
     "templated. Personalize only from the approved context and don't repeat "
-    "recent outbound phrasing. Do not add a greeting, sign-off, sender name, or "
-    "brokerage name when the templates already provide that formatting."
+    "recent outbound phrasing. Never add a greeting, sign-off, sender name, or "
+    "brokerage name — the application renders those from the channel template."
 )
 _LENGTH_NEUTRAL_SMS_PROMPT_TEXT = (
     "Write an SMS that reads like a casual text from a real person. Use "
     "contractions and everyday words, keep each sentence to a single thought, "
     "and ask at most one easy question. No marketing phrases, no forced "
     "enthusiasm, no emojis, and nothing that sounds automated. Personalize only "
-    "from the approved context and don't repeat recent outbound phrasing. Do "
-    "not add a greeting or sign-off when the template already provides that "
-    "formatting."
+    "from the approved context and don't repeat recent outbound phrasing. "
+    "Never add a greeting or sign-off — the application renders both from the "
+    "channel template."
 )
 _LENGTH_NEUTRAL_EMAIL_PROMPT_TEXT = (
     "Write a natural follow-up email body with a short, plain subject line, "
@@ -70,9 +70,9 @@ _LENGTH_NEUTRAL_EMAIL_PROMPT_TEXT = (
     "words, and ask at most one easy question. Avoid marketing language, "
     "filler openers like 'I hope you're doing well' or 'I wanted to reach "
     "out', and anything that sounds automated or templated. Personalize only "
-    "from the approved context and don't repeat recent outbound phrasing. Do "
-    "not add a greeting, sign-off, sender name, or brokerage name when the "
-    "templates already provide that formatting."
+    "from the approved context and don't repeat recent outbound phrasing. "
+    "Never add a greeting, sign-off, sender name, or brokerage name — the "
+    "application renders those from the channel template."
 )
 LEGACY_SMS_INSTRUCTION_TEMPLATE = (
     "Write a short, conversational SMS. Acknowledge the lead's latest request, "
@@ -85,6 +85,36 @@ LEGACY_EMAIL_INSTRUCTION_TEMPLATE = (
     "and end with a clear offer to have the assigned agent follow up."
 )
 TEMPLATE_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-z_]+)\s*}}")
+SIGN_OFF_CLOSING_PATTERN = "|".join((
+    "best",
+    "best regards",
+    "best wishes",
+    "kind regards",
+    "warm regards",
+    "warmly",
+    "regards",
+    "sincerely",
+    "thanks",
+    "thank you",
+    "cheers",
+    "talk soon",
+    "all the best",
+))
+MAX_SIGN_OFF_SIGNATURE_LINES = 4
+MAX_SIGN_OFF_SIGNATURE_LINE_LENGTH = 60
+# A leading greeting is only stripped when it stands alone on its own line, so
+# removing it cannot leave a sentence starting mid-clause.
+MAX_GREETING_LINE_WORDS = 4
+# A closing block with no closing word only counts as a signature when one of its
+# lines carries an identity signal: the brokerage/agent name, contact details, or
+# one of these signature-style descriptors.
+SIGNATURE_SIGNAL_PATTERN = re.compile(
+    r"[\w.+-]+@[\w-]+\.[\w.]+"
+    r"|(?:https?://|www\.)\S+"
+    r"|\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}"
+    r"|\b(?:real estate|realtor|realty|brokerage|broker|properties|"
+    r"team|group|llc|inc|co\.|agent|sent from)\b"
+)
 
 
 class OutboundJourneyKind(StrEnum):
@@ -588,9 +618,11 @@ def _deduplicate_message_body(
         return ""
 
     prefix, suffix = _rendered_template_wrapper_parts(template, values)
-    without_prefix = _strip_matching_wrapper_from_start(message_body, prefix)
+    without_prefix = _strip_greeting_line_prefix(
+        _strip_matching_wrapper_from_start(message_body, prefix)
+    )
     without_suffix = _strip_matching_wrapper_from_end(without_prefix, suffix)
-    return without_suffix.strip()
+    return _strip_sign_off_suffix(without_suffix, _signature_identity_terms(values)).strip()
 
 
 def _rendered_template_wrapper_parts(
@@ -720,12 +752,115 @@ def _strip_greeting_prefix(body: str, wrapper_line: str) -> str | None:
         )
         if match is None:
             continue
-        remainder = body_lines[start_index][match.end() :].lstrip()
+        remainder = body_lines[start_index][match.end() :].lstrip(" \t-–—,;:")
         if not remainder:
             return None
-        body_lines[start_index] = remainder
+        body_lines[start_index] = _capitalize_sentence_start(remainder)
         return "\n".join(body_lines)
     return None
+
+
+def _capitalize_sentence_start(value: str) -> str:
+    """Recase a body that used to continue the greeting it no longer follows."""
+    if not value or not value[0].isalpha() or not value[0].islower():
+        return value
+    return value[0].upper() + value[1:]
+
+
+def _strip_greeting_line_prefix(body: str) -> str:
+    """Drop a standalone greeting line the model added on its own.
+
+    The channel template owns message layout, so a greeting inside the
+    generated body is always a duplicate — including when the template
+    greeting is ``none``. Only a greeting occupying its own short line is
+    removed; a greeting that opens a sentence is left alone, because cutting it
+    would strand the rest of that sentence.
+    """
+    body_lines = body.split("\n")
+    start_index = _leading_blank_line_count(body_lines)
+    if start_index >= len(body_lines):
+        return body
+
+    line = body_lines[start_index]
+    if not _is_greeting_line(line):
+        return body
+    if len(_normalize_wrapper_line(line).split()) > MAX_GREETING_LINE_WORDS:
+        return body
+
+    remainder = _skip_blank_lines(body_lines, start_index + 1, step=1)
+    if remainder >= len(body_lines):
+        return body
+    return "\n".join(body_lines[remainder:])
+
+
+def _strip_sign_off_suffix(body: str, identity_terms: tuple[str, ...]) -> str:
+    """Drop a trailing sign-off or signature the model added on its own.
+
+    The channel template owns message layout, so a closing block inside the
+    generated body is always a duplicate. A closing word ("Best,", "Regards,")
+    is stripped on sight. A block with no closing word is only stripped when it
+    also carries a signature signal — the brokerage or agent name, contact
+    details, or a signature-style descriptor — so ordinary trailing copy such
+    as a short list stays intact.
+    """
+    body_lines = body.split("\n")
+    cursor = _trailing_blank_line_start(body_lines) - 1
+    block_start = cursor + 1
+    block: list[str] = []
+    while cursor >= 0:
+        line = body_lines[cursor]
+        if not line.strip():
+            break
+        if _is_sign_off_line(line):
+            return _body_without_suffix_from(body_lines, cursor) or body
+        if not _is_signature_block_line(line):
+            return body
+        if len(block) == MAX_SIGN_OFF_SIGNATURE_LINES:
+            return body
+        block.insert(0, line)
+        block_start = cursor
+        cursor -= 1
+
+    if not block:
+        return body
+    if not any(_is_signature_signal_line(line, identity_terms) for line in block):
+        return body
+    return _body_without_suffix_from(body_lines, block_start) or body
+
+
+def _body_without_suffix_from(body_lines: list[str], index: int) -> str:
+    return "\n".join(body_lines[:index]).strip()
+
+
+def _is_sign_off_line(value: str) -> bool:
+    normalized = _normalize_wrapper_line(value)
+    if not normalized:
+        return False
+    return bool(re.match(rf"^(?:{SIGN_OFF_CLOSING_PATTERN})$", normalized))
+
+
+def _is_signature_block_line(value: str) -> bool:
+    stripped = value.strip()
+    if len(stripped) > MAX_SIGN_OFF_SIGNATURE_LINE_LENGTH:
+        return False
+    return not stripped.endswith(("?", "!", "."))
+
+
+def _is_signature_signal_line(value: str, identity_terms: tuple[str, ...]) -> bool:
+    normalized = value.strip().casefold()
+    if not normalized:
+        return False
+    if any(term and term in normalized for term in identity_terms):
+        return True
+    return bool(SIGNATURE_SIGNAL_PATTERN.search(normalized))
+
+
+def _signature_identity_terms(values: Mapping[str, str]) -> tuple[str, ...]:
+    terms = (
+        values.get("brokerage_name", ""),
+        values.get("agent_name", ""),
+    )
+    return tuple(term.strip().casefold() for term in terms if term.strip())
 
 
 def _is_greeting_line(value: str) -> bool:

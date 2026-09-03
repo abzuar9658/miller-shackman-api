@@ -392,6 +392,11 @@ def _build_prompt(
         "These admin-configured writing instructions are the primary behavior brief for "
         "this draft. Follow them closely unless they conflict with the safety rules below.",
         "",
+        "They do not control message layout. The application renders the greeting, "
+        "sign-off, and signature from the channel template after you respond, so never "
+        "emit one yourself — not even if these instructions demand a specific signature "
+        "or say to always include one.",
+        "",
         "# Your Task",
         f"Channel: {channel.value}",
         f"Journey: {journey_kind.value if journey_kind else 'general'}",

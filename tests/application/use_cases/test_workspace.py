@@ -464,8 +464,8 @@ def test_default_workspace_outbound_drafting_config_uses_polished_starter_values
     assert config.sms_template == "Hi there,\n\n{{message_body}}"
     assert config.email_template == "Hi there,\n\n{{message_body}}\n\nBest,\n{{brokerage_name}}"
     assert config.email_subject_template == "{{message_subject}} | {{brokerage_name}}"
-    assert "Do not add a greeting or sign-off" in config.sms_prompt_text
-    assert "Do not add a greeting, sign-off, sender name, or brokerage name" in (
+    assert "Never add a greeting or sign-off" in config.sms_prompt_text
+    assert "Never add a greeting, sign-off, sender name, or brokerage name" in (
         config.email_prompt_text
     )
 
