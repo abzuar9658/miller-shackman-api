@@ -346,13 +346,17 @@ message is still allowed before every outbound send.
 
 Examples of things that can still stop a message:
 
-- the lead opted out
+- the lead opted out (including a carrier-level unsubscribe reported by the SMS provider)
 - the lead replied after the message was scheduled
-- an agent manually contacted the lead
-- ownership changed
+- the enrollment tag was removed from the lead (the workflow ends)
 - quiet hours apply
 - frequency limits were reached
-- consent or contactability is no longer valid
+- the channel is explicitly blocked (the message goes out on the other channel if one is usable)
+- the provider permanently rejected the send (the lead is held for review)
+
+Agent activity in the CRM — a manual text or call, a note, another tag, a stage change, or a
+reassignment — does not stop a message while the enrollment tag is on the lead. An uncertain
+provider outcome on a previous step does not stop the next one.
 
 The business should think of classification and routing as the plan, but send
 eligibility as a final checkpoint every time.

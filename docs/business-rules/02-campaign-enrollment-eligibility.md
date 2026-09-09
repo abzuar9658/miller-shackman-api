@@ -84,6 +84,14 @@ Imported lists must first exist in the CRM and then be tagged or categorized the
 | Neither source applies                                  | Not eligible                                   |
 | Both sources apply                                      | Treat the source as `crm_tag` for auditability |
 
+The candidate source describes how the lead was found; it does not change the resulting state.
+Every enrolled lead carries the configured enrollment tag in the CRM. For `dormant_selector`
+candidates the platform writes the tag at enrollment, and enrollment is not confirmed until that
+write succeeds. After enrollment the tag is the single CRM-side on/off switch: removing it ends the
+workflow, and re-adding it starts a fresh enrollment (decision recorded 2026-09-04; see
+`docs/planning/production-state-consistency-issues.md`, Issue 14). A lead whose workflow ended by
+tag removal is exempt from the "terminal workflows require manual re-enrollment" rule.
+
 ### Rule 2: Dormant selector rules
 
 | Condition                                                         | Result                                |

@@ -22,7 +22,7 @@ This rule decides whether a lead is contactable on a channel based on:
 - do-not-contact state
 - whether required data is known or unknown
 
-In **Phase One**, the presence of a usable destination is the V1 permission signal. A lead with a mobile number is considered SMS-contactable; a lead with an email address is considered email-contactable. Workspace SMS compliance (A2P/10DLC) and the raw consent/permission status fields are stored for future stricter policy but do not block the contactability decision in V1. Explicit suppression (opt-out, unsubscribe) and do-not-contact always override the destination signal.
+In **Phase One**, the presence of a usable destination is the V1 permission signal. A lead with a mobile number is considered SMS-contactable; a lead with an email address is considered email-contactable. There is no workspace-level SMS compliance (A2P/10DLC) gate in V1. The only consent-based blocker is an explicit lead "no" for a channel: a platform-observed opt-out, a CRM `sms_opted_out` / `email_unsubscribed` flag, or a CRM consent status of `DENIED` for that channel. An `UNKNOWN` consent status never blocks. Do-not-contact always overrides the destination signal on both channels. (Decision recorded 2026-09-04; see `docs/planning/production-state-consistency-issues.md`, Issue 13.)
 
 ## What this decision does not include
 
@@ -50,13 +50,15 @@ Those belong to later rules.
 ## Safety principles
 
 1. Suppression always overrides permission.
-2. Unknown or uncertain data must fail safe unless a usable channel is present and
-   V1 policy treats that presence as sufficient permission.
+2. Unknown consent never blocks a channel; a usable destination in the brokerage's own CRM is the
+   V1 consent basis. Only an explicit "no" (suppression or `DENIED` consent status) blocks.
 3. Do-not-contact blocks all automated outreach. When CRM data does not provide an
    explicit do-not-contact value, V1 derives `do_not_contact = false` if any email or
    phone destination is present, otherwise `true`.
-4. SMS compliance data may be stored for future use, but it does not block SMS in V1.
-5. These rules are application rules, not AI decisions.
+4. There is no workspace-level SMS compliance (A2P/10DLC) gate in V1.
+5. There is one evaluation mode. The former strict / `require_explicit_automated_permission` split
+   is removed; every send path gets the same answer.
+6. These rules are application rules, not AI decisions.
 
 ## Channel decision rules
 
@@ -68,28 +70,36 @@ Those belong to later rules.
 
 ### SMS rules
 
-| Condition                                  | Result    |
-| ------------------------------------------ | --------- |
-| Lead has SMS opt-out suppression           | Block SMS |
-| No usable SMS-capable phone is present     | Block SMS |
-| No SMS suppression and a phone is present | Allow SMS |
+| Condition                                            | Result    |
+| ---------------------------------------------------- | --------- |
+| Lead has SMS opt-out suppression                     | Block SMS |
+| CRM SMS consent status is `DENIED`                   | Block SMS |
+| No usable SMS-capable phone is present               | Block SMS |
+| No explicit SMS "no" and a phone is present          | Allow SMS |
+
+An SMS opt-out suppression is recorded from any of: the lead texting a stop word to the platform, a
+classifier-detected opt-out, the CRM `sms_opted_out` flag, or the SMS provider rejecting a send as
+"recipient unsubscribed / blocked sender" (carrier-level opt-out, decided 2026-09-04, Issue 12). All
+four are the same suppression kind and are durable: a later CRM sync does not clear a
+platform-recorded one.
 
 ### Email rules
 
-| Condition                                      | Result      |
-| ---------------------------------------------- | ----------- |
-| Lead has email unsubscribe suppression         | Block email |
-| No usable email address is present             | Block email |
-| No email suppression and an email is present   | Allow email |
+| Condition                                            | Result      |
+| ---------------------------------------------------- | ----------- |
+| Lead has email unsubscribe suppression               | Block email |
+| CRM email permission status is `DENIED`              | Block email |
+| No usable email address is present                   | Block email |
+| No explicit email "no" and an email is present       | Allow email |
 
 ## Decision precedence
 
 When multiple facts exist, evaluate in this order:
 
 1. Do-not-contact
-2. Channel suppression
+2. Channel suppression or explicit `DENIED` consent status
 3. Channel destination present
-4. Otherwise block as unknown or unavailable
+4. Otherwise block as unavailable
 
 ## Outputs the rule must produce
 
@@ -109,12 +119,15 @@ For each requested channel, the rule should return:
 ### SMS
 
 - `sms_opted_out`
-- `missing_sms_consent`
+- `sms_permission_denied`
+
+(`missing_sms_consent` / `missing_email_permission` remain defined for the removed strict mode and
+are no longer emitted by the V1 rule.)
 
 ### Email
 
 - `email_unsubscribed`
-- `missing_email_permission`
+- `email_permission_denied`
 
 ## Configurable inputs
 
@@ -123,7 +136,7 @@ These may vary by workspace and should be configurable later:
 - how consent evidence is mapped from CRM or provider data
 - how email permission is mapped from CRM or provider data
 - suppression keyword mappings from providers
-- the source of future workspace SMS compliance state
+- which provider error codes are treated as a carrier-level opt-out
 
 ## Hard-coded safety rules
 
@@ -131,12 +144,13 @@ These must stay explicit in code and tests:
 
 - do-not-contact blocks all channels
 - suppression overrides any destination-based permission signal
-- a usable SMS destination present allows SMS unless a suppression or do-not-contact blocks it
-- a usable email destination present allows email unless a suppression or do-not-contact blocks it
+- a usable SMS destination present allows SMS unless a suppression, `DENIED` consent, or do-not-contact blocks it
+- a usable email destination present allows email unless a suppression, `DENIED` permission, or do-not-contact blocks it
 - no usable SMS destination blocks SMS
 - no usable email destination blocks email
-- workspace SMS compliance does not block SMS in V1
-- raw SMS consent or email permission status fields do not block the V1 decision
+- no workspace-level SMS compliance gate exists in V1
+- an `UNKNOWN` consent or permission status never blocks
+- the same rule applies on every send path; there is no strict/lenient mode
 - AI cannot override these decisions
 
 ## Required unit tests
@@ -146,14 +160,14 @@ At minimum, test:
 - do-not-contact blocks both SMS and email
 - SMS opt-out blocks SMS even when a destination is present
 - email unsubscribe blocks email even when a destination is present
-- a usable SMS destination present allows SMS in V1 regardless of consent status
-- a usable email destination present allows email in V1 regardless of permission status
+- a usable SMS destination with `UNKNOWN` consent status allows SMS
+- a usable email destination with `UNKNOWN` permission status allows email
 - no usable SMS destination blocks SMS
 - no usable email destination blocks email
-- workspace SMS compliance does not block SMS in V1
-- explicit denied consent or permission does not block when a usable destination is present in V1
+- `DENIED` SMS consent blocks SMS even when a destination is present
+- `DENIED` email permission blocks email even when a destination is present
 - multiple blocking reasons return deterministic precedence
-- uncertain or missing data fails safe
+- missing destination data blocks the channel
 
 ## Database implications to design later
 
