@@ -16,6 +16,7 @@ from app.domain.leads.canonical import (
     PropertyEventType,
     lead_paused_search_profile,
     preserve_app_owned_lead_state,
+    preserve_durable_lead_state,
 )
 from app.domain.leads.customer_timing import (
     CustomerTimingCandidate,
@@ -55,4 +56,5 @@ __all__ = [
     "confirm_customer_timing",
     "lead_paused_search_profile",
     "preserve_app_owned_lead_state",
+    "preserve_durable_lead_state",
 ]

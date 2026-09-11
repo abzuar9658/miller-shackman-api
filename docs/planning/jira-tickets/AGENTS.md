@@ -32,3 +32,5 @@ Use plain business language and exact page/button names. Do not require commands
 or reading logs. Prepare developer-only setup yourself; explain checks that cannot be reproduced
 through the normal interface and provide their verification evidence separately. Stakeholder testing
 is a second check, not a substitute for the agent's own verification or release approval.
+
+Use --arch arm64 in case of architectural mismatch. It always works this way.

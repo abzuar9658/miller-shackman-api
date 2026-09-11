@@ -9,6 +9,7 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
+import time_machine
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
@@ -1884,7 +1885,8 @@ def test_follow_up_boss_crm_webhook_completes_tag_time_human_handoff(
         ),
     )
 
-    with _build_webhook_client_with_handler(bundle) as client:
+    # Keep the inbound fixture fresh for tag-time routing regardless of the real date.
+    with time_machine.travel(NOW, tick=False), _build_webhook_client_with_handler(bundle) as client:
         response = client.post(
             f"/api/v1/webhooks/crm/follow-up-boss/{WORKSPACE_ID}",
             json={
@@ -1907,14 +1909,14 @@ def test_follow_up_boss_crm_webhook_completes_tag_time_human_handoff(
         bundle.handoff_completion_repository,
     )
     handoff_record = completion_repository.record
-    assert {handoff.handoff_id for handoff in handoffs.saved} == {
-        handoff_record.handoff_id if handoff_record is not None else None
-    }
+    assert handoff_record is not None
+    assert {handoff.handoff_id for handoff in handoffs.saved} == {handoff_record.handoff_id}
     assert len(notification_provider.notifications) == 1
     assert crm_client.tags == ["human_handoff_required"]
     assert crm_client.custom_field_updates[-1]["handoff_status"] == "required"
     assert len(crm_client.notes) == 1
     assert len(enrollments.enrollments) == 0
+    assert cast(FakeTemporalWorkflowStarter, bundle.temporal_workflow_starter).calls == []
     assert cast(FakeSession, bundle.session).commit_count == 1
 
 

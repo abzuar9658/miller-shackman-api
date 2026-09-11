@@ -12,6 +12,7 @@ from sqlalchemy import (
     not_,
     or_,
     select,
+    update,
 )
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +41,7 @@ from app.domain.leads import (
     PausedSearchAction,
     PausedSearchSource,
     PropertyEventType,
+    preserve_durable_lead_state,
 )
 from app.domain.workflows import WorkflowState
 from app.infrastructure.persistence.postgres.models import (
@@ -276,23 +278,48 @@ class PostgresLeadRepository:
     async def upsert(self, record: CanonicalLeadRecord) -> CanonicalLeadRecord:
         now = datetime.now(UTC)
         values = _record_to_values(record, created_at=now, updated_at=now)
-        update_values = {
-            key: value for key, value in values.items() if key not in {"lead_id", "created_at"}
-        }
-        update_values["updated_at"] = now
-
-        statement = (
+        inserted = await self._session.execute(
             insert(LeadModel)
             .values(**values)
-            .on_conflict_do_update(
-                constraint="uq_leads_workspace_crm_identity",
-                set_=update_values,
-            )
+            .on_conflict_do_nothing(constraint="uq_leads_workspace_crm_identity")
             .returning(LeadModel)
         )
-        result = await self._session.execute(statement)
-        model = result.scalar_one()
-        return _model_to_record(model)
+        model = inserted.scalar_one_or_none()
+        if model is not None:
+            return _model_to_record(model)
+
+        # The unique constraint also serializes concurrent first inserts. Reload
+        # after the conflict wait: a cached ORM instance may predate an opt-out.
+        locked = await self._session.execute(
+            select(LeadModel)
+            .where(
+                LeadModel.workspace_id == record.workspace_id,
+                LeadModel.crm_provider == record.crm_provider.value,
+                LeadModel.crm_lead_id == record.crm_lead_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        current = locked.scalar_one()
+        merged = preserve_durable_lead_state(record, _model_to_record(current))
+        update_values = {
+            key: value
+            for key, value in _record_to_values(
+                merged, created_at=current.created_at, updated_at=now,
+            ).items()
+            if key not in {"lead_id", "created_at"}
+        }
+        result = await self._session.execute(
+            update(LeadModel)
+            .where(
+                LeadModel.workspace_id == record.workspace_id,
+                LeadModel.lead_id == current.lead_id,
+            )
+            .values(**update_values)
+            .returning(LeadModel)
+            .execution_options(populate_existing=True)
+        )
+        return _model_to_record(result.scalar_one())
 
     async def list_for_lead(
         self,
@@ -906,5 +933,5 @@ def _by_id_statement(
         LeadModel.lead_id == lead_id,
     )
     if for_update:
-        statement = statement.with_for_update()
+        statement = statement.with_for_update().execution_options(populate_existing=True)
     return statement

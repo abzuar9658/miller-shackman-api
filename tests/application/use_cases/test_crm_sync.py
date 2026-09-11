@@ -17,13 +17,18 @@ from app.application.use_cases.crm_sync import (
     request_crm_sync,
     run_follow_up_boss_lead_snapshot_sync,
 )
+from app.application.use_cases.process_contact_suppression_event import (
+    apply_contact_suppression_to_lead,
+)
 from app.domain.campaigns.execution import CampaignExecutionConfig, CampaignVersionStatus
 from app.domain.campaigns.outbound_message import OutboundMessage, OutboundMessageStatus
 from app.domain.campaigns.pre_send import ProviderSendStatus
 from app.domain.campaigns.start_queue import CampaignStatus
+from app.domain.compliance import ContactSuppressionKind
 from app.domain.compliance.contactability import (
     ContactChannel,
     ContactPermissionStatus,
+    SuppressionType,
     WorkspaceContactPolicy,
 )
 from app.domain.conversations import (
@@ -982,9 +987,373 @@ async def test_runs_full_sync_across_multiple_pages() -> None:
     assert source.requests[1]["cursor"] == "cursor-2"
 
 
-async def test_sync_preserves_app_owned_paused_search_state() -> None:
-    existing_lead = replace(
+@pytest.mark.parametrize(
+    ("sync_type", "expected_cursor_started_at"),
+    [
+        pytest.param(CRMSyncType.FULL, None, id="full"),
+        pytest.param(CRMSyncType.INCREMENTAL, PREVIOUS_SYNC_AT, id="incremental"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("crm_permission_status", "crm_do_not_contact"),
+    [
+        pytest.param(ContactPermissionStatus.CONFIRMED, False, id="permissive"),
+        pytest.param(
+            ContactPermissionStatus.CONFIRMED, None, id="permissive-missing-dnc"
+        ),
+        pytest.param(ContactPermissionStatus.UNKNOWN, None, id="unknown-missing-dnc"),
+        pytest.param(ContactPermissionStatus.UNKNOWN, False, id="explicit-false"),
+    ],
+)
+@pytest.mark.parametrize(
+    (
+        "kind", "provider", "event_id", "expected_sms", "expected_email", "expected_dnc",
+        "expected_evidence",
+    ),
+    [
+        pytest.param(
+            ContactSuppressionKind.SMS_OPT_OUT,
+            "twilio",
+            "sms-stop-original",
+            True,
+            False,
+            None,
+            {
+                "sms_opt_out_source_provider": "twilio",
+                "sms_opt_out_source_event_id": "sms-stop-original",
+                "sms_opt_out_occurred_at": "2026-07-07T10:00:00+00:00",
+            },
+            id="sms",
+        ),
+        pytest.param(
+            ContactSuppressionKind.EMAIL_UNSUBSCRIBED,
+            "follow_up_boss",
+            "email-unsubscribe-original",
+            False,
+            True,
+            None,
+            {
+                "email_unsubscribed_source_provider": "follow_up_boss",
+                "email_unsubscribed_source_event_id": "email-unsubscribe-original",
+                "email_unsubscribed_occurred_at": "2026-07-07T10:00:00+00:00",
+            },
+            id="email",
+        ),
+        pytest.param(
+            ContactSuppressionKind.DO_NOT_CONTACT,
+            "follow_up_boss",
+            "dnc-original",
+            False,
+            False,
+            True,
+            {
+                "do_not_contact_source_provider": "follow_up_boss",
+                "do_not_contact_source_event_id": "dnc-original",
+                "do_not_contact_occurred_at": "2026-07-07T10:00:00+00:00",
+            },
+            id="dnc",
+        ),
+    ],
+)
+async def test_sync_preserves_recorded_opt_out_and_original_evidence(
+    sync_type: CRMSyncType,
+    expected_cursor_started_at: datetime | None,
+    crm_permission_status: ContactPermissionStatus,
+    crm_do_not_contact: bool | None,
+    kind: ContactSuppressionKind,
+    provider: str,
+    event_id: str,
+    expected_sms: bool,
+    expected_email: bool,
+    expected_dnc: bool | None,
+    expected_evidence: dict[str, str],
+) -> None:
+    lead = replace(
+        _lead("1", primary_email="original@example.test", has_email=True, do_not_contact=False),
+        facts_derived_at=PREVIOUS_SYNC_AT,
+        source_updated_at=PREVIOUS_SYNC_AT,
+        lead_stage="cold",
+        primary_phone="+15555550160",
+        has_phone=True,
+        has_sms_capable_phone=True,
+        email_count=1,
+        phone_count=1,
+        sms_permission_status=ContactPermissionStatus.CONFIRMED,
+        email_permission_status=ContactPermissionStatus.CONFIRMED,
+    )
+    control = replace(lead, lead_id=UUID("00000000-0000-0000-0000-000000000002"), crm_lead_id="2")
+    lead_repository = FakeLeadRepository(existing=(lead, control))
+    await apply_contact_suppression_to_lead(
+        lead=lead,
+        suppression_kind=kind,
+        source_provider=provider,
+        source_event_id=event_id,
+        occurred_at=datetime(2026, 7, 7, 10, 0, tzinfo=UTC),
+        lead_repository=lead_repository,
+    )
+    fresh = replace(
+        lead,
+        facts_derived_at=NOW,
+        source_updated_at=NOW,
+        lead_stage="nurture",
+        tags=("updated-tag",),
+        primary_email="updated@example.test",
+        primary_phone="+15555550161",
+        sms_permission_status=crm_permission_status,
+        email_permission_status=crm_permission_status,
+        do_not_contact=crm_do_not_contact,
+    )
+    source = FakeLeadSnapshotSource(
+        pages=(
+            CanonicalLeadSnapshotPage(
+                leads=(fresh, replace(fresh, lead_id=control.lead_id, crm_lead_id="2")),
+                next_cursor=None,
+            ),
+        ),
+    )
+
+    result = await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=source,
+        lead_repository=lead_repository,
+        crm_sync_job_repository=FakeCRMSyncJobRepository(
+            recent_jobs=(_completed_job(cursor_finished_at=PREVIOUS_SYNC_AT),),
+        ),
+        now=NOW,
+        sync_type=sync_type,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+
+    assert result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
+    assert result.job.sync_type is sync_type
+    assert result.job.total_seen == 2
+    assert result.job.total_upserted == 2
+    assert result.job.total_failed == 0
+    assert result.job.cursor_started_at == expected_cursor_started_at
+    assert source.requests[0]["updated_after"] == expected_cursor_started_at
+    assert source.requests[0]["updated_before"] == NOW
+    saved = await lead_repository.get_by_id(WORKSPACE_ID, lead.lead_id)
+    assert saved is not None
+    assert saved.sms_opted_out is expected_sms
+    assert saved.email_unsubscribed is expected_email
+    assert (SuppressionType.SMS_OPT_OUT in saved.suppression_types) is expected_sms
+    assert (SuppressionType.EMAIL_UNSUBSCRIBED in saved.suppression_types) is expected_email
+    assert saved.do_not_contact is (True if expected_dnc else crm_do_not_contact)
+    assert saved.permission_evidence == expected_evidence
+    assert saved.sms_permission_status is crm_permission_status
+    assert saved.email_permission_status is crm_permission_status
+    assert saved.lead_stage == "nurture"
+    assert saved.tags == ("updated-tag",)
+    assert saved.primary_email == "updated@example.test"
+    assert saved.primary_phone == "+15555550161"
+    assert saved.facts_derived_at == NOW
+    assert saved.source_updated_at == NOW
+
+    saved_control = await lead_repository.get_by_id(WORKSPACE_ID, control.lead_id)
+    assert saved_control is not None
+    assert saved_control.sms_opted_out is False
+    assert saved_control.email_unsubscribed is False
+    assert saved_control.do_not_contact is crm_do_not_contact
+    assert saved_control.suppression_types == frozenset()
+    assert saved_control.permission_evidence == {}
+    assert saved_control.sms_permission_status is crm_permission_status
+    assert saved_control.email_permission_status is crm_permission_status
+    assert saved_control.lead_stage == "nurture"
+    assert saved_control.primary_email == "updated@example.test"
+
+
+@pytest.mark.parametrize(
+    "sync_type", [CRMSyncType.FULL, CRMSyncType.INCREMENTAL], ids=["full", "incremental"]
+)
+async def test_sync_adds_crm_restrictions_without_replacing_platform_evidence(
+    sync_type: CRMSyncType,
+) -> None:
+    lead = replace(
+        _lead("1", primary_email="original@example.test", has_email=True, do_not_contact=False),
+        primary_phone="+15555550160",
+        has_phone=True,
+        has_sms_capable_phone=True,
+        email_count=1,
+        phone_count=1,
+    )
+    repository = FakeLeadRepository(existing=(lead,))
+    await apply_contact_suppression_to_lead(
+        lead=lead,
+        suppression_kind=ContactSuppressionKind.SMS_OPT_OUT,
+        source_provider="twilio",
+        source_event_id="sms-stop-original",
+        occurred_at=datetime(2026, 7, 7, 10, tzinfo=UTC),
+        lead_repository=repository,
+    )
+    fresh = replace(
+        lead,
+        lead_stage="updated-stage",
+        sms_permission_status=ContactPermissionStatus.CONFIRMED,
+        email_permission_status=ContactPermissionStatus.DENIED,
+        email_unsubscribed=True,
+        do_not_contact=True,
+        suppression_types=frozenset({SuppressionType.EMAIL_UNSUBSCRIBED}),
+        permission_evidence={
+            "sms_permission_status_source": "follow_up_boss.customFields",
+            "email_permission_status_source": "follow_up_boss.customFields",
+            "email_unsubscribed_source": "follow_up_boss.customFields",
+            "do_not_contact_source": "follow_up_boss.customFields",
+            "sms_opt_out_source_provider": "follow_up_boss",
+            "sms_opt_out_source_event_id": "conflicting-crm-evidence",
+            "sms_opt_out_occurred_at": "2026-07-08T11:00:00+00:00",
+        },
+    )
+
+    result = await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=FakeLeadSnapshotSource(
+            pages=(CanonicalLeadSnapshotPage(leads=(fresh,), next_cursor=None),),
+        ),
+        lead_repository=repository,
+        crm_sync_job_repository=FakeCRMSyncJobRepository(
+            recent_jobs=(_completed_job(cursor_finished_at=PREVIOUS_SYNC_AT),),
+        ),
+        now=NOW,
+        sync_type=sync_type,
+        sync_job_id_factory=lambda: SYNC_JOB_ID,
+    )
+
+    saved = await repository.get_by_id(WORKSPACE_ID, lead.lead_id)
+    assert result.status is RunFollowUpBossLeadSyncStatus.COMPLETED
+    assert result.job.total_upserted == 1
+    assert result.job.total_failed == 0
+    assert saved is not None
+    assert saved.sms_opted_out is True
+    assert saved.email_unsubscribed is True
+    assert saved.do_not_contact is True
+    assert saved.suppression_types == frozenset(
+        {SuppressionType.SMS_OPT_OUT, SuppressionType.EMAIL_UNSUBSCRIBED}
+    )
+    assert saved.permission_evidence == {
+        "sms_opt_out_source_provider": "twilio",
+        "sms_opt_out_source_event_id": "sms-stop-original",
+        "sms_opt_out_occurred_at": "2026-07-07T10:00:00+00:00",
+        "sms_permission_status_source": "follow_up_boss.customFields",
+        "email_permission_status_source": "follow_up_boss.customFields",
+        "email_unsubscribed_source": "follow_up_boss.customFields",
+        "do_not_contact_source": "follow_up_boss.customFields",
+    }
+    assert saved.sms_permission_status is ContactPermissionStatus.CONFIRMED
+    assert saved.email_permission_status is ContactPermissionStatus.DENIED
+    assert saved.lead_stage == "updated-stage"
+
+
+@pytest.mark.parametrize(
+    ("flag", "kind", "crm_marker"),
+    [
+        ("sms_opted_out", ContactSuppressionKind.SMS_OPT_OUT, "sms_opted_out_source"),
+        (
+            "email_unsubscribed", ContactSuppressionKind.EMAIL_UNSUBSCRIBED,
+            "email_unsubscribed_source",
+        ),
+        ("do_not_contact", ContactSuppressionKind.DO_NOT_CONTACT, "do_not_contact_source"),
+    ],
+)
+@pytest.mark.parametrize("provenance", ["crm_only", "platform", "empty", "partial", "unknown"])
+async def test_sync_clears_only_proven_crm_restrictions(
+    flag: str, kind: ContactSuppressionKind, crm_marker: str, provenance: str,
+) -> None:
+    evidence: dict[str, str] = {}
+    if provenance in {"crm_only", "platform", "partial"}:
+        evidence[crm_marker] = "follow_up_boss.customFields"
+    if provenance == "platform":
+        evidence.update({
+            f"{kind.value}_source_provider": "follow_up_boss",
+            f"{kind.value}_source_event_id": "original-opt-out",
+            f"{kind.value}_occurred_at": "2026-07-07T10:00:00+00:00",
+        })
+    if provenance == "partial":
+        evidence[f"{kind.value}_source_event_id"] = "legacy-opt-out"
+    if provenance == "unknown":
+        evidence[crm_marker] = "unverified_legacy_source"
+    restrictions = (
+        frozenset() if kind == ContactSuppressionKind.DO_NOT_CONTACT
+        else frozenset({SuppressionType(kind.value)})
+    )
+    existing = replace(
         _lead("1"),
+        sms_opted_out=flag == "sms_opted_out",
+        email_unsubscribed=flag == "email_unsubscribed",
+        do_not_contact=True if flag == "do_not_contact" else None,
+        suppression_types=restrictions,
+        permission_evidence=evidence,
+    )
+    repository = FakeLeadRepository(existing=(existing,))
+    fresh = replace(
+        _lead("1"), do_not_contact=False, sms_permission_status=ContactPermissionStatus.CONFIRMED,
+        email_permission_status=ContactPermissionStatus.CONFIRMED, lead_stage="updated-stage",
+    )
+
+    await run_follow_up_boss_lead_snapshot_sync(
+        workspace_id=WORKSPACE_ID,
+        lead_snapshot_source=FakeLeadSnapshotSource(
+            pages=(CanonicalLeadSnapshotPage(leads=(fresh,), next_cursor=None),),
+        ),
+        lead_repository=repository, crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        now=NOW, sync_type=CRMSyncType.FULL,
+    )
+
+    saved = await repository.get_by_id(WORKSPACE_ID, existing.lead_id)
+    assert saved is not None
+    assert getattr(saved, flag) is (provenance != "crm_only")
+    assert saved.suppression_types == (frozenset() if provenance == "crm_only" else restrictions)
+    assert saved.permission_evidence == ({} if provenance == "crm_only" else evidence)
+    assert saved.sms_permission_status == ContactPermissionStatus.CONFIRMED
+    assert saved.email_permission_status == ContactPermissionStatus.CONFIRMED
+    assert saved.lead_stage == "updated-stage"
+
+
+@pytest.mark.parametrize(
+    "sync_type", [CRMSyncType.FULL, CRMSyncType.INCREMENTAL], ids=["full", "incremental"]
+)
+@pytest.mark.parametrize(
+    ("record_sms_opt_out", "expected_suppressions", "expected_evidence"),
+    [
+        pytest.param(False, frozenset(), {}, id="unrestricted"),
+        pytest.param(
+            True,
+            frozenset({SuppressionType.SMS_OPT_OUT}),
+            {
+                "sms_opt_out_source_provider": "twilio",
+                "sms_opt_out_source_event_id": "sms-stop-before-paused-search-refresh",
+                "sms_opt_out_occurred_at": "2026-07-07T10:00:00+00:00",
+            },
+            id="platform-sms-opt-out",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("existing_activity", "fresh_activity", "expected_activity"),
+    [
+        pytest.param(None, None, None, id="no-activity"),
+        pytest.param(PREVIOUS_SYNC_AT, None, PREVIOUS_SYNC_AT, id="missing-activity"),
+        pytest.param(NOW, PREVIOUS_SYNC_AT, NOW, id="older-activity"),
+        pytest.param(PREVIOUS_SYNC_AT, NOW, NOW, id="newer-activity"),
+        pytest.param(None, NOW, NOW, id="first-activity"),
+    ],
+)
+async def test_sync_preserves_app_owned_paused_search_state(
+    sync_type: CRMSyncType,
+    record_sms_opt_out: bool,
+    expected_suppressions: frozenset[SuppressionType],
+    expected_evidence: dict[str, str],
+    existing_activity: datetime | None,
+    fresh_activity: datetime | None,
+    expected_activity: datetime | None,
+) -> None:
+    existing_lead = replace(
+        _lead("1", primary_email="original@example.test", has_email=True),
+        primary_phone="+15555550160",
+        has_phone=True,
+        has_sms_capable_phone=True,
+        email_count=1,
+        phone_count=1,
+        last_agent_activity_at=existing_activity,
         paused_search_active=True,
         paused_search_track_key="waiting-for-rates",
         paused_search_track_version_id=UUID("00000000-0000-0000-0000-000000000077"),
@@ -994,24 +1363,53 @@ async def test_sync_preserves_app_owned_paused_search_state() -> None:
         paused_search_source=PausedSearchSource.OPERATOR,
         paused_search_recorded_at=NOW,
         paused_search_recorded_by_user_id=UUID("00000000-0000-0000-0000-000000000088"),
+        paused_search_last_confirmed_at=NOW,
+    )
+    fresh_lead = replace(
+        _lead("1", primary_email="updated@example.test", has_email=True),
+        primary_phone="+15555550161",
+        has_phone=True,
+        has_sms_capable_phone=True,
+        email_count=1,
+        phone_count=1,
+        last_agent_activity_at=fresh_activity,
+        lead_stage="new-stage",
+        tags=("updated-tag",),
     )
     source = FakeLeadSnapshotSource(
-        pages=(CanonicalLeadSnapshotPage(leads=(_lead("1"),), next_cursor=None),),
+        pages=(CanonicalLeadSnapshotPage(leads=(fresh_lead,), next_cursor=None),),
     )
     lead_repository = FakeLeadRepository(existing=(existing_lead,))
+    if record_sms_opt_out:
+        await apply_contact_suppression_to_lead(
+            lead=existing_lead,
+            suppression_kind=ContactSuppressionKind.SMS_OPT_OUT,
+            source_provider="twilio",
+            source_event_id="sms-stop-before-paused-search-refresh",
+            occurred_at=datetime(2026, 7, 7, 10, tzinfo=UTC),
+            lead_repository=lead_repository,
+        )
 
     result = await run_follow_up_boss_lead_snapshot_sync(
         workspace_id=WORKSPACE_ID,
         lead_snapshot_source=source,
         lead_repository=lead_repository,
-        crm_sync_job_repository=FakeCRMSyncJobRepository(),
+        crm_sync_job_repository=FakeCRMSyncJobRepository(
+            recent_jobs=(_completed_job(cursor_finished_at=PREVIOUS_SYNC_AT),),
+        ),
         now=NOW,
-        sync_type=CRMSyncType.FULL,
+        sync_type=sync_type,
         sync_job_id_factory=lambda: SYNC_JOB_ID,
     )
 
     assert result.status == RunFollowUpBossLeadSyncStatus.COMPLETED
-    saved = lead_repository.saved[0]
+    saved = await lead_repository.get_by_id(WORKSPACE_ID, existing_lead.lead_id)
+    assert saved is not None
+    assert saved.sms_opted_out is record_sms_opt_out
+    assert saved.email_unsubscribed is False
+    assert saved.do_not_contact is None
+    assert saved.suppression_types == expected_suppressions
+    assert saved.permission_evidence == expected_evidence
     assert saved.paused_search_active is True
     assert saved.paused_search_track_key == "waiting-for-rates"
     assert saved.paused_search_track_version_id == UUID(
@@ -1025,6 +1423,12 @@ async def test_sync_preserves_app_owned_paused_search_state() -> None:
     assert saved.paused_search_recorded_by_user_id == UUID(
         "00000000-0000-0000-0000-000000000088"
     )
+    assert saved.paused_search_last_confirmed_at == NOW
+    assert saved.last_agent_activity_at == expected_activity
+    assert saved.lead_stage == "new-stage"
+    assert saved.tags == ("updated-tag",)
+    assert saved.primary_email == "updated@example.test"
+    assert saved.primary_phone == "+15555550161"
 
 
 async def test_sync_resolves_effective_owner_from_verified_mapping() -> None:

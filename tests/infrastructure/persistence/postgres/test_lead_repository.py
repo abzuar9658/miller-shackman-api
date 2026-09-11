@@ -252,6 +252,9 @@ class _FakeResult:
     def scalar_one(self) -> Any:
         return self._scalar_value
 
+    def scalar_one_or_none(self) -> Any:
+        return self._scalar_value
+
 
 class _FakeSession:
     def __init__(self, result: _FakeResult) -> None:

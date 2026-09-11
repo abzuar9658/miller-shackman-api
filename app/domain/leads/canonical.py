@@ -5,7 +5,11 @@ from enum import StrEnum
 from uuid import UUID
 
 from app.domain.common.ids import LeadId, PausedSearchTrackVersionId, WorkspaceId
-from app.domain.compliance.contactability import ContactPermissionStatus, SuppressionType
+from app.domain.compliance.contactability import (
+    ContactPermissionStatus,
+    ContactSuppressionKind,
+    SuppressionType,
+)
 from app.domain.lead_assignment import AssignmentResolutionStatus, EffectiveOwnerSource
 
 
@@ -214,20 +218,91 @@ class CanonicalLeadRecord:
             raise ValueError("active paused-search leads require a concrete track assignment")
 
 
+def preserve_durable_lead_state(
+    fresh: CanonicalLeadRecord,
+    existing: CanonicalLeadRecord | None,
+) -> CanonicalLeadRecord:
+    """Protect restrictions and newest activity on every whole-record write.
+
+    Persistence repeats this merge against the locked row, not a pre-fetch snapshot.
+    Deliberate paused-profile edits remain possible through ordinary app writes.
+    """
+    if existing is None:
+        return fresh
+    evidence = dict(fresh.permission_evidence)
+    retained: set[ContactSuppressionKind] = set()
+    for suppression, active, crm_marker in (
+        (
+            ContactSuppressionKind.SMS_OPT_OUT,
+            existing.sms_opted_out or SuppressionType.SMS_OPT_OUT in existing.suppression_types,
+            "sms_opted_out_source",
+        ),
+        (
+            ContactSuppressionKind.EMAIL_UNSUBSCRIBED,
+            existing.email_unsubscribed
+            or SuppressionType.EMAIL_UNSUBSCRIBED in existing.suppression_types,
+            "email_unsubscribed_source",
+        ),
+        (
+            ContactSuppressionKind.DO_NOT_CONTACT, existing.do_not_contact is True,
+            "do_not_contact_source",
+        ),
+    ):
+        source_keys = tuple(
+            f"{suppression.value}_{suffix}"
+            for suffix in ("source_provider", "source_event_id", "occurred_at")
+        )
+        has_platform_evidence = any(key in existing.permission_evidence for key in source_keys)
+        crm_only = (
+            existing.permission_evidence.get(crm_marker) == "follow_up_boss.customFields"
+            and not has_platform_evidence
+        )
+        # Missing/partial provenance is not permission to clear an existing block.
+        if not active or crm_only:
+            continue
+        retained.add(suppression)
+        if has_platform_evidence:
+            for key in source_keys:
+                evidence.pop(key, None)
+                if key in existing.permission_evidence:
+                    evidence[key] = existing.permission_evidence[key]
+        # A new snapshot must not relabel an ambiguous legacy block as CRM-only.
+        if not has_platform_evidence:
+            evidence.pop(crm_marker, None)
+        if crm_marker in existing.permission_evidence:
+            evidence[crm_marker] = existing.permission_evidence[crm_marker]
+    return replace(
+        fresh,
+        sms_opted_out=fresh.sms_opted_out or ContactSuppressionKind.SMS_OPT_OUT in retained,
+        email_unsubscribed=(
+            fresh.email_unsubscribed or ContactSuppressionKind.EMAIL_UNSUBSCRIBED in retained
+        ),
+        do_not_contact=(
+            True if ContactSuppressionKind.DO_NOT_CONTACT in retained else fresh.do_not_contact
+        ),
+        suppression_types=fresh.suppression_types
+        | {kind for kind in SuppressionType if ContactSuppressionKind(kind.value) in retained},
+        permission_evidence=evidence,
+        last_agent_activity_at=max(
+            (
+                timestamp for timestamp in
+                (existing.last_agent_activity_at, fresh.last_agent_activity_at)
+                if timestamp is not None
+            ),
+            default=None,
+        ),
+    )
+
+
 def preserve_app_owned_lead_state(
     fresh: CanonicalLeadRecord,
     existing: CanonicalLeadRecord | None,
 ) -> CanonicalLeadRecord:
-    """Carry app-owned paused-search state forward onto a freshly CRM-mapped record.
-
-    CRM payloads never carry the paused-search profile; upserting a fresh mapping
-    without this merge silently wipes it, bypassing track-assignment release and
-    the paused-search audit history.
-    """
+    """CRM has no paused-search profile, so it cannot replace that app-owned state."""
     if existing is None:
         return fresh
     return replace(
-        fresh,
+        preserve_durable_lead_state(fresh, existing),
         paused_search_active=existing.paused_search_active,
         paused_search_track_key=existing.paused_search_track_key,
         paused_search_track_version_id=existing.paused_search_track_version_id,

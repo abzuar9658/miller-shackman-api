@@ -249,7 +249,7 @@ async def apply_contact_suppression_to_lead(
     lead_repository: LeadRepository,
     source_event_id: str | None = None,
 ) -> CanonicalLeadRecord:
-    updated_lead = _updated_lead_with_suppression(
+    updated_lead = lead_with_contact_suppression(
         lead=lead,
         suppression_kind=suppression_kind,
         source_provider=source_provider,
@@ -261,7 +261,7 @@ async def apply_contact_suppression_to_lead(
     return await lead_repository.upsert(updated_lead)
 
 
-def _updated_lead_with_suppression(
+def lead_with_contact_suppression(
     *,
     lead: CanonicalLeadRecord,
     suppression_kind: ContactSuppressionKind,
