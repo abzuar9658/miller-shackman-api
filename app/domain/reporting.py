@@ -67,6 +67,25 @@ class PausedSearchOccurrenceHealth:
 
 
 @dataclass(frozen=True)
+class LeadOutcomeCounts:
+    """Distinct-lead outcome funnel, all time.
+
+    Each step is a subset of the one before it except ``enrolled_leads``:
+    contacted leads have a sent (or uncertain, treated as sent) outbound
+    message, replied leads have an inbound message received at or after their
+    first send, and handed-off leads are replied leads with a non-cancelled
+    handoff. ``replied_by_current_state`` counts replied leads by their latest
+    workflow state.
+    """
+
+    enrolled_leads: int
+    contacted_leads: int
+    replied_leads: int
+    handed_off_leads: int
+    replied_by_current_state: WorkflowStateCounts
+
+
+@dataclass(frozen=True)
 class CampaignAuditLogEntry:
     audit_log_id: UUID
     workspace_id: WorkspaceId
@@ -87,6 +106,7 @@ class WorkspaceOperationsSummary:
     workflow_counts: WorkflowStateCounts
     message_counts: MessageStatusCounts
     handoff_counts: HandoffStatusCounts
+    outcome_counts: LeadOutcomeCounts
     pending_external_events: int
     failed_external_events: int
     pending_outbox_events: int

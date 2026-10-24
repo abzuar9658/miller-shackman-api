@@ -2,14 +2,16 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import Select, and_, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.application.ports.reporting import ReportingRepository
 from app.domain.campaigns.admin import CampaignAdminAuditAction
+from app.domain.campaigns.outbound_message import OutboundMessageStatus
 from app.domain.campaigns.paused_search_occurrences import RecurringOccurrenceStatus
 from app.domain.campaigns.start_queue import CampaignStatus
+from app.domain.conversations.models import HandoffStatus
 from app.domain.crm_sync import CRMSyncJobStatus, ExternalEventStatus
 from app.domain.events import OutboxEventStatus
 from app.domain.reporting import (
@@ -17,6 +19,7 @@ from app.domain.reporting import (
     CampaignOperationsSummary,
     EnrollmentStatusCounts,
     HandoffStatusCounts,
+    LeadOutcomeCounts,
     MessageStatusCounts,
     PausedSearchOccurrenceHealth,
     WorkflowStateCounts,
@@ -28,6 +31,7 @@ from app.infrastructure.persistence.postgres.models import (
     CRMSyncJobModel,
     ExternalEventModel,
     HandoffModel,
+    InboundMessageModel,
     OutboundMessageModel,
     OutboxEventModel,
     RecurringOccurrenceModel,
@@ -42,6 +46,12 @@ _ENROLLMENT_STATES = tuple(field for field in EnrollmentStatusCounts.__dataclass
 _MESSAGE_STATES = tuple(field for field in MessageStatusCounts.__dataclass_fields__)
 _HANDOFF_STATES = tuple(field for field in HandoffStatusCounts.__dataclass_fields__)
 _DELIVERY_ISSUE_STATUSES = frozenset({"failed", "undelivered", "bounced", "dropped"})
+# Uncertain provider outcomes are treated as sent and never re-sent, so they
+# count as contact. Uncertain rows carry no sent_at, only the attempt time.
+_CONTACTED_MESSAGE_STATUSES = (
+    OutboundMessageStatus.SENT.value,
+    OutboundMessageStatus.UNCERTAIN.value,
+)
 type _FilterClause = ColumnElement[bool]
 
 
@@ -64,6 +74,7 @@ class PostgresReportingRepository(ReportingRepository):
             (OutboundMessageModel.workspace_id == workspace_id,)
         )
         handoff_counts = await self._handoff_counts((HandoffModel.workspace_id == workspace_id,))
+        outcome_counts = await self._outcome_counts(workspace_id)
         occurrence_health = await self._paused_search_occurrence_health(workspace_id)
         last_successful_sync_at = await self._session.scalar(
             select(func.max(CRMSyncJobModel.finished_at)).where(
@@ -79,6 +90,7 @@ class PostgresReportingRepository(ReportingRepository):
             workflow_counts=workflow_counts,
             message_counts=message_counts,
             handoff_counts=handoff_counts,
+            outcome_counts=outcome_counts,
             paused_search_occurrence_health=occurrence_health,
             pending_external_events=await self._count_rows(
                 ExternalEventModel,
@@ -237,6 +249,67 @@ class PostgresReportingRepository(ReportingRepository):
         )
         counts = {str(state): int(count) for state, count in result.all() if state is not None}
         return WorkflowStateCounts(**{state: counts.get(state, 0) for state in _WORKFLOW_STATES})
+
+    async def _outcome_counts(self, workspace_id: UUID) -> LeadOutcomeCounts:
+        enrolled_leads = await self._session.scalar(
+            select(func.count(distinct(LeadWorkflowModel.lead_id))).where(
+                LeadWorkflowModel.workspace_id == workspace_id
+            )
+        )
+        first_send = (
+            select(
+                OutboundMessageModel.lead_id.label("lead_id"),
+                func.min(
+                    func.coalesce(
+                        OutboundMessageModel.sent_at,
+                        OutboundMessageModel.provider_last_attempt_at,
+                        OutboundMessageModel.created_at,
+                    )
+                ).label("first_sent_at"),
+            )
+            .where(
+                OutboundMessageModel.workspace_id == workspace_id,
+                OutboundMessageModel.status.in_(_CONTACTED_MESSAGE_STATUSES),
+            )
+            .group_by(OutboundMessageModel.lead_id)
+            .subquery()
+        )
+        contacted_leads = await self._session.scalar(select(func.count()).select_from(first_send))
+        replied_lead_ids: Select[tuple[UUID]] = (
+            select(first_send.c.lead_id)
+            .join(
+                InboundMessageModel,
+                and_(
+                    InboundMessageModel.workspace_id == workspace_id,
+                    InboundMessageModel.lead_id == first_send.c.lead_id,
+                    InboundMessageModel.received_at >= first_send.c.first_sent_at,
+                ),
+            )
+            .distinct()
+        )
+        replied_leads = await self._session.scalar(
+            select(func.count()).select_from(replied_lead_ids.subquery())
+        )
+        handed_off_leads = await self._session.scalar(
+            select(func.count(distinct(HandoffModel.lead_id))).where(
+                HandoffModel.workspace_id == workspace_id,
+                HandoffModel.status != HandoffStatus.CANCELLED.value,
+                HandoffModel.lead_id.in_(replied_lead_ids),
+            )
+        )
+        replied_by_current_state = await self._workflow_counts(
+            (
+                LeadWorkflowModel.workspace_id == workspace_id,
+                LeadWorkflowModel.lead_id.in_(replied_lead_ids),
+            )
+        )
+        return LeadOutcomeCounts(
+            enrolled_leads=int(enrolled_leads or 0),
+            contacted_leads=int(contacted_leads or 0),
+            replied_leads=int(replied_leads or 0),
+            handed_off_leads=int(handed_off_leads or 0),
+            replied_by_current_state=replied_by_current_state,
+        )
 
     async def _enrollment_counts(self, filters: Sequence[_FilterClause]) -> EnrollmentStatusCounts:
         counts = await self._counts_by_status(CampaignEnrollmentModel.status, filters)

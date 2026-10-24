@@ -19,6 +19,7 @@ from app.domain.reporting import (
     CampaignOperationsSummary,
     EnrollmentStatusCounts,
     HandoffStatusCounts,
+    LeadOutcomeCounts,
     MessageStatusCounts,
     PausedSearchOccurrenceHealth,
     WorkflowStateCounts,
@@ -61,6 +62,16 @@ def test_workspace_operations_route_returns_200(reporting_client: ReportingTestC
     assert body["status"] == "ok"
     assert body["report"]["active_campaigns"] == 1
     assert body["report"]["message_counts"]["delivered"] == 3
+    outcome = body["report"]["outcome_counts"]
+    assert {key: value for key, value in outcome.items() if key != "replied_by_current_state"} == {
+        "enrolled_leads": 5,
+        "contacted_leads": 4,
+        "replied_leads": 2,
+        "handed_off_leads": 1,
+    }
+    assert outcome["replied_by_current_state"]["human_handoff"] == 1
+    assert outcome["replied_by_current_state"]["active_nurture"] == 1
+    assert outcome["replied_by_current_state"]["suppressed"] == 0
     assert body["report"]["paused_search_occurrence_health"] == {
         "due": 0,
         "held": 0,
@@ -110,6 +121,13 @@ def _client_for_role(role: WorkspaceMembershipRole) -> ReportingTestClient:
         workflow_counts=WorkflowStateCounts(active_nurture=2, waiting_for_response=1),
         message_counts=MessageStatusCounts(sent=4, delivered=3),
         handoff_counts=HandoffStatusCounts(notified=1),
+        outcome_counts=LeadOutcomeCounts(
+            enrolled_leads=5,
+            contacted_leads=4,
+            replied_leads=2,
+            handed_off_leads=1,
+            replied_by_current_state=WorkflowStateCounts(human_handoff=1, active_nurture=1),
+        ),
         pending_external_events=0,
         failed_external_events=0,
         pending_outbox_events=1,

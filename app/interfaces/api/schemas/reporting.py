@@ -58,6 +58,14 @@ class PausedSearchOccurrenceHealthResponse(BaseModel):
     fallback: int = 0
 
 
+class LeadOutcomeCountsResponse(BaseModel):
+    enrolled_leads: int
+    contacted_leads: int
+    replied_leads: int
+    handed_off_leads: int
+    replied_by_current_state: WorkflowStateCountsResponse
+
+
 class WorkspaceOperationsSummaryResponse(BaseModel):
     workspace_id: UUID
     active_campaigns: int
@@ -66,6 +74,7 @@ class WorkspaceOperationsSummaryResponse(BaseModel):
     workflow_counts: WorkflowStateCountsResponse
     message_counts: MessageStatusCountsResponse
     handoff_counts: HandoffStatusCountsResponse
+    outcome_counts: LeadOutcomeCountsResponse
     paused_search_occurrence_health: PausedSearchOccurrenceHealthResponse
     pending_external_events: int
     failed_external_events: int

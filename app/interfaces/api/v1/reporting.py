@@ -14,6 +14,7 @@ from app.domain.reporting import (
     CampaignOperationsSummary,
     EnrollmentStatusCounts,
     HandoffStatusCounts,
+    LeadOutcomeCounts,
     MessageStatusCounts,
     PausedSearchOccurrenceHealth,
     WorkflowStateCounts,
@@ -31,6 +32,7 @@ from app.interfaces.api.schemas.reporting import (
     CampaignOperationsSummaryResponse,
     EnrollmentStatusCountsResponse,
     HandoffStatusCountsResponse,
+    LeadOutcomeCountsResponse,
     MessageStatusCountsResponse,
     PausedSearchOccurrenceHealthResponse,
     WorkflowStateCountsResponse,
@@ -166,6 +168,16 @@ def _enrollment_counts_response(counts: EnrollmentStatusCounts) -> EnrollmentSta
     return EnrollmentStatusCountsResponse.model_validate(counts.__dict__)
 
 
+def _outcome_counts_response(counts: LeadOutcomeCounts) -> LeadOutcomeCountsResponse:
+    return LeadOutcomeCountsResponse(
+        enrolled_leads=counts.enrolled_leads,
+        contacted_leads=counts.contacted_leads,
+        replied_leads=counts.replied_leads,
+        handed_off_leads=counts.handed_off_leads,
+        replied_by_current_state=_workflow_counts_response(counts.replied_by_current_state),
+    )
+
+
 def _workspace_report_response(
     report: WorkspaceOperationsSummary,
 ) -> WorkspaceOperationsSummaryResponse:
@@ -177,6 +189,7 @@ def _workspace_report_response(
         workflow_counts=_workflow_counts_response(report.workflow_counts),
         message_counts=_message_counts_response(report.message_counts),
         handoff_counts=_handoff_counts_response(report.handoff_counts),
+        outcome_counts=_outcome_counts_response(report.outcome_counts),
         paused_search_occurrence_health=_paused_search_occurrence_health_response(
             report.paused_search_occurrence_health
         ),
